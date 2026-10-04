@@ -7,7 +7,7 @@ import java.util.Map;
 
 public final class EntityMetadata {
 
-    public enum Kind { ID, SCALAR, EMBEDDED, MANY_TO_ONE, ONE_TO_MANY, ELEMENT_COLLECTION }
+    public enum Kind { ID, SCALAR, EMBEDDED, MANY_TO_ONE, ASSOCIATION, ONE_TO_MANY, ELEMENT_COLLECTION }
 
     public record Property(String name, Class<?> type, Kind kind, String column,
                            EntityMetadata target, Property inverse) {}
@@ -60,7 +60,7 @@ public final class EntityMetadata {
         for (Property p : properties) {
             switch (p.kind()) {
                 case SCALAR -> out.add(new ColumnRef(p.column(), p.name(), p.type()));
-                case MANY_TO_ONE -> {
+                case MANY_TO_ONE, ASSOCIATION -> {
                     if (p.target() == null || p.target().id() == null) {
                         throw new IllegalStateException("Entity " + type().getName()
                                 + " has a many-to-one property '" + p.name()

@@ -80,7 +80,8 @@ public final class JdbcEntityMapper {
                             .param("id", id).query(p.target().type()).list();
                     setField(entity, p.name(), items);
                 }
-                default -> { /* ID, SCALAR, EMBEDDED: already mapped flat by query(Class); EMBEDDED is out of v1 scope */ }
+                default -> { /* ID, SCALAR, EMBEDDED: already mapped flat by query(Class);
+                                ASSOCIATION: an external reference is left null (lazy), never resolved here */ }
             }
         }
     }

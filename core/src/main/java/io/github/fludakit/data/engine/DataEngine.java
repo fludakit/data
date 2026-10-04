@@ -145,7 +145,8 @@ public class DataEngine {
     /**
      * Binds an INSERT statement. Keys match {@link SqlBuilder#insert}'s {@code :name} placeholders
      * (the property path, dots replaced by underscores). A null identifier is omitted so the database
-     * can generate it; a many-to-one property binds the referenced entity's identifier, not the entity.
+     * can generate it; a many-to-one or association property binds the referenced entity's identifier,
+     * not the entity itself (an association never cascades and is not resolved back on read).
      */
     private Map<String, Object> bindInsert(EntityMetadata md, Object entity) {
         Map<String, Object> out = new LinkedHashMap<>();
@@ -156,7 +157,7 @@ public class DataEngine {
         for (EntityMetadata.Property p : md.properties()) {
             switch (p.kind()) {
                 case SCALAR -> out.put(p.name(), fieldValue(entity, p.name()));
-                case MANY_TO_ONE -> {
+                case MANY_TO_ONE, ASSOCIATION -> {
                     Object ref = fieldValue(entity, p.name());
                     out.put(p.name(), ref == null ? null : fieldValue(ref, p.target().id().name()));
                 }
@@ -193,7 +194,7 @@ public class DataEngine {
                     cols.add(cp.column());
                     switch (cp.kind()) {
                         case SCALAR -> params.put(cp.column(), fieldValue(item, cp.name()));
-                        case MANY_TO_ONE -> {
+                        case MANY_TO_ONE, ASSOCIATION -> {
                             Object ref = fieldValue(item, cp.name());
                             params.put(cp.column(), ref == null ? null : fieldValue(ref, cp.target().id().name()));
                         }

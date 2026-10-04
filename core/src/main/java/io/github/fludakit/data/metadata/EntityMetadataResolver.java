@@ -1,10 +1,11 @@
 package io.github.fludakit.data.metadata;
 
 import io.github.fludakit.data.Names;
-import org.jmolecules.ddd.annotation.AggregateRoot;
-import org.jmolecules.ddd.annotation.Entity;
-import org.jmolecules.ddd.annotation.Identity;
-import org.jmolecules.ddd.annotation.ValueObject;
+import io.github.fludakit.data.annotation.AggregateRoot;
+import io.github.fludakit.data.annotation.Association;
+import io.github.fludakit.data.annotation.Entity;
+import io.github.fludakit.data.annotation.Identity;
+import io.github.fludakit.data.annotation.ValueObject;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
@@ -63,6 +64,9 @@ public final class EntityMetadataResolver {
             Class<?> ft = f.getType();
             if (f.isAnnotationPresent(Identity.class) || (!isValueObject && name.equals("id"))) {
                 id = new EntityMetadata.Property(name, ft, EntityMetadata.Kind.ID, Names.columnName(name), null, null);
+            } else if (f.isAnnotationPresent(Association.class)) {
+                props.add(new EntityMetadata.Property(name, ft, EntityMetadata.Kind.ASSOCIATION,
+                        Names.fkColumn(name), null, null));
             } else if (isEntityType(ft)) {
                 props.add(new EntityMetadata.Property(name, ft, EntityMetadata.Kind.MANY_TO_ONE,
                         Names.fkColumn(name), null, null));
@@ -96,7 +100,7 @@ public final class EntityMetadataResolver {
         List<EntityMetadata.Property> deepProps = new ArrayList<>(props.size());
         for (EntityMetadata.Property p : props) {
             switch (p.kind()) {
-                case MANY_TO_ONE, EMBEDDED -> deepProps.add(new EntityMetadata.Property(
+                case MANY_TO_ONE, ASSOCIATION, EMBEDDED -> deepProps.add(new EntityMetadata.Property(
                         p.name(), p.type(), p.kind(), p.column(), resolve(p.type()), p.inverse()));
                 case ELEMENT_COLLECTION -> deepProps.add(new EntityMetadata.Property(
                         p.name(), p.type(), p.kind(), p.column(),
@@ -141,13 +145,11 @@ public final class EntityMetadataResolver {
     }
 
     private boolean isEntityType(Class<?> c) {
-        return c.isAnnotationPresent(Entity.class) || c.isAnnotationPresent(AggregateRoot.class)
-                || org.jmolecules.ddd.types.Entity.class.isAssignableFrom(c);
+        return c.isAnnotationPresent(Entity.class) || c.isAnnotationPresent(AggregateRoot.class);
     }
 
     private boolean isValueObjectType(Class<?> c) {
-        return c.isAnnotationPresent(ValueObject.class)
-                || org.jmolecules.ddd.types.ValueObject.class.isAssignableFrom(c);
+        return c.isAnnotationPresent(ValueObject.class);
     }
 
     private List<Field> allFields(Class<?> type) {

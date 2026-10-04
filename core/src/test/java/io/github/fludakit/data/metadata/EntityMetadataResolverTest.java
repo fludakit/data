@@ -1,10 +1,11 @@
 package io.github.fludakit.data.metadata;
 
 import io.github.fludakit.data.Names;
-import org.jmolecules.ddd.annotation.AggregateRoot;
-import org.jmolecules.ddd.annotation.Entity;
-import org.jmolecules.ddd.annotation.Identity;
-import org.jmolecules.ddd.annotation.ValueObject;
+import io.github.fludakit.data.annotation.AggregateRoot;
+import io.github.fludakit.data.annotation.Association;
+import io.github.fludakit.data.annotation.Entity;
+import io.github.fludakit.data.annotation.Identity;
+import io.github.fludakit.data.annotation.ValueObject;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -38,6 +39,12 @@ class EntityMetadataResolverTest {
 
     @ValueObject
     record Money(java.math.BigDecimal amount, String currency) {}
+
+    @Entity
+    static class AssociationOrder {
+        @Identity Long id;
+        @Association Customer customer;
+    }
 
     @Test
     void resolvesEntityAndColumnsByConvention() {
@@ -106,6 +113,20 @@ class EntityMetadataResolverTest {
                 .anySatisfy(c -> {
                     assertThat(c.column()).isEqualTo("address_city");
                     assertThat(c.path()).isEqualTo("address.city");
+                });
+    }
+
+    @Test
+    void resolvesAssociationAsForeignKeyOnlyReference() {
+        EntityMetadata m = new EntityMetadataResolver().resolve(AssociationOrder.class);
+
+        assertThat(m.property("customer").kind()).isEqualTo(EntityMetadata.Kind.ASSOCIATION);
+        assertThat(m.property("customer").column()).isEqualTo("customer_id");
+        assertThat(m.property("customer").target().tableName()).isEqualTo("customer");
+        assertThat(m.columns())
+                .anySatisfy(c -> {
+                    assertThat(c.column()).isEqualTo("customer_id");
+                    assertThat(c.path()).isEqualTo("customer");
                 });
     }
 

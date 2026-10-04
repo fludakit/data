@@ -27,10 +27,6 @@
             <artifactId>jakarta.data-api</artifactId>
         </dependency>
         <dependency>
-            <groupId>org.jmolecules</groupId>
-            <artifactId>jmolecules-ddd</artifactId>
-        </dependency>
-        <dependency>
             <groupId>jakarta.enterprise</groupId>
             <artifactId>jakarta.enterprise.cdi-api</artifactId>
             <scope>provided</scope>
@@ -71,6 +67,7 @@
                                     <name>fluda.data.core</name>
                                     <exports>
                                         io.github.fludakit.data;
+                                        io.github.fludakit.data.annotation;
                                         io.github.fludakit.data.engine;
                                         io.github.fludakit.data.mapping;
                                         io.github.fludakit.data.metadata;

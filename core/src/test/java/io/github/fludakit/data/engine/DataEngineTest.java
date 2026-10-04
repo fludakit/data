@@ -7,10 +7,11 @@ import io.github.fludakit.data.query.QueryModel;
 import io.github.fludakit.data.query.ResultKind;
 import io.github.fludakit.jdbc.JdbcClient;
 import org.h2.jdbcx.JdbcDataSource;
-import org.jmolecules.ddd.annotation.AggregateRoot;
-import org.jmolecules.ddd.annotation.Entity;
-import org.jmolecules.ddd.annotation.Identity;
-import org.jmolecules.ddd.annotation.ValueObject;
+import io.github.fludakit.data.annotation.AggregateRoot;
+import io.github.fludakit.data.annotation.Association;
+import io.github.fludakit.data.annotation.Entity;
+import io.github.fludakit.data.annotation.Identity;
+import io.github.fludakit.data.annotation.ValueObject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -73,13 +74,13 @@ class DataEngineTest {
     }
 
     @ValueObject
-    public record OrderItem(Product product, int quantity) {}
+    public record OrderItem(@Association Product product, int quantity) {}
 
     @Entity
     public static class Order {
         @Identity Long id;
         BigDecimal amount;
-        Customer customer;
+        @Association Customer customer;
         List<OrderItem> orderItems = new ArrayList<>();
 
         public Order() {}
@@ -168,6 +169,17 @@ class DataEngineTest {
         Long itemProductId = client.sql("SELECT product_id FROM order_order_items WHERE order_id = :id")
                 .param("id", saved.getId()).singleValue(Long.class);
         assertThat(itemProductId).isEqualTo(product.getId());
+
+        // @Association is lazy on read: the FK columns are written above, but the referenced
+        // entities (Order.customer and the element-collection's OrderItem.product) are left null.
+        Order reloaded = (Order) engine.invoke(
+                QueryModel.builder(Order.class, Operation.FIND)
+                        .resultKind(ResultKind.SINGLE)
+                        .predicate(Predicate.of("id", Operator.EQ, "arg0")).build(),
+                new Object[] { saved.getId() });
+
+        assertThat(reloaded.getCustomer()).isNull();
+        assertThat(reloaded.getOrderItems()).extracting(OrderItem::product).containsOnlyNulls();
     }
 
     @Test

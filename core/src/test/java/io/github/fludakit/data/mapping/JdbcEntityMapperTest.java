@@ -2,9 +2,9 @@ package io.github.fludakit.data.mapping;
 
 import io.github.fludakit.jdbc.JdbcClient;
 import org.h2.jdbcx.JdbcDataSource;
-import org.jmolecules.ddd.annotation.AggregateRoot;
-import org.jmolecules.ddd.annotation.Entity;
-import org.jmolecules.ddd.annotation.Identity;
+import io.github.fludakit.data.annotation.AggregateRoot;
+import io.github.fludakit.data.annotation.Entity;
+import io.github.fludakit.data.annotation.Identity;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 

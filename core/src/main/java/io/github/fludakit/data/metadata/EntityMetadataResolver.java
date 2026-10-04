@@ -8,13 +8,16 @@ import org.jmolecules.ddd.annotation.ValueObject;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 public final class EntityMetadataResolver {
 
     private final Map<Class<?>, EntityMetadata> cache;
+    private final ThreadLocal<Set<Class<?>>> inProgress = ThreadLocal.withInitial(HashSet::new);
 
     public EntityMetadataResolver() { this(true); }
 
@@ -27,9 +30,22 @@ public final class EntityMetadataResolver {
             EntityMetadata hit = cache.get(type);
             if (hit != null) return hit;
         }
-        EntityMetadata md = build(type);
-        if (cache != null) cache.put(type, md);
-        return md;
+        Set<Class<?>> stack = inProgress.get();
+        if (stack.contains(type)) {
+            if (cache == null) {
+                throw new IllegalStateException("Cyclic aggregate reference to " + type.getName()
+                        + " cannot be resolved when caching is disabled");
+            }
+            return cache.get(type); // in-progress (shallow) placeholder breaks the cycle
+        }
+        stack.add(type);
+        try {
+            EntityMetadata md = build(type);
+            if (cache != null) cache.put(type, md);
+            return md;
+        } finally {
+            stack.remove(type);
+        }
     }
 
     private EntityMetadata build(Class<?> type) {

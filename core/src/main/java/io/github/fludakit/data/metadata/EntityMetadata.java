@@ -69,6 +69,11 @@ public final class EntityMetadata {
                     out.add(new ColumnRef(p.column(), p.name(), p.target().id().type()));
                 }
                 case EMBEDDED -> {
+                    if (p.target() == null) {
+                        throw new IllegalStateException("Entity " + type().getName()
+                                + " has an embedded property '" + p.name()
+                                + "' whose target is unresolved");
+                    }
                     for (ColumnRef leaf : p.target().columns()) {
                         out.add(new ColumnRef(p.column() + "_" + leaf.column(), p.name() + "." + leaf.path(), leaf.type()));
                     }

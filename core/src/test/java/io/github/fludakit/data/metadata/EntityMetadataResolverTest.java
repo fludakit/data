@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class EntityMetadataResolverTest {
 
@@ -106,5 +107,15 @@ class EntityMetadataResolverTest {
                     assertThat(c.column()).isEqualTo("address_city");
                     assertThat(c.path()).isEqualTo("address.city");
                 });
+    }
+
+    @Test
+    void cyclicAggregateWithoutCacheFailsClearly() {
+        assertThatThrownBy(() -> new EntityMetadataResolver(false).resolve(Customer.class))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Cyclic aggregate reference");
+        // cached resolver still succeeds and terminates
+        assertThat(new EntityMetadataResolver().resolve(Customer.class).property("orders").kind())
+                .isEqualTo(EntityMetadata.Kind.ONE_TO_MANY);
     }
 }

@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xmlns="http://maven.apache.org/POM/4.0.0"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.github.fludakit</groupId>
+        <artifactId>fludakit-parent</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../parent/pom.xml</relativePath>
+    </parent>
+
+    <!-- TODO: Replace 'feature' with your module name -->
+    <artifactId>fluda-feature-parent</artifactId>
+    <packaging>pom</packaging>
+
+    <!-- TODO: Update name, description, and URL -->
+    <name>FluDa :: Feature</name>
+    <description>TODO: Describe your feature module.</description>
+    <url>https://github.com/fludakit/feature</url>
+
+    <licenses>
+        <license>
+            <name>The Apache License, Version 2.0</name>
+            <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+        </license>
+    </licenses>
+
+    <developers>
+        <developer>
+            <name>Hantsy Bai</name>
+            <email>hantsy@gmail.com</email>
+        </developer>
+    </developers>
+
+    <!-- TODO: Update SCM URLs to your repository -->
+    <scm>
+        <connection>scm:git:git://github.com/fludakit/feature.git</connection>
+        <developerConnection>scm:git:ssh://github.com/fludakit/feature.git</developerConnection>
+        <url>https://github.com/fludakit/feature</url>
+        <tag>HEAD</tag>
+    </scm>
+
+    <modules>
+        <module>core</module>
+    </modules>
+
+    <properties>
+        <!-- Module-specific properties can be added here -->
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- Module-specific dependencies can be added here -->
+        </dependencies>
+    </dependencyManagement>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <!-- Module-specific plugin configurations can be added here -->
+            </plugins>
+        </pluginManagement>
+    </build>
+
+    <profiles>
+        <!-- Module-specific profiles can be added here -->
+    </profiles>
+
+    <!-- TODO: Update distributionManagement URL to your repository -->
+    <distributionManagement>
+        <repository>
+            <id>github</id>
+            <name>GitHub Packages</name>
+            <url>https://maven.pkg.github.com/fludakit/feature</url>
+        </repository>
+    </distributionManagement>
+
+    <repositories>
+        <repository>
+            <name>GitHub Packages - Fludakit Org</name>
+            <id>github-fludakit</id>
+            <url>https://maven.pkg.github.com/fludakit/*</url>
+            <releases>
+                <enabled>false</enabled>
+            </releases>
+            <snapshots>
+                <enabled>true</enabled>
+            </snapshots>
+        </repository>
+    </repositories>
+</project>

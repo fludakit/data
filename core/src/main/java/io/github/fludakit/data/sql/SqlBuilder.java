@@ -27,7 +27,21 @@ public final class SqlBuilder {
     }
 
     public String insert(EntityMetadata md) {
+        return insert(md, true);
+    }
+
+    /**
+     * Builds an INSERT. When {@code includeId} is false the identifier column is omitted so the
+     * database can generate it (identity / auto-increment); binding an explicit NULL to an identity
+     * column is rejected by most databases, including H2.
+     */
+    public String insert(EntityMetadata md, boolean includeId) {
         List<EntityMetadata.ColumnRef> cols = md.columns();
+        if (!includeId) {
+            cols = cols.stream()
+                    .filter(c -> md.id() == null || !c.column().equals(md.id().column()))
+                    .collect(Collectors.toList());
+        }
         String names = cols.stream().map(c -> Names.quote(c.column())).collect(Collectors.joining(", "));
         String params = cols.stream().map(c -> ":" + c.path().replace('.', '_')).collect(Collectors.joining(", "));
         return "INSERT INTO " + Names.quote(md.tableName()) + " (" + names + ") VALUES (" + params + ")";

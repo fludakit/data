@@ -71,10 +71,12 @@
                                     <name>fluda.data.core</name>
                                     <exports>
                                         io.github.fludakit.data;
+                                        io.github.fludakit.data.engine;
                                         io.github.fludakit.data.mapping;
                                         io.github.fludakit.data.metadata;
                                         io.github.fludakit.data.page;
                                         io.github.fludakit.data.query;
+                                        io.github.fludakit.data.support;
                                     </exports>
                                 </moduleInfo>
                             </module>

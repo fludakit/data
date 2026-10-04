@@ -22,7 +22,8 @@ public final class SimplePage<T> implements Page<T> {
     @Override public boolean hasContent() { return !content.isEmpty(); }
     @Override public int numberOfElements() { return content.size(); }
     @Override public boolean hasNext() {
-        return pageRequest.mode() == PageRequest.Mode.OFFSET
+        if (pageRequest.mode() != PageRequest.Mode.OFFSET) return content.size() == pageRequest.size();
+        return pageRequest.requestTotal()
                 ? pageRequest.page() * (long) pageRequest.size() < totalElements
                 : content.size() == pageRequest.size();
     }

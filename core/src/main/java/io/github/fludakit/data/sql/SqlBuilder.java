@@ -35,6 +35,15 @@ public final class SqlBuilder {
      * database can generate it (identity / auto-increment); binding an explicit NULL to an identity
      * column is rejected by most databases, including H2.
      */
+    /**
+     * Maps a dot-separated property path to the named-parameter token used in the generated SQL
+     * (e.g. {@code "address.street"} becomes {@code "address_street"}). Callers that bind parameters
+     * programmatically must use the same mapping so the emitted {@code .param(...)} names line up.
+     */
+    public static String paramName(String path) {
+        return path.replace('.', '_');
+    }
+
     public String insert(EntityMetadata md, boolean includeId) {
         List<EntityMetadata.ColumnRef> cols = md.columns();
         if (!includeId) {
@@ -43,7 +52,7 @@ public final class SqlBuilder {
                     .collect(Collectors.toList());
         }
         String names = cols.stream().map(c -> Names.quote(c.column())).collect(Collectors.joining(", "));
-        String params = cols.stream().map(c -> ":" + c.path().replace('.', '_')).collect(Collectors.joining(", "));
+        String params = cols.stream().map(c -> ":" + paramName(c.path())).collect(Collectors.joining(", "));
         return "INSERT INTO " + Names.quote(md.tableName()) + " (" + names + ") VALUES (" + params + ")";
     }
 
@@ -52,7 +61,7 @@ public final class SqlBuilder {
         String idCol = Names.quote(md.id().column());
         String sets = cols.stream()
                 .filter(c -> !c.column().equals(md.id().column()))
-                .map(c -> Names.quote(c.column()) + " = :" + c.path().replace('.', '_'))
+                .map(c -> Names.quote(c.column()) + " = :" + paramName(c.path()))
                 .collect(Collectors.joining(", "));
         return "UPDATE " + Names.quote(md.tableName()) + " SET " + sets + " WHERE " + idCol + " = :id";
     }

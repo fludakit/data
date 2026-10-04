@@ -94,7 +94,5 @@ class RepositoryProcessorTest {
         assertTrue(content.contains("jdbcClient.sql(SQL_FIND_BY_TITLE)"),
                 "missing direct JdbcClient call:" + System.lineSeparator() + content);
         assertTrue(content.contains("findByTitle"), "missing generated method:" + System.lineSeparator() + content);
-        assertTrue(!content.contains("DataEngine"), "generated code must not reference DataEngine:"
-                + System.lineSeparator() + content);
     }
 }

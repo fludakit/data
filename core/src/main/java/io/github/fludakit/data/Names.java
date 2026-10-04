@@ -19,7 +19,8 @@ public final class Names {
 
     public static String columnName(String property) { return toSnakeCase(property); }
     public static String fkColumn(String property) { return toSnakeCase(property) + "_id"; }
-    public static String tableName(Class<?> type) { return toSnakeCase(type.getSimpleName()); }
+    public static String tableName(Class<?> type) { return tableName(type.getSimpleName()); }
+    public static String tableName(String simpleName) { return toSnakeCase(simpleName); }
     public static String childTable(String parentTable, String field) { return parentTable + "_" + toSnakeCase(field); }
     public static String quote(String identifier) { return "\"" + identifier + "\""; }
 }

@@ -11,12 +11,14 @@ import io.github.fludakit.data.Names;
 import io.github.fludakit.data.annotation.Association;
 import io.github.fludakit.data.annotation.Identity;
 import io.github.fludakit.data.annotation.ValueObject;
+import io.github.fludakit.data.metadata.EntityMetadata;
 import io.github.fludakit.data.page.SimplePage;
 import io.github.fludakit.data.qbn.ParsedMethodName;
 import io.github.fludakit.data.qbn.QueryByMethodNameParser;
 import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.SortSpec;
+import io.github.fludakit.data.sql.SqlBuilder;
 import io.github.fludakit.jdbc.JdbcClient;
 import io.github.fludakit.jdbc.support.GeneratedKeyHolder;
 import jakarta.data.Sort;
@@ -308,11 +310,14 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     private void appendInsertStatements(MethodSpec.Builder builder, String value, EntityModel entity,
                                         Map<String, String> constants) {
-        String constant = addConstant(constants, "SQL_INSERT", insertSql(entity));
+        // includeId=false: the generated key is read back through GeneratedKeyHolder, so the identity
+        // column must be omitted from the INSERT (H2 and most databases reject an explicit NULL).
+        String constant = addConstant(constants, "SQL_INSERT",
+                new SqlBuilder().insert(entity.metadata(), false));
         builder.addStatement("$T keys = new $T()", GeneratedKeyHolder.class, GeneratedKeyHolder.class);
         CodeBlock.Builder sql = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
         for (Property property : entity.properties()) {
-            sql.add(".param($S, $L)", property.column(), readValue(property, value));
+            sql.add(".param($S, $L)", SqlBuilder.paramName(property.name()), readValue(property, value));
         }
         sql.add(".update(keys)");
         builder.addStatement("$L", sql.build());
@@ -363,18 +368,11 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     private void appendUpdateStatements(MethodSpec.Builder builder, String value, EntityModel entity,
                                         Map<String, String> constants) {
-        List<Property> updated = entity.properties();
-        StringBuilder sql = new StringBuilder("UPDATE ").append(Names.quote(entity.table())).append(" SET ");
-        for (int i = 0; i < updated.size(); i++) {
-            if (i > 0) sql.append(", ");
-            sql.append(Names.quote(updated.get(i).column())).append(" = :").append(updated.get(i).column());
-        }
-        sql.append(" WHERE ").append(Names.quote(entity.id().column())).append(" = :id");
-        String constant = addConstant(constants, "SQL_UPDATE", sql.toString());
+        String constant = addConstant(constants, "SQL_UPDATE", new SqlBuilder().update(entity.metadata()));
 
         CodeBlock.Builder update = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
-        for (Property property : updated) {
-            update.add(".param($S, $L)", property.column(), readValue(property, value));
+        for (Property property : entity.properties()) {
+            update.add(".param($S, $L)", SqlBuilder.paramName(property.name()), readValue(property, value));
         }
         update.add(".param($S, $L.$L())", "id", value, getter(entity.id().name()));
         update.add(".update()");
@@ -398,20 +396,21 @@ public class RepositoryProcessor extends AbstractProcessor {
     private void emitFindById(MethodSpec.Builder builder, String value, EntityModel entity,
                               Map<String, String> constants) {
         String constant = addConstant(constants, "SQL_FIND_BY_ID",
-                "SELECT * FROM " + Names.quote(entity.table()) + " WHERE " + Names.quote(entity.id().column()) + " = :id");
+                new SqlBuilder().selectBy(entity.metadata(),
+                        List.of(Predicate.of(entity.id().name(), Operator.EQ, "id")), List.of(), 0, null));
         builder.addStatement("return jdbcClient.sql($L).param($S, $L).query($T.class).optional()",
                 constant, "id", value, entity.typeName());
     }
 
     private void emitDeleteById(MethodSpec.Builder builder, String value, EntityModel entity,
                                 Map<String, String> constants) {
-        String constant = addConstant(constants, "SQL_DELETE",
-                "DELETE FROM " + Names.quote(entity.table()) + " WHERE " + Names.quote(entity.id().column()) + " = :id");
+        String constant = addConstant(constants, "SQL_DELETE", new SqlBuilder().deleteById(entity.metadata()));
         builder.addStatement("jdbcClient.sql($L).param($S, $L).update()", constant, "id", value);
     }
 
     private void emitFindAll(MethodSpec.Builder builder, EntityModel entity, Map<String, String> constants) {
-        String constant = addConstant(constants, "SQL_FIND_ALL", "SELECT * FROM " + Names.quote(entity.table()));
+        String constant = addConstant(constants, "SQL_FIND_ALL",
+                new SqlBuilder().selectBy(entity.metadata(), List.of(), List.of(), 0, null));
         builder.addStatement("return jdbcClient.sql($L).query($T.class).stream()", constant, entity.typeName());
     }
 
@@ -419,8 +418,10 @@ public class RepositoryProcessor extends AbstractProcessor {
                                  EntityModel entity, Map<String, String> constants) {
         String pageRequest = parameterName(parameters.get(0), "pageRequest");
         String sortBy = parameterName(parameters.get(1), "sortBy");
-        String findConstant = addConstant(constants, "SQL_FIND_ALL", "SELECT * FROM " + Names.quote(entity.table()));
-        String countConstant = addConstant(constants, "SQL_COUNT_ALL", "SELECT COUNT(*) FROM " + Names.quote(entity.table()));
+        String findConstant = addConstant(constants, "SQL_FIND_ALL",
+                new SqlBuilder().selectBy(entity.metadata(), List.of(), List.of(), 0, null));
+        String countConstant = addConstant(constants, "SQL_COUNT_ALL",
+                new SqlBuilder().countBy(entity.metadata(), List.of()));
 
         builder.addStatement("long offset = ($L.page() - 1) * $L.size()", pageRequest, pageRequest);
         builder.addStatement("$T orderBy = new $T()", StringBuilder.class, StringBuilder.class);
@@ -498,10 +499,11 @@ public class RepositoryProcessor extends AbstractProcessor {
         TypeMirror returnMirror = resolved.getReturnType();
         Kind kind = kindOf(returnMirror);
 
+        List<Predicate> predicates = predicates(bindings, parameters);
+
         if ("count".equals(action) || "exists".equals(action)) {
-            StringBuilder sql = new StringBuilder("SELECT COUNT(*) FROM ").append(Names.quote(entity.table()));
-            appendWhere(sql, bindings, parameters);
-            String constant = addConstant(constants, "SQL_" + upperSnake(name), sql.toString());
+            String constant = addConstant(constants, "SQL_" + upperSnake(name),
+                    new SqlBuilder().countBy(entity.metadata(), predicates));
             CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
             appendBoundParameters(call, bindings, parameters);
             call.add(".singleValue($T.class)", Long.class);
@@ -516,9 +518,8 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
 
         if ("delete".equals(action)) {
-            StringBuilder sql = new StringBuilder("DELETE FROM ").append(Names.quote(entity.table()));
-            appendWhere(sql, bindings, parameters);
-            String constant = addConstant(constants, "SQL_" + upperSnake(name), sql.toString());
+            String constant = addConstant(constants, "SQL_" + upperSnake(name),
+                    new SqlBuilder().deleteBy(entity.metadata(), predicates));
             CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
             appendBoundParameters(call, bindings, parameters);
             call.add(".update()");
@@ -530,13 +531,9 @@ public class RepositoryProcessor extends AbstractProcessor {
             return;
         }
 
-        StringBuilder sql = new StringBuilder("SELECT * FROM ").append(Names.quote(entity.table()));
-        appendWhere(sql, bindings, parameters);
-        appendOrderBy(sql, sorts(method, parsed));
-        if (parsed != null && parsed.limit() > 0) {
-            sql.append(" LIMIT ").append(parsed.limit());
-        }
-        String constant = addConstant(constants, "SQL_" + upperSnake(name), sql.toString());
+        String sql = new SqlBuilder().selectBy(entity.metadata(), predicates, sorts(method, parsed),
+                parsed != null ? parsed.limit() : 0, null);
+        String constant = addConstant(constants, "SQL_" + upperSnake(name), sql);
         CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
         appendBoundParameters(call, bindings, parameters);
         terminal(call, kind, entity.typeName());
@@ -572,45 +569,18 @@ public class RepositoryProcessor extends AbstractProcessor {
         return result;
     }
 
-    private void appendWhere(StringBuilder sql, List<Binding> bindings,
-                             List<? extends VariableElement> parameters) {
-        StringBuilder clause = new StringBuilder();
+    /**
+     * Converts the resolved parameter bindings into {@link Predicate}s whose named parameters are the
+     * method's parameter names, so the SQL rendered by {@link SqlBuilder} uses exactly the tokens
+     * bound by {@link #appendBoundParameters}.
+     */
+    private List<Predicate> predicates(List<Binding> bindings, List<? extends VariableElement> parameters) {
+        List<Predicate> predicates = new ArrayList<>();
         for (Binding binding : bindings) {
-            Operator operator = binding.operator();
-            String column = Names.quote(Names.columnName(binding.property()));
             String param = parameters.get(binding.paramIndex()).getSimpleName().toString();
-            String fragment;
-            if (operator == Operator.IS_NULL || operator == Operator.IS_NOT_NULL
-                    || operator == Operator.TRUE || operator == Operator.FALSE) {
-                fragment = column + " " + operator.sql();
-            } else if (operator == Operator.IGNORE_CASE_EQ) {
-                fragment = "LOWER(" + column + ") = LOWER(:" + param + ")";
-            } else {
-                fragment = column + " " + operator.sql() + " :" + param;
-            }
-            if (clause.length() > 0) {
-                clause.append(" AND ");
-            }
-            clause.append(fragment);
+            predicates.add(Predicate.of(binding.property(), binding.operator(), param));
         }
-        if (clause.length() > 0) {
-            sql.append(" WHERE ").append(clause);
-        }
-    }
-
-    private void appendOrderBy(StringBuilder sql, List<SortSpec> sorts) {
-        if (sorts.isEmpty()) {
-            return;
-        }
-        sql.append(" ORDER BY ");
-        for (int i = 0; i < sorts.size(); i++) {
-            if (i > 0) {
-                sql.append(", ");
-            }
-            SortSpec sort = sorts.get(i);
-            sql.append(Names.quote(Names.columnName(sort.property())))
-                    .append(sort.ascending() ? " ASC" : " DESC");
-        }
+        return predicates;
     }
 
     private void appendBoundParameters(CodeBlock.Builder call, List<Binding> bindings,
@@ -667,21 +637,6 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
         constants.put(name, sql);
         return name;
-    }
-
-    private String insertSql(EntityModel entity) {
-        List<Property> columns = entity.properties();
-        StringBuilder sql = new StringBuilder("INSERT INTO ").append(Names.quote(entity.table())).append(" (");
-        for (int i = 0; i < columns.size(); i++) {
-            if (i > 0) sql.append(", ");
-            sql.append(Names.quote(columns.get(i).column()));
-        }
-        sql.append(") VALUES (");
-        for (int i = 0; i < columns.size(); i++) {
-            if (i > 0) sql.append(", ");
-            sql.append(':').append(columns.get(i).column());
-        }
-        return sql.append(')').toString();
     }
 
     private CodeBlock readValue(Property property, String variable) {
@@ -846,9 +801,12 @@ public class RepositoryProcessor extends AbstractProcessor {
     private EntityModel buildEntity(TypeElement element) {
         TypeMirror typeMirror = types.erasure(element.asType());
         TypeName typeName = TypeName.get(typeMirror);
-        String table = Names.toSnakeCase(element.getSimpleName().toString());
+        String table = Names.tableName(element.getSimpleName().toString());
+        String typeNameString = element.getQualifiedName().toString();
         Property id = null;
+        EntityMetadata.Property metadataId = null;
         List<Property> properties = new ArrayList<>();
+        List<EntityMetadata.Property> metadataProperties = new ArrayList<>();
         List<ElementCollection> collections = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         for (Element member : elements.getAllMembers(element)) {
@@ -863,48 +821,75 @@ public class RepositoryProcessor extends AbstractProcessor {
             if (!seen.add(name)) {
                 continue;
             }
+            String fieldType = field.asType().toString();
             TypeElement valueObject = valueObjectElement(field);
             if (field.getAnnotation(Identity.class) != null || name.equals("id")) {
                 id = new Property(name, Names.columnName(name), false);
+                metadataId = new EntityMetadata.Property(name, fieldType, EntityMetadata.Kind.ID,
+                        Names.columnName(name), null, null);
             } else if (field.getAnnotation(Association.class) != null) {
                 properties.add(new Property(name, Names.fkColumn(name), true));
+                metadataProperties.add(new EntityMetadata.Property(name, fieldType, EntityMetadata.Kind.MANY_TO_ONE,
+                        Names.fkColumn(name), null, null));
             } else if (valueObject != null) {
-                collections.add(buildCollection(table, name, valueObject));
+                ElementCollection collection = buildCollection(table, name, valueObject);
+                collections.add(collection);
+                metadataProperties.add(new EntityMetadata.Property(name, fieldType,
+                        EntityMetadata.Kind.ELEMENT_COLLECTION, null, collection.target(), null));
             } else {
                 properties.add(new Property(name, Names.columnName(name), false));
+                metadataProperties.add(new EntityMetadata.Property(name, fieldType, EntityMetadata.Kind.SCALAR,
+                        Names.columnName(name), null, null));
             }
         }
         if (id == null) {
             id = new Property("id", Names.columnName("id"), false);
+            metadataId = new EntityMetadata.Property("id", "java.lang.Long", EntityMetadata.Kind.ID,
+                    Names.columnName("id"), null, null);
         }
-        return new EntityModel(typeMirror, typeName, table, id, properties, collections);
+        EntityMetadata metadata = EntityMetadata.of(typeNameString, table, metadataId, metadataProperties);
+        return new EntityModel(typeMirror, typeName, id, properties, collections, metadata);
     }
 
     private ElementCollection buildCollection(String parentTable, String field, TypeElement valueObject) {
         String childTable = Names.childTable(parentTable, field);
         String parentFk = parentTable + "_id";
+        EntityMetadata target = valueObjectMetadata(valueObject);
         List<Property> properties = new ArrayList<>();
+        for (EntityMetadata.Property property : target.properties()) {
+            properties.add(new Property(property.name(), property.column(),
+                    property.kind() == EntityMetadata.Kind.MANY_TO_ONE));
+        }
+        return new ElementCollection(field, TypeName.get(types.erasure(valueObject.asType())),
+                childTable, parentFk, properties, target);
+    }
+
+    /** Builds the id-less metadata for a {@code List<@ValueObject>} element type. */
+    private EntityMetadata valueObjectMetadata(TypeElement valueObject) {
+        List<EntityMetadata.Property> properties = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         for (Element member : elements.getAllMembers(valueObject)) {
             if (member.getKind() != ElementKind.FIELD) {
                 continue;
             }
-            VariableElement property = (VariableElement) member;
-            if (property.getModifiers().contains(Modifier.STATIC)) {
+            VariableElement field = (VariableElement) member;
+            if (field.getModifiers().contains(Modifier.STATIC)) {
                 continue;
             }
-            String name = property.getSimpleName().toString();
-            if (!seen.add(name) || property.getAnnotation(Identity.class) != null || name.equals("id")) {
+            String name = field.getSimpleName().toString();
+            if (!seen.add(name) || field.getAnnotation(Identity.class) != null || name.equals("id")) {
                 continue;
             }
-            if (property.getAnnotation(Association.class) != null) {
-                properties.add(new Property(name, Names.fkColumn(name), true));
+            String fieldType = field.asType().toString();
+            if (field.getAnnotation(Association.class) != null) {
+                properties.add(new EntityMetadata.Property(name, fieldType, EntityMetadata.Kind.MANY_TO_ONE,
+                        Names.fkColumn(name), null, null));
             } else {
-                properties.add(new Property(name, Names.columnName(name), false));
+                properties.add(new EntityMetadata.Property(name, fieldType, EntityMetadata.Kind.SCALAR,
+                        Names.columnName(name), null, null));
             }
         }
-        return new ElementCollection(field, TypeName.get(types.erasure(valueObject.asType())),
-                childTable, parentFk, properties);
+        return EntityMetadata.of(valueObject.getQualifiedName().toString(), null, null, properties);
     }
 
     private TypeElement valueObjectElement(VariableElement field) {
@@ -928,10 +913,11 @@ public class RepositoryProcessor extends AbstractProcessor {
     private record Property(String name, String column, boolean association) { }
 
     private record ElementCollection(String field, TypeName valueObjectType, String childTable,
-                                     String parentFk, List<Property> properties) { }
+                                     String parentFk, List<Property> properties, EntityMetadata target) { }
 
-    private record EntityModel(TypeMirror typeMirror, TypeName typeName, String table, Property id,
-                               List<Property> properties, List<ElementCollection> collections) { }
+    private record EntityModel(TypeMirror typeMirror, TypeName typeName, Property id,
+                               List<Property> properties, List<ElementCollection> collections,
+                               EntityMetadata metadata) { }
 
     private record Binding(String property, Operator operator, int paramIndex) { }
 

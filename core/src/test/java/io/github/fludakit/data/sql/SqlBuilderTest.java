@@ -14,9 +14,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 class SqlBuilderTest {
 
     static EntityMetadata customer() {
-        return EntityMetadata.of(String.class, "customer",
-                new EntityMetadata.Property("id", Long.class, EntityMetadata.Kind.ID, "id", null, null),
-                List.of(new EntityMetadata.Property("name", String.class, EntityMetadata.Kind.SCALAR, "name", null, null)));
+        return EntityMetadata.of("Customer", "customer",
+                new EntityMetadata.Property("id", "java.lang.Long", EntityMetadata.Kind.ID, "id", null, null),
+                List.of(new EntityMetadata.Property("name", "java.lang.String", EntityMetadata.Kind.SCALAR, "name", null, null)));
     }
 
     @Test

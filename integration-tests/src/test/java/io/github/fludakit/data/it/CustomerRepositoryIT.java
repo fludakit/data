@@ -1,5 +1,6 @@
 package io.github.fludakit.data.it;
 
+import jakarta.data.page.CursoredPage;
 import jakarta.data.page.Page;
 import jakarta.data.page.PageRequest;
 import jakarta.inject.Inject;
@@ -63,6 +64,21 @@ class CustomerRepositoryIT {
         assertThat(saved.getCustomer().getId()).isEqualTo(ana.getId());
         assertThat(saved.getOrderItems()).hasSize(1);
         assertThat(saved.getOrderItems().get(0).getProduct().getId()).isEqualTo(book.getId());
+    }
+
+    @Test
+    void cursoredPagePagesById() {
+        customers.insert(customer("Charlie", "charlie@example.com"));
+        customers.insert(customer("Alice", "alice@example.com"));
+        customers.insert(customer("Bob", "bob@example.com"));
+
+        CursoredPage<Customer> first = customers.paged(PageRequest.ofSize(2));
+        assertThat(first).isInstanceOf(CursoredPage.class);
+        assertThat(first.content()).hasSize(2);
+        if (first.hasNext()) {
+            CursoredPage<Customer> second = (CursoredPage<Customer>) customers.paged(first.nextPageRequest());
+            assertThat(second.content()).isNotEmpty();
+        }
     }
 
     private static Customer customer(String name, String email) {

@@ -12,6 +12,8 @@ import io.github.fludakit.data.annotation.Association;
 import io.github.fludakit.data.annotation.Identity;
 import io.github.fludakit.data.annotation.ValueObject;
 import io.github.fludakit.data.metadata.EntityMetadata;
+import io.github.fludakit.data.page.CursorSupport;
+import io.github.fludakit.data.page.SimpleCursoredPage;
 import io.github.fludakit.data.page.SimplePage;
 import io.github.fludakit.data.qbn.ParsedMethodName;
 import io.github.fludakit.data.qbn.QueryByMethodNameParser;
@@ -22,6 +24,7 @@ import io.github.fludakit.data.sql.SqlBuilder;
 import io.github.fludakit.jdbc.JdbcClient;
 import io.github.fludakit.jdbc.support.GeneratedKeyHolder;
 import jakarta.data.Sort;
+import jakarta.data.page.PageRequest;
 import jakarta.data.repository.By;
 import jakarta.data.repository.Delete;
 import jakarta.data.repository.Insert;
@@ -423,15 +426,23 @@ public class RepositoryProcessor extends AbstractProcessor {
         String countConstant = addConstant(constants, "SQL_COUNT_ALL",
                 new SqlBuilder().countBy(entity.metadata(), List.of()));
 
-        builder.addStatement("long offset = ($L.page() - 1) * $L.size()", pageRequest, pageRequest);
+        builder.addStatement("$T cols = new $T<>()", List.class, ArrayList.class);
+        builder.addStatement("$T dirs = new $T<>()", List.class, ArrayList.class);
+        builder.addStatement("$T props = new $T<>()", List.class, ArrayList.class);
         builder.addStatement("$T orderBy = new $T()", StringBuilder.class, StringBuilder.class);
         builder.beginControlFlow("for ($T<?> s : $L)", Sort.class, sortBy);
+        builder.addStatement("cols.add(column(s.property()))");
+        builder.addStatement("dirs.add(s.isAscending())");
+        builder.addStatement("props.add(s.property())");
         builder.beginControlFlow("if (orderBy.length() > 0)");
         builder.addStatement("orderBy.append($S)", ", ");
         builder.endControlFlow();
         builder.addStatement("orderBy.append($S).append(column(s.property())).append($S)"
                         + ".append(s.isAscending() ? $S : $S)", "\"", "\"", " ASC", " DESC");
         builder.endControlFlow();
+
+        builder.beginControlFlow("if ($L.mode() == $T.Mode.OFFSET)", pageRequest, PageRequest.class);
+        builder.addStatement("long offset = ($L.page() - 1) * $L.size()", pageRequest, pageRequest);
         builder.addStatement("$T<$T> content = jdbcClient.sql($L + (orderBy.length() > 0 ? $S + orderBy : $S)"
                         + " + $S + $L.size() + $S + offset).query($T.class).list()",
                 List.class, entity.typeName(), findConstant, " ORDER BY ", "", " LIMIT ", pageRequest, " OFFSET ",
@@ -439,6 +450,103 @@ public class RepositoryProcessor extends AbstractProcessor {
         builder.addStatement("long total = $L.requestTotal() ? jdbcClient.sql($L).singleValue($T.class) : -1L",
                 pageRequest, countConstant, Long.class);
         builder.addStatement("return new $T<>($L, content, total)", SimplePage.class, pageRequest);
+        builder.endControlFlow();
+
+        builder.addStatement("$T.Cursor cursor = $L.cursor().orElseThrow()", PageRequest.class, pageRequest);
+        builder.addStatement("$T where = $T.seekWhere(cols, dirs, cursor, $L.mode() == $T.Mode.CURSOR_NEXT)",
+                String.class, CursorSupport.class, pageRequest, PageRequest.class);
+        builder.addStatement("$T<$T> content = jdbcClient.sql($L + $S + where + (orderBy.length() > 0 ? $S + orderBy : $S)"
+                        + " + $S + $L.size() + $S).params($T.cursorParams(cursor)).query($T.class).list()",
+                List.class, entity.typeName(), findConstant, " WHERE ", " ORDER BY ", "", " LIMIT ", pageRequest,
+                " + 1", CursorSupport.class, entity.typeName());
+        builder.addStatement("boolean hasMore = content.size() > $L.size()", pageRequest);
+        builder.beginControlFlow("if (hasMore)");
+        builder.addStatement("content = content.subList(0, $L.size())", pageRequest);
+        builder.endControlFlow();
+        builder.addStatement("$T<$T.Cursor> cursors = new $T<>()", List.class, PageRequest.class, ArrayList.class);
+        builder.beginControlFlow("for ($T e : content)", entity.typeName());
+        builder.addStatement("cursors.add($T.cursorFor(props, e))", CursorSupport.class);
+        builder.endControlFlow();
+        builder.addStatement("return new $T<>($L, content, cursors, -1L)", SimpleCursoredPage.class, pageRequest);
+    }
+
+    private void emitPaged(MethodSpec.Builder builder, EntityModel entity, String pageRequest, List<SortSpec> sorts,
+                           String findConstant, Map<String, String> constants, List<Binding> bindings,
+                           List<? extends VariableElement> parameters, boolean cursored) {
+        List<SortSpec> effective = sorts.isEmpty()
+                ? List.of(SortSpec.of(entity.id().name(), true, false))
+                : sorts;
+        List<String> columns = new ArrayList<>();
+        List<String> properties = new ArrayList<>();
+        List<String> directions = new ArrayList<>();
+        for (SortSpec s : effective) {
+            columns.add(Names.columnName(s.property()));
+            properties.add(s.property());
+            directions.add(Boolean.toString(s.ascending()));
+        }
+        String colsExpr = "java.util.List.of(" + quoted(columns) + ")";
+        String propsExpr = "java.util.List.of(" + quoted(properties) + ")";
+        String dirsExpr = "java.util.List.of(" + String.join(", ", directions) + ")";
+        String orderBy = new SqlBuilder().orderBy(effective);
+        String wherePrefix = bindings.isEmpty() ? " WHERE " : " AND ";
+
+        if (!cursored) {
+            String countConstant = addConstant(constants, "SQL_COUNT_ALL",
+                    new SqlBuilder().countBy(entity.metadata(), List.of()));
+            builder.addStatement("long offset = ($L.page() - 1) * $L.size()", pageRequest, pageRequest);
+            CodeBlock.Builder call = CodeBlock.builder()
+                    .add("jdbcClient.sql($L + $S + $S + $L.size() + $S + offset)", findConstant, orderBy,
+                            " LIMIT ", pageRequest, " OFFSET ");
+            appendBoundParameters(call, bindings, parameters);
+            call.add(".query($T.class).list()", entity.typeName());
+            builder.addStatement("$T<$T> content = $L", List.class, entity.typeName(), call.build());
+            builder.addStatement("long total = $L.requestTotal() ? jdbcClient.sql($L).singleValue($T.class) : -1L",
+                    pageRequest, countConstant, Long.class);
+            builder.addStatement("return new $T<>($L, content, total)", SimplePage.class, pageRequest);
+            return;
+        }
+
+        builder.addStatement("$T.Cursor cursor = $L.cursor().orElse(null)", PageRequest.class, pageRequest);
+        builder.beginControlFlow("if (cursor == null)");
+        builder.addStatement("long offset = ($L.page() - 1) * $L.size()", pageRequest, pageRequest);
+        CodeBlock.Builder offsetCall = CodeBlock.builder()
+                .add("jdbcClient.sql($L + $S + $S + $L.size() + $S + offset)", findConstant, orderBy,
+                        " LIMIT ", pageRequest, " OFFSET ");
+        appendBoundParameters(offsetCall, bindings, parameters);
+        offsetCall.add(".query($T.class).list()", entity.typeName());
+        builder.addStatement("$T<$T> content = $L", List.class, entity.typeName(), offsetCall.build());
+        builder.addStatement("$T<$T.Cursor> cursors = new $T<>()", List.class, PageRequest.class, ArrayList.class);
+        builder.beginControlFlow("for ($T e : content)", entity.typeName());
+        builder.addStatement("cursors.add($T.cursorFor($L, e))", CursorSupport.class, propsExpr);
+        builder.endControlFlow();
+        builder.addStatement("return new $T<>($L, content, cursors, -1L)", SimpleCursoredPage.class, pageRequest);
+        builder.endControlFlow();
+        builder.addStatement("$T where = $T.seekWhere($L, $L, cursor, $L.mode() == $T.Mode.CURSOR_NEXT)",
+                String.class, CursorSupport.class, colsExpr, dirsExpr, pageRequest, PageRequest.class);
+        CodeBlock.Builder seekCall = CodeBlock.builder()
+                .add("jdbcClient.sql($L + $S + where + $S + $S + $L.size() + $S)", findConstant, wherePrefix,
+                        orderBy, " LIMIT ", pageRequest, " + 1");
+        appendBoundParameters(seekCall, bindings, parameters);
+        seekCall.add(".params($T.cursorParams(cursor)).query($T.class).list()", CursorSupport.class, entity.typeName());
+        builder.addStatement("$T<$T> content = $L", List.class, entity.typeName(), seekCall.build());
+        builder.addStatement("boolean hasMore = content.size() > $L.size()", pageRequest);
+        builder.beginControlFlow("if (hasMore)");
+        builder.addStatement("content = content.subList(0, $L.size())", pageRequest);
+        builder.endControlFlow();
+        builder.addStatement("$T<$T.Cursor> cursors = new $T<>()", List.class, PageRequest.class, ArrayList.class);
+        builder.beginControlFlow("for ($T e : content)", entity.typeName());
+        builder.addStatement("cursors.add($T.cursorFor($L, e))", CursorSupport.class, propsExpr);
+        builder.endControlFlow();
+        builder.addStatement("return new $T<>($L, content, cursors, -1L)", SimpleCursoredPage.class, pageRequest);
+    }
+
+    private String quoted(List<String> values) {
+        StringBuilder sb = new StringBuilder();
+        for (String v : values) {
+            if (sb.length() > 0) sb.append(", ");
+            sb.append('"').append(v).append('"');
+        }
+        return sb.toString();
     }
 
     /**
@@ -531,7 +639,22 @@ public class RepositoryProcessor extends AbstractProcessor {
             return;
         }
 
-        String sql = new SqlBuilder().selectBy(entity.metadata(), predicates, sorts(method, parsed),
+        List<SortSpec> methodSorts = sorts(method, parsed);
+        if (kind == Kind.CURSORED_PAGE || kind == Kind.PAGE) {
+            String pageRequest = specialParameter(parameters, parameterTypes, PAGE_REQUEST);
+            if (pageRequest == null) {
+                processingEnv.getMessager().printMessage(Diagnostic.Kind.ERROR,
+                        name + " returning " + (kind == Kind.PAGE ? "Page" : "CursoredPage")
+                                + " requires a PageRequest parameter", method);
+                return;
+            }
+            String constant = addConstant(constants, "SQL_" + upperSnake(name),
+                    new SqlBuilder().selectBy(entity.metadata(), predicates, List.of(), 0, null));
+            emitPaged(builder, entity, pageRequest, methodSorts, constant, constants, bindings, parameters,
+                    kind == Kind.CURSORED_PAGE);
+            return;
+        }
+        String sql = new SqlBuilder().selectBy(entity.metadata(), predicates, methodSorts,
                 parsed != null ? parsed.limit() : 0, null);
         String constant = addConstant(constants, "SQL_" + upperSnake(name), sql);
         CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
@@ -542,6 +665,16 @@ public class RepositoryProcessor extends AbstractProcessor {
         } else {
             builder.addStatement("return $L", call.build());
         }
+    }
+
+    private String specialParameter(List<? extends VariableElement> parameters,
+                                    List<? extends TypeMirror> parameterTypes, String erasedType) {
+        for (int i = 0; i < parameters.size(); i++) {
+            if (erasedType.equals(types.erasure(parameterTypes.get(i)).toString())) {
+                return parameters.get(i).getSimpleName().toString();
+            }
+        }
+        return null;
     }
 
     private List<Binding> bindings(List<? extends VariableElement> parameters, List<? extends TypeMirror> parameterTypes,
@@ -716,6 +849,8 @@ public class RepositoryProcessor extends AbstractProcessor {
             case "java.util.List", "java.util.Set", "java.util.Collection", "java.lang.Iterable" -> Kind.LIST;
             case "java.util.Optional" -> Kind.OPTIONAL;
             case "java.util.stream.Stream" -> Kind.STREAM;
+            case "jakarta.data.page.Page" -> Kind.PAGE;
+            case "jakarta.data.page.CursoredPage" -> Kind.CURSORED_PAGE;
             default -> Kind.SINGLE;
         };
     }
@@ -921,5 +1056,5 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     private record Binding(String property, Operator operator, int paramIndex) { }
 
-    private enum Kind { LIST, STREAM, OPTIONAL, SINGLE, VOID }
+    private enum Kind { LIST, STREAM, OPTIONAL, SINGLE, VOID, PAGE, CURSORED_PAGE }
 }

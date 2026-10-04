@@ -1,5 +1,7 @@
 package io.github.fludakit.data.it;
 
+import jakarta.data.page.CursoredPage;
+import jakarta.data.page.PageRequest;
 import jakarta.data.repository.By;
 import jakarta.data.repository.CrudRepository;
 import jakarta.data.repository.Find;
@@ -16,4 +18,8 @@ public interface CustomerRepository extends CrudRepository<Customer, Long> {
     @Find
     @OrderBy("name")
     List<Customer> findByEmailLike(@By("email") String emailPattern);
+
+    @Find
+    @OrderBy("id")
+    CursoredPage<Customer> paged(PageRequest pageRequest);
 }

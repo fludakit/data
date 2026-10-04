@@ -38,6 +38,7 @@ public final class EntityMetadataResolver {
 
         String tableName = isEntity ? Names.tableName(type) : null;
 
+        // Phase 1: classify fields without resolving relationship targets, so a cycle cannot recurse.
         List<EntityMetadata.Property> props = new ArrayList<>();
         EntityMetadata.Property id = null;
 
@@ -47,41 +48,74 @@ public final class EntityMetadataResolver {
             if (f.isAnnotationPresent(Identity.class) || (!isValueObject && name.equals("id"))) {
                 id = new EntityMetadata.Property(name, ft, EntityMetadata.Kind.ID, Names.columnName(name), null, null);
             } else if (isEntityType(ft)) {
-                EntityMetadata target = resolve(ft);
                 props.add(new EntityMetadata.Property(name, ft, EntityMetadata.Kind.MANY_TO_ONE,
-                        Names.fkColumn(name), target, null));
+                        Names.fkColumn(name), null, null));
             } else if (ft == List.class) {
                 Class<?> elem = elementType(type, name);
                 if (elem != null && isEntityType(elem)) {
-                    EntityMetadata target = resolve(elem);
                     props.add(new EntityMetadata.Property(name, ft, EntityMetadata.Kind.ONE_TO_MANY,
-                            null, target, findInverse(type, target)));
+                            null, null, null));
                 } else if (elem != null && isValueObjectType(elem)) {
-                    EntityMetadata target = resolve(elem);
                     props.add(new EntityMetadata.Property(name, ft, EntityMetadata.Kind.ELEMENT_COLLECTION,
-                            null, target, null));
+                            null, null, null));
                 } else {
                     props.add(new EntityMetadata.Property(name, ft, EntityMetadata.Kind.SCALAR,
                             Names.columnName(name), null, null));
                 }
             } else if (isValueObjectType(ft)) {
                 props.add(new EntityMetadata.Property(name, ft, EntityMetadata.Kind.EMBEDDED,
-                        Names.columnName(name), resolve(ft), null));
+                        Names.columnName(name), null, null));
             } else {
                 props.add(new EntityMetadata.Property(name, ft, EntityMetadata.Kind.SCALAR,
                         Names.columnName(name), null, null));
             }
         }
 
-        return EntityMetadata.of(type, tableName, id, props);
+        // Phase 2: register a shallow metadata first, so a cycle resolving back to this type
+        // returns this instance instead of recursing forever.
+        EntityMetadata shallow = EntityMetadata.of(type, tableName, id, List.copyOf(props));
+        if (cache != null) cache.put(type, shallow);
+
+        // Phase 3: resolve targets and rebuild with the deep metadata.
+        List<EntityMetadata.Property> deepProps = new ArrayList<>(props.size());
+        for (EntityMetadata.Property p : props) {
+            switch (p.kind()) {
+                case MANY_TO_ONE, EMBEDDED -> deepProps.add(new EntityMetadata.Property(
+                        p.name(), p.type(), p.kind(), p.column(), resolve(p.type()), p.inverse()));
+                case ELEMENT_COLLECTION -> deepProps.add(new EntityMetadata.Property(
+                        p.name(), p.type(), p.kind(), p.column(),
+                        resolve(elementType(type, p.name())), p.inverse()));
+                case ONE_TO_MANY -> {
+                    EntityMetadata child = resolve(elementType(type, p.name()));
+                    deepProps.add(new EntityMetadata.Property(p.name(), p.type(), p.kind(), p.column(),
+                            child, findInverse(type, child)));
+                }
+                default -> deepProps.add(p);
+            }
+        }
+
+        EntityMetadata result = EntityMetadata.of(type, tableName, id, List.copyOf(deepProps));
+        if (cache != null) cache.put(type, result);
+        return result;
     }
 
     private EntityMetadata.Property findInverse(Class<?> parent, EntityMetadata child) {
         List<EntityMetadata.Property> candidates = child.propertiesOf(EntityMetadata.Kind.MANY_TO_ONE, parent);
+        if (candidates.isEmpty()) {
+            // The child may still be the shallow, cycle-breaking instance registered before its own
+            // targets were resolved. Fall back to the declared field type so the inverse is found
+            // regardless of which side of the relationship was resolved first.
+            for (EntityMetadata.Property p : child.properties()) {
+                if (p.kind() == EntityMetadata.Kind.MANY_TO_ONE
+                        && p.type().equals(parent) && !candidates.contains(p)) {
+                    candidates.add(p);
+                }
+            }
+        }
         if (candidates.size() == 1) return candidates.get(0);
         if (candidates.size() > 1) {
             for (EntityMetadata.Property p : candidates) {
-                if (p.target().type().equals(parent)) return p;
+                if (p.target() != null && p.target().type().equals(parent)) return p;
             }
             throw new IllegalStateException("Ambiguous one-to-many inverse between "
                     + parent.getSimpleName() + " and " + child.type().getSimpleName());

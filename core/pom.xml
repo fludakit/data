@@ -71,6 +71,7 @@
                                     <name>fluda.data.core</name>
                                     <exports>
                                         io.github.fludakit.data;
+                                        io.github.fludakit.data.metadata;
                                     </exports>
                                 </moduleInfo>
                             </module>

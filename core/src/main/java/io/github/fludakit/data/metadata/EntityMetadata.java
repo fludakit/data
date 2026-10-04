@@ -60,7 +60,14 @@ public final class EntityMetadata {
         for (Property p : properties) {
             switch (p.kind()) {
                 case SCALAR -> out.add(new ColumnRef(p.column(), p.name(), p.type()));
-                case MANY_TO_ONE -> out.add(new ColumnRef(p.column(), p.name(), p.target().id().type()));
+                case MANY_TO_ONE -> {
+                    if (p.target() == null || p.target().id() == null) {
+                        throw new IllegalStateException("Entity " + type().getName()
+                                + " has a many-to-one property '" + p.name()
+                                + "' whose target has no identifier");
+                    }
+                    out.add(new ColumnRef(p.column(), p.name(), p.target().id().type()));
+                }
                 case EMBEDDED -> {
                     for (ColumnRef leaf : p.target().columns()) {
                         out.add(new ColumnRef(p.column() + "_" + leaf.column(), p.name() + "." + leaf.path(), leaf.type()));

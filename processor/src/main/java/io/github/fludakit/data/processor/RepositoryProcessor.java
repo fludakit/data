@@ -271,13 +271,15 @@ public class RepositoryProcessor extends AbstractProcessor {
         OrderBy[] orderBys = method.getAnnotationsByType(OrderBy.class);
 
         if (annotated || orderBys.length > 0) {
+            ParsedMethodName nameParsed = parseByMethodName(name);
             CodeBlock.Builder builder = model(entityType, inferOperation(name), kind);
             for (int i = 0; i < parameters.size(); i++) {
                 By by = parameters.get(i).getAnnotation(By.class);
                 if (by != null) {
                     String property = By.ID.equals(by.value()) ? "id" : by.value();
                     builder.add(".predicate($T.of($S, $T.$L, $S))",
-                            Predicate.class, property, Operator.class, "EQ", "arg" + i);
+                            Predicate.class, property, Operator.class,
+                            operatorFor(nameParsed, property).name(), "arg" + i);
                 }
             }
             for (OrderBy orderBy : orderBys) {
@@ -367,6 +369,22 @@ public class RepositoryProcessor extends AbstractProcessor {
             return SORT.equals(types.erasure(component).toString());
         }
         return false;
+    }
+
+    /**
+     * The operator for a property bound with {@link By} comes from the method name (for example
+     * {@code findByEmailLike} binds {@code email} with {@code LIKE}); {@link By} itself only names the
+     * property and carries no operator. Falls back to {@code EQ} when the name encodes none.
+     */
+    private Operator operatorFor(ParsedMethodName parsed, String property) {
+        if (parsed != null) {
+            for (Predicate predicate : parsed.predicates()) {
+                if (predicate.property().equals(property)) {
+                    return predicate.operator();
+                }
+            }
+        }
+        return Operator.EQ;
     }
 
     private ParsedMethodName parseByMethodName(String name) {

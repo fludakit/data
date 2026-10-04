@@ -72,6 +72,7 @@
                                     <exports>
                                         io.github.fludakit.data;
                                         io.github.fludakit.data.metadata;
+                                        io.github.fludakit.data.query;
                                     </exports>
                                 </moduleInfo>
                             </module>

@@ -19,6 +19,7 @@ import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.SortSpec;
 import io.github.fludakit.jdbc.JdbcClient;
 import io.github.fludakit.jdbc.support.GeneratedKeyHolder;
+import jakarta.data.Sort;
 import jakarta.data.repository.By;
 import jakarta.data.repository.Delete;
 import jakarta.data.repository.Insert;
@@ -133,6 +134,7 @@ public class RepositoryProcessor extends AbstractProcessor {
 
         Map<String, String> constants = new LinkedHashMap<>();
         List<MethodSpec> methods = new ArrayList<>();
+        boolean paginatedFindAll = false;
         for (Element member : elements.getAllMembers(repository)) {
             if (member.getKind() != ElementKind.METHOD) {
                 continue;
@@ -143,6 +145,9 @@ public class RepositoryProcessor extends AbstractProcessor {
             }
             if (method.getEnclosingElement().toString().equals("java.lang.Object")) {
                 continue;
+            }
+            if (method.getSimpleName().contentEquals("findAll") && method.getParameters().size() == 2) {
+                paginatedFindAll = true;
             }
             methods.add(generateMethod(method, repositoryType, entity, crud, constants));
         }
@@ -161,6 +166,9 @@ public class RepositoryProcessor extends AbstractProcessor {
                 .addAnnotation(Inject.class)
                 .build());
         methods.forEach(classBuilder::addMethod);
+        if (paginatedFindAll) {
+            classBuilder.addMethod(columnHelper(entity));
+        }
 
         JavaFile javaFile = JavaFile.builder(packageName, classBuilder.build())
                 .skipJavaLangImports(true)
@@ -410,15 +418,47 @@ public class RepositoryProcessor extends AbstractProcessor {
     private void emitFindAllPage(MethodSpec.Builder builder, List<? extends VariableElement> parameters,
                                  EntityModel entity, Map<String, String> constants) {
         String pageRequest = parameterName(parameters.get(0), "pageRequest");
+        String sortBy = parameterName(parameters.get(1), "sortBy");
         String findConstant = addConstant(constants, "SQL_FIND_ALL", "SELECT * FROM " + Names.quote(entity.table()));
         String countConstant = addConstant(constants, "SQL_COUNT_ALL", "SELECT COUNT(*) FROM " + Names.quote(entity.table()));
 
         builder.addStatement("long offset = ($L.page() - 1) * $L.size()", pageRequest, pageRequest);
-        builder.addStatement("$T<$T> content = jdbcClient.sql($L + $S + $L.size() + $S + offset).query($T.class).list()",
-                List.class, entity.typeName(), findConstant, " LIMIT ", pageRequest, " OFFSET ", entity.typeName());
+        builder.addStatement("$T orderBy = new $T()", StringBuilder.class, StringBuilder.class);
+        builder.beginControlFlow("for ($T<?> s : $L)", Sort.class, sortBy);
+        builder.beginControlFlow("if (orderBy.length() > 0)");
+        builder.addStatement("orderBy.append($S)", ", ");
+        builder.endControlFlow();
+        builder.addStatement("orderBy.append($S).append(column(s.property())).append($S)"
+                        + ".append(s.isAscending() ? $S : $S)", "\"", "\"", " ASC", " DESC");
+        builder.endControlFlow();
+        builder.addStatement("$T<$T> content = jdbcClient.sql($L + (orderBy.length() > 0 ? $S + orderBy : $S)"
+                        + " + $S + $L.size() + $S + offset).query($T.class).list()",
+                List.class, entity.typeName(), findConstant, " ORDER BY ", "", " LIMIT ", pageRequest, " OFFSET ",
+                entity.typeName());
         builder.addStatement("long total = $L.requestTotal() ? jdbcClient.sql($L).singleValue($T.class) : -1L",
                 pageRequest, countConstant, Long.class);
         builder.addStatement("return new $T<>($L, content, total)", SimplePage.class, pageRequest);
+    }
+
+    /**
+     * Emits the private {@code column(String)} helper that maps an entity property name to its SQL column,
+     * used by the paginated {@code findAll} to honour the runtime {@link Sort} criteria. Every scalar column
+     * and the identifier are mapped; associations map to their foreign-key column.
+     */
+    private MethodSpec columnHelper(EntityModel entity) {
+        MethodSpec.Builder helper = MethodSpec.methodBuilder("column")
+                .addModifiers(Modifier.PRIVATE, Modifier.STATIC)
+                .returns(String.class)
+                .addParameter(String.class, "property");
+        helper.beginControlFlow("switch (property)");
+        helper.addStatement("case $S: return $S", entity.id().name(), entity.id().column());
+        for (Property property : entity.properties()) {
+            helper.addStatement("case $S: return $S", property.name(), property.column());
+        }
+        helper.addStatement("default: throw new $T($S + property)", IllegalArgumentException.class,
+                "Unknown sort property: ");
+        helper.endControlFlow();
+        return helper.build();
     }
 
     // ------------------------------------------------------------------ @Query

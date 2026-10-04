@@ -1,5 +1,7 @@
 package io.github.fludakit.data.it;
 
+import jakarta.data.page.Page;
+import jakarta.data.page.PageRequest;
 import jakarta.inject.Inject;
 import org.jboss.weld.junit5.auto.AddBeanClasses;
 import org.jboss.weld.junit5.auto.AddPackages;
@@ -32,6 +34,20 @@ class CustomerRepositoryIT {
         Product book = products.insert(product("DDD", new BigDecimal("39.99")));
         assertThat(products.findByName("DDD")).hasSize(1);
         assertThat(products.findByPriceGreaterThan(new BigDecimal("10"))).hasSize(1);
+    }
+
+    @Test
+    void findAllPageHonoursOrder() {
+        customers.insert(customer("Charlie", "charlie@example.com"));
+        customers.insert(customer("Alice", "alice@example.com"));
+        customers.insert(customer("Bob", "bob@example.com"));
+
+        Page<Customer> page = customers.findAll(
+                PageRequest.ofSize(2),
+                jakarta.data.Order.by(jakarta.data.Sort.asc("name")));
+
+        assertThat(page.numberOfElements()).isEqualTo(2);
+        assertThat(page.content()).extracting(Customer::getName).containsExactly("Alice", "Bob");
     }
 
     @Test

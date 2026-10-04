@@ -35,6 +35,11 @@ class RepositoryProcessorTest {
                 public class Book {
                     public Long id;
                     public String title;
+
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getTitle() { return title; }
+                    public void setTitle(String title) { this.title = title; }
                 }
                 """);
 
@@ -84,8 +89,12 @@ class RepositoryProcessorTest {
 
         String content = Files.readString(implementation);
         assertTrue(content.contains("implements Shelf"), "missing superinterface:" + System.lineSeparator() + content);
-        assertTrue(content.contains("DataEngine"), "missing DataEngine injection:" + System.lineSeparator() + content);
         assertTrue(content.contains("JdbcClient"), "missing JdbcClient injection:" + System.lineSeparator() + content);
+        assertTrue(content.contains("SQL_FIND_BY_TITLE"), "missing static SQL constant:" + System.lineSeparator() + content);
+        assertTrue(content.contains("jdbcClient.sql(SQL_FIND_BY_TITLE)"),
+                "missing direct JdbcClient call:" + System.lineSeparator() + content);
         assertTrue(content.contains("findByTitle"), "missing generated method:" + System.lineSeparator() + content);
+        assertTrue(!content.contains("DataEngine"), "generated code must not reference DataEngine:"
+                + System.lineSeparator() + content);
     }
 }

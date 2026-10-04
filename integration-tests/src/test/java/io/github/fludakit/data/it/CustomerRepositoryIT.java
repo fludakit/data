@@ -13,7 +13,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 @EnableAutoWeld
 @AddPackages(Customer.class)
 @AddBeanClasses({DataSourceProducer.class,
-                 io.github.fludakit.data.engine.DataEngine.class,
                  io.github.fludakit.jdbc.cdi.JdbcClientProducer.class,
                  io.github.fludakit.jdbc.cdi.ConverterRegistryProducer.class})
 class CustomerRepositoryIT {

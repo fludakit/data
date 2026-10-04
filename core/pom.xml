@@ -6,18 +6,16 @@
 
     <parent>
         <groupId>io.github.fludakit</groupId>
-        <artifactId>fluda-feature-parent</artifactId>
+        <artifactId>fluda-data-parent</artifactId>
         <version>1.0.0-SNAPSHOT</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
-    <!-- TODO: Replace 'feature' with your module name -->
-    <artifactId>fluda-feature-core</artifactId>
+    <artifactId>fluda-data-core</artifactId>
     <packaging>jar</packaging>
 
-    <!-- TODO: Update name and description -->
-    <name>FluDa :: Feature :: Core</name>
-    <description>Core functionality for the feature module.</description>
+    <name>FluDa :: Data :: Core</name>
+    <description>Core functionality for the data module.</description>
 
     <dependencies>
         <dependency>
@@ -42,10 +40,9 @@
                         <configuration>
                             <module>
                                 <moduleInfo>
-                                    <!-- TODO: Replace with your module name -->
-                                    <name>fluda.feature.core</name>
+                                    <name>fluda.data.core</name>
                                     <exports>
-                                        io.github.fludakit.feature;
+                                        io.github.fludakit.data;
                                     </exports>
                                 </moduleInfo>
                             </module>

@@ -8,17 +8,15 @@
         <groupId>io.github.fludakit</groupId>
         <artifactId>fludakit-parent</artifactId>
         <version>1.0.0-SNAPSHOT</version>
-        <relativePath>../parent/pom.xml</relativePath>
+        <relativePath/>
     </parent>
 
-    <!-- TODO: Replace 'feature' with your module name -->
-    <artifactId>fluda-feature-parent</artifactId>
+    <artifactId>fluda-data-parent</artifactId>
     <packaging>pom</packaging>
 
-    <!-- TODO: Update name, description, and URL -->
-    <name>FluDa :: Feature</name>
-    <description>TODO: Describe your feature module.</description>
-    <url>https://github.com/fludakit/feature</url>
+    <name>FluDa :: Data</name>
+    <description>A fluent data-access toolkit for Jakarta EE / CDI applications.</description>
+    <url>https://github.com/fludakit/data</url>
 
     <licenses>
         <license>
@@ -34,11 +32,10 @@
         </developer>
     </developers>
 
-    <!-- TODO: Update SCM URLs to your repository -->
     <scm>
-        <connection>scm:git:git://github.com/fludakit/feature.git</connection>
-        <developerConnection>scm:git:ssh://github.com/fludakit/feature.git</developerConnection>
-        <url>https://github.com/fludakit/feature</url>
+        <connection>scm:git:git://github.com/fludakit/data.git</connection>
+        <developerConnection>scm:git:ssh://github.com/fludakit/data.git</developerConnection>
+        <url>https://github.com/fludakit/data</url>
         <tag>HEAD</tag>
     </scm>
 
@@ -52,7 +49,11 @@
 
     <dependencyManagement>
         <dependencies>
-            <!-- Module-specific dependencies can be added here -->
+            <dependency>
+                <groupId>io.github.fludakit</groupId>
+                <artifactId>fluda-data-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 
@@ -68,12 +69,11 @@
         <!-- Module-specific profiles can be added here -->
     </profiles>
 
-    <!-- TODO: Update distributionManagement URL to your repository -->
     <distributionManagement>
         <repository>
             <id>github</id>
             <name>GitHub Packages</name>
-            <url>https://maven.pkg.github.com/fludakit/feature</url>
+            <url>https://maven.pkg.github.com/fludakit/data</url>
         </repository>
     </distributionManagement>
 

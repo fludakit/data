@@ -1,13 +1,13 @@
-package io.github.fludakit.feature;
+package io.github.fludakit.data;
 
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-class FeatureTest {
+class DataTest {
 
     @Test
     void hello() {
-        assertEquals("Hello from FluDa Feature!", Feature.hello());
+        assertEquals("Hello from FluDa Data!", Data.hello());
     }
 }

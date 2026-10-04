@@ -1,12 +1,12 @@
 # Contributing
 
-Thanks for your interest in contributing to **FluDa Feature**!
+Thanks for your interest in contributing to **FluDa Data**!
 
 This document describes how to set up the project, make changes, and submit them for review.
 
 ## Ways to contribute
 
-- **Report bugs** or **request features** by opening a [GitHub issue](https://github.com/fludakit/feature/issues).
+- **Report bugs** or **request features** by opening a [GitHub issue](https://github.com/fludakit/data/issues).
 - **Fix bugs or add features** by opening a pull request (see below).
 
 ## Prerequisites
@@ -19,8 +19,8 @@ This document describes how to set up the project, make changes, and submit them
 Clone the repository and build everything:
 
 ```bash
-git clone https://github.com/fludakit/feature.git
-cd feature
+git clone https://github.com/fludakit/data.git
+cd data
 ./mvnw clean install
 ```
 
@@ -28,7 +28,7 @@ cd feature
 
 ```
 .
-├── core/                   # fluda-feature-core — core functionality
+├── core/                   # fluda-data-core — core functionality
 └── ...                     # add more modules as needed
 ```
 

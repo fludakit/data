@@ -186,7 +186,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             if (method.getSimpleName().contentEquals("findAll") && method.getParameters().size() == 2) {
                 paginatedFindAll = true;
             }
-            methods.add(generateMethod(method, repositoryType, entity, crud, constants));
+            methods.add(generateMethod(method, repositoryType, entity, crud, constants, mapperType));
         }
 
         TypeSpec.Builder classBuilder = TypeSpec.classBuilder(implementationName)
@@ -331,7 +331,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     // ------------------------------------------------------------- method dispatch
 
     private MethodSpec generateMethod(ExecutableElement method, DeclaredType repositoryType, EntityModel entity,
-                                      boolean crud, Map<String, String> constants) {
+                                      boolean crud, Map<String, String> constants, ClassName mapperType) {
         ExecutableType resolved = (ExecutableType) types.asMemberOf(repositoryType, method);
         TypeMirror returnMirror = resolved.getReturnType();
         List<? extends TypeMirror> parameterTypes = resolved.getParameterTypes();
@@ -389,7 +389,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             return builder.build();
         }
         if (arity == 1 && name.equals("findById")) {
-            emitFindById(builder, parameterName(parameters.get(0), "id"), entity, constants);
+            emitFindById(builder, parameterName(parameters.get(0), "id"), entity, constants, mapperType);
             return builder.build();
         }
         if (arity == 1 && name.equals("deleteById")) {
@@ -397,11 +397,11 @@ public class RepositoryProcessor extends AbstractProcessor {
             return builder.build();
         }
         if (name.equals("findAll") && arity == 0) {
-            emitFindAll(builder, entity, constants);
+            emitFindAll(builder, entity, constants, mapperType);
             return builder.build();
         }
         if (name.equals("findAll") && arity == 2) {
-            emitFindAllPage(builder, parameters, entity, constants);
+            emitFindAllPage(builder, parameters, entity, constants, mapperType);
             return builder.build();
         }
 
@@ -427,7 +427,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             return builder.build();
         }
 
-        emitFind(builder, method, resolved, entity, constants);
+        emitFind(builder, method, resolved, entity, constants, mapperType);
         return builder.build();
     }
 
@@ -535,12 +535,12 @@ public class RepositoryProcessor extends AbstractProcessor {
     // ------------------------------------------------------------------- CRUD reads
 
     private void emitFindById(MethodSpec.Builder builder, String value, EntityModel entity,
-                              Map<String, String> constants) {
+                              Map<String, String> constants, ClassName mapperType) {
         String constant = addConstant(constants, "SQL_FIND_BY_ID",
                 new SqlBuilder().selectBy(entity.metadata(),
                         List.of(Predicate.of(entity.id().name(), Operator.EQ, "id")), List.of(), 0, null));
-        builder.addStatement("return jdbcClient.sql($L).param($S, $L).query($T.class).optional()",
-                constant, "id", value, entity.typeName());
+        builder.addStatement("return jdbcClient.sql($L).param($S, $L).query($L).optional()",
+                constant, "id", value, queryArg(entity, mapperType));
     }
 
     private void emitDeleteById(MethodSpec.Builder builder, String value, EntityModel entity,
@@ -549,14 +549,16 @@ public class RepositoryProcessor extends AbstractProcessor {
         builder.addStatement("jdbcClient.sql($L).param($S, $L).update()", constant, "id", value);
     }
 
-    private void emitFindAll(MethodSpec.Builder builder, EntityModel entity, Map<String, String> constants) {
+    private void emitFindAll(MethodSpec.Builder builder, EntityModel entity, Map<String, String> constants,
+                             ClassName mapperType) {
         String constant = addConstant(constants, "SQL_FIND_ALL",
                 new SqlBuilder().selectBy(entity.metadata(), List.of(), List.of(), 0, null));
-        builder.addStatement("return jdbcClient.sql($L).query($T.class).stream()", constant, entity.typeName());
+        builder.addStatement("return jdbcClient.sql($L).query($L).stream()",
+                constant, queryArg(entity, mapperType));
     }
 
     private void emitFindAllPage(MethodSpec.Builder builder, List<? extends VariableElement> parameters,
-                                 EntityModel entity, Map<String, String> constants) {
+                                 EntityModel entity, Map<String, String> constants, ClassName mapperType) {
         String pageRequest = parameterName(parameters.get(0), "pageRequest");
         String sortBy = parameterName(parameters.get(1), "sortBy");
         String findConstant = addConstant(constants, "SQL_FIND_ALL",
@@ -582,9 +584,9 @@ public class RepositoryProcessor extends AbstractProcessor {
         builder.beginControlFlow("if ($L.mode() == $T.Mode.OFFSET)", pageRequest, PageRequest.class);
         builder.addStatement("long offset = ($L.page() - 1) * $L.size()", pageRequest, pageRequest);
         builder.addStatement("$T<$T> content = jdbcClient.sql($L + (orderBy.length() > 0 ? $S + orderBy : $S)"
-                        + " + $S + $L.size() + $S + offset).query($T.class).list()",
+                        + " + $S + $L.size() + $S + offset).query($L).list()",
                 List.class, entity.typeName(), findConstant, " ORDER BY ", "", " LIMIT ", pageRequest, " OFFSET ",
-                entity.typeName());
+                queryArg(entity, mapperType));
         builder.addStatement("long total = $L.requestTotal() ? jdbcClient.sql($L).singleValue($T.class) : -1L",
                 pageRequest, countConstant, Long.class);
         builder.addStatement("return new $T<>($L, content, total)", SimplePage.class, pageRequest);
@@ -594,9 +596,9 @@ public class RepositoryProcessor extends AbstractProcessor {
         builder.addStatement("$T where = $T.seekWhere(cols, dirs, cursor, $L.mode() == $T.Mode.CURSOR_NEXT)",
                 String.class, CursorSupport.class, pageRequest, PageRequest.class);
         builder.addStatement("$T<$T> content = jdbcClient.sql($L + $S + where + (orderBy.length() > 0 ? $S + orderBy : $S)"
-                        + " + $S + $L.size() + $S).params($T.cursorParams(cursor)).query($T.class).list()",
+                        + " + $S + $L.size() + $S).params($T.cursorParams(cursor)).query($L).list()",
                 List.class, entity.typeName(), findConstant, " WHERE ", " ORDER BY ", "", " LIMIT ", pageRequest,
-                " + 1", CursorSupport.class, entity.typeName());
+                " + 1", CursorSupport.class, queryArg(entity, mapperType));
         builder.addStatement("boolean hasMore = content.size() > $L.size()", pageRequest);
         builder.beginControlFlow("if (hasMore)");
         builder.addStatement("content = content.subList(0, $L.size())", pageRequest);
@@ -610,7 +612,7 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     private void emitPaged(MethodSpec.Builder builder, EntityModel entity, String pageRequest, List<SortSpec> sorts,
                            String findConstant, Map<String, String> constants, List<Binding> bindings,
-                           List<? extends VariableElement> parameters, boolean cursored) {
+                           List<? extends VariableElement> parameters, boolean cursored, ClassName mapperType) {
         List<SortSpec> effective = sorts.isEmpty()
                 ? List.of(SortSpec.of(entity.id().name(), true, false))
                 : sorts;
@@ -636,7 +638,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                     .add("jdbcClient.sql($L + $S + $S + $L.size() + $S + offset)", findConstant, orderBy,
                             " LIMIT ", pageRequest, " OFFSET ");
             appendBoundParameters(call, bindings, parameters);
-            call.add(".query($T.class).list()", entity.typeName());
+            call.add(".query($L).list()", queryArg(entity, mapperType));
             builder.addStatement("$T<$T> content = $L", List.class, entity.typeName(), call.build());
             builder.addStatement("long total = $L.requestTotal() ? jdbcClient.sql($L).singleValue($T.class) : -1L",
                     pageRequest, countConstant, Long.class);
@@ -651,7 +653,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                 .add("jdbcClient.sql($L + $S + $S + $L.size() + $S + offset)", findConstant, orderBy,
                         " LIMIT ", pageRequest, " OFFSET ");
         appendBoundParameters(offsetCall, bindings, parameters);
-        offsetCall.add(".query($T.class).list()", entity.typeName());
+        offsetCall.add(".query($L).list()", queryArg(entity, mapperType));
         builder.addStatement("$T<$T> content = $L", List.class, entity.typeName(), offsetCall.build());
         builder.addStatement("$T<$T.Cursor> cursors = new $T<>()", List.class, PageRequest.class, ArrayList.class);
         builder.beginControlFlow("for ($T e : content)", entity.typeName());
@@ -665,7 +667,8 @@ public class RepositoryProcessor extends AbstractProcessor {
                 .add("jdbcClient.sql($L + $S + where + $S + $S + $L.size() + $S)", findConstant, wherePrefix,
                         orderBy, " LIMIT ", pageRequest, " + 1");
         appendBoundParameters(seekCall, bindings, parameters);
-        seekCall.add(".params($T.cursorParams(cursor)).query($T.class).list()", CursorSupport.class, entity.typeName());
+        seekCall.add(".params($T.cursorParams(cursor)).query($L).list()", CursorSupport.class,
+                queryArg(entity, mapperType));
         builder.addStatement("$T<$T> content = $L", List.class, entity.typeName(), seekCall.build());
         builder.addStatement("boolean hasMore = content.size() > $L.size()", pageRequest);
         builder.beginControlFlow("if (hasMore)");
@@ -724,7 +727,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
         Kind kind = kindOf(returnMirror);
         TypeName queryType = queryResultType(returnMirror, entity.typeName());
-        terminal(sql, kind, queryType);
+        terminal(sql, kind, CodeBlock.of("$T.class", queryType));
         if (kind == Kind.VOID) {
             builder.addStatement("$L", sql.build());
         } else {
@@ -735,7 +738,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     // ------------------------------------------------------------- find / by-method-name
 
     private void emitFind(MethodSpec.Builder builder, ExecutableElement method, ExecutableType resolved,
-                          EntityModel entity, Map<String, String> constants) {
+                          EntityModel entity, Map<String, String> constants, ClassName mapperType) {
         String name = method.getSimpleName().toString();
         ParsedMethodName parsed = tryParse(name);
         String action = parsed != null ? parsed.action() : "find";
@@ -789,7 +792,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
                     new SqlBuilder().selectBy(entity.metadata(), predicates, List.of(), 0, null));
             emitPaged(builder, entity, pageRequest, methodSorts, constant, constants, bindings, parameters,
-                    kind == Kind.CURSORED_PAGE);
+                    kind == Kind.CURSORED_PAGE, mapperType);
             return;
         }
         String sql = new SqlBuilder().selectBy(entity.metadata(), predicates, methodSorts,
@@ -797,7 +800,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         String constant = addConstant(constants, "SQL_" + upperSnake(name), sql);
         CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
         appendBoundParameters(call, bindings, parameters);
-        terminal(call, kind, entity.typeName());
+        terminal(call, kind, queryArg(entity, mapperType));
         if (kind == Kind.VOID) {
             builder.addStatement("$L", call.build());
         } else {
@@ -876,14 +879,25 @@ public class RepositoryProcessor extends AbstractProcessor {
         };
     }
 
-    private void terminal(CodeBlock.Builder call, Kind kind, TypeName queryType) {
+    private void terminal(CodeBlock.Builder call, Kind kind, CodeBlock queryArg) {
         switch (kind) {
-            case LIST -> call.add(".query($T.class).list()", queryType);
-            case STREAM -> call.add(".query($T.class).stream()", queryType);
-            case OPTIONAL -> call.add(".query($T.class).optional()", queryType);
+            case LIST -> call.add(".query($L).list()", queryArg);
+            case STREAM -> call.add(".query($L).stream()", queryArg);
+            case OPTIONAL -> call.add(".query($L).optional()", queryArg);
             case VOID -> call.add(".update()");
-            case SINGLE -> call.add(".query($T.class).single()", queryType);
+            case SINGLE -> call.add(".query($L).single()", queryArg);
         }
+    }
+
+    /**
+     * Returns the argument passed to {@code JdbcClient.query(...)}: an instance of the compile-time
+     * generated {@code <Entity>RowMapper} when one exists, otherwise the entity class for the
+     * reflective mapper.
+     */
+    private CodeBlock queryArg(EntityModel entity, ClassName mapperType) {
+        return mapperType != null
+                ? CodeBlock.of("new $T()", mapperType)
+                : CodeBlock.of("$T.class", entity.typeName());
     }
 
     // ------------------------------------------------------------------ helpers

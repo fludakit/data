@@ -216,6 +216,54 @@ class RepositoryProcessorTest {
                 "metadata must be generated alongside the mapper");
     }
 
+    @Test
+    void generatedReadsUseRowMapperButNativeQueryUsesClass() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/demo3"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes3"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated3"));
+
+        Files.writeString(sourceDir.resolve("Book.java"), """
+                package demo3;
+                public class Book {
+                    public Long id;
+                    public String title;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getTitle() { return title; }
+                    public void setTitle(String title) { this.title = title; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Shelf.java"), """
+                package demo3;
+                import jakarta.data.repository.By;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Find;
+                import jakarta.data.repository.Query;
+                import jakarta.data.repository.Repository;
+                import java.util.List;
+                import java.util.Optional;
+
+                @Repository
+                public interface Shelf extends CrudRepository<Book, Long> {
+                    @Find
+                    List<Book> findByTitle(@By("title") String title);
+
+                    @Query("SELECT id, title FROM book WHERE title = ?1")
+                    Optional<Book> nativeByTitle(String title);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Book.java", "Shelf.java");
+
+        String impl = Files.readString(generatedDir.resolve("demo3/ShelfImpl.java"));
+        assertTrue(impl.contains(".query(new BookRowMapper())"),
+                "convention find must use the generated mapper:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains(".query(Book.class)"),
+                "@Query native SQL must keep class-based mapping:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("findById") && impl.contains(".query(new BookRowMapper()).optional()"),
+                "findById must use the mapper:" + System.lineSeparator() + impl);
+    }
+
     private void compile(Path sourceDir, Path classesDir, Path generatedDir, String... fileNames) throws Exception {
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         assertNotNull(compiler, "A system Java compiler is required to run this test");

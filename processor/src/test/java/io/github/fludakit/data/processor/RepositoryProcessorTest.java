@@ -553,12 +553,12 @@ class RepositoryProcessorTest {
 
         compile(sourceDir, classesDir, generatedDir, "GeoPoint.java", "Address.java", "Contact.java", "Contacts.java");
 
-        // The owner gate is unchanged: Contact embeds a non-JDBC-safe value object type, so it keeps
-        // the reflective read path and gets no RowMapper/Metadata of its own.
-        assertTrue(Files.notExists(generatedDir.resolve("emb/ContactRowMapper.java")),
-                "the RowMapper gate must stay as it is for embedded value objects");
-        assertTrue(Files.notExists(generatedDir.resolve("emb/ContactMetadata.java")),
-                "no owner metadata when the mapper is skipped");
+        // Post-Task-2 the gate passes for embeddable value objects: Contact is fully JDBC-safe or
+        // embeddable, so owner-level Metadata and a reflection-free RowMapper are generated too.
+        assertTrue(Files.exists(generatedDir.resolve("emb/ContactRowMapper.java")),
+                "all-safe-or-embedded entities must get the generated mapper");
+        assertTrue(Files.exists(generatedDir.resolve("emb/ContactMetadata.java")),
+                "owner metadata must be generated alongside the mapper");
 
         // The value object gets a descriptor-only Metadata: no TABLE_NAME, null tableName(), null id().
         Path voMetadata = generatedDir.resolve("emb/AddressMetadata.java");
@@ -777,6 +777,87 @@ class RepositoryProcessorTest {
     }
 
     @Test
+    void generatedMapperAndBindingsCoverEmbeddedValueObject() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/gp"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-gp"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-gp"));
+
+        Files.writeString(sourceDir.resolve("Profile.java"), """
+                package gp;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Profile {
+                    @Identity Long id;
+                    Address address;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public Address getAddress() { return address; }
+                    public void setAddress(Address address) { this.address = address; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Address.java"), """
+                package gp;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class Address {
+                    String city;
+                    Integer zip;
+                    GeoPoint point;
+                    public String getCity() { return city; }
+                    public void setCity(String city) { this.city = city; }
+                    public Integer getZip() { return zip; }
+                    public void setZip(Integer zip) { this.zip = zip; }
+                    public GeoPoint getPoint() { return point; }
+                    public void setPoint(GeoPoint point) { this.point = point; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("GeoPoint.java"), """
+                package gp;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class GeoPoint {
+                    Double lat;
+                    Double lng;
+                    public Double getLat() { return lat; }
+                    public void setLat(Double lat) { this.lat = lat; }
+                    public Double getLng() { return lng; }
+                    public void setLng(Double lng) { this.lng = lng; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("ProfileRepository.java"), """
+                package gp;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository interface ProfileRepository extends CrudRepository<Profile, Long> { }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir,
+                "Profile.java", "Address.java", "GeoPoint.java", "ProfileRepository.java");
+
+        // The gate now passes for all-boxed embedded value objects, and the generated mapper builds
+        // the VO leaf-by-leaf from the flattened columns — reflection-free (Task 2).
+        String mapper = Files.readString(generatedDir.resolve("gp/ProfileRowMapper.java"));
+        assertTrue(mapper.contains("String address_city = rs.getObject(ProfileMetadata.ADDRESS_CITY, String.class);"),
+                "flattened boxed leaf must be read into a prefixed local:" + System.lineSeparator() + mapper);
+        assertTrue(mapper.contains("GeoPoint address_point = new GeoPoint();"),
+                "nested child VO must be constructed before its parent:" + System.lineSeparator() + mapper);
+        assertTrue(mapper.contains("entity.setAddress(address);"),
+                "the embedded property must be assigned on the entity:" + System.lineSeparator() + mapper);
+        assertTrue(!mapper.contains("getDeclaredField"), "mapper must not reflect:" + System.lineSeparator() + mapper);
+        assertTrue(!mapper.contains("java.lang.reflect"), "mapper must not import reflection:" + System.lineSeparator() + mapper);
+
+        // Write bindings iterate the descriptor's flattened columns; param names follow
+        // SqlBuilder.paramName(path) (dot to underscore) and every intermediate null short-circuits.
+        String impl = Files.readString(generatedDir.resolve("gp/ProfileRepositoryImpl.java"));
+        assertTrue(impl.contains(".param(\"address_city\", entity.getAddress() == null ? null : entity.getAddress().getCity())"),
+                "embedded leaf must bind through its null-guarded path:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains(".param(\"address_point_lat\", entity.getAddress() == null"
+                        + " || entity.getAddress().getPoint() == null ? null : entity.getAddress().getPoint().getLat())"),
+                "nested embedded leaf must chain the guards:" + System.lineSeparator() + impl);
+    }
+
+    @Test
     void embeddedPropertyGetsNoPhantomColumnConstant() throws Exception {
         Path sourceDir = Files.createDirectories(workspace.resolve("src/phantom"));
         Path classesDir = Files.createDirectories(workspace.resolve("classes-phantom"));
@@ -859,6 +940,17 @@ class RepositoryProcessorTest {
         String imd = Files.readString(inner);
         assertTrue(imd.contains("public static final String LAT = \"lat\";"), imd);
         assertTrue(imd.contains("public static final String LNG = \"lng\";"), imd);
+
+        // The owner entity now passes the post-Task-2 gate (city is a boxed String, the primitive
+        // double leaves are JDBC-safe), so the full flattened chain surfaces on ContactMetadata —
+        // the owner-level constants lock Task 1 could not make when the gate skipped the owner.
+        String cmd = Files.readString(generatedDir.resolve("phantom/ContactMetadata.java"));
+        assertTrue(cmd.contains("public static final String ADDRESS_CITY = \"address_city\";"),
+                "owner-level leaf constant must carry the embedded prefix:" + System.lineSeparator() + cmd);
+        assertTrue(cmd.contains("public static final String ADDRESS_POINT_LAT = \"address_point_lat\";"),
+                "owner-level nested leaf constant must chain both prefixes:" + System.lineSeparator() + cmd);
+        assertTrue(cmd.contains("public static final String ADDRESS_POINT_LNG = \"address_point_lng\";"),
+                "owner-level nested leaf constant must chain both prefixes:" + System.lineSeparator() + cmd);
     }
 
     private void compile(Path sourceDir, Path classesDir, Path generatedDir, String... fileNames) throws Exception {

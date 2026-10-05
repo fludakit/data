@@ -72,7 +72,7 @@ import java.util.Set;
  * Generates three artifacts at compile time: a {@code <Repository>Impl} class for every
  * {@link Repository @Repository} interface, a reflection-free {@code <Entity>Metadata} class
  * implementing {@link EntityDescriptor} (the compile-time descriptor model behind all SQL), and a
- * {@code <Entity>RowMapper} for entities whose fields are all JDBC-safe.
+ * {@code <Entity>RowMapper} for entities whose fields are all JDBC-safe or embeddable value objects.
  *
  * <p>The generated implementation class is {@link ApplicationScoped} and carries a single injected
  * collaborator, a {@link JdbcClient}. Every query's SQL is emitted as a {@code private static final
@@ -99,8 +99,11 @@ public class RepositoryProcessor extends AbstractProcessor {
     /**
      * Field types the reflection-free {@code <Entity>RowMapper} can read straight from a
      * {@code ResultSet} (via {@code getObject(...)} or a primitive getter). Any entity carrying a
-     * field outside this allowlist (enums, associations, value objects, ...) is skipped so it keeps
+     * field outside this allowlist (enums, non-embeddable types, ...) is skipped so it keeps
      * using the existing reflective mapping instead of generating code that would not compile.
+     * {@code @ValueObject}-typed fields are not in this set: they pass the gate through the
+     * {@code EMBEDDED} recursion in {@link #canGenerateRowMapper} and are read leaf-by-leaf from
+     * their flattened columns.
      * Note that {@code java.time.Instant}, {@code java.time.ZonedDateTime} and
      * {@code java.math.BigInteger} are read via {@code rs.getObject(col, X.class)}, whose driver
      * support beyond the types guaranteed by JDBC 4.2 ({@code LocalDate}/{@code LocalTime}/
@@ -135,6 +138,12 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     /** FQNs whose descriptor is currently being built; the cycle guard for {@link #descriptorFor}. */
     private final Set<String> inProgress = new HashSet<>();
+
+    /** Embedded value-object FQN → compile-time model, memoized for {@link #voModel}. */
+    private final Map<String, EntityModel> voModels = new HashMap<>();
+
+    /** FQNs whose embedded model is currently on the build stack; the cycle guard for {@link #voModel}. */
+    private final Set<String> voModelsInProgress = new HashSet<>();
 
     @Override
     public SourceVersion getSupportedSourceVersion() {
@@ -254,14 +263,29 @@ public class RepositoryProcessor extends AbstractProcessor {
         return JDBC_SAFE_TYPES.contains(type.toString());
     }
 
+    /**
+     * Gate for the reflection-free row mapper: safe when every property is JDBC-safe, an
+     * {@code ASSOCIATION}/{@code MANY_TO_ONE} fk (skipped on read), or an {@code EMBEDDED} value
+     * object whose own model passes the same check. A VO's model has no id and its leaves are its
+     * properties, so the recursion flattens naturally; a {@code null} embedded model (cycle guard)
+     * fails closed.
+     */
     private boolean canGenerateRowMapper(EntityModel entity) {
         if (entity.id() != null && !isJdbcSafe(entity.id().type())) {
             return false;
         }
         for (Property p : entity.properties()) {
-            if (!p.association() && !isJdbcSafe(p.type())) {
-                return false;
+            if (p.association() || p.kind() == EntityDescriptor.Kind.MANY_TO_ONE) {
+                continue; // FK-only or hydrated by loaders (Tasks 3-4)
             }
+            if (isJdbcSafe(p.type())) {
+                continue;
+            }
+            if (p.kind() == EntityDescriptor.Kind.EMBEDDED && p.embeddedModel() != null
+                    && canGenerateRowMapper(p.embeddedModel())) {
+                continue;
+            }
+            return false;
         }
         return true;
     }
@@ -311,14 +335,16 @@ public class RepositoryProcessor extends AbstractProcessor {
         // flattened embedded leaves: one constant per physical leaf column (Decision 3). The
         // EMBEDDED property's own name stays skipped above — its column slot is only a leaf prefix —
         // while each leaf of the (already-flattened) value-object descriptor surfaces as
-        // <prefix>_<leaf>, e.g. an embedded "point" yields POINT_LAT = "point_lat".
+        // <prefix>_<leaf>, e.g. an embedded "point" yields POINT_LAT = "point_lat". The constant
+        // NAME derives from the leaf's COLUMN (not the attribute name) so name and value agree
+        // whenever the attribute name is not the snake case of its column.
         for (EntityDescriptor.Attribute a : entity.metadata().attributes()) {
             if (a.kind() != EntityDescriptor.Kind.EMBEDDED || a.embedded() == null) {
                 continue;
             }
             for (EntityDescriptor.ColumnRef leaf : a.embedded().columns()) {
                 builder.addField(stringConstant(
-                        Names.toSnakeCase(a.name() + "_" + leaf.column()).toUpperCase(),
+                        Names.toSnakeCase(a.column() + "_" + leaf.column()).toUpperCase(),
                         a.column() + "_" + leaf.column()));
             }
         }
@@ -445,8 +471,12 @@ public class RepositoryProcessor extends AbstractProcessor {
                     entity.id().column(), entityElement.getSimpleName().toString());
         }
         for (Property p : entity.properties()) {
-            if (p.association()) {
-                continue; // FK-only reference; left null on read (matches current behaviour)
+            if (p.association() || p.kind() == EntityDescriptor.Kind.MANY_TO_ONE) {
+                continue; // FK-only reference; left null on read (loaders fill it in Tasks 3-4)
+            }
+            if (p.kind() == EntityDescriptor.Kind.EMBEDDED) {
+                appendEmbeddedRead(mapRow, metadataType, p, entityElement.getSimpleName().toString());
+                continue;
             }
             appendPropertyRead(mapRow, p.type(), metadataType, p.name(), p.column(),
                     entityElement.getSimpleName().toString());
@@ -488,6 +518,80 @@ public class RepositoryProcessor extends AbstractProcessor {
                         + "\" mapped to " + entityName + "." + property);
         mapRow.endControlFlow();
         mapRow.addStatement("entity.$L($L)", setter(property), temp);
+    }
+
+    /**
+     * Emits the read and construction of one {@code EMBEDDED} property (Decision 2): every flattened
+     * leaf of the value-object tree is read into a local named after its physical column
+     * ({@code <prefix>_<leaf>}, e.g. {@code address_point_lat}); the tree is then constructed
+     * post-order — deepest child first — inside a single guard that fires iff at least one boxed
+     * leaf is non-null. Primitive leaves follow the {@link #appendPropertyRead} temp+{@code wasNull()}
+     * rule and never join the presence test, so a VO with a primitive leaf cannot be NULL-absent in
+     * the database. The whole block stays reflection-free.
+     */
+    private void appendEmbeddedRead(MethodSpec.Builder mapRow, ClassName ownerMetadata,
+                                    Property embedded, String entityName) {
+        List<String> presence = new ArrayList<>();
+        readEmbeddedLeaves(mapRow, ownerMetadata, embedded.embeddedModel(),
+                embedded.column(), embedded.name(), presence, entityName);
+        boolean guarded = !presence.isEmpty();
+        if (guarded) {
+            mapRow.beginControlFlow("if ($L)", String.join(" || ", presence));
+        }
+        buildEmbeddedValue(mapRow, embedded.embeddedModel(), embedded.column(), embedded.name());
+        mapRow.addStatement("entity.$L($L)", setter(embedded.name()), embedded.name());
+        if (guarded) {
+            mapRow.endControlFlow();
+        }
+    }
+
+    /** Reads each flattened leaf of {@code vo} into a column-named local, collecting the boxed-leaf presence terms. */
+    private void readEmbeddedLeaves(MethodSpec.Builder mapRow, ClassName ownerMetadata, EntityModel vo,
+                                    String prefix, String path, List<String> presence, String entityName) {
+        for (Property p : vo.properties()) {
+            if (p.association() || p.kind() == EntityDescriptor.Kind.MANY_TO_ONE) {
+                continue; // fk-only children stay null on read, as at owner level
+            }
+            if (p.kind() == EntityDescriptor.Kind.EMBEDDED) {
+                readEmbeddedLeaves(mapRow, ownerMetadata, p.embeddedModel(),
+                        prefix + "_" + p.column(), path + "." + p.name(), presence, entityName);
+                continue;
+            }
+            String local = prefix + "_" + p.column();
+            if (!p.type().isPrimitive()) {
+                mapRow.addStatement("$T $L = $L", p.type(), local,
+                        readExpression(p.type(), ownerMetadata, local));
+                presence.add(local + " != null");
+                continue;
+            }
+            mapRow.addStatement("$T $L = rs.$L($T.$L)", p.type(), local, primitiveGetter(p.type()),
+                    ownerMetadata, constName(local));
+            mapRow.beginControlFlow("if (rs.wasNull())");
+            mapRow.addStatement("throw new $T($S)", ClassName.get("java.sql", "SQLException"),
+                    "NULL value in non-nullable primitive column \"" + local
+                            + "\" mapped to " + entityName + "." + path);
+            mapRow.endControlFlow();
+        }
+    }
+
+    /**
+     * Constructs one value-object instance from its already-read leaf locals: nested children are
+     * emitted first (post-order, mirroring {@link #generateEmbeddedDescriptors}) so every child local
+     * exists before this node's setters reference it.
+     */
+    private void buildEmbeddedValue(MethodSpec.Builder mapRow, EntityModel vo, String prefix, String local) {
+        for (Property p : vo.properties()) {
+            if (p.kind() == EntityDescriptor.Kind.EMBEDDED) {
+                buildEmbeddedValue(mapRow, p.embeddedModel(), prefix + "_" + p.column(), prefix + "_" + p.column());
+            }
+        }
+        mapRow.addStatement("$T $L = new $T()", vo.typeName(), local, vo.typeName());
+        for (Property p : vo.properties()) {
+            if (p.association() || p.kind() == EntityDescriptor.Kind.MANY_TO_ONE) {
+                continue;
+            }
+            mapRow.addStatement("$L.$L($L)", local, setter(p.name()), prefix + "_" + p.column());
+        }
     }
 
     private static String primitiveGetter(TypeName type) {
@@ -649,9 +753,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                 new SqlBuilder().insert(entity.metadata(), false));
         builder.addStatement("$T keys = new $T()", GeneratedKeyHolder.class, GeneratedKeyHolder.class);
         CodeBlock.Builder sql = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
-        for (Property property : entity.properties()) {
-            sql.add(".param($S, $L)", SqlBuilder.paramName(property.name()), readValue(property, value));
-        }
+        appendColumnParams(sql, entity, value);
         sql.add(".update(keys)");
         builder.addStatement("$L", sql.build());
 
@@ -690,8 +792,12 @@ public class RepositoryProcessor extends AbstractProcessor {
         builder.beginControlFlow("if (item != null)");
         CodeBlock.Builder insert = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
         insert.add(".param($S, $L.$L())", collection.parentFk(), value, getter(entity.id().name()));
-        for (Property property : collection.properties()) {
-            insert.add(".param($S, $L)", property.column(), readValue(property, "item"));
+        // Child-table placeholders stay COLUMN-named: the hand-rendered INSERT above lists the
+        // property columns (:product_id, :quantity), so the params must match them. The value still
+        // walks the descriptor path through boundValue, which makes fk-bearing children bind their
+        // id exactly like the previous property-driven loop did.
+        for (EntityDescriptor.ColumnRef ref : collection.descriptor().columns()) {
+            insert.add(".param($S, $L)", ref.column(), boundValue(collection.descriptor(), "item", ref));
         }
         insert.add(".update()");
         builder.addStatement("$L", insert.build());
@@ -704,12 +810,62 @@ public class RepositoryProcessor extends AbstractProcessor {
         String constant = addConstant(constants, "SQL_UPDATE", new SqlBuilder().update(entity.metadata()));
 
         CodeBlock.Builder update = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
-        for (Property property : entity.properties()) {
-            update.add(".param($S, $L)", SqlBuilder.paramName(property.name()), readValue(property, value));
-        }
+        appendColumnParams(update, entity, value);
         update.add(".param($S, $L.$L())", "id", value, getter(entity.id().name()));
         update.add(".update()");
         builder.addStatement("$L", update.build());
+    }
+
+    /**
+     * Binds one {@code .param(...)} per physical column exactly as {@link SqlBuilder} renders it:
+     * the name is {@code paramName(path)} and the value walks the dot-path. The identifier is
+     * skipped by COLUMN EQUALITY, mirroring {@code SqlBuilder.insert(md, false)} and
+     * {@code SqlBuilder.update(md)} (which both also exclude the id from SET); any other predicate
+     * would drift against the rendered placeholders.
+     */
+    private void appendColumnParams(CodeBlock.Builder sql, EntityModel entity, String var) {
+        EntityDescriptor md = entity.metadata();
+        for (EntityDescriptor.ColumnRef ref : md.columns()) {
+            if (md.id() != null && ref.column().equals(md.id().column())) {
+                continue;
+            }
+            sql.add(".param($S, $L)", SqlBuilder.paramName(ref.path()), boundValue(md, var, ref));
+        }
+    }
+
+    /**
+     * Renders the accessor expression for one physical column path (e.g. {@code address.point.lat}
+     * or a FK-bearing {@code primary}) rooted at {@code rootVar}. Every intermediate null short-
+     * circuits to SQL NULL; a final ASSOCIATION/MANY_TO_ONE attribute binds its id.
+     */
+    private static CodeBlock boundValue(EntityDescriptor md, String rootVar, EntityDescriptor.ColumnRef ref) {
+        String[] segments = ref.path().split("\\.");
+        StringBuilder chain = new StringBuilder(rootVar);
+        List<String> nullChecks = new ArrayList<>();
+        EntityDescriptor current = md;
+        for (int i = 0; i < segments.length; i++) {
+            EntityDescriptor.Attribute attr = current.attribute(segments[i]);
+            chain.append('.').append(getter(segments[i])).append("()");
+            if (i < segments.length - 1) {
+                nullChecks.add(chain.toString());
+                current = attr.embedded();
+            } else if (attr.kind() == EntityDescriptor.Kind.ASSOCIATION
+                    || attr.kind() == EntityDescriptor.Kind.MANY_TO_ONE) {
+                nullChecks.add(chain.toString());
+                chain.append(".getId()");
+            }
+        }
+        if (nullChecks.isEmpty()) {
+            return CodeBlock.of("$L", chain.toString());
+        }
+        StringBuilder guard = new StringBuilder();
+        for (int i = 0; i < nullChecks.size(); i++) {
+            if (i > 0) {
+                guard.append(" || ");
+            }
+            guard.append(nullChecks.get(i)).append(" == null");
+        }
+        return CodeBlock.of("$L ? null : $L", guard.toString(), chain.toString());
     }
 
     private void emitBatch(MethodSpec.Builder builder, ExecutableElement method, VariableElement parameter,
@@ -1116,14 +1272,6 @@ public class RepositoryProcessor extends AbstractProcessor {
         return name;
     }
 
-    private CodeBlock readValue(Property property, String variable) {
-        String accessor = variable + "." + getter(property.name()) + "()";
-        if (property.association()) {
-            return CodeBlock.of("$L == null ? null : $L.getId()", accessor, accessor);
-        }
-        return CodeBlock.of("$L", accessor);
-    }
-
     private List<SortSpec> sorts(ExecutableElement method, ParsedMethodName parsed) {
         List<SortSpec> sorts = new ArrayList<>();
         if (parsed != null) {
@@ -1318,17 +1466,22 @@ public class RepositoryProcessor extends AbstractProcessor {
                         target != null ? target.getQualifiedName().toString() : null, null, null));
 
             } else if (embeddedTarget(field) != null) {
-                // Direct value object: flatten leaves into this table.
+                // Direct value object: flatten leaves into this table. The Property carries the VO's
+                // compile-time model so the mapper gate and the embedded read emitter can recurse.
                 TypeElement vo = embeddedTarget(field);
                 Descriptor embedded = descriptorFor(vo);
-                properties.add(new Property(name, Names.columnName(name), false, fieldTypeName));
+                properties.add(new Property(name, Names.columnName(name), false, fieldTypeName,
+                        EntityDescriptor.Kind.EMBEDDED, voModel(vo)));
                 attrs.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.EMBEDDED,
                         Names.columnName(name), vo.getQualifiedName().toString(), null, embedded));
 
             } else if (isEntityType(declaredElement(field))) {
                 // In-aggregate many-to-one / one-to-one: fk column, hydrated on read (Plan C).
+                // Not an external ASSOCIATION: the field is left null by the mapper and the
+                // loaders (Task 4) fill it, so it skips the gate via its kind, not the flag.
                 TypeElement target = declaredElement(field);
-                properties.add(new Property(name, Names.fkColumn(name), true, fieldTypeName));
+                properties.add(new Property(name, Names.fkColumn(name), false, fieldTypeName,
+                        EntityDescriptor.Kind.MANY_TO_ONE, null));
                 attrs.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.MANY_TO_ONE,
                         Names.fkColumn(name), target.getQualifiedName().toString(), null, null));
 
@@ -1390,10 +1543,10 @@ public class RepositoryProcessor extends AbstractProcessor {
             properties.add(new Property(attribute.name(), attribute.column(),
                     attribute.kind() == EntityDescriptor.Kind.MANY_TO_ONE
                             || attribute.kind() == EntityDescriptor.Kind.ASSOCIATION,
-                    typeNameOfString(attribute.typeName())));
+                    typeNameOfString(attribute.typeName()), attribute.kind(), null));
         }
         return new ElementCollection(field, TypeName.get(types.erasure(valueObject.asType())),
-                childTable, parentFk, properties);
+                childTable, parentFk, properties, target);
     }
 
     /**
@@ -1552,6 +1705,31 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /**
+     * Compile-time model of an {@code EMBEDDED} target value object: memoized like {@link #descriptorFor}
+     * and cycle-bounded — a re-entrant build (A embeds B embeds A, which is Java-legal although VOs
+     * cannot cycle back into an aggregate) returns {@code null} so the mapper gate fails closed on that
+     * property instead of recursing forever.
+     */
+    private EntityModel voModel(TypeElement voElement) {
+        String fqn = voElement.getQualifiedName().toString();
+        EntityModel cached = voModels.get(fqn);
+        if (cached != null) {
+            return cached;
+        }
+        if (voModelsInProgress.contains(fqn)) {
+            return null;
+        }
+        voModelsInProgress.add(fqn);
+        try {
+            EntityModel model = buildEntity(voElement);
+            voModels.put(fqn, model);
+            return model;
+        } finally {
+            voModelsInProgress.remove(fqn);
+        }
+    }
+
+    /**
      * Scans the child's attributes for a back-reference to the parent; a cyclic child whose descriptor
      * is the shallow placeholder yields {@code null}, which Plan C's hydration resolves instead from
      * the child's own generated metadata. An unresolved inverse is treated as read-only/unmapped.
@@ -1568,7 +1746,19 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     // --------------------------------------------------------------- nested types
 
-    private record Property(String name, String column, boolean association, TypeName type) { }
+    /**
+     * A mapped non-id property. {@code kind} carries the descriptor classification the gate and the
+     * codegen loops need (embedded recursion, fk-only skips); {@code embeddedModel} is the compile-time
+     * model of an {@code EMBEDDED} target, {@code null} otherwise or when the VO build cycles. Call sites
+     * that do not consume the new components use the 4-arg convenience constructor.
+     */
+    private record Property(String name, String column, boolean association, TypeName type,
+                            EntityDescriptor.Kind kind, EntityModel embeddedModel) {
+        Property(String name, String column, boolean association, TypeName type) {
+            this(name, column, association, type, association ? EntityDescriptor.Kind.ASSOCIATION
+                    : EntityDescriptor.Kind.SCALAR, null);
+        }
+    }
 
     private record Descriptor(String typeName, String tableName,
                               EntityDescriptor.Attribute id,
@@ -1580,8 +1770,14 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
     }
 
+    /**
+     * A {@code List<@ValueObject>} element collection. {@code properties} drives the child-table column
+     * list; {@code descriptor} (the value object's flattened column view) drives the param bindings so
+     * fk-bearing children resolve through the same {@link #boundValue} walk as parent-entity paths.
+     */
     private record ElementCollection(String field, TypeName valueObjectType, String childTable,
-                                     String parentFk, List<Property> properties) { }
+                                     String parentFk, List<Property> properties,
+                                     EntityDescriptor descriptor) { }
 
     private record EntityModel(TypeMirror typeMirror, TypeName typeName, Property id,
                                List<Property> properties, List<ElementCollection> collections,

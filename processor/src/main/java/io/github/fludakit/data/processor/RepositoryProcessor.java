@@ -1263,7 +1263,13 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     private record Descriptor(String typeName, String tableName,
                               EntityDescriptor.Attribute id,
-                              List<EntityDescriptor.Attribute> attributes) implements EntityDescriptor { }
+                              List<EntityDescriptor.Attribute> attributes) implements EntityDescriptor {
+        Descriptor {
+            // Defensive copy: the immutability invariant of a descriptor must not rely on
+            // call-site discipline.
+            attributes = List.copyOf(attributes);
+        }
+    }
 
     private record ElementCollection(String field, TypeName valueObjectType, String childTable,
                                      String parentFk, List<Property> properties, EntityDescriptor target) { }

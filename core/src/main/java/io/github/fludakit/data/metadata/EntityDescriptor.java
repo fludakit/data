@@ -46,6 +46,10 @@ public interface EntityDescriptor {
         return tableName() == null;
     }
 
+    /**
+     * Resolves the named attribute, looking the identifier up first. This deliberately diverges
+     * from the old {@code EntityMetadata.property}, which threw when asked for the id name.
+     */
     default Attribute attribute(String name) {
         if (id() != null && id().name().equals(name)) return id();
         for (Attribute a : attributes()) {

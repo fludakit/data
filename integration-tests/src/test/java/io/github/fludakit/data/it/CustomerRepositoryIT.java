@@ -81,8 +81,20 @@ class CustomerRepositoryIT {
     }
 
     @Test
-    void cursoredPagePagesById() {
-        customers.insert(customer("Charlie", "charlie@example.com"));
+    void associationIsNullOnRereadViaGeneratedMapper() {
+        Customer ana = customers.save(customer("Ana", "ana@example.com"));
+        Order order = new Order(ana);
+        order.setAmount(new BigDecimal("79.98"));
+        Order saved = orders.save(order);
+        assertThat(saved.getId()).isNotNull();
+
+        Order reloaded = orders.findById(saved.getId()).orElseThrow();
+        assertThat(reloaded.getCustomer()).isNull();
+        assertThat(reloaded.getAmount()).isEqualByComparingTo("79.98");
+    }
+
+    @Test
+    void cursoredPagePagesById() {        customers.insert(customer("Charlie", "charlie@example.com"));
         customers.insert(customer("Alice", "alice@example.com"));
         customers.insert(customer("Bob", "bob@example.com"));
 

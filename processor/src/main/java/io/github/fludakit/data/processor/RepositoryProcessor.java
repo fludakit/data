@@ -98,6 +98,11 @@ public class RepositoryProcessor extends AbstractProcessor {
      * {@code ResultSet} (via {@code getObject(...)} or a primitive getter). Any entity carrying a
      * field outside this allowlist (enums, associations, value objects, ...) is skipped so it keeps
      * using the existing reflective mapping instead of generating code that would not compile.
+     * Note that {@code java.time.Instant}, {@code java.time.ZonedDateTime} and
+     * {@code java.math.BigInteger} are read via {@code rs.getObject(col, X.class)}, whose driver
+     * support beyond the types guaranteed by JDBC 4.2 ({@code LocalDate}/{@code LocalTime}/
+     * {@code LocalDateTime}/{@code OffsetDateTime} and the basic types) is driver-dependent; an
+     * unsupported driver fails fast at runtime with {@code SQLFeatureNotSupportedException}.
      */
     private static final Set<String> JDBC_SAFE_TYPES = Set.of(
             "java.lang.String", "java.lang.Boolean", "java.lang.Byte", "java.lang.Short",
@@ -277,15 +282,15 @@ public class RepositoryProcessor extends AbstractProcessor {
                 .addStatement("$T entity = new $T()", entityType, entityType);
 
         if (entity.id() != null) {
-            mapRow.addStatement("entity.$L($L)", setter(entity.id().name()),
-                    readExpression(entity.id().type(), metadataType, entity.id().name()));
+            appendPropertyRead(mapRow, entity.id().type(), metadataType, entity.id().name(),
+                    entity.id().column(), entityElement.getSimpleName().toString());
         }
         for (Property p : entity.properties()) {
             if (p.association()) {
                 continue; // FK-only reference; left null on read (matches current behaviour)
             }
-            mapRow.addStatement("entity.$L($L)", setter(p.name()),
-                    readExpression(p.type(), metadataType, p.name()));
+            appendPropertyRead(mapRow, p.type(), metadataType, p.name(), p.column(),
+                    entityElement.getSimpleName().toString());
         }
         mapRow.addStatement("return entity");
 
@@ -299,20 +304,48 @@ public class RepositoryProcessor extends AbstractProcessor {
         return ClassName.get(packageName, simpleName);
     }
 
-    private CodeBlock readExpression(TypeName type, ClassName metadataType, String property) {
-        if (type.isPrimitive()) {
-            String getter = switch (type.toString()) {
-                case "boolean" -> "getBoolean";
-                case "byte" -> "getByte";
-                case "short" -> "getShort";
-                case "int" -> "getInt";
-                case "long" -> "getLong";
-                case "float" -> "getFloat";
-                case "double" -> "getDouble";
-                default -> throw new IllegalStateException("Unsupported primitive " + type);
-            };
-            return CodeBlock.of("rs.$L($T.$L)", getter, metadataType, constName(property));
+    /**
+     * Emits the assignment of one mapped column into the freshly constructed {@code entity}. Boxed
+     * and reference columns are read via {@code getObject} and assigned directly, since a SQL NULL
+     * is a legal value for them. A primitive column cannot hold NULL, so the value is read into a
+     * method-unique temporary and {@code rs.wasNull()} is checked immediately after the getter to
+     * fail fast with a {@code SQLException} — mirroring the reflective mapper, which throws when a
+     * NULL is assigned to a primitive field. The {@code id} read follows the same rule.
+     */
+    private void appendPropertyRead(MethodSpec.Builder mapRow, TypeName type, ClassName metadataType,
+                                    String property, String columnName, String entityName) {
+        if (!type.isPrimitive()) {
+            mapRow.addStatement("entity.$L($L)", setter(property), readExpression(type, metadataType, property));
+            return;
         }
+        // Temp name is derived from the (unique) property name so it cannot collide with the
+        // generated entity/rs/rowNum locals nor with another primitive property in the same mapper.
+        String temp = property + "Value";
+        mapRow.addStatement("$T $L = rs.$L($T.$L)", type, temp, primitiveGetter(type),
+                metadataType, constName(property));
+        mapRow.beginControlFlow("if (rs.wasNull())");
+        mapRow.addStatement("throw new $T($S)", ClassName.get("java.sql", "SQLException"),
+                "NULL value in non-nullable primitive column \"" + columnName
+                        + "\" mapped to " + entityName + "." + property);
+        mapRow.endControlFlow();
+        mapRow.addStatement("entity.$L($L)", setter(property), temp);
+    }
+
+    private static String primitiveGetter(TypeName type) {
+        return switch (type.toString()) {
+            case "boolean" -> "getBoolean";
+            case "byte" -> "getByte";
+            case "short" -> "getShort";
+            case "int" -> "getInt";
+            case "long" -> "getLong";
+            case "float" -> "getFloat";
+            case "double" -> "getDouble";
+            default -> throw new IllegalStateException("Unsupported primitive " + type);
+        };
+    }
+
+    /** Boxed/reference read expression; a primitive column is guarded separately in {@link #appendPropertyRead}. */
+    private CodeBlock readExpression(TypeName type, ClassName metadataType, String property) {
         return CodeBlock.of("rs.getObject($T.$L, $T.class)", metadataType, constName(property), type.box());
     }
 

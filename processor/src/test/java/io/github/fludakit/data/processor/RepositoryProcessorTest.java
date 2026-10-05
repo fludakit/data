@@ -158,6 +158,11 @@ class RepositoryProcessorTest {
                 "no mapper for an entity with a non-JDBC-safe field type");
         assertTrue(Files.notExists(generatedDir.resolve("demo2/TicketMetadata.java")),
                 "no metadata when the mapper is skipped");
+
+        // The central fallback promise: unsafe entities keep the reflective class-based read path.
+        String impl = Files.readString(generatedDir.resolve("demo2/TicketsImpl.java"));
+        assertTrue(impl.contains(".query(Ticket.class)"),
+                "convention reads must fall back to the reflective class path:" + System.lineSeparator() + impl);
     }
 
     @Test
@@ -214,6 +219,51 @@ class RepositoryProcessorTest {
         assertTrue(mp.contains("return entity;"), mp);
         assertTrue(Files.exists(generatedDir.resolve("demo3/BasketMetadata.java")),
                 "metadata must be generated alongside the mapper");
+    }
+
+    @Test
+    void primitiveReadsGuardAgainstNullButBoxedReadsDoNot() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/demo4"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes4"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated4"));
+
+        Files.writeString(sourceDir.resolve("Widget.java"), """
+                package demo4;
+                public class Widget {
+                    public Long id;
+                    public int qty;
+                    public String name;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public int getQty() { return qty; }
+                    public void setQty(int qty) { this.qty = qty; }
+                    public String getName() { return name; }
+                    public void setName(String name) { this.name = name; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Widgets.java"), """
+                package demo4;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Widgets extends CrudRepository<Widget, Long> { }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Widget.java", "Widgets.java");
+
+        Path mapper = generatedDir.resolve("demo4/WidgetRowMapper.java");
+        assertTrue(Files.exists(mapper), "Expected generated " + mapper);
+        String mp = Files.readString(mapper);
+
+        // The primitive branch must read the column, immediately check wasNull() and fail fast,
+        // matching the reflective path that throws when a SQL NULL is assigned to a primitive field.
+        assertTrue(mp.contains("rs.getInt("), "primitive getter missing:" + System.lineSeparator() + mp);
+        assertTrue(mp.contains("rs.wasNull()"), "NULL guard missing:" + System.lineSeparator() + mp);
+        assertTrue(mp.contains("throw new SQLException"), "NULL guard must throw:" + System.lineSeparator() + mp);
+
+        // The boxed/reference branch must stay a plain getObject assignment (NULL is a legal value).
+        assertTrue(mp.contains("entity.setName(rs.getObject(WidgetMetadata.NAME, String.class));"),
+                "boxed read must remain unguarded:" + System.lineSeparator() + mp);
     }
 
     @Test

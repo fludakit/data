@@ -622,6 +622,235 @@ class RepositoryProcessorTest {
                 "a T-typed field is not JDBC-safe, so the RowMapper must be skipped");
     }
 
+    @Test
+    void valueObjectAssociationChildBindsFkIdInElementCollectionInsert() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/voca"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-voca"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-voca"));
+
+        Files.writeString(sourceDir.resolve("Product.java"), """
+                package voca;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Product {
+                    @Identity Long id;
+                    String name;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getName() { return name; }
+                    public void setName(String name) { this.name = name; }
+                }
+                """);
+        // A @ValueObject carrying an @Association field: the child-table classifier
+        // (RepositoryProcessor.valueObjectMetadata) must treat it as ASSOCIATION (global contract),
+        // and buildCollection must flag BOTH MANY_TO_ONE and ASSOCIATION as association-backed so
+        // the fk binds item.getProduct().getId(). Changing only one of the two sites breaks this
+        // binding silently; this test is the coupled-pair regression lock (mirrors the IT corpus'
+        // OrderItem/Order element collection).
+        Files.writeString(sourceDir.resolve("Line.java"), """
+                package voca;
+                import io.github.fludakit.data.annotation.Association;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class Line {
+                    @Association Product product;
+                    int quantity;
+                    public Product getProduct() { return product; }
+                    public void setProduct(Product product) { this.product = product; }
+                    public int getQuantity() { return quantity; }
+                    public void setQuantity(int quantity) { this.quantity = quantity; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Basket.java"), """
+                package voca;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                import java.util.ArrayList;
+                import java.util.List;
+                @AggregateRoot
+                public class Basket {
+                    @Identity Long id;
+                    List<Line> lines = new ArrayList<>();
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public List<Line> getLines() { return lines; }
+                    public void setLines(List<Line> lines) { this.lines = lines; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Baskets.java"), """
+                package voca;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Baskets extends CrudRepository<Basket, Long> { }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Product.java", "Line.java", "Basket.java", "Baskets.java");
+
+        String impl = Files.readString(generatedDir.resolve("voca/BasketsImpl.java")).replace("\\\"", "\"");
+        assertTrue(impl.contains("INSERT INTO \"basket_lines\" (\"basket_id\", \"product_id\", \"quantity\")"
+                        + " VALUES (:basket_id, :product_id, :quantity)"),
+                "child-table insert must keep the fk column:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains(".param(\"product_id\", item.getProduct() == null ? null : item.getProduct().getId())"),
+                "@Association child column must bind the target's id, not the target object:"
+                        + System.lineSeparator() + impl);
+        assertTrue(impl.contains(".param(\"quantity\", item.getQuantity())"),
+                "scalar child column must bind the getter directly:" + System.lineSeparator() + impl);
+    }
+
+    @Test
+    void bareEntityFieldAndEntityListClassifyAsManyToOneAndOneToManyWithResolvedInverse() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/rel"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-rel"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-rel"));
+
+        Files.writeString(sourceDir.resolve("Child.java"), """
+                package rel;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Child {
+                    @Identity Long id;
+                    Parent owner;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public Parent getOwner() { return owner; }
+                    public void setOwner(Parent owner) { this.owner = owner; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Parent.java"), """
+                package rel;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                import java.util.ArrayList;
+                import java.util.List;
+                @AggregateRoot
+                public class Parent {
+                    @Identity Long id;
+                    String name;
+                    Child primary;
+                    List<Child> children = new ArrayList<>();
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getName() { return name; }
+                    public void setName(String name) { this.name = name; }
+                    public Child getPrimary() { return primary; }
+                    public void setPrimary(Child primary) { this.primary = primary; }
+                    public List<Child> getChildren() { return children; }
+                    public void setChildren(List<Child> children) { this.children = children; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Parents.java"), """
+                package rel;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Parents extends CrudRepository<Parent, Long> { }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Child.java", "Parent.java", "Parents.java");
+
+        // Flatten JavaPoet's soft wraps so the positional literals can be pinned verbatim: five of
+        // the seven Attribute components are Strings, so ONLY an exact full-literal assertion
+        // detects a swapped column/targetTypeName/inverseName argument (M-6).
+        String md = Files.readString(generatedDir.resolve("rel/ParentMetadata.java")).replaceAll("\\s+", " ");
+
+        // Bare entity-typed field: MANY_TO_ONE + fk column + target FQN (coverage lock, I-2).
+        assertTrue(md.contains("new EntityDescriptor.Attribute(\"primary\", \"rel.Child\","
+                        + " EntityDescriptor.Kind.MANY_TO_ONE, \"primary_id\", \"rel.Child\", null, null)"),
+                "un-annotated entity field must be MANY_TO_ONE with an fk column:" + System.lineSeparator() + md);
+        assertTrue(md.contains("public static final String PRIMARY = \"primary_id\";"),
+                "the fk column constant must be emitted from the Property list:" + System.lineSeparator() + md);
+
+        // List<@Entity>: ONE_TO_MANY via the second pass, column null, inverse resolved from the
+        // child's own MANY_TO_ONE back-reference (coverage lock, I-2 + positional lock, M-6).
+        assertTrue(md.contains("new EntityDescriptor.Attribute(\"children\", \"java.util.List<rel.Child>\","
+                        + " EntityDescriptor.Kind.ONE_TO_MANY, null, \"rel.Child\", \"owner\", null)"),
+                "entity list must be ONE_TO_MANY with the resolved inverse name:" + System.lineSeparator() + md);
+        assertTrue(!md.contains("public static final String CHILDREN"),
+                "ONE_TO_MANY contributes no column constant:" + System.lineSeparator() + md);
+
+        // Association properties are skipped by the mapper gate, so the owner still generates.
+        assertTrue(Files.exists(generatedDir.resolve("rel/ParentRowMapper.java")),
+                "entity-typed fields are association-backed and must not abort the owner's gate");
+    }
+
+    @Test
+    void embeddedPropertyGetsNoPhantomColumnConstant() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/phantom"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-phantom"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-phantom"));
+
+        Files.writeString(sourceDir.resolve("GeoPoint.java"), """
+                package phantom;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class GeoPoint {
+                    double lat;
+                    double lng;
+                    public double getLat() { return lat; }
+                    public void setLat(double lat) { this.lat = lat; }
+                    public double getLng() { return lng; }
+                    public void setLng(double lng) { this.lng = lng; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Address.java"), """
+                package phantom;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class Address {
+                    String city;
+                    GeoPoint point;
+                    public String getCity() { return city; }
+                    public void setCity(String city) { this.city = city; }
+                    public GeoPoint getPoint() { return point; }
+                    public void setPoint(GeoPoint point) { this.point = point; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Contact.java"), """
+                package phantom;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Contact {
+                    @Identity Long id;
+                    String name;
+                    Address address;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getName() { return name; }
+                    public void setName(String name) { this.name = name; }
+                    public Address getAddress() { return address; }
+                    public void setAddress(Address address) { this.address = address; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Contacts.java"), """
+                package phantom;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Contacts extends CrudRepository<Contact, Long> { }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "GeoPoint.java", "Address.java", "Contact.java", "Contacts.java");
+
+        String vmd = Files.readString(generatedDir.resolve("phantom/AddressMetadata.java"));
+        // M-5: the EMBEDDED property's column slot is a leaf PREFIX, not a physical column named
+        // "point"; the public generated API must not advertise a phantom column constant for it.
+        assertTrue(!vmd.contains("public static final String POINT"),
+                "no phantom column constant for an EMBEDDED property:" + System.lineSeparator() + vmd);
+        // Real (leaf-ward) constants remain.
+        assertTrue(vmd.contains("public static final String CITY = \"city\";"), vmd);
+        assertTrue(vmd.contains("GeoPointMetadata.INSTANCE"),
+                "the EMBEDDED attribute must still reference the nested value object:" + System.lineSeparator() + vmd);
+        Path inner = generatedDir.resolve("phantom/GeoPointMetadata.java");
+        assertTrue(Files.exists(inner), "Expected generated " + inner);
+        String imd = Files.readString(inner);
+        assertTrue(imd.contains("public static final String LAT = \"lat\";"), imd);
+        assertTrue(imd.contains("public static final String LNG = \"lng\";"), imd);
+    }
+
     private void compile(Path sourceDir, Path classesDir, Path generatedDir, String... fileNames) throws Exception {
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         assertNotNull(compiler, "A system Java compiler is required to run this test");

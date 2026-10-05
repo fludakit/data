@@ -69,13 +69,16 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Generates a {@code <Repository>Impl} class for every {@link Repository @Repository} interface.
+ * Generates three artifacts at compile time: a {@code <Repository>Impl} class for every
+ * {@link Repository @Repository} interface, a reflection-free {@code <Entity>Metadata} class
+ * implementing {@link EntityDescriptor} (the compile-time descriptor model behind all SQL), and a
+ * {@code <Entity>RowMapper} for entities whose fields are all JDBC-safe.
  *
- * <p>The generated class is {@link ApplicationScoped} and carries a single injected collaborator,
- * a {@link JdbcClient}. Every query's SQL is emitted as a {@code private static final String}
- * constant and executed with direct {@code jdbcClient.sql(...).param(...).query(...)} calls: there
- * is no runtime query model and no engine indirection. The entity's table/columns are derived at
- * compile time from its fields by convention (see {@link Names}).</p>
+ * <p>The generated implementation class is {@link ApplicationScoped} and carries a single injected
+ * collaborator, a {@link JdbcClient}. Every query's SQL is emitted as a {@code private static final
+ * String} constant and executed with direct {@code jdbcClient.sql(...).param(...).query(...)}
+ * calls: there is no runtime query model and no engine indirection. The entity's table/columns are
+ * derived at compile time from its fields by convention (see {@link Names}).</p>
  */
 @SupportedAnnotationTypes("jakarta.data.repository.Repository")
 public class RepositoryProcessor extends AbstractProcessor {
@@ -268,7 +271,9 @@ public class RepositoryProcessor extends AbstractProcessor {
      * (one per mapped property plus the table name) alongside the descriptor view — {@code INSTANCE},
      * {@code typeName()}, {@code tableName()}, {@code id()} and {@code attributes()}. A value
      * object (EMBEDDED target) has no table and no id, so its TABLE_NAME constant is omitted and the
-     * matching accessors return {@code null}.
+     * matching accessors return {@code null}. EMBEDDED properties contribute no column constant:
+     * their {@code column} slot holds a leaf prefix, so no physical column named after the property
+     * exists (the leaves are {@code <prefix>_<leaf>}, named by the nested value object's constants).
      */
     private ClassName generateMetadata(TypeElement entityElement, EntityModel entity) {
         String packageName = elements.getPackageOf(entityElement).getQualifiedName().toString();
@@ -290,8 +295,16 @@ public class RepositoryProcessor extends AbstractProcessor {
         if (entity.id() != null) {
             builder.addField(stringConstant(constName(entity.id().name()), entity.id().column()));
         }
+        Set<String> embeddedNames = new HashSet<>();
+        for (EntityDescriptor.Attribute a : entity.metadata().attributes()) {
+            if (a.kind() == EntityDescriptor.Kind.EMBEDDED) {
+                embeddedNames.add(a.name());
+            }
+        }
         for (Property p : entity.properties()) {
-            builder.addField(stringConstant(constName(p.name()), p.column()));
+            if (!embeddedNames.contains(p.name())) {
+                builder.addField(stringConstant(constName(p.name()), p.column()));
+            }
         }
 
         builder.addMethod(stringAccessor("typeName", entityElement.getQualifiedName().toString()));
@@ -1350,15 +1363,21 @@ public class RepositoryProcessor extends AbstractProcessor {
     private ElementCollection buildCollection(String parentTable, String field, TypeElement valueObject) {
         String childTable = Names.childTable(parentTable, field);
         String parentFk = parentTable + "_id";
+        // The child columns are classified by the value-object-local classifier below; per the
+        // global contract an @Association field is Kind.ASSOCIATION there, exactly as in
+        // buildEntity. Both fk-bearing relationship kinds (MANY_TO_ONE for an in-aggregate target
+        // and ASSOCIATION for an external reference) bind the target's id, so the association flag
+        // must accept BOTH: dropping either label here silently breaks the child-table fk binding.
         EntityDescriptor target = valueObjectMetadata(valueObject);
         List<Property> properties = new ArrayList<>();
         for (EntityDescriptor.Attribute attribute : target.attributes()) {
             properties.add(new Property(attribute.name(), attribute.column(),
-                    attribute.kind() == EntityDescriptor.Kind.MANY_TO_ONE,
+                    attribute.kind() == EntityDescriptor.Kind.MANY_TO_ONE
+                            || attribute.kind() == EntityDescriptor.Kind.ASSOCIATION,
                     typeNameOfString(attribute.typeName())));
         }
         return new ElementCollection(field, TypeName.get(types.erasure(valueObject.asType())),
-                childTable, parentFk, properties, target);
+                childTable, parentFk, properties);
     }
 
     /**
@@ -1402,7 +1421,11 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
     }
 
-    /** Builds the id-less descriptor for a {@code List<@ValueObject>} element type. */
+    /**
+     * Builds the id-less descriptor for a {@code List<@ValueObject>} element type. Classification
+     * follows the global contract: {@code @Association} → {@code ASSOCIATION} (never
+     * {@code MANY_TO_ONE}); everything else is a {@code SCALAR} column.
+     */
     private EntityDescriptor valueObjectMetadata(TypeElement valueObject) {
         List<EntityDescriptor.Attribute> attributes = new ArrayList<>();
         Set<String> seen = new HashSet<>();
@@ -1420,7 +1443,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             }
             String fieldType = field.asType().toString();
             if (field.getAnnotation(Association.class) != null) {
-                attributes.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.MANY_TO_ONE,
+                attributes.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.ASSOCIATION,
                         Names.fkColumn(name), null, null, null));
             } else {
                 attributes.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.SCALAR,
@@ -1541,7 +1564,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     private record ElementCollection(String field, TypeName valueObjectType, String childTable,
-                                     String parentFk, List<Property> properties, EntityDescriptor target) { }
+                                     String parentFk, List<Property> properties) { }
 
     private record EntityModel(TypeMirror typeMirror, TypeName typeName, Property id,
                                List<Property> properties, List<ElementCollection> collections,

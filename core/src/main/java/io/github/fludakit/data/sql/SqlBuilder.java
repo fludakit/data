@@ -31,11 +31,6 @@ public final class SqlBuilder {
     }
 
     /**
-     * Builds an INSERT. When {@code includeId} is false the identifier column is omitted so the
-     * database can generate it (identity / auto-increment); binding an explicit NULL to an identity
-     * column is rejected by most databases, including H2.
-     */
-    /**
      * Maps a dot-separated property path to the named-parameter token used in the generated SQL
      * (e.g. {@code "address.street"} becomes {@code "address_street"}). Callers that bind parameters
      * programmatically must use the same mapping so the emitted {@code .param(...)} names line up.
@@ -44,6 +39,11 @@ public final class SqlBuilder {
         return path.replace('.', '_');
     }
 
+    /**
+     * Builds an INSERT. When {@code includeId} is false the identifier column is omitted so the
+     * database can generate it (identity / auto-increment); binding an explicit NULL to an identity
+     * column is rejected by most databases, including H2.
+     */
     public String insert(EntityDescriptor md, boolean includeId) {
         List<EntityDescriptor.ColumnRef> cols = md.columns();
         if (!includeId) {

@@ -1149,15 +1149,16 @@ public class RepositoryProcessor extends AbstractProcessor {
                 continue;
             }
             String fieldType = field.asType().toString();
+            TypeName fieldTypeName = TypeName.get(field.asType());
 
             if (field.getAnnotation(Identity.class) != null || (!valueObject && name.equals("id"))) {
-                id = new Property(name, Names.columnName(name), false, typeNameOfString(fieldType));
+                id = new Property(name, Names.columnName(name), false, fieldTypeName);
                 idAttr = new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.ID,
                         Names.columnName(name), null, null, null);
 
             } else if (field.getAnnotation(Association.class) != null) {
                 // External aggregate reference: fk-only, never hydrated.
-                properties.add(new Property(name, Names.fkColumn(name), true, typeNameOfString(fieldType)));
+                properties.add(new Property(name, Names.fkColumn(name), true, fieldTypeName));
                 TypeElement target = declaredElement(field);
                 attrs.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.ASSOCIATION,
                         Names.fkColumn(name),
@@ -1167,14 +1168,14 @@ public class RepositoryProcessor extends AbstractProcessor {
                 // Direct value object: flatten leaves into this table.
                 TypeElement vo = embeddedTarget(field);
                 Descriptor embedded = descriptorFor(vo);
-                properties.add(new Property(name, Names.columnName(name), false, typeNameOfString(fieldType)));
+                properties.add(new Property(name, Names.columnName(name), false, fieldTypeName));
                 attrs.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.EMBEDDED,
                         Names.columnName(name), vo.getQualifiedName().toString(), null, embedded));
 
             } else if (isEntityType(declaredElement(field))) {
                 // In-aggregate many-to-one / one-to-one: fk column, hydrated on read (Plan C).
                 TypeElement target = declaredElement(field);
-                properties.add(new Property(name, Names.fkColumn(name), true, typeNameOfString(fieldType)));
+                properties.add(new Property(name, Names.fkColumn(name), true, fieldTypeName));
                 attrs.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.MANY_TO_ONE,
                         Names.fkColumn(name), target.getQualifiedName().toString(), null, null));
 
@@ -1194,7 +1195,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                         null, child.getQualifiedName().toString(), null, null));
 
             } else {
-                properties.add(new Property(name, Names.columnName(name), false, typeNameOfString(fieldType)));
+                properties.add(new Property(name, Names.columnName(name), false, fieldTypeName));
                 attrs.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.SCALAR,
                         Names.columnName(name), null, null, null));
             }

@@ -370,6 +370,59 @@ class RepositoryProcessorTest {
                 "scalar column must be present:" + System.lineSeparator() + impl);
     }
 
+    @Test
+    void generatesRowMapperForByteArrayField() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/bytez"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-bytez"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-bytez"));
+
+        Files.writeString(sourceDir.resolve("Blob.java"), """
+                package bytez;
+                public class Blob {
+                    public Long id;
+                    public String name;
+                    public byte[] data;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getName() { return name; }
+                    public void setName(String name) { this.name = name; }
+                    public byte[] getData() { return data; }
+                    public void setData(byte[] data) { this.data = data; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Blobs.java"), """
+                package bytez;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Blobs extends CrudRepository<Blob, Long> { }
+                """);
+
+        // compile() also compiles the generated sources, so a valid byte[] read must be emitted
+        // for the whole task to succeed (see RepositoryProcessor.readExpression -> getObject(byte[].class)).
+        compile(sourceDir, classesDir, generatedDir, "Blob.java", "Blobs.java");
+
+        Path metadata = generatedDir.resolve("bytez/BlobMetadata.java");
+        assertTrue(Files.exists(metadata), "Expected generated " + metadata);
+        String md = Files.readString(metadata);
+        assertTrue(md.contains("public static final String TABLE_NAME = \"blob\";"), md);
+        assertTrue(md.contains("public static final String ID = \"id\";"), md);
+        assertTrue(md.contains("public static final String NAME = \"name\";"), md);
+        assertTrue(md.contains("public static final String DATA = \"data\";"), md);
+
+        Path mapper = generatedDir.resolve("bytez/BlobRowMapper.java");
+        assertTrue(Files.exists(mapper),
+                "a byte[] scalar is JDBC-safe and must not silently lose its generated RowMapper");
+        String mp = Files.readString(mapper);
+        assertTrue(mp.contains("implements RowMapper<Blob>"), mp);
+        assertTrue(mp.contains("rs.getObject(BlobMetadata.ID, Long.class)"), mp);
+        assertTrue(mp.contains("rs.getObject(BlobMetadata.NAME, String.class)"), mp);
+        assertTrue(mp.contains("rs.getObject(BlobMetadata.DATA, byte[].class)"),
+                "byte[] column must be read via getObject(byte[].class):" + System.lineSeparator() + mp);
+        assertTrue(mp.contains("entity.setData("), mp);
+        assertTrue(mp.contains("return entity;"), mp);
+    }
+
     private void compile(Path sourceDir, Path classesDir, Path generatedDir, String... fileNames) throws Exception {
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         assertNotNull(compiler, "A system Java compiler is required to run this test");

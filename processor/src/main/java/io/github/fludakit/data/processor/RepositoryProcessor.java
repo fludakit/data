@@ -13,7 +13,6 @@ import com.squareup.javapoet.TypeVariableName;
 import io.github.fludakit.data.Names;
 import io.github.fludakit.data.annotation.Association;
 import io.github.fludakit.data.annotation.Identity;
-import io.github.fludakit.data.annotation.ValueObject;
 import io.github.fludakit.data.metadata.EntityDescriptor;
 import io.github.fludakit.data.page.CursorSupport;
 import io.github.fludakit.data.page.SimpleCursoredPage;
@@ -62,6 +61,7 @@ import javax.tools.JavaFileObject;
 import java.io.IOException;
 import java.io.Writer;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -119,6 +119,12 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     /** Entity FQN → generated {@code <Entity>RowMapper} type, deduped across processing rounds. */
     private final Map<String, ClassName> rowMappers = new LinkedHashMap<>();
+
+    /** Entity/value-object FQN → compile-time descriptor, memoized for {@link #descriptorFor}. */
+    private final Map<String, Descriptor> descriptorCache = new HashMap<>();
+
+    /** FQNs whose descriptor is currently being built; the cycle guard for {@link #descriptorFor}. */
+    private final Set<String> inProgress = new HashSet<>();
 
     @Override
     public SourceVersion getSupportedSourceVersion() {
@@ -1119,14 +1125,15 @@ public class RepositoryProcessor extends AbstractProcessor {
     // ------------------------------------------------- compile-time entity model
 
     private EntityModel buildEntity(TypeElement element) {
+        boolean valueObject = isValueObjectType(element);
         TypeMirror typeMirror = types.erasure(element.asType());
         TypeName typeName = TypeName.get(typeMirror);
-        String table = Names.tableName(element.getSimpleName().toString());
+        String table = valueObject ? null : Names.tableName(element.getSimpleName().toString());
         String typeNameString = element.getQualifiedName().toString();
         Property id = null;
-        EntityDescriptor.Attribute metadataId = null;
+        EntityDescriptor.Attribute idAttr = null;
         List<Property> properties = new ArrayList<>();
-        List<EntityDescriptor.Attribute> metadataProperties = new ArrayList<>();
+        List<EntityDescriptor.Attribute> attrs = new ArrayList<>();
         List<ElementCollection> collections = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         for (Element member : elements.getAllMembers(element)) {
@@ -1142,34 +1149,76 @@ public class RepositoryProcessor extends AbstractProcessor {
                 continue;
             }
             String fieldType = field.asType().toString();
-            TypeName fieldTypeName = TypeName.get(field.asType());
-            TypeElement valueObject = valueObjectElement(field);
-            if (field.getAnnotation(Identity.class) != null || name.equals("id")) {
-                id = new Property(name, Names.columnName(name), false, fieldTypeName);
-                metadataId = new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.ID,
+
+            if (field.getAnnotation(Identity.class) != null || (!valueObject && name.equals("id"))) {
+                id = new Property(name, Names.columnName(name), false, typeNameOfString(fieldType));
+                idAttr = new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.ID,
                         Names.columnName(name), null, null, null);
+
             } else if (field.getAnnotation(Association.class) != null) {
-                properties.add(new Property(name, Names.fkColumn(name), true, fieldTypeName));
-                metadataProperties.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.MANY_TO_ONE,
-                        Names.fkColumn(name), null, null, null));
-            } else if (valueObject != null) {
-                ElementCollection collection = buildCollection(table, name, valueObject);
+                // External aggregate reference: fk-only, never hydrated.
+                properties.add(new Property(name, Names.fkColumn(name), true, typeNameOfString(fieldType)));
+                TypeElement target = declaredElement(field);
+                attrs.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.ASSOCIATION,
+                        Names.fkColumn(name),
+                        target != null ? target.getQualifiedName().toString() : null, null, null));
+
+            } else if (embeddedTarget(field) != null) {
+                // Direct value object: flatten leaves into this table.
+                TypeElement vo = embeddedTarget(field);
+                Descriptor embedded = descriptorFor(vo);
+                properties.add(new Property(name, Names.columnName(name), false, typeNameOfString(fieldType)));
+                attrs.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.EMBEDDED,
+                        Names.columnName(name), vo.getQualifiedName().toString(), null, embedded));
+
+            } else if (isEntityType(declaredElement(field))) {
+                // In-aggregate many-to-one / one-to-one: fk column, hydrated on read (Plan C).
+                TypeElement target = declaredElement(field);
+                properties.add(new Property(name, Names.fkColumn(name), true, typeNameOfString(fieldType)));
+                attrs.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.MANY_TO_ONE,
+                        Names.fkColumn(name), target.getQualifiedName().toString(), null, null));
+
+            } else if (valueObjectElementType(field) != null) {
+                // List<@ValueObject>: element collection in a child table.
+                TypeElement vo = valueObjectElementType(field);
+                ElementCollection collection = buildCollection(table, name, vo);
                 collections.add(collection);
-                metadataProperties.add(new EntityDescriptor.Attribute(name, fieldType,
-                        EntityDescriptor.Kind.ELEMENT_COLLECTION, null,
-                        valueObject.getQualifiedName().toString(), null, null));
+                attrs.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.ELEMENT_COLLECTION,
+                        null, vo.getQualifiedName().toString(), null, null));
+
+            } else if (entityTypeElement(field) != null) {
+                // List<@Entity>: one-to-many across the child's own table. The inverse is resolved
+                // in the second pass below, so the placeholder inverse stays null here.
+                TypeElement child = entityTypeElement(field);
+                attrs.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.ONE_TO_MANY,
+                        null, child.getQualifiedName().toString(), null, null));
+
             } else {
-                properties.add(new Property(name, Names.columnName(name), false, fieldTypeName));
-                metadataProperties.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.SCALAR,
+                properties.add(new Property(name, Names.columnName(name), false, typeNameOfString(fieldType)));
+                attrs.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.SCALAR,
                         Names.columnName(name), null, null, null));
             }
         }
-        if (id == null) {
+        if (!valueObject && id == null) {
             id = new Property("id", Names.columnName("id"), false, ClassName.get(Long.class));
-            metadataId = new EntityDescriptor.Attribute("id", "java.lang.Long", EntityDescriptor.Kind.ID,
+            idAttr = new EntityDescriptor.Attribute("id", "java.lang.Long", EntityDescriptor.Kind.ID,
                     Names.columnName("id"), null, null, null);
         }
-        EntityDescriptor metadata = new Descriptor(typeNameString, table, metadataId, List.copyOf(metadataProperties));
+        // Second pass: resolve ONE_TO_MANY inverses now that all parent attributes are known.
+        Descriptor self = new Descriptor(typeNameString, table, idAttr, attrs);
+        List<EntityDescriptor.Attribute> resolved = new ArrayList<>(attrs.size());
+        for (EntityDescriptor.Attribute a : attrs) {
+            if (a.kind() == EntityDescriptor.Kind.ONE_TO_MANY && a.targetTypeName() != null) {
+                TypeElement childEl = elements.getTypeElement(a.targetTypeName());
+                Descriptor child = childEl != null ? descriptorFor(childEl) : null;
+                String inverse = child != null ? findInverseName(self, child) : null;
+                resolved.add(new EntityDescriptor.Attribute(a.name(), a.typeName(), a.kind(), a.column(),
+                        a.targetTypeName(), inverse, a.embedded()));
+            } else {
+                resolved.add(a);
+            }
+        }
+        EntityDescriptor metadata = new Descriptor(typeNameString, table, idAttr, resolved);
         return new EntityModel(typeMirror, typeName, id, properties, collections, metadata);
     }
 
@@ -1241,20 +1290,100 @@ public class RepositoryProcessor extends AbstractProcessor {
         return new Descriptor(valueObject.getQualifiedName().toString(), null, null, List.copyOf(attributes));
     }
 
-    private TypeElement valueObjectElement(VariableElement field) {
-        if (field.getAnnotation(Association.class) != null) {
-            return null;
-        }
+    private boolean isEntityType(TypeElement te) {
+        return te != null
+                && (te.getAnnotation(io.github.fludakit.data.annotation.Entity.class) != null
+                 || te.getAnnotation(io.github.fludakit.data.annotation.AggregateRoot.class) != null);
+    }
+
+    private boolean isValueObjectType(TypeElement te) {
+        return te != null && te.getAnnotation(io.github.fludakit.data.annotation.ValueObject.class) != null;
+    }
+
+    /** The TypeElement of a direct field whose type is a value object (for EMBEDDED), else null. */
+    private TypeElement embeddedTarget(VariableElement field) {
+        if (field.getAnnotation(Association.class) != null) return null;
         TypeMirror type = field.asType();
-        if (!(type instanceof DeclaredType declared) || declared.getTypeArguments().size() != 1
+        if (!(type instanceof DeclaredType declared)) return null;
+        if (!(declared.asElement() instanceof TypeElement te)) return null;
+        return isValueObjectType(te) ? te : null;
+    }
+
+    /** The element TypeElement of a List&lt;E&gt; field when E is an entity (for ONE_TO_MANY), else null. */
+    private TypeElement entityTypeElement(VariableElement field) {
+        if (field.getAnnotation(Association.class) != null) return null;
+        if (!(field.asType() instanceof DeclaredType declared) || declared.getTypeArguments().size() != 1
                 || !"java.util.List".equals(types.erasure(declared).toString())) {
             return null;
         }
         TypeMirror argument = declared.getTypeArguments().get(0);
-        if (!(argument instanceof DeclaredType element) || !(element.asElement() instanceof TypeElement typeElement)) {
+        if (!(argument instanceof DeclaredType element) || !(element.asElement() instanceof TypeElement te)) {
             return null;
         }
-        return typeElement.getAnnotation(ValueObject.class) != null ? typeElement : null;
+        return isEntityType(te) ? te : null;
+    }
+
+    /** The element TypeElement of a List&lt;E&gt; field when E is a value object (for ELEMENT_COLLECTION). */
+    private TypeElement valueObjectElementType(VariableElement field) {
+        if (field.getAnnotation(Association.class) != null) return null;
+        if (!(field.asType() instanceof DeclaredType declared) || declared.getTypeArguments().size() != 1
+                || !"java.util.List".equals(types.erasure(declared).toString())) {
+            return null;
+        }
+        TypeMirror argument = declared.getTypeArguments().get(0);
+        if (!(argument instanceof DeclaredType element) || !(element.asElement() instanceof TypeElement te)) {
+            return null;
+        }
+        return isValueObjectType(te) ? te : null;
+    }
+
+    /** The declared TypeElement of a (non-collection) field, or null. */
+    private TypeElement declaredElement(VariableElement field) {
+        if (field.asType() instanceof DeclaredType declared
+                && declared.asElement() instanceof TypeElement te) {
+            return te;
+        }
+        return null;
+    }
+
+    /**
+     * Builds the compile-time descriptor for any entity or value-object element, reusing
+     * {@link #buildEntity}'s classification without generating sources. Memoized, and cycle-bounded:
+     * a descriptor already being built returns a shallow attribute-less placeholder (only
+     * {@code targetTypeName} is consumed for a back-reference).
+     */
+    private Descriptor descriptorFor(TypeElement te) {
+        String fqn = te.getQualifiedName().toString();
+        Descriptor cached = descriptorCache.get(fqn);
+        if (cached != null) return cached;
+        if (inProgress.contains(fqn)) {
+            // Cycle: return a shallow, attribute-less placeholder; only targetTypeName is consumed
+            // for a back-reference, and findInverseName tolerates an empty attribute list.
+            return new Descriptor(fqn, Names.tableName(te.getSimpleName().toString()), null, List.of());
+        }
+        inProgress.add(fqn);
+        try {
+            Descriptor d = (Descriptor) buildEntity(te).metadata();
+            descriptorCache.put(fqn, d);
+            return d;
+        } finally {
+            inProgress.remove(fqn);
+        }
+    }
+
+    /**
+     * Scans the child's attributes for a back-reference to the parent; a cyclic child whose descriptor
+     * is the shallow placeholder yields {@code null}, which Plan C's hydration resolves instead from
+     * the child's own generated metadata. An unresolved inverse is treated as read-only/unmapped.
+     */
+    private String findInverseName(Descriptor parent, Descriptor child) {
+        for (EntityDescriptor.Attribute a : child.attributes()) {
+            if ((a.kind() == EntityDescriptor.Kind.MANY_TO_ONE || a.kind() == EntityDescriptor.Kind.ASSOCIATION)
+                    && parent.typeName().equals(a.targetTypeName())) {
+                return a.name();
+            }
+        }
+        return null; // unresolved inverse: hydration (Plan C) will treat this as read-only/unmapped
     }
 
     // --------------------------------------------------------------- nested types

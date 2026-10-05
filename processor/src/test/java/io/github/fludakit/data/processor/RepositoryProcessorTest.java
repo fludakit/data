@@ -314,6 +314,62 @@ class RepositoryProcessorTest {
                 "findById must use the mapper:" + System.lineSeparator() + impl);
     }
 
+    @Test
+    void associationFieldContributesFkColumnAndIsNotEmbedded() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/cls"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-cls"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-cls"));
+
+        Files.writeString(sourceDir.resolve("Author.java"), """
+                package cls;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Author {
+                    @Identity Long id;
+                    String name;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getName() { return name; }
+                    public void setName(String name) { this.name = name; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Book.java"), """
+                package cls;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Association;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Book {
+                    @Identity Long id;
+                    String title;
+                    @Association Author author;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getTitle() { return title; }
+                    public void setTitle(String title) { this.title = title; }
+                    public Author getAuthor() { return author; }
+                    public void setAuthor(Author author) { this.author = author; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Books.java"), """
+                package cls;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Books extends CrudRepository<Book, Long> { }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Author.java", "Book.java", "Books.java");
+
+        // The @Association field must appear as an fk column (author_id), never as flattened embedded leaves.
+        String impl = Files.readString(generatedDir.resolve("cls/BooksImpl.java"));
+        assertTrue(impl.contains("\"author_id\""),
+                "association must contribute its fk column:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("\"title\""),
+                "scalar column must be present:" + System.lineSeparator() + impl);
+    }
+
     private void compile(Path sourceDir, Path classesDir, Path generatedDir, String... fileNames) throws Exception {
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         assertNotNull(compiler, "A system Java compiler is required to run this test");

@@ -700,6 +700,115 @@ class RepositoryProcessorTest {
     }
 
     @Test
+    void elementCollectionIsHydratedOnReadAndReplacedOnUpdate() throws Exception {
+        // Reuses the voca element-collection shape (@Association child + primitive scalar) so the
+        // hydration SELECT list is guarded by the same column classification the insert test pins.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/hyd"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-hyd"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-hyd"));
+
+        Files.writeString(sourceDir.resolve("Product.java"), """
+                package hyd;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Product {
+                    @Identity Long id;
+                    String name;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getName() { return name; }
+                    public void setName(String name) { this.name = name; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Line.java"), """
+                package hyd;
+                import io.github.fludakit.data.annotation.Association;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class Line {
+                    @Association Product product;
+                    int quantity;
+                    public Product getProduct() { return product; }
+                    public void setProduct(Product product) { this.product = product; }
+                    public int getQuantity() { return quantity; }
+                    public void setQuantity(int quantity) { this.quantity = quantity; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Basket.java"), """
+                package hyd;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                import java.util.ArrayList;
+                import java.util.List;
+                @AggregateRoot
+                public class Basket {
+                    @Identity Long id;
+                    List<Line> lines = new ArrayList<>();
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public List<Line> getLines() { return lines; }
+                    public void setLines(List<Line> lines) { this.lines = lines; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Baskets.java"), """
+                package hyd;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Baskets extends CrudRepository<Basket, Long> { }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Product.java", "Line.java", "Basket.java", "Baskets.java");
+
+        String impl = Files.readString(generatedDir.resolve("hyd/BasketsImpl.java")).replace("\\\"", "\"");
+
+        // A per-collection loader plus its SELECT constant and a delete constant for replace-all/cascade.
+        assertTrue(impl.contains("SQL_SELECT_LINES"), "missing child SELECT constant:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("IN ("), "loader must build a runtime IN (:key0, ...) list:" + System.lineSeparator() + impl);
+        // NOTE (ruling #7): JavaPoet's skipJavaLangImports still IMPORTS java.util.Collection, so the
+        // generated loader/umbrella parameter renders as the simple `Collection<Basket>` (an
+        // `import java.util.Collection;` is added). The normative source of truth is the clean generated
+        // code; the string assertion is corrected here to match the real form. The raw-string expression
+        // passed to the umbrella ($L, not $T) stays fully-qualified `java.util.List.of(e)`, so its
+        // assertion below is left verbatim.
+        assertTrue(impl.contains("private void hydrateLines(Collection<Basket> parents)"),
+                "missing per-collection hydration loader:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("new LineRowMapper().mapRow(rs, rowNum)"),
+                "loader must pair rows through the generated VO row mapper:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("parent.setLines("), "loader must group children onto each parent:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("SQL_DELETE_LINES"), "missing child DELETE constant:" + System.lineSeparator() + impl);
+
+        // The umbrella is emitted once and reached from every read shape.
+        assertTrue(impl.contains("private void hydrateAll(Collection<Basket> parents)"),
+                "missing umbrella hydrateAll:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("hydrateLines(parents)"),
+                "umbrella must call each loader:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("found.ifPresent(e -> hydrateAll(java.util.List.of(e)))"),
+                "findById must hydrate through the umbrella:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("hydrateAll(content)"),
+                "paged read must hydrate the materialized content list:" + System.lineSeparator() + impl);
+
+        // Replace-all update: children deleted by parent fk (child param stays COLUMN-named), then re-inserted.
+        assertTrue(impl.contains(".param(\"basket_id\", entity.getId())"),
+                "update must delete children by the parent fk before re-inserting:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("DELETE FROM \"basket_lines\" WHERE \"basket_id\" = :basket_id"),
+                "delete-cascade constant:" + System.lineSeparator() + impl);
+
+        // The generated VO row mapper reads the primitive leaf with the wasNull guard and never touches
+        // the @Association target (Decision 8: many-to-one/association children stay null in this task).
+        String voMapper = Files.readString(generatedDir.resolve("hyd/LineRowMapper.java"));
+        assertTrue(voMapper.contains("rs.getInt(LineMetadata.QUANTITY)"),
+                "primitive leaf must use rs.getInt(...) with the VO's own metadata:" + System.lineSeparator() + voMapper);
+        assertTrue(voMapper.contains("if (rs.wasNull())"),
+                "primitive read must guard wasNull:" + System.lineSeparator() + voMapper);
+        assertTrue(!voMapper.contains("getProduct"),
+                "@Association child target is never hydrated in Task 3:" + System.lineSeparator() + voMapper);
+
+        assertTrue(!impl.contains("java.lang.reflect"), "generated code must stay reflection-free:" + System.lineSeparator() + impl);
+    }
+
+    @Test
     void bareEntityFieldAndEntityListClassifyAsManyToOneAndOneToManyWithResolvedInverse() throws Exception {
         Path sourceDir = Files.createDirectories(workspace.resolve("src/rel"));
         Path classesDir = Files.createDirectories(workspace.resolve("classes-rel"));

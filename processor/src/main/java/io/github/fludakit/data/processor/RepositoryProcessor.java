@@ -145,6 +145,14 @@ public class RepositoryProcessor extends AbstractProcessor {
     /** FQNs whose embedded model is currently on the build stack; the cycle guard for {@link #voModel}. */
     private final Set<String> voModelsInProgress = new HashSet<>();
 
+    /**
+     * Value-object FQN → generated {@code <VO>RowMapper} type, deduped across processing rounds.
+     * Populated for {@code List<@ValueObject>} element-collection children (Task 3) so a VO reused by
+     * several collections/repositories is mapped by one shared mapper; Task 4 reuses the same cache
+     * for many-to-one/one-to-many child hydration.
+     */
+    private final Map<String, ClassName> voRowMappers = new LinkedHashMap<>();
+
     @Override
     public SourceVersion getSupportedSourceVersion() {
         return SourceVersion.latestSupported();
@@ -198,6 +206,22 @@ public class RepositoryProcessor extends AbstractProcessor {
         // EMBEDDED value objects carry descriptor metadata even when the owner's mapper gate skips
         // them; the generated <VO>Metadata classes are what the owner's attributes() reference.
         generateEmbeddedDescriptors(entity.metadata());
+
+        // Element-collection hydration (Task 3): resolve a generated <VO>RowMapper for each
+        // List<@ValueObject> child. A child whose VO fails the mapper gate is skipped — hydration
+        // then degrades to the parent's default (empty) field value rather than failing the whole
+        // repository, matching the "gate fails closed" spirit of the row-mapper gate (Decision 7).
+        List<ElementCollection> hydratedCollections = new ArrayList<>();
+        Map<String, ClassName> collectionMappers = new LinkedHashMap<>();
+        for (ElementCollection c : entity.collections()) {
+            ClassName voMapper = voRowMapperFor(c, entityElement);
+            if (voMapper != null) {
+                hydratedCollections.add(c);
+                collectionMappers.put(c.field(), voMapper);
+            }
+        }
+        boolean hydrate = mapperType != null && !hydratedCollections.isEmpty();
+
         DeclaredType repositoryType = (DeclaredType) repository.asType();
         boolean crud = extendsCrud(repository, new HashSet<>());
         String packageName = elements.getPackageOf(repository).getQualifiedName().toString();
@@ -220,7 +244,16 @@ public class RepositoryProcessor extends AbstractProcessor {
             if (method.getSimpleName().contentEquals("findAll") && method.getParameters().size() == 2) {
                 paginatedFindAll = true;
             }
-            methods.add(generateMethod(method, repositoryType, entity, crud, constants, mapperType));
+            methods.add(generateMethod(method, repositoryType, entity, crud, constants, mapperType, hydrate,
+                    hydratedCollections));
+        }
+        // Registered before the field loop below so the loaders' SELECT constants render as fields.
+        if (hydrate) {
+            // One umbrella reached from every read shape, delegating to a loader per collection field.
+            methods.add(hydrationUmbrella(entity, hydratedCollections));
+            for (ElementCollection c : hydratedCollections) {
+                methods.add(appendCollectionHydration(constants, entity, c, collectionMappers.get(c.field())));
+            }
         }
 
         TypeSpec.Builder classBuilder = TypeSpec.classBuilder(implementationName)
@@ -494,6 +527,91 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /**
+     * Resolves (generating on first use) the {@code <VO>RowMapper} for an element-collection child VO.
+     * The VO's own descriptor metadata is generated (and its transitive embedded tree) so the mapper's
+     * leaf reads reference {@code <VO>Metadata} constants. A VO that fails the row-mapper gate yields
+     * {@code null}: its collection loader is skipped and a NOTE is recorded, so hydration degrades to
+     * the parent's default field value rather than failing the whole repository (Decision 7 spirit).
+     */
+    private ClassName voRowMapperFor(ElementCollection collection, Element origin) {
+        String voFqn = collection.descriptor().typeName();
+        ClassName cached = voRowMappers.get(voFqn);
+        if (cached != null) {
+            return cached;
+        }
+        TypeElement voElement = elements.getTypeElement(voFqn);
+        if (voElement == null) {
+            processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
+                    "Cannot resolve element-collection value object '" + voFqn
+                            + "'; its children will not be hydrated.", origin);
+            return null;
+        }
+        EntityModel voModel = buildEntity(voElement);
+        if (!canGenerateRowMapper(voModel)) {
+            processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
+                    "Value object '" + voFqn + "' is not reflection-free mappable; its element collection"
+                            + " children will not be hydrated.", origin);
+            return null;
+        }
+        if (!metadataTypes.containsKey(voFqn)) {
+            generateEmbeddedDescriptors(voModel.metadata());
+            metadataTypes.put(voFqn, generateMetadata(voElement, voModel));
+        }
+        ClassName voMetadata = metadataTypes.get(voFqn);
+        ClassName mapper = generateValueObjectRowMapper(voElement, voModel, voMetadata);
+        voRowMappers.put(voFqn, mapper);
+        return mapper;
+    }
+
+    /**
+     * Emits {@code <VO>RowMapper implements RowMapper<VO>} for a value object read from an
+     * element-collection child table. It is {@link #generateRowMapper} without the identifier step: a
+     * {@code @ValueObject} has no id and the child table's physical columns ARE the VO's (flattened)
+     * leaf columns, so the standalone mapper reads UNprefixed labels from the VO's OWN metadata. FK-only
+     * children ({@code ASSOCIATION}/{@code MANY_TO_ONE}) are skipped — never hydrated in this task
+     * (Decision 8) — and {@code EMBEDDED} children are rebuilt leaf-by-leaf via
+     * {@link #appendEmbeddedRead}.
+     */
+    private ClassName generateValueObjectRowMapper(TypeElement voElement, EntityModel voModel,
+                                                  ClassName voMetadataType) {
+        String packageName = elements.getPackageOf(voElement).getQualifiedName().toString();
+        String simpleName = voElement.getSimpleName() + "RowMapper";
+        TypeName voType = voModel.typeName();
+        ClassName rowMapperInterface = ClassName.get("io.github.fludakit.jdbc", "RowMapper");
+        String voName = voElement.getSimpleName().toString();
+
+        MethodSpec.Builder mapRow = MethodSpec.methodBuilder("mapRow")
+                .addModifiers(Modifier.PUBLIC)
+                .addAnnotation(Override.class)
+                .returns(voType)
+                .addParameter(ClassName.get("java.sql", "ResultSet"), "rs")
+                .addParameter(int.class, "rowNum")
+                .addException(ClassName.get("java.sql", "SQLException"))
+                .addStatement("$T entity = new $T()", voType, voType);
+
+        for (Property p : voModel.properties()) {
+            if (p.association() || p.kind() == EntityDescriptor.Kind.MANY_TO_ONE) {
+                continue; // FK-only reference; left null (loaders fill it in Task 4)
+            }
+            if (p.kind() == EntityDescriptor.Kind.EMBEDDED) {
+                appendEmbeddedRead(mapRow, voMetadataType, p, voName);
+                continue;
+            }
+            appendPropertyRead(mapRow, p.type(), voMetadataType, p.name(), p.column(), voName);
+        }
+        mapRow.addStatement("return entity");
+
+        TypeSpec type = TypeSpec.classBuilder(simpleName)
+                .addModifiers(Modifier.PUBLIC, Modifier.FINAL)
+                .addSuperinterface(ParameterizedTypeName.get(rowMapperInterface, voType))
+                .addMethod(mapRow.build())
+                .build();
+        writeSourceFile(packageName + "." + simpleName, voElement,
+                JavaFile.builder(packageName, type).skipJavaLangImports(true).build());
+        return ClassName.get(packageName, simpleName);
+    }
+
+    /**
      * Emits the assignment of one mapped column into the freshly constructed {@code entity}. Boxed
      * and reference columns are read via {@code getObject} and assigned directly, since a SQL NULL
      * is a legal value for them. A primitive column cannot hold NULL, so the value is read into a
@@ -627,7 +745,8 @@ public class RepositoryProcessor extends AbstractProcessor {
     // ------------------------------------------------------------- method dispatch
 
     private MethodSpec generateMethod(ExecutableElement method, DeclaredType repositoryType, EntityModel entity,
-                                      boolean crud, Map<String, String> constants, ClassName mapperType) {
+                                      boolean crud, Map<String, String> constants, ClassName mapperType,
+                                      boolean hydrate, List<ElementCollection> hydrated) {
         ExecutableType resolved = (ExecutableType) types.asMemberOf(repositoryType, method);
         TypeMirror returnMirror = resolved.getReturnType();
         List<? extends TypeMirror> parameterTypes = resolved.getParameterTypes();
@@ -651,7 +770,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                 return builder.build();
             }
             if (name.equals("save")) {
-                emitSave(builder, value, entity, crud, constants);
+                emitSave(builder, value, entity, crud, constants, hydrated);
                 return builder.build();
             }
             if (name.equals("insert") && crud) {
@@ -660,7 +779,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                 return builder.build();
             }
             if (name.equals("update") && crud) {
-                appendUpdateStatements(builder, value, entity, constants);
+                appendUpdateStatements(builder, value, entity, constants, hydrated);
                 builder.addStatement("return $L", value);
                 return builder.build();
             }
@@ -685,19 +804,19 @@ public class RepositoryProcessor extends AbstractProcessor {
             return builder.build();
         }
         if (arity == 1 && name.equals("findById")) {
-            emitFindById(builder, parameterName(parameters.get(0), "id"), entity, constants, mapperType);
+            emitFindById(builder, parameterName(parameters.get(0), "id"), entity, constants, mapperType, hydrate);
             return builder.build();
         }
         if (arity == 1 && name.equals("deleteById")) {
-            emitDeleteById(builder, parameterName(parameters.get(0), "id"), entity, constants);
+            emitDeleteById(builder, parameterName(parameters.get(0), "id"), entity, constants, hydrated);
             return builder.build();
         }
         if (name.equals("findAll") && arity == 0) {
-            emitFindAll(builder, entity, constants, mapperType);
+            emitFindAll(builder, entity, constants, mapperType, hydrate);
             return builder.build();
         }
         if (name.equals("findAll") && arity == 2) {
-            emitFindAllPage(builder, parameters, entity, constants, mapperType);
+            emitFindAllPage(builder, parameters, entity, constants, mapperType, hydrate);
             return builder.build();
         }
 
@@ -709,12 +828,12 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
         if (arity == 1 && method.getAnnotation(Update.class) != null) {
             String value = parameterName(parameters.get(0), "entity");
-            appendUpdateStatements(builder, value, entity, constants);
+            appendUpdateStatements(builder, value, entity, constants, hydrated);
             builder.addStatement("return $L", value);
             return builder.build();
         }
         if (arity == 1 && method.getAnnotation(Save.class) != null) {
-            emitSave(builder, parameterName(parameters.get(0), "entity"), entity, crud, constants);
+            emitSave(builder, parameterName(parameters.get(0), "entity"), entity, crud, constants, hydrated);
             return builder.build();
         }
         if (arity == 1 && method.getAnnotation(Delete.class) != null) {
@@ -723,14 +842,14 @@ public class RepositoryProcessor extends AbstractProcessor {
             return builder.build();
         }
 
-        emitFind(builder, method, resolved, entity, constants, mapperType);
+        emitFind(builder, method, resolved, entity, constants, mapperType, hydrate);
         return builder.build();
     }
 
     // ------------------------------------------------------------------- CRUD writes
 
     private void emitSave(MethodSpec.Builder builder, String value, EntityModel entity, boolean crud,
-                          Map<String, String> constants) {
+                          Map<String, String> constants, List<ElementCollection> hydrated) {
         String idAccess = value + "." + getter(entity.id().name()) + "()";
         if (crud) {
             builder.addStatement("return $L == null ? insert($L) : update($L)", idAccess, value, value);
@@ -740,7 +859,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         appendInsertStatements(builder, value, entity, constants);
         builder.addStatement("return $L", value);
         builder.nextControlFlow("else");
-        appendUpdateStatements(builder, value, entity, constants);
+        appendUpdateStatements(builder, value, entity, constants, hydrated);
         builder.addStatement("return $L", value);
         builder.endControlFlow();
     }
@@ -769,11 +888,12 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     private void appendElementCollectionInsert(MethodSpec.Builder builder, String value, EntityModel entity,
                                                ElementCollection collection, Map<String, String> constants) {
-        List<String> columns = new ArrayList<>();
-        columns.add(collection.parentFk());
-        for (Property property : collection.properties()) {
-            columns.add(property.column());
-        }
+        // M-1: the child-table column list must iterate the SAME flattened descriptor columns the
+        // params below bind. The old list walked {@code collection.properties()} while the params
+        // walked {@code descriptor().columns()}; the two diverge for a collection VO that embeds
+        // another VO (one column per property vs one per flattened leaf). Iterating the descriptor
+        // here keeps columns and params aligned. Byte-stable for a flat VO (no nested embedded).
+        List<String> columns = childColumnNames(collection);
         StringBuilder sql = new StringBuilder("INSERT INTO ").append(Names.quote(collection.childTable())).append(" (");
         for (int i = 0; i < columns.size(); i++) {
             if (i > 0) sql.append(", ");
@@ -793,7 +913,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         CodeBlock.Builder insert = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
         insert.add(".param($S, $L.$L())", collection.parentFk(), value, getter(entity.id().name()));
         // Child-table placeholders stay COLUMN-named: the hand-rendered INSERT above lists the
-        // property columns (:product_id, :quantity), so the params must match them. The value still
+        // descriptor columns (:product_id, :quantity), so the params must match them. The value still
         // walks the descriptor path through boundValue, which makes fk-bearing children bind their
         // id exactly like the previous property-driven loop did.
         for (EntityDescriptor.ColumnRef ref : collection.descriptor().columns()) {
@@ -805,8 +925,48 @@ public class RepositoryProcessor extends AbstractProcessor {
         builder.endControlFlow();
     }
 
+    /**
+     * The child-table's physical columns in write order: the parent FK first, then one entry per
+     * flattened descriptor column — exactly the names the element-collection INSERT params bind
+     * (M-1). A flat VO yields the same list as its property columns did before the fix.
+     */
+    private List<String> childColumnNames(ElementCollection collection) {
+        List<String> columns = new ArrayList<>();
+        columns.add(collection.parentFk());
+        for (EntityDescriptor.ColumnRef ref : collection.descriptor().columns()) {
+            columns.add(ref.column());
+        }
+        return columns;
+    }
+
+    /**
+     * The child-table column list for the hydration SELECT: the parent FK (the grouping key) followed
+     * by every descriptor column the generated VO row mapper actually reads back. FK-only columns
+     * ({@code ASSOCIATION}/{@code MANY_TO_ONE}) are excluded — they are never hydrated in this task
+     * (Decision 8) — as are relationship kinds with no physical column. This mirrors the mapper's own
+     * {@code properties()} loop, which skips the same kinds.
+     */
+    private String quotedColumnList(ElementCollection collection) {
+        StringBuilder sb = new StringBuilder(Names.quote(collection.parentFk()));
+        for (EntityDescriptor.Attribute a : collection.descriptor().attributes()) {
+            switch (a.kind()) {
+                case SCALAR, ID -> sb.append(", ").append(Names.quote(a.column()));
+                case EMBEDDED -> {
+                    if (a.embedded() == null) {
+                        continue;
+                    }
+                    for (EntityDescriptor.ColumnRef leaf : a.embedded().columns()) {
+                        sb.append(", ").append(Names.quote(a.column() + "_" + leaf.column()));
+                    }
+                }
+                default -> { } // ASSOCIATION / MANY_TO_ONE / ONE_TO_MANY / ELEMENT_COLLECTION: never read
+            }
+        }
+        return sb.toString();
+    }
+
     private void appendUpdateStatements(MethodSpec.Builder builder, String value, EntityModel entity,
-                                        Map<String, String> constants) {
+                                        Map<String, String> constants, List<ElementCollection> hydrated) {
         String constant = addConstant(constants, "SQL_UPDATE", new SqlBuilder().update(entity.metadata()));
 
         CodeBlock.Builder update = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
@@ -814,6 +974,24 @@ public class RepositoryProcessor extends AbstractProcessor {
         update.add(".param($S, $L.$L())", "id", value, getter(entity.id().name()));
         update.add(".update()");
         builder.addStatement("$L", update.build());
+
+        // Replace-all children (Task 3): delete the parent's whole child set, then re-insert it from
+        // the entity's current collection. The child DELETE keeps the COLUMN-named FK param; the
+        // INSERT is reused verbatim so reads and writes stay on the same columns as before.
+        for (ElementCollection collection : hydrated) {
+            appendElementCollectionDelete(builder, value, entity, collection, constants);
+            appendElementCollectionInsert(builder, value, entity, collection, constants);
+        }
+    }
+
+    /** Emits {@code jdbcClient.sql(SQL_DELETE_<FIELD>).param(<parentFk>, entity.getId()).update()}. */
+    private void appendElementCollectionDelete(MethodSpec.Builder builder, String value, EntityModel entity,
+                                               ElementCollection collection, Map<String, String> constants) {
+        String constant = addConstant(constants, "SQL_DELETE_" + upperSnake(collection.field()),
+                "DELETE FROM " + Names.quote(collection.childTable())
+                        + " WHERE " + Names.quote(collection.parentFk()) + " = :" + collection.parentFk());
+        builder.addStatement("jdbcClient.sql($L).param($S, $L.$L()).update()", constant,
+                collection.parentFk(), value, getter(entity.id().name()));
     }
 
     /**
@@ -883,30 +1061,55 @@ public class RepositoryProcessor extends AbstractProcessor {
     // ------------------------------------------------------------------- CRUD reads
 
     private void emitFindById(MethodSpec.Builder builder, String value, EntityModel entity,
-                              Map<String, String> constants, ClassName mapperType) {
+                              Map<String, String> constants, ClassName mapperType, boolean hydrate) {
         String constant = addConstant(constants, "SQL_FIND_BY_ID",
                 new SqlBuilder().selectBy(entity.metadata(),
                         List.of(Predicate.of(entity.id().name(), Operator.EQ, "id")), List.of(), 0, null));
-        builder.addStatement("return jdbcClient.sql($L).param($S, $L).query($L).optional()",
-                constant, "id", value, queryArg(entity, mapperType));
+        if (!hydrate) {
+            builder.addStatement("return jdbcClient.sql($L).param($S, $L).query($L).optional()",
+                    constant, "id", value, queryArg(entity, mapperType));
+            return;
+        }
+        builder.addStatement("$T<$T> found = jdbcClient.sql($L).param($S, $L).query($L).optional()",
+                java.util.Optional.class, entity.typeName(), constant, "id", value, queryArg(entity, mapperType));
+        builder.addStatement("found.ifPresent(e -> $L)", hydrationCall(entity, "java.util.List.of(e)"));
+        builder.addStatement("return found");
     }
 
     private void emitDeleteById(MethodSpec.Builder builder, String value, EntityModel entity,
-                                Map<String, String> constants) {
+                                Map<String, String> constants, List<ElementCollection> hydrated) {
+        // Children first, then the parent: the child table has no FK constraint to lean on, but the
+        // order keeps the child rows from outliving their parent even for a single autocommit delete.
+        for (ElementCollection collection : hydrated) {
+            String childConstant = addConstant(constants, "SQL_DELETE_" + upperSnake(collection.field()),
+                    "DELETE FROM " + Names.quote(collection.childTable())
+                            + " WHERE " + Names.quote(collection.parentFk()) + " = :" + collection.parentFk());
+            builder.addStatement("jdbcClient.sql($L).param($S, $L).update()", childConstant,
+                    collection.parentFk(), value);
+        }
         String constant = addConstant(constants, "SQL_DELETE", new SqlBuilder().deleteById(entity.metadata()));
         builder.addStatement("jdbcClient.sql($L).param($S, $L).update()", constant, "id", value);
     }
 
     private void emitFindAll(MethodSpec.Builder builder, EntityModel entity, Map<String, String> constants,
-                             ClassName mapperType) {
+                             ClassName mapperType, boolean hydrate) {
         String constant = addConstant(constants, "SQL_FIND_ALL",
                 new SqlBuilder().selectBy(entity.metadata(), List.of(), List.of(), 0, null));
-        builder.addStatement("return jdbcClient.sql($L).query($L).stream()",
-                constant, queryArg(entity, mapperType));
+        if (!hydrate) {
+            builder.addStatement("return jdbcClient.sql($L).query($L).stream()",
+                    constant, queryArg(entity, mapperType));
+            return;
+        }
+        // Materialize before streaming so the (lazy) stream's elements are all hydrated up front.
+        builder.addStatement("$T<$T> results = jdbcClient.sql($L).query($L).list()",
+                List.class, entity.typeName(), constant, queryArg(entity, mapperType));
+        builder.addStatement("$L", hydrationCall(entity, "results"));
+        builder.addStatement("return results.stream()");
     }
 
     private void emitFindAllPage(MethodSpec.Builder builder, List<? extends VariableElement> parameters,
-                                 EntityModel entity, Map<String, String> constants, ClassName mapperType) {
+                                 EntityModel entity, Map<String, String> constants, ClassName mapperType,
+                                 boolean hydrate) {
         String pageRequest = parameterName(parameters.get(0), "pageRequest");
         String sortBy = parameterName(parameters.get(1), "sortBy");
         String findConstant = addConstant(constants, "SQL_FIND_ALL",
@@ -937,6 +1140,9 @@ public class RepositoryProcessor extends AbstractProcessor {
                 queryArg(entity, mapperType));
         builder.addStatement("long total = $L.requestTotal() ? jdbcClient.sql($L).singleValue($T.class) : -1L",
                 pageRequest, countConstant, Long.class);
+        if (hydrate) {
+            builder.addStatement("$L", hydrationCall(entity, "content"));
+        }
         builder.addStatement("return new $T<>($L, content, total)", SimplePage.class, pageRequest);
         builder.endControlFlow();
 
@@ -955,12 +1161,16 @@ public class RepositoryProcessor extends AbstractProcessor {
         builder.beginControlFlow("for ($T e : content)", entity.typeName());
         builder.addStatement("cursors.add($T.cursorFor(props, e))", CursorSupport.class);
         builder.endControlFlow();
+        if (hydrate) {
+            builder.addStatement("$L", hydrationCall(entity, "content"));
+        }
         builder.addStatement("return new $T<>($L, content, cursors, -1L)", SimpleCursoredPage.class, pageRequest);
     }
 
     private void emitPaged(MethodSpec.Builder builder, EntityModel entity, String pageRequest, List<SortSpec> sorts,
                            String findConstant, Map<String, String> constants, List<Binding> bindings,
-                           List<? extends VariableElement> parameters, boolean cursored, ClassName mapperType) {
+                           List<? extends VariableElement> parameters, boolean cursored, ClassName mapperType,
+                           boolean hydrate) {
         List<SortSpec> effective = sorts.isEmpty()
                 ? List.of(SortSpec.of(entity.id().name(), true, false))
                 : sorts;
@@ -990,6 +1200,9 @@ public class RepositoryProcessor extends AbstractProcessor {
             builder.addStatement("$T<$T> content = $L", List.class, entity.typeName(), call.build());
             builder.addStatement("long total = $L.requestTotal() ? jdbcClient.sql($L).singleValue($T.class) : -1L",
                     pageRequest, countConstant, Long.class);
+            if (hydrate) {
+                builder.addStatement("$L", hydrationCall(entity, "content"));
+            }
             builder.addStatement("return new $T<>($L, content, total)", SimplePage.class, pageRequest);
             return;
         }
@@ -1007,6 +1220,9 @@ public class RepositoryProcessor extends AbstractProcessor {
         builder.beginControlFlow("for ($T e : content)", entity.typeName());
         builder.addStatement("cursors.add($T.cursorFor($L, e))", CursorSupport.class, propsExpr);
         builder.endControlFlow();
+        if (hydrate) {
+            builder.addStatement("$L", hydrationCall(entity, "content"));
+        }
         builder.addStatement("return new $T<>($L, content, cursors, -1L)", SimpleCursoredPage.class, pageRequest);
         builder.endControlFlow();
         builder.addStatement("$T where = $T.seekWhere($L, $L, cursor, $L.mode() == $T.Mode.CURSOR_NEXT)",
@@ -1026,6 +1242,9 @@ public class RepositoryProcessor extends AbstractProcessor {
         builder.beginControlFlow("for ($T e : content)", entity.typeName());
         builder.addStatement("cursors.add($T.cursorFor($L, e))", CursorSupport.class, propsExpr);
         builder.endControlFlow();
+        if (hydrate) {
+            builder.addStatement("$L", hydrationCall(entity, "content"));
+        }
         builder.addStatement("return new $T<>($L, content, cursors, -1L)", SimpleCursoredPage.class, pageRequest);
     }
 
@@ -1086,7 +1305,8 @@ public class RepositoryProcessor extends AbstractProcessor {
     // ------------------------------------------------------------- find / by-method-name
 
     private void emitFind(MethodSpec.Builder builder, ExecutableElement method, ExecutableType resolved,
-                          EntityModel entity, Map<String, String> constants, ClassName mapperType) {
+                          EntityModel entity, Map<String, String> constants, ClassName mapperType,
+                          boolean hydrate) {
         String name = method.getSimpleName().toString();
         ParsedMethodName parsed = tryParse(name);
         String action = parsed != null ? parsed.action() : "find";
@@ -1140,7 +1360,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
                     new SqlBuilder().selectBy(entity.metadata(), predicates, List.of(), 0, null));
             emitPaged(builder, entity, pageRequest, methodSorts, constant, constants, bindings, parameters,
-                    kind == Kind.CURSORED_PAGE, mapperType);
+                    kind == Kind.CURSORED_PAGE, mapperType, hydrate);
             return;
         }
         String sql = new SqlBuilder().selectBy(entity.metadata(), predicates, methodSorts,
@@ -1148,11 +1368,39 @@ public class RepositoryProcessor extends AbstractProcessor {
         String constant = addConstant(constants, "SQL_" + upperSnake(name), sql);
         CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
         appendBoundParameters(call, bindings, parameters);
-        terminal(call, kind, queryArg(entity, mapperType));
-        if (kind == Kind.VOID) {
-            builder.addStatement("$L", call.build());
-        } else {
-            builder.addStatement("return $L", call.build());
+        if (!hydrate || kind == Kind.VOID) {
+            terminal(call, kind, queryArg(entity, mapperType));
+            if (kind == Kind.VOID) {
+                builder.addStatement("$L", call.build());
+            } else {
+                builder.addStatement("return $L", call.build());
+            }
+            return;
+        }
+        // Hydrated read shapes: land the query result in a local, run the umbrella loader, then return.
+        switch (kind) {
+            case LIST, STREAM -> {
+                call.add(".query($L).list()", queryArg(entity, mapperType));
+                builder.addStatement("$T<$T> results = $L", List.class, entity.typeName(), call.build());
+                builder.addStatement("$L", hydrationCall(entity, "results"));
+                builder.addStatement(kind == Kind.STREAM ? "return results.stream()" : "return results");
+            }
+            case OPTIONAL -> {
+                call.add(".query($L).optional()", queryArg(entity, mapperType));
+                builder.addStatement("$T<$T> found = $L", java.util.Optional.class, entity.typeName(), call.build());
+                builder.addStatement("found.ifPresent(e -> $L)", hydrationCall(entity, "java.util.List.of(e)"));
+                builder.addStatement("return found");
+            }
+            case SINGLE -> {
+                call.add(".query($L).single()", queryArg(entity, mapperType));
+                builder.addStatement("$T found = $L", entity.typeName(), call.build());
+                builder.addStatement("$L", hydrationCall(entity, "java.util.List.of(found)"));
+                builder.addStatement("return found");
+            }
+            default -> {
+                terminal(call, kind, queryArg(entity, mapperType));
+                builder.addStatement("$L", call.build());
+            }
         }
     }
 
@@ -1246,6 +1494,101 @@ public class RepositoryProcessor extends AbstractProcessor {
         return mapperType != null
                 ? CodeBlock.of("new $T()", mapperType)
                 : CodeBlock.of("$T.class", entity.typeName());
+    }
+
+    // -------------------------------------------------------------- collection hydration (Task 3)
+
+    /**
+     * The single hydration hook every read shape calls once its parents are materialized: the umbrella
+     * {@code hydrateAll} dispatches to each collection loader. {@code parentsExpr} is either a
+     * materialized local (a list of parents) or an inline {@code java.util.List.of(...)} for the
+     * optional / single cases. Task 4 reuses this hook when many-to-one / one-to-many loaders join the
+     * umbrella, so the wrapping stays in one place.
+     */
+    private static CodeBlock hydrationCall(EntityModel entity, String parentsExpr) {
+        return CodeBlock.of("hydrateAll($L)", parentsExpr);
+    }
+
+    /**
+     * Emits the per-entity umbrella: {@code private void hydrateAll(Collection<Entity> parents)} calling
+     * each emitted {@code hydrate<Field>(parents)} loader. One method reached from every read shape keeps
+     * the wiring sites free of per-collection detail.
+     */
+    private MethodSpec hydrationUmbrella(EntityModel entity, List<ElementCollection> hydrated) {
+        MethodSpec.Builder umbrella = MethodSpec.methodBuilder("hydrateAll")
+                .addModifiers(Modifier.PRIVATE)
+                .addParameter(ParameterizedTypeName.get(ClassName.get(java.util.Collection.class),
+                        entity.typeName()), "parents");
+        for (ElementCollection c : hydrated) {
+            umbrella.addStatement("hydrate$L(parents)", capitalize(c.field()));
+        }
+        return umbrella.build();
+    }
+
+    /**
+     * Emits one collection loader: {@code private void hydrate<Field>(Collection<Entity> parents)}. It
+     * gathers the parents' ids, builds a {@code WHERE <fk> IN (:key0, ...)} at runtime (JdbcClient has
+     * no collection-parameter expansion), and reads each child row as an {@code Object[]} pair of
+     * {@code [<fk>, <VO>]} via an anonymous {@link io.github.fludakit.jdbc.RowMapper} — the row mapper is
+     * row-scoped and has no client access, so the pairing is assembled here — then groups the
+     * {@code <VO>}s by fk and assigns each parent's collection. FK-only child columns are never selected
+     * (see {@link #quotedColumnList}); the association targets stay {@code null} (Decision 8).
+     */
+    private MethodSpec appendCollectionHydration(Map<String, String> constants,
+                                           EntityModel entity, ElementCollection collection, ClassName voMapper) {
+        String selectConst = addConstant(constants, "SQL_SELECT_" + upperSnake(collection.field()),
+                "SELECT " + quotedColumnList(collection) + " FROM " + Names.quote(collection.childTable())
+                        + " WHERE " + Names.quote(collection.parentFk()) + " IN (");
+
+        ClassName sqlSpec = ClassName.get(JdbcClient.class).nestedClass("SqlSpec");
+        TypeName entityType = entity.typeName();
+        TypeName parentKeyList = ParameterizedTypeName.get(ClassName.get(java.util.List.class), ClassName.get(Long.class));
+        TypeName rowArrayType = ArrayTypeName.of(TypeName.OBJECT);
+        TypeName rowsType = ParameterizedTypeName.get(ClassName.get(java.util.List.class), rowArrayType);
+        TypeName childType = collection.valueObjectType();
+        TypeName groupedType = ParameterizedTypeName.get(ClassName.get(java.util.Map.class), ClassName.get(Long.class),
+                ParameterizedTypeName.get(ClassName.get(java.util.List.class), childType));
+
+        MethodSpec.Builder loader = MethodSpec.methodBuilder("hydrate" + capitalize(collection.field()))
+                .addModifiers(Modifier.PRIVATE)
+                .addParameter(ParameterizedTypeName.get(ClassName.get(java.util.Collection.class), entityType), "parents");
+        loader.beginControlFlow("if (parents.isEmpty())").addStatement("return").endControlFlow();
+        loader.addStatement("$T keys = new $T<>()", parentKeyList, java.util.ArrayList.class);
+        loader.beginControlFlow("for ($T parent : parents)", entityType);
+        loader.addStatement("keys.add(parent.$L())", getter(entity.id().name()));
+        loader.endControlFlow();
+
+        loader.addStatement("$T sql = new $T($L)", StringBuilder.class, StringBuilder.class, selectConst);
+        loader.beginControlFlow("for (int i = 0; i < keys.size(); i++)");
+        loader.beginControlFlow("if (i > 0)");
+        loader.addStatement("sql.append($S)", ", ");
+        loader.endControlFlow();
+        loader.addStatement("sql.append($S).append(i)", ":key");
+        loader.endControlFlow();
+        loader.addStatement("sql.append($S)", ")");
+        loader.addStatement("$T spec = jdbcClient.sql(sql.toString())", sqlSpec);
+        loader.beginControlFlow("for (int i = 0; i < keys.size(); i++)");
+        loader.addStatement("spec = spec.param($S + i, keys.get(i))", "key");
+        loader.endControlFlow();
+        loader.addStatement("$T rows = spec.query((rs, rowNum) -> new $T[] { rs.getObject($S, $T.class), "
+                        + "new $T().mapRow(rs, rowNum) }).list()",
+                rowsType, Object.class, collection.parentFk(), Long.class, voMapper);
+
+        loader.addStatement("$T grouped = new $T<>()", groupedType, java.util.HashMap.class);
+        loader.beginControlFlow("for ($T row : rows)", rowArrayType);
+        loader.addStatement("grouped.computeIfAbsent(($T) row[0], k -> new $T<>()).add(($T) row[1])",
+                Long.class, java.util.ArrayList.class, childType);
+        loader.endControlFlow();
+        loader.beginControlFlow("for ($T parent : parents)", entityType);
+        loader.addStatement("parent.$L(grouped.getOrDefault(parent.$L(), new $T<>()))",
+                setter(collection.field()), getter(entity.id().name()), java.util.ArrayList.class);
+        loader.endControlFlow();
+
+        return loader.build();
+    }
+
+    private static String capitalize(String field) {
+        return Character.toUpperCase(field.charAt(0)) + field.substring(1);
     }
 
     // ------------------------------------------------------------------ helpers

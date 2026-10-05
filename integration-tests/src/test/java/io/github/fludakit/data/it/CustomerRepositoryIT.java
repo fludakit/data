@@ -38,6 +38,20 @@ class CustomerRepositoryIT {
     }
 
     @Test
+    void rereadPopulatesAllScalarColumnsViaGeneratedMapper() {
+        Customer ana = customers.insert(customer("Ana", "ana@example.com"));
+        Product book = products.insert(product("DDD", new BigDecimal("39.99")));
+
+        Customer reloadedCustomer = customers.findById(ana.getId()).orElseThrow();
+        assertThat(reloadedCustomer.getName()).isEqualTo("Ana");
+        assertThat(reloadedCustomer.getEmail()).isEqualTo("ana@example.com");
+
+        Product reloadedProduct = products.findById(book.getId()).orElseThrow();
+        assertThat(reloadedProduct.getName()).isEqualTo("DDD");
+        assertThat(reloadedProduct.getPrice()).isEqualByComparingTo("39.99");
+    }
+
+    @Test
     void findAllPageHonoursOrder() {
         customers.insert(customer("Charlie", "charlie@example.com"));
         customers.insert(customer("Alice", "alice@example.com"));

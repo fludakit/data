@@ -52,6 +52,13 @@
     <build>
         <plugins>
             <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <configuration>
+                    <forceCreation>true</forceCreation>
+                </configuration>
+            </plugin>
+            <plugin>
                 <groupId>org.moditect</groupId>
                 <artifactId>moditect-maven-plugin</artifactId>
                 <executions>
@@ -62,6 +69,7 @@
                             <goal>add-module-info</goal>
                         </goals>
                         <configuration>
+                            <overwriteExistingFiles>true</overwriteExistingFiles>
                             <module>
                                 <moduleInfo>
                                     <name>fluda.data.core</name>

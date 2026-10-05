@@ -271,9 +271,11 @@ public class RepositoryProcessor extends AbstractProcessor {
      * (one per mapped property plus the table name) alongside the descriptor view — {@code INSTANCE},
      * {@code typeName()}, {@code tableName()}, {@code id()} and {@code attributes()}. A value
      * object (EMBEDDED target) has no table and no id, so its TABLE_NAME constant is omitted and the
-     * matching accessors return {@code null}. EMBEDDED properties contribute no column constant:
-     * their {@code column} slot holds a leaf prefix, so no physical column named after the property
-     * exists (the leaves are {@code <prefix>_<leaf>}, named by the nested value object's constants).
+     * matching accessors return {@code null}. An EMBEDDED property contributes no constant of its
+     * own — its {@code column} slot holds a leaf prefix, so no physical column named after the
+     * property exists — but each flattened leaf of its value-object descriptor gets a constant
+     * {@code <PREFIX>_<LEAF>} named {@code <prefix>_<leaf>} (Decision 3; nesting is resolved inside
+     * the descriptor, so one loop per embedded attribute suffices).
      */
     private ClassName generateMetadata(TypeElement entityElement, EntityModel entity) {
         String packageName = elements.getPackageOf(entityElement).getQualifiedName().toString();
@@ -304,6 +306,20 @@ public class RepositoryProcessor extends AbstractProcessor {
         for (Property p : entity.properties()) {
             if (!embeddedNames.contains(p.name())) {
                 builder.addField(stringConstant(constName(p.name()), p.column()));
+            }
+        }
+        // flattened embedded leaves: one constant per physical leaf column (Decision 3). The
+        // EMBEDDED property's own name stays skipped above — its column slot is only a leaf prefix —
+        // while each leaf of the (already-flattened) value-object descriptor surfaces as
+        // <prefix>_<leaf>, e.g. an embedded "point" yields POINT_LAT = "point_lat".
+        for (EntityDescriptor.Attribute a : entity.metadata().attributes()) {
+            if (a.kind() != EntityDescriptor.Kind.EMBEDDED || a.embedded() == null) {
+                continue;
+            }
+            for (EntityDescriptor.ColumnRef leaf : a.embedded().columns()) {
+                builder.addField(stringConstant(
+                        Names.toSnakeCase(a.name() + "_" + leaf.column()).toUpperCase(),
+                        a.column() + "_" + leaf.column()));
             }
         }
 
@@ -1443,8 +1459,12 @@ public class RepositoryProcessor extends AbstractProcessor {
             }
             String fieldType = field.asType().toString();
             if (field.getAnnotation(Association.class) != null) {
+                // Mirror buildEntity's ASSOCIATION branch: carry the target's FQN so Tasks 2-4
+                // (relationship hydration / embedded mapping) can resolve the association target.
+                TypeElement target = declaredElement(field);
                 attributes.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.ASSOCIATION,
-                        Names.fkColumn(name), null, null, null));
+                        Names.fkColumn(name), target != null ? target.getQualifiedName().toString() : null,
+                        null, null));
             } else {
                 attributes.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.SCALAR,
                         Names.columnName(name), null, null, null));
@@ -1472,8 +1492,9 @@ public class RepositoryProcessor extends AbstractProcessor {
         return isValueObjectType(te) ? te : null;
     }
 
-    /** The element TypeElement of a List&lt;E&gt; field when E is an entity (for ONE_TO_MANY), else null. */
-    private TypeElement entityTypeElement(VariableElement field) {
+    /** Element TypeElement of a {@code java.util.List<E>} field, when E matches; null otherwise. */
+    private TypeElement listElementType(VariableElement field,
+                                        java.util.function.Predicate<TypeElement> elementMatcher) {
         if (field.getAnnotation(Association.class) != null) return null;
         if (!(field.asType() instanceof DeclaredType declared) || declared.getTypeArguments().size() != 1
                 || !"java.util.List".equals(types.erasure(declared).toString())) {
@@ -1483,21 +1504,17 @@ public class RepositoryProcessor extends AbstractProcessor {
         if (!(argument instanceof DeclaredType element) || !(element.asElement() instanceof TypeElement te)) {
             return null;
         }
-        return isEntityType(te) ? te : null;
+        return elementMatcher.test(te) ? te : null;
+    }
+
+    /** The element TypeElement of a List&lt;E&gt; field when E is an entity (for ONE_TO_MANY), else null. */
+    private TypeElement entityTypeElement(VariableElement field) {
+        return listElementType(field, this::isEntityType);
     }
 
     /** The element TypeElement of a List&lt;E&gt; field when E is a value object (for ELEMENT_COLLECTION). */
     private TypeElement valueObjectElementType(VariableElement field) {
-        if (field.getAnnotation(Association.class) != null) return null;
-        if (!(field.asType() instanceof DeclaredType declared) || declared.getTypeArguments().size() != 1
-                || !"java.util.List".equals(types.erasure(declared).toString())) {
-            return null;
-        }
-        TypeMirror argument = declared.getTypeArguments().get(0);
-        if (!(argument instanceof DeclaredType element) || !(element.asElement() instanceof TypeElement te)) {
-            return null;
-        }
-        return isValueObjectType(te) ? te : null;
+        return listElementType(field, this::isValueObjectType);
     }
 
     /** The declared TypeElement of a (non-collection) field, or null. */

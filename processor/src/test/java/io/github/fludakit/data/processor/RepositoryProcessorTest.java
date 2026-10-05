@@ -838,10 +838,20 @@ class RepositoryProcessorTest {
         String vmd = Files.readString(generatedDir.resolve("phantom/AddressMetadata.java"));
         // M-5: the EMBEDDED property's column slot is a leaf PREFIX, not a physical column named
         // "point"; the public generated API must not advertise a phantom column constant for it.
-        assertTrue(!vmd.contains("public static final String POINT"),
+        // Pinned to the exact phantom constant so the flattened leaf constants (below) still pass:
+        // the intent is "no constant for the embedded property itself", not "no POINT* constant".
+        assertTrue(!vmd.contains("public static final String POINT = "),
                 "no phantom column constant for an EMBEDDED property:" + System.lineSeparator() + vmd);
         // Real (leaf-ward) constants remain.
         assertTrue(vmd.contains("public static final String CITY = \"city\";"), vmd);
+        // leaf constants exist and match the flattened columns descriptor rendering produced in Plan B:
+        // one constant per physical leaf column, named <leaf-prefix>_<leaf> from the VO's own
+        // EMBEDDED attribute (Decision 3; the owner-level chain e.g. ADDRESS_POINT_LAT rides the
+        // same loop, but the owner gate skips ContactMetadata here, so this fixture pins the VO level).
+        assertTrue(vmd.contains("public static final String POINT_LAT = \"point_lat\";"),
+                "flattened embedded leaf must get a column constant:" + System.lineSeparator() + vmd);
+        assertTrue(vmd.contains("public static final String POINT_LNG = \"point_lng\";"),
+                "flattened embedded leaf must get a column constant:" + System.lineSeparator() + vmd);
         assertTrue(vmd.contains("GeoPointMetadata.INSTANCE"),
                 "the EMBEDDED attribute must still reference the nested value object:" + System.lineSeparator() + vmd);
         Path inner = generatedDir.resolve("phantom/GeoPointMetadata.java");

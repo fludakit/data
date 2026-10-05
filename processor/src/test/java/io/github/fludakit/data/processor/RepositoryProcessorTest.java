@@ -12,6 +12,7 @@ import javax.tools.ToolProvider;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Locale;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -765,6 +766,12 @@ class RepositoryProcessorTest {
 
         // A per-collection loader plus its SELECT constant and a delete constant for replace-all/cascade.
         assertTrue(impl.contains("SQL_SELECT_LINES"), "missing child SELECT constant:" + System.lineSeparator() + impl);
+        // M-3: pin the emitted hydration SELECT constant value exactly (the ASSOCIATION `product` column is
+        // excluded, so the list is parentFk + the flattened SCALAR `quantity`), not just the loose `IN (` token.
+        // The file's `\"` escapes are normalised to `"` by the read above, so the expected literal uses plain quotes.
+        assertTrue(impl.contains("SQL_SELECT_LINES = \"SELECT \"basket_id\", \"quantity\" FROM "
+                        + "\"basket_lines\" WHERE \"basket_id\" IN (\";"),
+                "hydration SELECT constant value must be pinned:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("IN ("), "loader must build a runtime IN (:key0, ...) list:" + System.lineSeparator() + impl);
         // NOTE (ruling #7): JavaPoet's skipJavaLangImports still IMPORTS java.util.Collection, so the
         // generated loader/umbrella parameter renders as the simple `Collection<Basket>` (an
@@ -806,6 +813,170 @@ class RepositoryProcessorTest {
                 "@Association child target is never hydrated in Task 3:" + System.lineSeparator() + voMapper);
 
         assertTrue(!impl.contains("java.lang.reflect"), "generated code must stay reflection-free:" + System.lineSeparator() + impl);
+    }
+
+    @Test
+    void cascadeCoversGateFailedCollectionWithoutLoader() throws Exception {
+        // I-1: save() inserts child rows for EVERY collection (appendInsertStatements drives from
+        // entity.collections()), so update() and deleteById() must cascade the DELETE for every
+        // collection TOO — even one whose VO fails the row-mapper gate. Gate failure may only degrade
+        // HYDRATION (no loader, no umbrella), never cascade integrity, else the child rows orphan.
+        // A VO with a non-JDBC-safe enum property fails canGenerateRowMapper, exercising that path.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/casc"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-casc"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-casc"));
+
+        Files.writeString(sourceDir.resolve("Status.java"), """
+                package casc;
+                public enum Status { OPEN, CLOSED }
+                """);
+        Files.writeString(sourceDir.resolve("Line.java"), """
+                package casc;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class Line {
+                    int quantity;
+                    Status flag;
+                    public int getQuantity() { return quantity; }
+                    public void setQuantity(int quantity) { this.quantity = quantity; }
+                    public Status getFlag() { return flag; }
+                    public void setFlag(Status flag) { this.flag = flag; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Basket.java"), """
+                package casc;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                import java.util.ArrayList;
+                import java.util.List;
+                @AggregateRoot
+                public class Basket {
+                    @Identity Long id;
+                    List<Line> lines = new ArrayList<>();
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public List<Line> getLines() { return lines; }
+                    public void setLines(List<Line> lines) { this.lines = lines; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Baskets.java"), """
+                package casc;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Baskets extends CrudRepository<Basket, Long> { }
+                """);
+
+        List<Diagnostic<? extends JavaFileObject>> diagnostics = compileWithDiagnostics(
+                sourceDir, classesDir, generatedDir, "Status.java", "Line.java", "Basket.java", "Baskets.java");
+
+        String impl = Files.readString(generatedDir.resolve("casc/BasketsImpl.java")).replace("\\\"", "\"");
+
+        // Save still inserts child rows for the gate-failed collection (unchanged write side).
+        assertTrue(impl.contains("INSERT INTO \"basket_lines\""),
+                "child rows must be inserted for every collection:" + System.lineSeparator() + impl);
+
+        // I-1: the DELETE cascade (replace-all update + deleteById) is emitted for the gate-failed collection.
+        assertTrue(impl.contains("SQL_DELETE_LINES"),
+                "gate-failed collection must still get its child DELETE constant:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("DELETE FROM \"basket_lines\" WHERE \"basket_id\" = :basket_id"),
+                "gate-failed collection must still get the child DELETE SQL:" + System.lineSeparator() + impl);
+
+        // Hydration degrades: no loader SELECT, no hydrateLines loader, no umbrella, no VO row mapper.
+        assertTrue(!impl.contains("SQL_SELECT_LINES"),
+                "no hydration SELECT must be emitted for a gate-failed collection:" + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("hydrateLines"),
+                "no loader must be emitted for a gate-failed collection:" + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("hydrateAll"),
+                "no umbrella when nothing hydrates:" + System.lineSeparator() + impl);
+        assertTrue(Files.notExists(generatedDir.resolve("casc/LineRowMapper.java")),
+                "gate-failed VO must not get a row mapper");
+
+        // The gate skip is still recorded as a NOTE (Decision 7 spirit).
+        String notes = notesOf(diagnostics);
+        assertTrue(notes.contains("not reflection-free mappable"),
+                "gate-skip NOTE must be recorded:" + System.lineSeparator() + notes);
+    }
+
+    @Test
+    void collectionLoaderKeyFollowsIntegerIdType() throws Exception {
+        // I-2: the collection loader must derive the parent-key / child-FK type from the entity id,
+        // not hardcode Long. An Integer-id entity with an element collection would emit a loader using
+        // List<Long> keys / getObject(fk, Long.class) / (Long) row[0] / Map<Long, ...> and fail to
+        // compile in the consumer build. The compile step below is the RED proof at BASE (the generated
+        // impl does not compile); the assertions below are the structural lock on the derived key type.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/ihd"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-ihd"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-ihd"));
+
+        Files.writeString(sourceDir.resolve("Line.java"), """
+                package ihd;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class Line {
+                    int quantity;
+                    public int getQuantity() { return quantity; }
+                    public void setQuantity(int quantity) { this.quantity = quantity; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Basket.java"), """
+                package ihd;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                import java.util.ArrayList;
+                import java.util.List;
+                @AggregateRoot
+                public class Basket {
+                    @Identity Integer id;
+                    List<Line> lines = new ArrayList<>();
+                    public Integer getId() { return id; }
+                    public void setId(Integer id) { this.id = id; }
+                    public List<Line> getLines() { return lines; }
+                    public void setLines(List<Line> lines) { this.lines = lines; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Baskets.java"), """
+                package ihd;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Baskets extends CrudRepository<Basket, Integer> { }
+                """);
+
+        // A gate-passing VO so a loader IS emitted; the loader key type must follow the Integer id.
+        // processOnly: the whole impl still cannot compile for a NON-Long id, but NOT because of the
+        // loader — the out-of-scope insert coercion `setId(((Number) key).longValue())` (only valid for a
+        // Long id) is the sole blocker. We assert that boundary explicitly below.
+        TaskResult result = processOnly(sourceDir, classesDir, generatedDir, "Line.java", "Basket.java", "Baskets.java");
+
+        String impl = Files.readString(generatedDir.resolve("ihd/BasketsImpl.java"))
+                .replace("\\\"", "\"")
+                .replaceAll("\\s+", " ");
+
+        // The FK read, the grouping cast, the key list and the grouped map all carry Integer.
+        assertTrue(impl.contains("rs.getObject(\"basket_id\", Integer.class)"),
+                "loader must read the FK as the id type:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("(Integer) row[0]"),
+                "loader must cast the pairing key to the id type:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("List<Integer> keys"),
+                "loader key list must use the id type:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("Map<Integer, List<Line>> grouped"),
+                "loader grouped map must key on the id type:" + System.lineSeparator() + impl);
+        // And must NOT retain the hardcoded Long key.
+        assertTrue(!impl.contains("rs.getObject(\"basket_id\", Long.class)"),
+                "loader must not hardcode Long:" + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("List<Long> keys"),
+                "loader must not hardcode List<Long>:" + System.lineSeparator() + impl);
+
+        // The loader itself now compiles: every remaining javac ERROR is the known, out-of-scope
+        // insert-path `longValue()` coercion (long -> Integer), never a loader-line type mismatch.
+        List<Diagnostic<? extends JavaFileObject>> errors = errorsOf(result);
+        assertTrue(!errors.isEmpty(), "the insert coercion is expected to still fail a full compile");
+        for (Diagnostic<? extends JavaFileObject> e : errors) {
+            assertTrue(e.toString().contains("longValue"),
+                    "every residual error must be the out-of-scope insert coercion, got:"
+                            + System.lineSeparator() + e);
+        }
     }
 
     @Test
@@ -1063,6 +1234,13 @@ class RepositoryProcessorTest {
     }
 
     private void compile(Path sourceDir, Path classesDir, Path generatedDir, String... fileNames) throws Exception {
+        compileWithDiagnostics(sourceDir, classesDir, generatedDir, fileNames);
+    }
+
+    /** The result of running the javac task: whole-round success plus every collected diagnostic. */
+    private record TaskResult(boolean success, List<Diagnostic<? extends JavaFileObject>> diagnostics) { }
+
+    private TaskResult runTask(Path sourceDir, Path classesDir, Path generatedDir, String... fileNames) throws Exception {
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         assertNotNull(compiler, "A system Java compiler is required to run this test");
         DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
@@ -1076,10 +1254,46 @@ class RepositoryProcessorTest {
                     "-s", generatedDir.toString(),
                     "-processor", "io.github.fludakit.data.processor.RepositoryProcessor");
             boolean success = compiler.getTask(null, fm, diagnostics, options, null, units).call();
-            String messages = diagnostics.getDiagnostics().stream()
-                    .filter(d -> d.getKind() == Diagnostic.Kind.ERROR)
-                    .map(Object::toString).collect(Collectors.joining(System.lineSeparator()));
-            assertTrue(success, "Annotation processing failed:" + System.lineSeparator() + messages);
+            return new TaskResult(success, diagnostics.getDiagnostics());
         }
+    }
+
+    /**
+     * Runs the processor and compiles the generated sources (javac compiles annotation-round output in
+     * later rounds unless -proc:only is set), asserting the whole task succeeded. Returns ALL collected
+     * diagnostics so a test can also assert NOTE-level messages (e.g. the gate-skip note for a
+     * non-reflection-free element-collection VO).
+     */
+    private List<Diagnostic<? extends JavaFileObject>> compileWithDiagnostics(
+            Path sourceDir, Path classesDir, Path generatedDir, String... fileNames) throws Exception {
+        TaskResult result = runTask(sourceDir, classesDir, generatedDir, fileNames);
+        String messages = result.diagnostics().stream()
+                .filter(d -> d.getKind() == Diagnostic.Kind.ERROR)
+                .map(Object::toString).collect(Collectors.joining(System.lineSeparator()));
+        assertTrue(result.success(), "Annotation processing failed:" + System.lineSeparator() + messages);
+        return result.diagnostics();
+    }
+
+    /**
+     * Runs the processor WITHOUT asserting whole-task success: the generated sources are still written to
+     * {@code generatedDir}. Used where a fixture is blocked by a deliberately out-of-scope generator issue
+     * (the {@code setId(((Number) key).longValue())} insert coercion only compiles for a {@code Long} id)
+     * while the loader emission under test still needs to be inspected.
+     */
+    private TaskResult processOnly(Path sourceDir, Path classesDir, Path generatedDir, String... fileNames) throws Exception {
+        return runTask(sourceDir, classesDir, generatedDir, fileNames);
+    }
+
+    private static List<Diagnostic<? extends JavaFileObject>> errorsOf(TaskResult result) {
+        return result.diagnostics().stream()
+                .filter(d -> d.getKind() == Diagnostic.Kind.ERROR)
+                .collect(Collectors.toList());
+    }
+
+    private static String notesOf(List<Diagnostic<? extends JavaFileObject>> diagnostics) {
+        return diagnostics.stream()
+                .filter(d -> d.getKind() == Diagnostic.Kind.NOTE)
+                .map(d -> d.getMessage(Locale.getDefault()))
+                .collect(Collectors.joining(System.lineSeparator()));
     }
 }

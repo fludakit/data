@@ -944,10 +944,12 @@ class RepositoryProcessorTest {
                 """);
 
         // A gate-passing VO so a loader IS emitted; the loader key type must follow the Integer id.
-        // processOnly: the whole impl still cannot compile for a NON-Long id, but NOT because of the
-        // loader — the out-of-scope insert coercion `setId(((Number) key).longValue())` (only valid for a
-        // Long id) is the sole blocker. We assert that boundary explicitly below.
-        TaskResult result = processOnly(sourceDir, classesDir, generatedDir, "Line.java", "Basket.java", "Baskets.java");
+        // Task 4 NEW-I: the generated-key coercion is now id-aware, so the Integer-id impl compiles
+        // FULLY. This test was written at Task 3 to force this upgrade (the residual-error canary below
+        // asserted the OLD `longValue()` coercion still failed the whole compile); the flip to a full-
+        // compile assertion is the deliberate upgrade the Task-3 re-review mandated.
+        List<Diagnostic<? extends JavaFileObject>> diagnostics = compileWithDiagnostics(
+                sourceDir, classesDir, generatedDir, "Line.java", "Basket.java", "Baskets.java");
 
         String impl = Files.readString(generatedDir.resolve("ihd/BasketsImpl.java"))
                 .replace("\\\"", "\"")
@@ -968,15 +970,19 @@ class RepositoryProcessorTest {
         assertTrue(!impl.contains("List<Long> keys"),
                 "loader must not hardcode List<Long>:" + System.lineSeparator() + impl);
 
-        // The loader itself now compiles: every remaining javac ERROR is the known, out-of-scope
-        // insert-path `longValue()` coercion (long -> Integer), never a loader-line type mismatch.
-        List<Diagnostic<? extends JavaFileObject>> errors = errorsOf(result);
-        assertTrue(!errors.isEmpty(), "the insert coercion is expected to still fail a full compile");
-        for (Diagnostic<? extends JavaFileObject> e : errors) {
-            assertTrue(e.toString().contains("longValue"),
-                    "every residual error must be the out-of-scope insert coercion, got:"
-                            + System.lineSeparator() + e);
-        }
+        // NEW-I: id-aware generated-key coercion. Integer id now binds intValue(), not longValue().
+        assertTrue(impl.contains("entity.setId(((Number) keys.getKey()).intValue())"),
+                "insert coercion must follow the id type:" + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("longValue"),
+                "Integer id must not use the Long coercion:" + System.lineSeparator() + impl);
+
+        // The whole impl now compiles: the loader AND the previously-blocking insert coercion are both
+        // id-correct, so there are no residual javac ERRORs (the flipped Task-3 canary).
+        List<Diagnostic<? extends JavaFileObject>> errors = diagnostics.stream()
+                .filter(d -> d.getKind() == Diagnostic.Kind.ERROR)
+                .collect(Collectors.toList());
+        assertTrue(errors.isEmpty(),
+                "Integer-id impl must now fully compile, got:" + System.lineSeparator() + errors);
     }
 
     @Test
@@ -1021,15 +1027,26 @@ class RepositoryProcessorTest {
                     public void setChildren(List<Child> children) { this.children = children; }
                 }
                 """);
-        Files.writeString(sourceDir.resolve("Parents.java"), """
+        Files.writeString(sourceDir.resolve("ParentRepository.java"), """
                 package rel;
                 import jakarta.data.repository.CrudRepository;
                 import jakarta.data.repository.Repository;
                 @Repository
-                public interface Parents extends CrudRepository<Parent, Long> { }
+                public interface ParentRepository extends CrudRepository<Parent, Long> { }
+                """);
+        // Child must be a MANAGED target (has its own @Repository) or the managed-target gate (Decision 7)
+        // leaves Parent.primary/Parent.children unmapped. ChildRepository also makes rel.Parent a managed
+        // target so Child.owner hydrates on the child side.
+        Files.writeString(sourceDir.resolve("ChildRepository.java"), """
+                package rel;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface ChildRepository extends CrudRepository<Child, Long> { }
                 """);
 
-        compile(sourceDir, classesDir, generatedDir, "Child.java", "Parent.java", "Parents.java");
+        compile(sourceDir, classesDir, generatedDir,
+                "Child.java", "Parent.java", "ParentRepository.java", "ChildRepository.java");
 
         // Flatten JavaPoet's soft wraps so the positional literals can be pinned verbatim: five of
         // the seven Attribute components are Strings, so ONLY an exact full-literal assertion
@@ -1054,6 +1071,116 @@ class RepositoryProcessorTest {
         // Association properties are skipped by the mapper gate, so the owner still generates.
         assertTrue(Files.exists(generatedDir.resolve("rel/ParentRowMapper.java")),
                 "entity-typed fields are association-backed and must not abort the owner's gate");
+
+        // ---- Task 4: relationship hydration loaders (managed targets rel.Child / rel.Parent) ----
+        // Normalise JavaPoet's escaped quotes and soft wraps so the SQL string literals pin verbatim.
+        String parentImpl = Files.readString(generatedDir.resolve("rel/ParentRepositoryImpl.java"))
+                .replace("\\\"", "\"");
+        // ONE_TO_MANY (Parent.children, inverse "owner" → fk "owner_id" on the child's own table):
+        // single-phase, group by the inverse fk, delegate to the child's generated entity RowMapper.
+        assertTrue(parentImpl.contains("private void hydrateChildren(Collection<Parent> parents)"),
+                "missing one-to-many loader:" + System.lineSeparator() + parentImpl);
+        assertTrue(parentImpl.contains("SELECT \"id\", \"owner_id\" FROM \"child\" WHERE \"owner_id\" IN ("),
+                "one-to-many SELECT must list child columns incl. the inverse fk:" + System.lineSeparator() + parentImpl);
+        assertTrue(parentImpl.contains("new ChildRowMapper().mapRow(rs, rowNum)"),
+                "one-to-many loader must pair child rows through the child entity row mapper:"
+                        + System.lineSeparator() + parentImpl);
+        assertTrue(parentImpl.contains("parent.setChildren(grouped.getOrDefault(parent.getId(), new ArrayList<>()))"),
+                "one-to-many loader must group children onto each parent:" + System.lineSeparator() + parentImpl);
+        // MANY_TO_ONE (Parent.primary, target Child, fk "primary_id" on the PARENT table): two-phase.
+        // Phase 1 re-reads id + fk from the parent table; phase 2 fetches targets by distinct fk.
+        assertTrue(parentImpl.contains("private void hydratePrimary(Collection<Parent> parents)"),
+                "missing many-to-one loader:" + System.lineSeparator() + parentImpl);
+        assertTrue(parentImpl.contains("SELECT \"id\", \"primary_id\" FROM \"parent\" WHERE \"id\" IN ("),
+                "many-to-one phase 1 must re-read the fk from the parent table:" + System.lineSeparator() + parentImpl);
+        assertTrue(parentImpl.contains("SQL_FIND_CHILD_BY_IDS"),
+                "many-to-one phase 2 must fetch targets by their ids:" + System.lineSeparator() + parentImpl);
+        assertTrue(parentImpl.contains("SELECT \"id\", \"owner_id\" FROM \"child\" WHERE \"id\" IN ("),
+                "many-to-one phase 2 SELECT lists target columns from the target table:"
+                        + System.lineSeparator() + parentImpl);
+        assertTrue(parentImpl.contains(".query(new ChildRowMapper()).list()"),
+                "many-to-one phase 2 must map targets with the target row mapper:" + System.lineSeparator() + parentImpl);
+        // The umbrella covers both loaders.
+        assertTrue(parentImpl.contains("private void hydrateAll(Collection<Parent> parents)"),
+                "missing umbrella hydrateAll:" + System.lineSeparator() + parentImpl);
+        assertTrue(parentImpl.contains("hydrateChildren(parents)") && parentImpl.contains("hydratePrimary(parents)"),
+                "umbrella must call each relationship loader:" + System.lineSeparator() + parentImpl);
+        // Write path (Step 6): the MANY_TO_ONE fk binding flows through boundValue (Task 2), asserted not rebuilt.
+        assertTrue(parentImpl.contains(".param(\"primary\", entity.getPrimary() == null ? null : entity.getPrimary().getId())"),
+                "many-to-one write must bind the target id through boundValue:" + System.lineSeparator() + parentImpl);
+
+        // Child.owner is MANY_TO_ONE into the managed rel.Parent → hydrateOwner on the child side,
+        // phase 2 fetching parents via the parent's generated row mapper (ParentRowMapper).
+        String childImpl = Files.readString(generatedDir.resolve("rel/ChildRepositoryImpl.java"))
+                .replace("\\\"", "\"");
+        assertTrue(childImpl.contains("private void hydrateOwner(Collection<Child> parents)"),
+                "missing many-to-one loader on the child side:" + System.lineSeparator() + childImpl);
+        assertTrue(childImpl.contains(".query(new ParentRowMapper()).list()"),
+                "child hydrateOwner must fetch parent targets with the parent row mapper:"
+                        + System.lineSeparator() + childImpl);
+        assertTrue(childImpl.contains("parent.setOwner(byId.get(fkByParent.get(parent.getId())))"),
+                "child hydrateOwner must set the reference from the fetched target:" + System.lineSeparator() + childImpl);
+        assertTrue(!childImpl.contains("java.lang.reflect"),
+                "generated loaders must stay reflection-free:" + System.lineSeparator() + childImpl);
+    }
+
+    @Test
+    void unmanagedManyToOneTargetIsLeftUnmappedWithNote() throws Exception {
+        // Decision 7 managed-target gate: a relationship whose TARGET has no @Repository in the round
+        // must NOT get a loader and must record a NOTE, so hydration is skipped rather than generating
+        // a call to a row mapper that was never emitted.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/mg"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-mg"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-mg"));
+
+        Files.writeString(sourceDir.resolve("Sibling.java"), """
+                package mg;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Sibling {
+                    @Identity Long id;
+                    String label;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getLabel() { return label; }
+                    public void setLabel(String label) { this.label = label; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Holder.java"), """
+                package mg;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Holder {
+                    @Identity Long id;
+                    Sibling peer;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public Sibling getPeer() { return peer; }
+                    public void setPeer(Sibling peer) { this.peer = peer; }
+                }
+                """);
+        // ONLY Holder is managed; Sibling has no repository.
+        Files.writeString(sourceDir.resolve("Holders.java"), """
+                package mg;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Holders extends CrudRepository<Holder, Long> { }
+                """);
+
+        List<Diagnostic<? extends JavaFileObject>> diagnostics = compileWithDiagnostics(
+                sourceDir, classesDir, generatedDir, "Sibling.java", "Holder.java", "Holders.java");
+
+        String impl = Files.readString(generatedDir.resolve("mg/HoldersImpl.java")).replace("\\\"", "\"");
+        assertTrue(!impl.contains("hydratePeer"),
+                "unmanaged many-to-one target must not get a loader:" + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("hydrateAll"),
+                "no umbrella when nothing hydrates:" + System.lineSeparator() + impl);
+        String notes = notesOf(diagnostics);
+        assertTrue(notes.contains("relationship 'peer' on mg.Holder: target mg.Sibling has no generated row mapper"),
+                "managed-target gate NOTE must be recorded:" + System.lineSeparator() + notes);
     }
 
     @Test
@@ -1272,22 +1399,6 @@ class RepositoryProcessorTest {
                 .map(Object::toString).collect(Collectors.joining(System.lineSeparator()));
         assertTrue(result.success(), "Annotation processing failed:" + System.lineSeparator() + messages);
         return result.diagnostics();
-    }
-
-    /**
-     * Runs the processor WITHOUT asserting whole-task success: the generated sources are still written to
-     * {@code generatedDir}. Used where a fixture is blocked by a deliberately out-of-scope generator issue
-     * (the {@code setId(((Number) key).longValue())} insert coercion only compiles for a {@code Long} id)
-     * while the loader emission under test still needs to be inspected.
-     */
-    private TaskResult processOnly(Path sourceDir, Path classesDir, Path generatedDir, String... fileNames) throws Exception {
-        return runTask(sourceDir, classesDir, generatedDir, fileNames);
-    }
-
-    private static List<Diagnostic<? extends JavaFileObject>> errorsOf(TaskResult result) {
-        return result.diagnostics().stream()
-                .filter(d -> d.getKind() == Diagnostic.Kind.ERROR)
-                .collect(Collectors.toList());
     }
 
     private static String notesOf(List<Diagnostic<? extends JavaFileObject>> diagnostics) {

@@ -153,6 +153,23 @@ public class RepositoryProcessor extends AbstractProcessor {
      */
     private final Map<String, ClassName> voRowMappers = new LinkedHashMap<>();
 
+    /**
+     * Entity FQN → compile-time {@link EntityModel} for a relationship TARGET resolved by the
+     * managed-target gate (Task 4). Like {@link #voModels}, {@link #buildEntity} is idempotent, so this
+     * is a pure memo; a target reused by several repositories is walked once.
+     */
+    private final Map<String, EntityModel> entityModels = new HashMap<>();
+
+    /**
+     * FQNs of every entity with a {@code @Repository} in the CURRENT round, computed in {@link #process}
+     * before {@link #generate} dispatch. A {@code MANY_TO_ONE}/{@code ONE_TO_MANY} property hydrates
+     * only if its target is here AND the target has a generated row mapper (Decision 7): an unmanaged
+     * target has no {@code <Target>RowMapper} to delegate to, so the reference is left unmapped on read.
+     * {@code getSupportedAnnotationTypes} hands all repositories in one {@code Set}, so the round set is
+     * complete; recomputed each round.
+     */
+    private Set<String> managedEntities = Set.of();
+
     @Override
     public SourceVersion getSupportedSourceVersion() {
         return SourceVersion.latestSupported();
@@ -165,12 +182,31 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
         this.types = processingEnv.getTypeUtils();
         this.elements = processingEnv.getElementUtils();
-        boolean claimed = false;
+        // Round pre-scan (Task 4 / Decision 7): the set of managed entity FQNs (every entity that some
+        // @Repository in THIS round resolves to) must be known BEFORE generate() dispatch, so a
+        // repository processed early in the round can already see targets that only get their own
+        // repository later in the same round. getSupportedAnnotationTypes hands all repositories in one
+        // Set, so this scan is complete for the round.
+        List<TypeElement> repositories = new ArrayList<>();
+        Set<String> managed = new HashSet<>();
         for (Element element : roundEnv.getElementsAnnotatedWith(Repository.class)) {
             if (element.getKind() != ElementKind.INTERFACE) {
                 continue;
             }
-            generate((TypeElement) element);
+            TypeElement repository = (TypeElement) element;
+            repositories.add(repository);
+            TypeMirror entityMirror = resolveEntityType(repository, new HashSet<>());
+            if (entityMirror != null && entityMirror.getKind() != TypeKind.TYPEVAR
+                    && entityMirror.getKind() != TypeKind.WILDCARD
+                    && types.erasure(entityMirror) instanceof DeclaredType declared
+                    && declared.asElement() instanceof TypeElement entityElement) {
+                managed.add(entityElement.getQualifiedName().toString());
+            }
+        }
+        this.managedEntities = Set.copyOf(managed);
+        boolean claimed = false;
+        for (TypeElement repository : repositories) {
+            generate(repository);
             claimed = true;
         }
         return claimed;
@@ -220,7 +256,43 @@ public class RepositoryProcessor extends AbstractProcessor {
                 collectionMappers.put(c.field(), voMapper);
             }
         }
-        boolean hydrate = hasGeneratedHydration(entity, mapperType, hydratedCollections);
+        // Relationship hydration (Task 4 / Decision 7 managed-target gate): a MANY_TO_ONE/ONE_TO_MANY
+        // property hydrates only when its TARGET is managed (some @Repository in this round resolves to
+        // it — see process()'s pre-scan) AND has a generated row mapper to delegate to, and (for
+        // ONE_TO_MANY) buildEntity's second pass resolved the inverse. Ineligible relationships get NO
+        // loader and one NOTE each: the reference is left unmapped on read rather than failing the
+        // repository or calling a mapper that was never emitted. The gate is checked BEFORE resolving
+        // the target model so an unmanaged target never gets a row mapper generated for it.
+        List<EntityRelationship> hydratedRelationships = new ArrayList<>();
+        for (EntityDescriptor.Attribute a : entity.metadata().attributes()) {
+            if (a.kind() != EntityDescriptor.Kind.MANY_TO_ONE && a.kind() != EntityDescriptor.Kind.ONE_TO_MANY) {
+                continue;
+            }
+            if (a.kind() == EntityDescriptor.Kind.ONE_TO_MANY && a.inverseName() == null) {
+                processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
+                        "relationship '" + a.name() + "' on " + entityElement.getQualifiedName()
+                                + ": one-to-many inverse is unresolved on the target — left unmapped on read",
+                        entityElement);
+                continue;
+            }
+            String targetFqn = a.targetTypeName();
+            TypeElement targetElement = targetFqn == null ? null : elements.getTypeElement(targetFqn);
+            ClassName targetMapper = null;
+            EntityModel targetModel = null;
+            if (targetElement != null && managedEntities.contains(targetFqn)) {
+                targetModel = entityModel(targetElement);
+                targetMapper = ensureEntityRowMapper(targetElement, targetModel);
+            }
+            if (targetMapper == null) {
+                processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
+                        "relationship '" + a.name() + "' on " + entityElement.getQualifiedName()
+                                + ": target " + targetFqn + " has no generated row mapper — left unmapped on read",
+                        entityElement);
+                continue;
+            }
+            hydratedRelationships.add(new EntityRelationship(a, targetModel, targetMapper));
+        }
+        boolean hydrate = hasGeneratedHydration(entity, mapperType, hydratedCollections, hydratedRelationships);
 
         DeclaredType repositoryType = (DeclaredType) repository.asType();
         boolean crud = extendsCrud(repository, new HashSet<>());
@@ -248,10 +320,16 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
         // Registered before the field loop below so the loaders' SELECT constants render as fields.
         if (hydrate) {
-            // One umbrella reached from every read shape, delegating to a loader per collection field.
-            methods.add(hydrationUmbrella(entity, hydratedCollections));
+            // One umbrella reached from every read shape, delegating to a loader per hydrated
+            // collection (Task 3) and per hydrated entity relationship (Task 4).
+            methods.add(hydrationUmbrella(entity, hydratedCollections, hydratedRelationships));
             for (ElementCollection c : hydratedCollections) {
                 methods.add(appendCollectionHydration(constants, entity, c, collectionMappers.get(c.field())));
+            }
+            for (EntityRelationship r : hydratedRelationships) {
+                methods.add(r.attribute().kind() == EntityDescriptor.Kind.MANY_TO_ONE
+                        ? appendManyToOneHydration(constants, entity, r)
+                        : appendOneToManyHydration(constants, entity, r));
             }
         }
 
@@ -876,13 +954,36 @@ public class RepositoryProcessor extends AbstractProcessor {
         builder.addStatement("$L", sql.build());
 
         builder.beginControlFlow("if (keys.getKey() != null)");
-        builder.addStatement("$L.$L((($T) keys.getKey()).longValue())",
-                value, setter(entity.id().name()), Number.class);
+        // NEW-I: the generated-key coercion follows the id type instead of hardcoding longValue().
+        // A Long id renders `((Number) keys.getKey()).longValue())` — byte-identical to the previous
+        // hardcoded emission; an Integer id renders intValue(), so its generated impl compiles.
+        // Unsupported id types (String/UUID/...) keep the old longValue() emission, exactly as before.
+        builder.addStatement("$L.$L((($T) keys.getKey()).$L())",
+                value, setter(entity.id().name()), Number.class, generatedKeyCoercion(entity.id().type()));
         builder.endControlFlow();
 
         for (ElementCollection collection : entity.collections()) {
             appendElementCollectionInsert(builder, value, entity, collection, constants);
         }
+    }
+
+    /**
+     * The {@code Number} → id coercion applied to a {@code GeneratedKeyHolder} key (NEW-I), derived
+     * from the entity's id type so the insert path compiles for every JDBC-safe integer id.
+     * {@code box()} normalizes a primitive id ({@code int} → {@code java.lang.Integer}); the Long
+     * corpus renders {@code longValue()} textually identical to the pre-Task-4 hardcoded coercion, and
+     * id types a {@code Number} cannot produce (String, UUID, ...) fall back to {@code longValue()} —
+     * the previous (non-working for them) emission, preserving existing behavior.
+     */
+    private static String generatedKeyCoercion(TypeName idType) {
+        return switch (idType.box().toString()) {
+            case "java.lang.Integer" -> "intValue";
+            case "java.lang.Short" -> "shortValue";
+            case "java.lang.Byte" -> "byteValue";
+            case "java.lang.Float" -> "floatValue";
+            case "java.lang.Double" -> "doubleValue";
+            default -> "longValue";
+        };
     }
 
     private void appendElementCollectionInsert(MethodSpec.Builder builder, String value, EntityModel entity,
@@ -1513,14 +1614,17 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     /**
      * True iff the repository generates hydration: a reflection-free row mapper was emitted for the
-     * entity AND at least one of its element collections cleared the VO row-mapper gate (so a loader
-     * was emitted). Isolated as ONE named predicate so Task 4 can widen hydration to
-     * MANY_TO_ONE/ONE_TO_MANY by editing only this method (M-1). {@code entity} is unused today and
-     * kept for that widening (relationship inspection lives on the entity model).
+     * entity AND at least one hydrator cleared its gate — an element collection past the VO row-mapper
+     * gate (Task 3) or an entity relationship past the managed-target gate (Task 4, the widening this
+     * predicate was extracted for). The relationship eligibility (managed target + generated target
+     * mapper + resolved inverse) is decided by the caller; this predicate only joins the lists.
+     * {@code entity} is unused and kept as the widening shape (relationship inspection lives on the
+     * entity model, walked by the caller).
      */
     private static boolean hasGeneratedHydration(EntityModel entity, ClassName mapperType,
-                                                 List<ElementCollection> hydratedCollections) {
-        return mapperType != null && !hydratedCollections.isEmpty();
+                                                 List<ElementCollection> hydratedCollections,
+                                                 List<EntityRelationship> hydratedRelationships) {
+        return mapperType != null && (!hydratedCollections.isEmpty() || !hydratedRelationships.isEmpty());
     }
 
     /**
@@ -1539,9 +1643,11 @@ public class RepositoryProcessor extends AbstractProcessor {
     /**
      * Emits the per-entity umbrella: {@code private void hydrateAll(Collection<Entity> parents)} calling
      * each emitted {@code hydrate<Field>(parents)} loader. One method reached from every read shape keeps
-     * the wiring sites free of per-collection detail.
+     * the wiring sites free of per-collection / per-relationship detail. Task 4 adds the relationship
+     * loaders (many-to-one, one-to-many) to the same dispatch.
      */
-    private MethodSpec hydrationUmbrella(EntityModel entity, List<ElementCollection> hydrated) {
+    private MethodSpec hydrationUmbrella(EntityModel entity, List<ElementCollection> hydrated,
+                                         List<EntityRelationship> relationships) {
         MethodSpec.Builder umbrella = MethodSpec.methodBuilder("hydrateAll")
                 .addModifiers(Modifier.PRIVATE)
                 .addParameter(ParameterizedTypeName.get(ClassName.get(java.util.Collection.class),
@@ -1549,24 +1655,64 @@ public class RepositoryProcessor extends AbstractProcessor {
         for (ElementCollection c : hydrated) {
             umbrella.addStatement("hydrate$L(parents)", capitalize(c.field()));
         }
+        for (EntityRelationship r : relationships) {
+            umbrella.addStatement("hydrate$L(parents)", capitalize(r.attribute().name()));
+        }
         return umbrella.build();
     }
 
     /**
-     * Emits one collection loader: {@code private void hydrate<Field>(Collection<Entity> parents)}. It
-     * gathers the parents' ids, builds a {@code WHERE <fk> IN (:key0, ...)} at runtime (JdbcClient has
-     * no collection-parameter expansion), and reads each child row as an {@code Object[]} pair of
-     * {@code [<fk>, <VO>]} via an anonymous {@link io.github.fludakit.jdbc.RowMapper} — the row mapper is
-     * row-scoped and has no client access, so the pairing is assembled here — then groups the
-     * {@code <VO>}s by fk and assigns each parent's collection. FK-only child columns are never selected
-     * (see {@link #quotedColumnList}); the association targets stay {@code null} (Decision 8).
+     * Emits one element-collection loader (Task 3): {@code private void hydrate<Field>(Collection<Entity>
+     * parents)}, selecting the VO's columns from the child table WHERE the parent fk IN the parent ids.
+     * Delegates the whole shape to {@link #appendGroupedKeyHydration}, which the one-to-many loader
+     * reuses; the emission is textually the Task 3 body, so a VO corpus's generated impl stays identical.
      */
     private MethodSpec appendCollectionHydration(Map<String, String> constants,
                                            EntityModel entity, ElementCollection collection, ClassName voMapper) {
         String selectConst = addConstant(constants, "SQL_SELECT_" + upperSnake(collection.field()),
                 "SELECT " + quotedColumnList(collection) + " FROM " + Names.quote(collection.childTable())
                         + " WHERE " + Names.quote(collection.parentFk()) + " IN (");
+        return appendGroupedKeyHydration(constants, entity, collection.field(), selectConst,
+                collection.parentFk(), collection.valueObjectType(), voMapper);
+    }
 
+    /**
+     * Emits one one-to-many loader (Task 4 / ruling: child's OWN table): {@code parents}' ids group the
+     * TARGET's own physical columns — INCLUDING the inverse fk, which the anonymous pairing reads by
+     * label — WHERE {@code <inverse>_id IN (...)}. The delegate row mapper is the target entity's
+     * generated {@code <Target>RowMapper} (no VO involved), and the grouped list is assigned to the
+     * parent's collection setter. The target's own relationships are NOT hydrated here (depth-1), and
+     * the back-reference on hydrated children stays NULL because the target's row mapper skips the
+     * inverse's fk column on read (coverage lock, ruling 6).
+     */
+    private MethodSpec appendOneToManyHydration(Map<String, String> constants, EntityModel entity,
+                                                EntityRelationship relationship) {
+        EntityDescriptor.Attribute a = relationship.attribute();
+        EntityModel targetModel = relationship.targetModel();
+        String inverseFk = Names.fkColumn(a.inverseName());
+        String selectConst = addConstant(constants, "SQL_SELECT_" + upperSnake(a.name()),
+                "SELECT " + entityColumnList(targetModel) + " FROM "
+                        + Names.quote(targetModel.metadata().tableName())
+                        + " WHERE " + Names.quote(inverseFk) + " IN (");
+        return appendGroupedKeyHydration(constants, entity, a.name(), selectConst, inverseFk,
+                targetModel.typeName(), relationship.targetMapper());
+    }
+
+    /**
+     * The one grouping loader shape shared by element-collection (Task 3) and one-to-many (Task 4)
+     * hydration. It gathers the parents' ids, builds a {@code WHERE <fk> IN (:key0, ...)} at runtime
+     * (JdbcClient has no collection-parameter expansion), and reads each child row as an
+     * {@code Object[]} pair of {@code [<fk>, <Child>]} via an anonymous {@code RowMapper} — the row
+     * mapper is row-scoped and has no client access, so the pairing is assembled here — then groups the
+     * children by fk and assigns each parent's collection. The pair's second element delegates to
+     * {@code childMapper} (a {@code <VO>RowMapper} for element collections, the target entity's
+     * {@code <Entity>RowMapper} for one-to-many). FK-only child columns are never selected by the
+     * element-collection column list (see {@link #quotedColumnList}); the association targets stay
+     * {@code null} (Decision 8).
+     */
+    private MethodSpec appendGroupedKeyHydration(Map<String, String> constants, EntityModel entity,
+                                                 String field, String selectConst, String fkLabel,
+                                                 TypeName childType, ClassName childMapper) {
         ClassName sqlSpec = ClassName.get(JdbcClient.class).nestedClass("SqlSpec");
         TypeName entityType = entity.typeName();
         // I-2: the parent-key / child-FK column shares the entity id's JDBC type, so derive it from
@@ -1577,11 +1723,10 @@ public class RepositoryProcessor extends AbstractProcessor {
         TypeName parentKeyList = ParameterizedTypeName.get(ClassName.get(java.util.List.class), keyType);
         TypeName rowArrayType = ArrayTypeName.of(TypeName.OBJECT);
         TypeName rowsType = ParameterizedTypeName.get(ClassName.get(java.util.List.class), rowArrayType);
-        TypeName childType = collection.valueObjectType();
         TypeName groupedType = ParameterizedTypeName.get(ClassName.get(java.util.Map.class), keyType,
                 ParameterizedTypeName.get(ClassName.get(java.util.List.class), childType));
 
-        MethodSpec.Builder loader = MethodSpec.methodBuilder("hydrate" + capitalize(collection.field()))
+        MethodSpec.Builder loader = MethodSpec.methodBuilder("hydrate" + capitalize(field))
                 .addModifiers(Modifier.PRIVATE)
                 .addParameter(ParameterizedTypeName.get(ClassName.get(java.util.Collection.class), entityType), "parents");
         loader.beginControlFlow("if (parents.isEmpty())").addStatement("return").endControlFlow();
@@ -1604,7 +1749,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         loader.endControlFlow();
         loader.addStatement("$T rows = spec.query((rs, rowNum) -> new $T[] { rs.getObject($S, $T.class), "
                         + "new $T().mapRow(rs, rowNum) }).list()",
-                rowsType, Object.class, collection.parentFk(), keyType, voMapper);
+                rowsType, Object.class, fkLabel, keyType, childMapper);
 
         loader.addStatement("$T grouped = new $T<>()", groupedType, java.util.HashMap.class);
         loader.beginControlFlow("for ($T row : rows)", rowArrayType);
@@ -1613,11 +1758,198 @@ public class RepositoryProcessor extends AbstractProcessor {
         loader.endControlFlow();
         loader.beginControlFlow("for ($T parent : parents)", entityType);
         loader.addStatement("parent.$L(grouped.getOrDefault(parent.$L(), new $T<>()))",
-                setter(collection.field()), getter(entity.id().name()), java.util.ArrayList.class);
+                setter(field), getter(entity.id().name()), java.util.ArrayList.class);
         loader.endControlFlow();
 
         return loader.build();
     }
+
+    /**
+     * Emits one many-to-one loader (Task 4 / Decision 4: {@code RowMapper} has no client access, so the
+     * target cannot be fetched from inside the parent row's mapping — the read is split in two). Phase 1
+     * re-reads {@code <id>} and {@code <prop>_id} from the PARENT's own table WHERE the parent id IN
+     * (:key<i>) and pairs them into a parent-id -> fk map (a NULL fk stays in the map as a NULL value).
+     * Phase 2 collects the DISTINCT non-null fks and fetches whole targets from the TARGET's table
+     * WHERE {@code "id"} IN (:tid<i>) through the target's generated row mapper (no ResultSet pairing
+     * happens there), then assigns each parent's reference from the two maps. The target's OWN
+     * relationships are not hydrated (depth-1), and hydrated targets are not cascaded on update
+     * (contract locks, ruling 6).
+     */
+    private MethodSpec appendManyToOneHydration(Map<String, String> constants, EntityModel entity,
+                                                EntityRelationship relationship) {
+        EntityDescriptor.Attribute a = relationship.attribute();
+        EntityModel targetModel = relationship.targetModel();
+        ClassName targetMapper = relationship.targetMapper();
+        TypeName targetType = targetModel.typeName();
+        String idColumn = entity.id().column();
+        String fkColumn = a.column();
+        String targetIdColumn = targetModel.id().column();
+
+        String fkConst = addConstant(constants, "SQL_SELECT_" + upperSnake(a.name()) + "_FK",
+                "SELECT " + Names.quote(idColumn) + ", " + Names.quote(fkColumn) + " FROM "
+                        + Names.quote(entity.metadata().tableName())
+                        + " WHERE " + Names.quote(idColumn) + " IN (");
+        String targetConst = addConstant(constants,
+                "SQL_FIND_" + upperSnake(targetSimpleName(targetModel)) + "_BY_IDS",
+                "SELECT " + entityColumnList(targetModel) + " FROM "
+                        + Names.quote(targetModel.metadata().tableName())
+                        + " WHERE " + Names.quote(targetIdColumn) + " IN (");
+
+        ClassName sqlSpec = ClassName.get(JdbcClient.class).nestedClass("SqlSpec");
+        TypeName entityType = entity.typeName();
+        // I-2 in force again: the parent-key list/cast follows the entity id's boxed type, while the FK
+        // side follows the TARGET's id type (the fk column shares the referenced id's JDBC type).
+        TypeName keyType = entity.id().type().box();
+        TypeName targetKeyType = targetModel.id().type().box();
+        TypeName parentKeyList = ParameterizedTypeName.get(ClassName.get(java.util.List.class), keyType);
+        TypeName fkIdList = ParameterizedTypeName.get(ClassName.get(java.util.List.class), targetKeyType);
+        TypeName rowArrayType = ArrayTypeName.of(TypeName.OBJECT);
+        TypeName rowsType = ParameterizedTypeName.get(ClassName.get(java.util.List.class), rowArrayType);
+        TypeName fkByParentType = ParameterizedTypeName.get(ClassName.get(java.util.Map.class),
+                keyType, targetKeyType);
+        TypeName byIdType = ParameterizedTypeName.get(ClassName.get(java.util.Map.class),
+                targetKeyType, targetType);
+
+        MethodSpec.Builder loader = MethodSpec.methodBuilder("hydrate" + capitalize(a.name()))
+                .addModifiers(Modifier.PRIVATE)
+                .addParameter(ParameterizedTypeName.get(ClassName.get(java.util.Collection.class), entityType), "parents");
+        loader.beginControlFlow("if (parents.isEmpty())").addStatement("return").endControlFlow();
+
+        // Phase 1: parent id -> fk, read from the parent's own table.
+        loader.addStatement("$T keys = new $T<>()", parentKeyList, java.util.ArrayList.class);
+        loader.beginControlFlow("for ($T parent : parents)", entityType);
+        loader.addStatement("keys.add(parent.$L())", getter(entity.id().name()));
+        loader.endControlFlow();
+        loader.addStatement("$T sql = new $T($L)", StringBuilder.class, StringBuilder.class, fkConst);
+        loader.beginControlFlow("for (int i = 0; i < keys.size(); i++)");
+        loader.beginControlFlow("if (i > 0)");
+        loader.addStatement("sql.append($S)", ", ");
+        loader.endControlFlow();
+        loader.addStatement("sql.append($S).append(i)", ":key");
+        loader.endControlFlow();
+        loader.addStatement("sql.append($S)", ")");
+        loader.addStatement("$T spec = jdbcClient.sql(sql.toString())", sqlSpec);
+        loader.beginControlFlow("for (int i = 0; i < keys.size(); i++)");
+        loader.addStatement("spec = spec.param($S + i, keys.get(i))", "key");
+        loader.endControlFlow();
+        loader.addStatement("$T rows = spec.query((rs, rowNum) -> new $T[] { rs.getObject($S, $T.class), "
+                        + "rs.getObject($S, $T.class) }).list()",
+                rowsType, Object.class, idColumn, keyType, fkColumn, targetKeyType);
+        loader.addStatement("$T fkByParent = new $T<>()", fkByParentType, java.util.HashMap.class);
+        loader.beginControlFlow("for ($T row : rows)", rowArrayType);
+        loader.addStatement("fkByParent.put(($T) row[0], ($T) row[1])", keyType, targetKeyType);
+        loader.endControlFlow();
+
+        // Phase 2: distinct non-null fks -> targets, fetched with the target's generated row mapper.
+        loader.addStatement("$T fkIds = new $T<>()", fkIdList, java.util.ArrayList.class);
+        loader.beginControlFlow("for ($T fk : fkByParent.values())", targetKeyType);
+        loader.beginControlFlow("if (fk != null && !fkIds.contains(fk))");
+        loader.addStatement("fkIds.add(fk)");
+        loader.endControlFlow();
+        loader.endControlFlow();
+        loader.addStatement("$T byId = new $T<>()", byIdType, java.util.HashMap.class);
+        loader.beginControlFlow("if (!fkIds.isEmpty())");
+        loader.addStatement("$T targetSql = new $T($L)", StringBuilder.class, StringBuilder.class, targetConst);
+        loader.beginControlFlow("for (int i = 0; i < fkIds.size(); i++)");
+        loader.beginControlFlow("if (i > 0)");
+        loader.addStatement("targetSql.append($S)", ", ");
+        loader.endControlFlow();
+        loader.addStatement("targetSql.append($S).append(i)", ":tid");
+        loader.endControlFlow();
+        loader.addStatement("targetSql.append($S)", ")");
+        loader.addStatement("$T targetSpec = jdbcClient.sql(targetSql.toString())", sqlSpec);
+        loader.beginControlFlow("for (int i = 0; i < fkIds.size(); i++)");
+        loader.addStatement("targetSpec = targetSpec.param($S + i, fkIds.get(i))", "tid");
+        loader.endControlFlow();
+        loader.beginControlFlow("for ($T target : targetSpec.query(new $T()).list())", targetType, targetMapper);
+        loader.addStatement("byId.put(target.$L(), target)", getter(targetModel.id().name()));
+        loader.endControlFlow();
+        loader.endControlFlow();
+
+        loader.beginControlFlow("for ($T parent : parents)", entityType);
+        loader.addStatement("parent.$L(byId.get(fkByParent.get(parent.$L())))",
+                setter(a.name()), getter(entity.id().name()));
+        loader.endControlFlow();
+
+        return loader.build();
+    }
+
+    /** The simple name of a target entity model, for the {@code SQL_FIND_<TARGET>_BY_IDS} constant base. */
+    private static String targetSimpleName(EntityModel targetModel) {
+        String fqn = targetModel.typeName().toString();
+        int dot = fqn.lastIndexOf('.');
+        return dot < 0 ? fqn : fqn.substring(dot + 1);
+    }
+
+    /**
+     * The physical column list of an ENTITY (not a VO): every {@code metadata().columns()} entry,
+     * quoted and comma-joined — id first, then scalars, many-to-one/association FKs and flattened
+     * embedded leaves. Unlike {@link #quotedColumnList} (element-collection children, whose FK-only
+     * columns are never selected) a one-to-many/many-to-one SELECT must carry the target's own FK
+     * columns so its row mapper and, for one-to-many, the inverse grouping label are readable.
+     */
+    private static String entityColumnList(EntityModel entity) {
+        StringBuilder sb = new StringBuilder();
+        for (EntityDescriptor.ColumnRef column : entity.metadata().columns()) {
+            if (!sb.isEmpty()) {
+                sb.append(", ");
+            }
+            sb.append(Names.quote(column.column()));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Memoized {@link #buildEntity} for a relationship target. {@code buildEntity} is idempotent (it
+     * walks the element fresh), so this is a pure cache that keeps a target reused by several
+     * repositories from being re-walked, mirroring {@link #voModels} for value objects.
+     */
+    private EntityModel entityModel(TypeElement targetElement) {
+        String fqn = targetElement.getQualifiedName().toString();
+        EntityModel model = entityModels.get(fqn);
+        if (model == null) {
+            model = buildEntity(targetElement);
+            entityModels.put(fqn, model);
+        }
+        return model;
+    }
+
+    /**
+     * Resolves (generating on first use) the {@code <Entity>RowMapper} for a managed relationship
+     * target. The managed-target gate already proved the target has a repository, but its own
+     * {@link #generate} pass may not have run yet in this round, so the metadata + mapper are emitted
+     * here on demand, exactly as the entity's own pass would: the {@link #rowMappers} and
+     * {@link #metadataTypes} caches make the emission idempotent, which keeps one {@code Filer} write
+     * per type however the repositories are ordered. A target failing the reflection-free gate yields
+     * {@code null}: the caller records the gate NOTE and leaves the reference unmapped (no loader).
+     */
+    private ClassName ensureEntityRowMapper(TypeElement targetElement, EntityModel targetModel) {
+        String targetFqn = targetElement.getQualifiedName().toString();
+        ClassName cached = rowMappers.get(targetFqn);
+        if (cached != null) {
+            return cached;
+        }
+        if (!canGenerateRowMapper(targetModel)) {
+            return null;
+        }
+        if (!metadataTypes.containsKey(targetFqn)) {
+            generateEmbeddedDescriptors(targetModel.metadata());
+            metadataTypes.put(targetFqn, generateMetadata(targetElement, targetModel));
+        }
+        ClassName mapper = generateRowMapper(targetElement, targetModel, metadataTypes.get(targetFqn));
+        rowMappers.put(targetFqn, mapper);
+        return mapper;
+    }
+
+    /**
+     * A relationship that cleared the Task 4 managed-target gate: the descriptor attribute, the target's
+     * compile-time model (id/column/table metadata the loader reads) and its generated row mapper, the
+     * loader's delegate. Produced only by {@link #generate}'s eligibility scan, so every instance is
+     * emittable.
+     */
+    private record EntityRelationship(EntityDescriptor.Attribute attribute, EntityModel targetModel,
+                                      ClassName targetMapper) { }
+
 
     private static String capitalize(String field) {
         return Character.toUpperCase(field.charAt(0)) + field.substring(1);

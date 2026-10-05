@@ -94,7 +94,8 @@ class CustomerRepositoryIT {
     }
 
     @Test
-    void cursoredPagePagesById() {        customers.insert(customer("Charlie", "charlie@example.com"));
+    void cursoredPagePagesById() {
+        customers.insert(customer("Charlie", "charlie@example.com"));
         customers.insert(customer("Alice", "alice@example.com"));
         customers.insert(customer("Bob", "bob@example.com"));
 

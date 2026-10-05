@@ -423,6 +423,167 @@ class RepositoryProcessorTest {
         assertTrue(mp.contains("return entity;"), mp);
     }
 
+    @Test
+    void generatedMetadataImplementsEntityDescriptorWithKindsAndTargets() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/meta"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-meta"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-meta"));
+
+        Files.writeString(sourceDir.resolve("Author.java"), """
+                package meta;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Author {
+                    @Identity Long id;
+                    String name;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getName() { return name; }
+                    public void setName(String name) { this.name = name; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Book.java"), """
+                package meta;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Association;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Book {
+                    @Identity Long id;
+                    String title;
+                    @Association Author author;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getTitle() { return title; }
+                    public void setTitle(String title) { this.title = title; }
+                    public Author getAuthor() { return author; }
+                    public void setAuthor(Author author) { this.author = author; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Books.java"), """
+                package meta;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Books extends CrudRepository<Book, Long> { }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Author.java", "Book.java", "Books.java");
+
+        String md = Files.readString(generatedDir.resolve("meta/BookMetadata.java"));
+        assertTrue(md.contains("implements EntityDescriptor"),
+                "generated metadata must implement the interface:" + System.lineSeparator() + md);
+        assertTrue(md.contains("import io.github.fludakit.data.metadata.EntityDescriptor;"), md);
+        assertTrue(md.contains("public static final BookMetadata INSTANCE"), md);
+        assertTrue(md.contains("Kind.ASSOCIATION"),
+                "@Association must be exposed as ASSOCIATION:" + System.lineSeparator() + md);
+        assertTrue(md.contains("\"meta.Author\""),
+                "association target type name must be recorded:" + System.lineSeparator() + md);
+        // Plan A column constants are preserved:
+        assertTrue(md.contains("public static final String TABLE_NAME = \"book\";"), md);
+        assertTrue(md.contains("public static final String TITLE = \"title\";"), md);
+        // The id() accessor emits the Kind.ID attribute literal (ruling 8).
+        assertTrue(md.contains("public EntityDescriptor.Attribute id()"), md);
+        assertTrue(md.contains("Kind.ID"), "id() must expose the ID attribute:" + System.lineSeparator() + md);
+        // typeName() carries the entity FQN.
+        assertTrue(md.contains("public String typeName()"), md);
+        assertTrue(md.contains("\"meta.Book\""), md);
+        // The SCALAR attribute literal has null targetTypeName/inverseName/embedded: a $S null crash
+        // would have failed the compile() above, so reaching this line proves null-safe emission.
+        assertTrue(md.contains("EntityDescriptor.Kind.SCALAR"), md);
+    }
+
+    @Test
+    void embeddedValueObjectGetsMetadataWithoutTableOrId() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/emb"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-emb"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-emb"));
+
+        Files.writeString(sourceDir.resolve("GeoPoint.java"), """
+                package emb;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class GeoPoint {
+                    double lat;
+                    double lng;
+                    public double getLat() { return lat; }
+                    public void setLat(double lat) { this.lat = lat; }
+                    public double getLng() { return lng; }
+                    public void setLng(double lng) { this.lng = lng; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Address.java"), """
+                package emb;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class Address {
+                    String city;
+                    GeoPoint point;
+                    public String getCity() { return city; }
+                    public void setCity(String city) { this.city = city; }
+                    public GeoPoint getPoint() { return point; }
+                    public void setPoint(GeoPoint point) { this.point = point; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Contact.java"), """
+                package emb;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Contact {
+                    @Identity Long id;
+                    String name;
+                    Address address;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getName() { return name; }
+                    public void setName(String name) { this.name = name; }
+                    public Address getAddress() { return address; }
+                    public void setAddress(Address address) { this.address = address; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Contacts.java"), """
+                package emb;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Contacts extends CrudRepository<Contact, Long> { }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "GeoPoint.java", "Address.java", "Contact.java", "Contacts.java");
+
+        // The owner gate is unchanged: Contact embeds a non-JDBC-safe value object type, so it keeps
+        // the reflective read path and gets no RowMapper/Metadata of its own.
+        assertTrue(Files.notExists(generatedDir.resolve("emb/ContactRowMapper.java")),
+                "the RowMapper gate must stay as it is for embedded value objects");
+        assertTrue(Files.notExists(generatedDir.resolve("emb/ContactMetadata.java")),
+                "no owner metadata when the mapper is skipped");
+
+        // The value object gets a descriptor-only Metadata: no TABLE_NAME, null tableName(), null id().
+        Path voMetadata = generatedDir.resolve("emb/AddressMetadata.java");
+        assertTrue(Files.exists(voMetadata), "Expected generated " + voMetadata);
+        String vmd = Files.readString(voMetadata);
+        assertTrue(vmd.contains("implements EntityDescriptor"), vmd);
+        assertTrue(vmd.contains("public static final AddressMetadata INSTANCE"), vmd);
+        assertTrue(!vmd.contains("TABLE_NAME"),
+                "a value object has no table and must not emit TABLE_NAME:" + System.lineSeparator() + vmd);
+        assertTrue(vmd.contains("public String tableName()") && vmd.contains("return null;"),
+                "value objects report a null table name:" + System.lineSeparator() + vmd);
+        assertTrue(vmd.contains("public EntityDescriptor.Attribute id()") && vmd.contains("return null;"),
+                "value objects report a null id:" + System.lineSeparator() + vmd);
+        assertTrue(vmd.contains("public static final String CITY = \"city\";"), vmd);
+        // The nested EMBEDDED attribute references the innermost value object's INSTANCE ...
+        assertTrue(vmd.contains("GeoPointMetadata.INSTANCE"),
+                "embedded attribute must reference the nested value object's INSTANCE:" + System.lineSeparator() + vmd);
+        // ... which must itself have been generated (transitive EMBEDDED tree walk).
+        Path innerMetadata = generatedDir.resolve("emb/GeoPointMetadata.java");
+        assertTrue(Files.exists(innerMetadata), "Expected generated " + innerMetadata);
+        String imd = Files.readString(innerMetadata);
+        assertTrue(imd.contains("public static final String LAT = \"lat\";"), imd);
+        assertTrue(imd.contains("EntityDescriptor.Kind.SCALAR"), imd);
+    }
+
     private void compile(Path sourceDir, Path classesDir, Path generatedDir, String... fileNames) throws Exception {
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         assertNotNull(compiler, "A system Java compiler is required to run this test");

@@ -120,6 +120,13 @@ public class RepositoryProcessor extends AbstractProcessor {
     /** Entity FQN → generated {@code <Entity>RowMapper} type, deduped across processing rounds. */
     private final Map<String, ClassName> rowMappers = new LinkedHashMap<>();
 
+    /**
+     * Entity/value-object FQN → generated {@code <Entity>Metadata} type. Doubles as the
+     * "already generated" guard for the EMBEDDED value-object metadata tree, so it is populated
+     * <em>before</em> the class is emitted (cycle-bounded).
+     */
+    private final Map<String, ClassName> metadataTypes = new LinkedHashMap<>();
+
     /** Entity/value-object FQN → compile-time descriptor, memoized for {@link #descriptorFor}. */
     private final Map<String, Descriptor> descriptorCache = new HashMap<>();
 
@@ -171,10 +178,14 @@ public class RepositoryProcessor extends AbstractProcessor {
             mapperType = rowMappers.get(entityFqn);
             if (mapperType == null) {
                 ClassName metadataType = generateMetadata(entityElement, entity);
+                metadataTypes.put(entityFqn, metadataType);
                 mapperType = generateRowMapper(entityElement, entity, metadataType);
                 rowMappers.put(entityFqn, mapperType);
             }
         }
+        // EMBEDDED value objects carry descriptor metadata even when the owner's mapper gate skips
+        // them; the generated <VO>Metadata classes are what the owner's attributes() reference.
+        generateEmbeddedDescriptors(entity.metadata());
         DeclaredType repositoryType = (DeclaredType) repository.asType();
         boolean crud = extendsCrud(repository, new HashSet<>());
         String packageName = elements.getPackageOf(repository).getQualifiedName().toString();
@@ -252,23 +263,136 @@ public class RepositoryProcessor extends AbstractProcessor {
         return true;
     }
 
-    /** Emits {@code <Entity>Metadata}: the table name and one column-name constant per mapped property. */
+    /**
+     * Emits {@code <Entity>Metadata implements EntityDescriptor}: Plan A's column-name constants
+     * (one per mapped property plus the table name) alongside the descriptor view — {@code INSTANCE},
+     * {@code typeName()}, {@code tableName()}, {@code id()} and {@code attributes()}. A value
+     * object (EMBEDDED target) has no table and no id, so its TABLE_NAME constant is omitted and the
+     * matching accessors return {@code null}.
+     */
     private ClassName generateMetadata(TypeElement entityElement, EntityModel entity) {
         String packageName = elements.getPackageOf(entityElement).getQualifiedName().toString();
         String simpleName = entityElement.getSimpleName() + "Metadata";
+        ClassName self = ClassName.get(packageName, simpleName);
+        ClassName descriptor = ClassName.get("io.github.fludakit.data.metadata", "EntityDescriptor");
+        ClassName attribute = descriptor.nestedClass("Attribute");
+        ClassName kind = descriptor.nestedClass("Kind");
+
         TypeSpec.Builder builder = TypeSpec.classBuilder(simpleName)
                 .addModifiers(Modifier.PUBLIC, Modifier.FINAL)
+                .addSuperinterface(descriptor)
                 .addMethod(MethodSpec.constructorBuilder().addModifiers(Modifier.PRIVATE).build())
-                .addField(stringConstant("TABLE_NAME", entity.metadata().tableName()));
+                .addField(FieldSpec.builder(self, "INSTANCE", Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
+                        .initializer("new $T()", self).build());
+        if (entity.metadata().tableName() != null) {
+            builder.addField(stringConstant("TABLE_NAME", entity.metadata().tableName()));
+        }
         if (entity.id() != null) {
             builder.addField(stringConstant(constName(entity.id().name()), entity.id().column()));
         }
         for (Property p : entity.properties()) {
             builder.addField(stringConstant(constName(p.name()), p.column()));
         }
+
+        builder.addMethod(stringAccessor("typeName", entityElement.getQualifiedName().toString()));
+        builder.addMethod(stringAccessor("tableName", entity.metadata().tableName()));
+        EntityDescriptor.Attribute idAttribute = entity.metadata().id();
+        if (idAttribute != null) {
+            builder.addMethod(attributeAccessor("id", idAttribute, attribute, kind));
+        } else {
+            builder.addMethod(MethodSpec.methodBuilder("id").addModifiers(Modifier.PUBLIC)
+                    .addAnnotation(Override.class).returns(attribute)
+                    .addStatement("return null").build());
+        }
+        List<EntityDescriptor.Attribute> attrs = entity.metadata().attributes();
+        CodeBlock.Builder list = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
+        for (int i = 0; i < attrs.size(); i++) {
+            if (i > 0) {
+                list.add(", ");
+            }
+            list.add(attributeLiteral(attrs.get(i), attribute, kind));
+        }
+        list.add(")");
+        builder.addMethod(MethodSpec.methodBuilder("attributes").addModifiers(Modifier.PUBLIC)
+                .addAnnotation(Override.class)
+                .returns(ParameterizedTypeName.get(ClassName.get(java.util.List.class), attribute))
+                .addStatement("return $L", list.build()).build());
+
         writeSourceFile(packageName + "." + simpleName, entityElement,
                 JavaFile.builder(packageName, builder.build()).skipJavaLangImports(true).build());
-        return ClassName.get(packageName, simpleName);
+        return self;
+    }
+
+    /**
+     * Emits descriptor metadata for every value object transitively {@code EMBEDDED} in
+     * {@code owner}'s attributes. Children are generated before their parent so the parent's
+     * {@code <VO>Metadata.INSTANCE} reference resolves to a generated class; the
+     * {@link #metadataTypes} guard is set before recursing, which bounds cycles (A embeds B embeds A).
+     */
+    private void generateEmbeddedDescriptors(EntityDescriptor owner) {
+        for (EntityDescriptor.Attribute a : owner.attributes()) {
+            if (a.kind() != EntityDescriptor.Kind.EMBEDDED || a.embedded() == null) {
+                continue;
+            }
+            String voFqn = a.embedded().typeName();
+            if (voFqn == null || metadataTypes.containsKey(voFqn)) {
+                continue;
+            }
+            TypeElement voElement = elements.getTypeElement(voFqn);
+            if (voElement == null) {
+                continue;
+            }
+            EntityModel voModel = buildEntity(voElement);
+            String voPackage = elements.getPackageOf(voElement).getQualifiedName().toString();
+            metadataTypes.put(voFqn, ClassName.get(voPackage, voElement.getSimpleName() + "Metadata"));
+            generateEmbeddedDescriptors(voModel.metadata());
+            generateMetadata(voElement, voModel);
+        }
+    }
+
+    /** Null-safe string emission: JavaPoet's {@code $S} is replaced by a literal {@code null} arg. */
+    private static CodeBlock stringLiteral(String value) {
+        return value == null ? CodeBlock.of("null") : CodeBlock.of("$S", value);
+    }
+
+    private MethodSpec stringAccessor(String name, String value) {
+        return MethodSpec.methodBuilder(name).addModifiers(Modifier.PUBLIC)
+                .addAnnotation(Override.class).returns(String.class)
+                .addStatement("return $L", stringLiteral(value)).build();
+    }
+
+    private MethodSpec attributeAccessor(String name, EntityDescriptor.Attribute attributeValue,
+                                         ClassName attribute, ClassName kind) {
+        return MethodSpec.methodBuilder(name).addModifiers(Modifier.PUBLIC)
+                .addAnnotation(Override.class).returns(attribute)
+                .addStatement("return $L", attributeLiteral(attributeValue, attribute, kind)).build();
+    }
+
+    /** Renders one {@code new EntityDescriptor.Attribute(...)} literal with the record's 7 components. */
+    private CodeBlock attributeLiteral(EntityDescriptor.Attribute a, ClassName attribute, ClassName kind) {
+        CodeBlock embedded = a.embedded() == null
+                ? CodeBlock.of("null")
+                : CodeBlock.of("$T.INSTANCE", embeddedMetadataName(a.embedded().typeName()));
+        return CodeBlock.of("new $T($L, $L, $T.$L, $L, $L, $L, $L)",
+                attribute,
+                stringLiteral(a.name()), stringLiteral(a.typeName()),
+                kind, a.kind().name(),
+                stringLiteral(a.column()), stringLiteral(a.targetTypeName()), stringLiteral(a.inverseName()),
+                embedded);
+    }
+
+    /**
+     * The {@code <VO>Metadata} type for a value-object FQN: the registered name from the embedded
+     * tree walk when available, otherwise a best-effort split of the FQN (default-package safe).
+     */
+    private ClassName embeddedMetadataName(String voFqn) {
+        ClassName known = metadataTypes.get(voFqn);
+        if (known != null) {
+            return known;
+        }
+        int dot = voFqn.lastIndexOf('.');
+        String pkg = dot < 0 ? "" : voFqn.substring(0, dot);
+        return ClassName.get(pkg, voFqn.substring(dot + 1) + "Metadata");
     }
 
     /** Emits {@code <Entity>RowMapper implements io.github.fludakit.jdbc.RowMapper<Entity>}; reflection-free. */

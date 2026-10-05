@@ -14,7 +14,7 @@ import io.github.fludakit.data.Names;
 import io.github.fludakit.data.annotation.Association;
 import io.github.fludakit.data.annotation.Identity;
 import io.github.fludakit.data.annotation.ValueObject;
-import io.github.fludakit.data.metadata.EntityMetadata;
+import io.github.fludakit.data.metadata.EntityDescriptor;
 import io.github.fludakit.data.page.CursorSupport;
 import io.github.fludakit.data.page.SimpleCursoredPage;
 import io.github.fludakit.data.page.SimplePage;
@@ -1124,9 +1124,9 @@ public class RepositoryProcessor extends AbstractProcessor {
         String table = Names.tableName(element.getSimpleName().toString());
         String typeNameString = element.getQualifiedName().toString();
         Property id = null;
-        EntityMetadata.Property metadataId = null;
+        EntityDescriptor.Attribute metadataId = null;
         List<Property> properties = new ArrayList<>();
-        List<EntityMetadata.Property> metadataProperties = new ArrayList<>();
+        List<EntityDescriptor.Attribute> metadataProperties = new ArrayList<>();
         List<ElementCollection> collections = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         for (Element member : elements.getAllMembers(element)) {
@@ -1146,41 +1146,42 @@ public class RepositoryProcessor extends AbstractProcessor {
             TypeElement valueObject = valueObjectElement(field);
             if (field.getAnnotation(Identity.class) != null || name.equals("id")) {
                 id = new Property(name, Names.columnName(name), false, fieldTypeName);
-                metadataId = new EntityMetadata.Property(name, fieldType, EntityMetadata.Kind.ID,
-                        Names.columnName(name), null, null);
+                metadataId = new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.ID,
+                        Names.columnName(name), null, null, null);
             } else if (field.getAnnotation(Association.class) != null) {
                 properties.add(new Property(name, Names.fkColumn(name), true, fieldTypeName));
-                metadataProperties.add(new EntityMetadata.Property(name, fieldType, EntityMetadata.Kind.MANY_TO_ONE,
-                        Names.fkColumn(name), null, null));
+                metadataProperties.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.MANY_TO_ONE,
+                        Names.fkColumn(name), null, null, null));
             } else if (valueObject != null) {
                 ElementCollection collection = buildCollection(table, name, valueObject);
                 collections.add(collection);
-                metadataProperties.add(new EntityMetadata.Property(name, fieldType,
-                        EntityMetadata.Kind.ELEMENT_COLLECTION, null, collection.target(), null));
+                metadataProperties.add(new EntityDescriptor.Attribute(name, fieldType,
+                        EntityDescriptor.Kind.ELEMENT_COLLECTION, null,
+                        valueObject.getQualifiedName().toString(), null, null));
             } else {
                 properties.add(new Property(name, Names.columnName(name), false, fieldTypeName));
-                metadataProperties.add(new EntityMetadata.Property(name, fieldType, EntityMetadata.Kind.SCALAR,
-                        Names.columnName(name), null, null));
+                metadataProperties.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.SCALAR,
+                        Names.columnName(name), null, null, null));
             }
         }
         if (id == null) {
             id = new Property("id", Names.columnName("id"), false, ClassName.get(Long.class));
-            metadataId = new EntityMetadata.Property("id", "java.lang.Long", EntityMetadata.Kind.ID,
-                    Names.columnName("id"), null, null);
+            metadataId = new EntityDescriptor.Attribute("id", "java.lang.Long", EntityDescriptor.Kind.ID,
+                    Names.columnName("id"), null, null, null);
         }
-        EntityMetadata metadata = EntityMetadata.of(typeNameString, table, metadataId, metadataProperties);
+        EntityDescriptor metadata = new Descriptor(typeNameString, table, metadataId, List.copyOf(metadataProperties));
         return new EntityModel(typeMirror, typeName, id, properties, collections, metadata);
     }
 
     private ElementCollection buildCollection(String parentTable, String field, TypeElement valueObject) {
         String childTable = Names.childTable(parentTable, field);
         String parentFk = parentTable + "_id";
-        EntityMetadata target = valueObjectMetadata(valueObject);
+        EntityDescriptor target = valueObjectMetadata(valueObject);
         List<Property> properties = new ArrayList<>();
-        for (EntityMetadata.Property property : target.properties()) {
-            properties.add(new Property(property.name(), property.column(),
-                    property.kind() == EntityMetadata.Kind.MANY_TO_ONE,
-                    typeNameOfString(property.typeName())));
+        for (EntityDescriptor.Attribute attribute : target.attributes()) {
+            properties.add(new Property(attribute.name(), attribute.column(),
+                    attribute.kind() == EntityDescriptor.Kind.MANY_TO_ONE,
+                    typeNameOfString(attribute.typeName())));
         }
         return new ElementCollection(field, TypeName.get(types.erasure(valueObject.asType())),
                 childTable, parentFk, properties, target);
@@ -1212,9 +1213,9 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
     }
 
-    /** Builds the id-less metadata for a {@code List<@ValueObject>} element type. */
-    private EntityMetadata valueObjectMetadata(TypeElement valueObject) {
-        List<EntityMetadata.Property> properties = new ArrayList<>();
+    /** Builds the id-less descriptor for a {@code List<@ValueObject>} element type. */
+    private EntityDescriptor valueObjectMetadata(TypeElement valueObject) {
+        List<EntityDescriptor.Attribute> attributes = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         for (Element member : elements.getAllMembers(valueObject)) {
             if (member.getKind() != ElementKind.FIELD) {
@@ -1230,14 +1231,14 @@ public class RepositoryProcessor extends AbstractProcessor {
             }
             String fieldType = field.asType().toString();
             if (field.getAnnotation(Association.class) != null) {
-                properties.add(new EntityMetadata.Property(name, fieldType, EntityMetadata.Kind.MANY_TO_ONE,
-                        Names.fkColumn(name), null, null));
+                attributes.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.MANY_TO_ONE,
+                        Names.fkColumn(name), null, null, null));
             } else {
-                properties.add(new EntityMetadata.Property(name, fieldType, EntityMetadata.Kind.SCALAR,
-                        Names.columnName(name), null, null));
+                attributes.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.SCALAR,
+                        Names.columnName(name), null, null, null));
             }
         }
-        return EntityMetadata.of(valueObject.getQualifiedName().toString(), null, null, properties);
+        return new Descriptor(valueObject.getQualifiedName().toString(), null, null, List.copyOf(attributes));
     }
 
     private TypeElement valueObjectElement(VariableElement field) {
@@ -1260,12 +1261,16 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     private record Property(String name, String column, boolean association, TypeName type) { }
 
+    private record Descriptor(String typeName, String tableName,
+                              EntityDescriptor.Attribute id,
+                              List<EntityDescriptor.Attribute> attributes) implements EntityDescriptor { }
+
     private record ElementCollection(String field, TypeName valueObjectType, String childTable,
-                                     String parentFk, List<Property> properties, EntityMetadata target) { }
+                                     String parentFk, List<Property> properties, EntityDescriptor target) { }
 
     private record EntityModel(TypeMirror typeMirror, TypeName typeName, Property id,
                                List<Property> properties, List<ElementCollection> collections,
-                               EntityMetadata metadata) { }
+                               EntityDescriptor metadata) { }
 
     private record Binding(String property, Operator operator, int paramIndex) { }
 

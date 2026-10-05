@@ -1,7 +1,7 @@
 package io.github.fludakit.data.sql;
 
 import io.github.fludakit.data.Names;
-import io.github.fludakit.data.metadata.EntityMetadata;
+import io.github.fludakit.data.metadata.EntityDescriptor;
 import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.SortSpec;
@@ -11,7 +11,7 @@ import java.util.stream.Collectors;
 
 public final class SqlBuilder {
 
-    public String selectBy(EntityMetadata md, List<Predicate> predicates, List<SortSpec> sorts, int limit, String cursorClause) {
+    public String selectBy(EntityDescriptor md, List<Predicate> predicates, List<SortSpec> sorts, int limit, String cursorClause) {
         String cols = md.columns().stream().map(c -> Names.quote(c.column())).collect(Collectors.joining(", "));
         StringBuilder sb = new StringBuilder("SELECT ").append(cols).append(" FROM ").append(Names.quote(md.tableName()));
         appendWhere(sb, predicates, cursorClause);
@@ -20,13 +20,13 @@ public final class SqlBuilder {
         return sb.toString();
     }
 
-    public String countBy(EntityMetadata md, List<Predicate> predicates) {
+    public String countBy(EntityDescriptor md, List<Predicate> predicates) {
         StringBuilder sb = new StringBuilder("SELECT COUNT(*) FROM ").append(Names.quote(md.tableName()));
         appendWhere(sb, predicates, null);
         return sb.toString();
     }
 
-    public String insert(EntityMetadata md) {
+    public String insert(EntityDescriptor md) {
         return insert(md, true);
     }
 
@@ -44,8 +44,8 @@ public final class SqlBuilder {
         return path.replace('.', '_');
     }
 
-    public String insert(EntityMetadata md, boolean includeId) {
-        List<EntityMetadata.ColumnRef> cols = md.columns();
+    public String insert(EntityDescriptor md, boolean includeId) {
+        List<EntityDescriptor.ColumnRef> cols = md.columns();
         if (!includeId) {
             cols = cols.stream()
                     .filter(c -> md.id() == null || !c.column().equals(md.id().column()))
@@ -56,8 +56,8 @@ public final class SqlBuilder {
         return "INSERT INTO " + Names.quote(md.tableName()) + " (" + names + ") VALUES (" + params + ")";
     }
 
-    public String update(EntityMetadata md) {
-        List<EntityMetadata.ColumnRef> cols = md.columns();
+    public String update(EntityDescriptor md) {
+        List<EntityDescriptor.ColumnRef> cols = md.columns();
         String idCol = Names.quote(md.id().column());
         String sets = cols.stream()
                 .filter(c -> !c.column().equals(md.id().column()))
@@ -66,11 +66,11 @@ public final class SqlBuilder {
         return "UPDATE " + Names.quote(md.tableName()) + " SET " + sets + " WHERE " + idCol + " = :id";
     }
 
-    public String deleteById(EntityMetadata md) {
+    public String deleteById(EntityDescriptor md) {
         return "DELETE FROM " + Names.quote(md.tableName()) + " WHERE " + Names.quote(md.id().column()) + " = :id";
     }
 
-    public String deleteBy(EntityMetadata md, List<Predicate> predicates) {
+    public String deleteBy(EntityDescriptor md, List<Predicate> predicates) {
         StringBuilder sb = new StringBuilder("DELETE FROM ").append(Names.quote(md.tableName()));
         appendWhere(sb, predicates, null);
         return sb.toString();

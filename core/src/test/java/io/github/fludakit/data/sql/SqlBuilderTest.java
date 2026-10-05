@@ -1,7 +1,8 @@
 package io.github.fludakit.data.sql;
 
-import io.github.fludakit.data.Names;
-import io.github.fludakit.data.metadata.EntityMetadata;
+import io.github.fludakit.data.metadata.EntityDescriptor;
+import io.github.fludakit.data.metadata.EntityDescriptor.Attribute;
+import io.github.fludakit.data.metadata.EntityDescriptor.Kind;
 import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.SortSpec;
@@ -13,10 +14,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class SqlBuilderTest {
 
-    static EntityMetadata customer() {
-        return EntityMetadata.of("Customer", "customer",
-                new EntityMetadata.Property("id", "java.lang.Long", EntityMetadata.Kind.ID, "id", null, null),
-                List.of(new EntityMetadata.Property("name", "java.lang.String", EntityMetadata.Kind.SCALAR, "name", null, null)));
+    record Fixture(String typeName, String tableName, Attribute id, List<Attribute> attributes)
+            implements EntityDescriptor { }
+
+    static EntityDescriptor customer() {
+        return new Fixture("Customer", "customer",
+                new Attribute("id", "java.lang.Long", Kind.ID, "id", null, null, null),
+                List.of(new Attribute("name", "java.lang.String", Kind.SCALAR, "name", null, null, null)));
     }
 
     @Test

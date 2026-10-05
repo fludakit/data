@@ -584,6 +584,44 @@ class RepositoryProcessorTest {
         assertTrue(imd.contains("EntityDescriptor.Kind.SCALAR"), imd);
     }
 
+    @Test
+    void genericEntityWithTypeVariableFieldDoesNotCrashCodegen() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/gentvar"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-gentvar"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-gentvar"));
+
+        Files.writeString(sourceDir.resolve("Box.java"), """
+                package gentvar;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Box<T> {
+                    @Identity Long id;
+                    T value;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public T getValue() { return value; }
+                    public void setValue(T value) { this.value = value; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Boxes.java"), """
+                package gentvar;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Boxes extends CrudRepository<Box, Long> { }
+                """);
+
+        // Processing a TypeVariable field must not abort annotation processing; the mapper gate then
+        // silently skips the non-JDBC-safe field as before (ruling 5).
+        compile(sourceDir, classesDir, generatedDir, "Box.java", "Boxes.java");
+
+        assertTrue(Files.exists(generatedDir.resolve("gentvar/BoxesImpl.java")),
+                "repository impl must still be generated");
+        assertTrue(Files.notExists(generatedDir.resolve("gentvar/BoxRowMapper.java")),
+                "a T-typed field is not JDBC-safe, so the RowMapper must be skipped");
+    }
+
     private void compile(Path sourceDir, Path classesDir, Path generatedDir, String... fileNames) throws Exception {
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         assertNotNull(compiler, "A system Java compiler is required to run this test");

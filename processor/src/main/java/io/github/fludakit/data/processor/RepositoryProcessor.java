@@ -1273,7 +1273,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                 continue;
             }
             String fieldType = field.asType().toString();
-            TypeName fieldTypeName = TypeName.get(field.asType());
+            TypeName fieldTypeName = safeFieldType(field.asType());
 
             if (field.getAnnotation(Identity.class) != null || (!valueObject && name.equals("id"))) {
                 id = new Property(name, Names.columnName(name), false, fieldTypeName);
@@ -1359,6 +1359,21 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
         return new ElementCollection(field, TypeName.get(types.erasure(valueObject.asType())),
                 childTable, parentFk, properties, target);
+    }
+
+    /**
+     * {@link TypeName#get(javax.lang.model.type.TypeMirror)} for a possibly exotic field type. A
+     * mirror JavaPoet cannot represent (it throws {@link IllegalArgumentException}) degrades to
+     * {@link TypeName#OBJECT}: never JDBC-safe, so the existing {@link #canGenerateRowMapper} gate
+     * silently skips the mapper exactly as the old string-only path did, instead of aborting
+     * annotation processing.
+     */
+    private static TypeName safeFieldType(TypeMirror type) {
+        try {
+            return TypeName.get(type);
+        } catch (IllegalArgumentException e) {
+            return TypeName.OBJECT;
+        }
     }
 
     /**

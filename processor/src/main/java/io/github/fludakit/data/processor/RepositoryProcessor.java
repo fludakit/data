@@ -1,9 +1,12 @@
 package io.github.fludakit.data.processor;
 
+import com.squareup.javapoet.ArrayTypeName;
+import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.CodeBlock;
 import com.squareup.javapoet.FieldSpec;
 import com.squareup.javapoet.JavaFile;
 import com.squareup.javapoet.MethodSpec;
+import com.squareup.javapoet.ParameterizedTypeName;
 import com.squareup.javapoet.TypeName;
 import com.squareup.javapoet.TypeSpec;
 import com.squareup.javapoet.TypeVariableName;
@@ -90,8 +93,27 @@ public class RepositoryProcessor extends AbstractProcessor {
             "java.util.List", "java.util.Set", "java.util.Collection", "java.lang.Iterable",
             "java.util.Optional", "java.util.stream.Stream");
 
+    /**
+     * Field types the reflection-free {@code <Entity>RowMapper} can read straight from a
+     * {@code ResultSet} (via {@code getObject(...)} or a primitive getter). Any entity carrying a
+     * field outside this allowlist (enums, associations, value objects, ...) is skipped so it keeps
+     * using the existing reflective mapping instead of generating code that would not compile.
+     */
+    private static final Set<String> JDBC_SAFE_TYPES = Set.of(
+            "java.lang.String", "java.lang.Boolean", "java.lang.Byte", "java.lang.Short",
+            "java.lang.Integer", "java.lang.Long", "java.lang.Float", "java.lang.Double",
+            "java.math.BigDecimal", "java.math.BigInteger",
+            "java.sql.Date", "java.sql.Time", "java.sql.Timestamp",
+            "java.time.LocalDate", "java.time.LocalTime", "java.time.LocalDateTime",
+            "java.time.Instant", "java.time.OffsetDateTime", "java.time.ZonedDateTime",
+            "java.util.UUID",
+            "boolean", "byte", "short", "int", "long", "float", "double");
+
     private Types types;
     private Elements elements;
+
+    /** Entity FQN → generated {@code <Entity>RowMapper} type, deduped across processing rounds. */
+    private final Map<String, ClassName> rowMappers = new LinkedHashMap<>();
 
     @Override
     public SourceVersion getSupportedSourceVersion() {
@@ -132,6 +154,16 @@ public class RepositoryProcessor extends AbstractProcessor {
         DeclaredType entityErasure = (DeclaredType) types.erasure(entityMirror);
         TypeElement entityElement = (TypeElement) entityErasure.asElement();
         EntityModel entity = buildEntity(entityElement);
+        ClassName mapperType = null;
+        if (canGenerateRowMapper(entity)) {
+            String entityFqn = entityElement.getQualifiedName().toString();
+            mapperType = rowMappers.get(entityFqn);
+            if (mapperType == null) {
+                ClassName metadataType = generateMetadata(entityElement, entity);
+                mapperType = generateRowMapper(entityElement, entity, metadataType);
+                rowMappers.put(entityFqn, mapperType);
+            }
+        }
         DeclaredType repositoryType = (DeclaredType) repository.asType();
         boolean crud = extendsCrud(repository, new HashSet<>());
         String packageName = elements.getPackageOf(repository).getQualifiedName().toString();
@@ -175,18 +207,124 @@ public class RepositoryProcessor extends AbstractProcessor {
             classBuilder.addMethod(columnHelper(entity));
         }
 
-        JavaFile javaFile = JavaFile.builder(packageName, classBuilder.build())
-                .skipJavaLangImports(true)
+        writeSourceFile(packageName + "." + implementationName, repository,
+                JavaFile.builder(packageName, classBuilder.build()).skipJavaLangImports(true).build());
+    }
+
+    // ------------------------------------------- static metamodel + row mapper generation
+
+    private static String constName(String property) {
+        return Names.toSnakeCase(property).toUpperCase();
+    }
+
+    private static FieldSpec stringConstant(String name, String value) {
+        return FieldSpec.builder(String.class, name, Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
+                .initializer("$S", value).build();
+    }
+
+    private static boolean isJdbcSafe(TypeName type) {
+        if (type instanceof ArrayTypeName array) {
+            return array.componentType.equals(TypeName.BYTE); // byte[]
+        }
+        return JDBC_SAFE_TYPES.contains(type.toString());
+    }
+
+    private boolean canGenerateRowMapper(EntityModel entity) {
+        if (entity.id() != null && !isJdbcSafe(entity.id().type())) {
+            return false;
+        }
+        for (Property p : entity.properties()) {
+            if (!p.association() && !isJdbcSafe(p.type())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Emits {@code <Entity>Metadata}: the table name and one column-name constant per mapped property. */
+    private ClassName generateMetadata(TypeElement entityElement, EntityModel entity) {
+        String packageName = elements.getPackageOf(entityElement).getQualifiedName().toString();
+        String simpleName = entityElement.getSimpleName() + "Metadata";
+        TypeSpec.Builder builder = TypeSpec.classBuilder(simpleName)
+                .addModifiers(Modifier.PUBLIC, Modifier.FINAL)
+                .addMethod(MethodSpec.constructorBuilder().addModifiers(Modifier.PRIVATE).build())
+                .addField(stringConstant("TABLE_NAME", entity.metadata().tableName()));
+        if (entity.id() != null) {
+            builder.addField(stringConstant(constName(entity.id().name()), entity.id().column()));
+        }
+        for (Property p : entity.properties()) {
+            builder.addField(stringConstant(constName(p.name()), p.column()));
+        }
+        writeSourceFile(packageName + "." + simpleName, entityElement,
+                JavaFile.builder(packageName, builder.build()).skipJavaLangImports(true).build());
+        return ClassName.get(packageName, simpleName);
+    }
+
+    /** Emits {@code <Entity>RowMapper implements io.github.fludakit.jdbc.RowMapper<Entity>}; reflection-free. */
+    private ClassName generateRowMapper(TypeElement entityElement, EntityModel entity, ClassName metadataType) {
+        String packageName = elements.getPackageOf(entityElement).getQualifiedName().toString();
+        String simpleName = entityElement.getSimpleName() + "RowMapper";
+        TypeName entityType = entity.typeName();
+        ClassName rowMapperInterface = ClassName.get("io.github.fludakit.jdbc", "RowMapper");
+
+        MethodSpec.Builder mapRow = MethodSpec.methodBuilder("mapRow")
+                .addModifiers(Modifier.PUBLIC)
+                .addAnnotation(Override.class)
+                .returns(entityType)
+                .addParameter(ClassName.get("java.sql", "ResultSet"), "rs")
+                .addParameter(int.class, "rowNum")
+                .addException(ClassName.get("java.sql", "SQLException"))
+                .addStatement("$T entity = new $T()", entityType, entityType);
+
+        if (entity.id() != null) {
+            mapRow.addStatement("entity.$L($L)", setter(entity.id().name()),
+                    readExpression(entity.id().type(), metadataType, entity.id().name()));
+        }
+        for (Property p : entity.properties()) {
+            if (p.association()) {
+                continue; // FK-only reference; left null on read (matches current behaviour)
+            }
+            mapRow.addStatement("entity.$L($L)", setter(p.name()),
+                    readExpression(p.type(), metadataType, p.name()));
+        }
+        mapRow.addStatement("return entity");
+
+        TypeSpec type = TypeSpec.classBuilder(simpleName)
+                .addModifiers(Modifier.PUBLIC, Modifier.FINAL)
+                .addSuperinterface(ParameterizedTypeName.get(rowMapperInterface, entityType))
+                .addMethod(mapRow.build())
                 .build();
+        writeSourceFile(packageName + "." + simpleName, entityElement,
+                JavaFile.builder(packageName, type).skipJavaLangImports(true).build());
+        return ClassName.get(packageName, simpleName);
+    }
+
+    private CodeBlock readExpression(TypeName type, ClassName metadataType, String property) {
+        if (type.isPrimitive()) {
+            String getter = switch (type.toString()) {
+                case "boolean" -> "getBoolean";
+                case "byte" -> "getByte";
+                case "short" -> "getShort";
+                case "int" -> "getInt";
+                case "long" -> "getLong";
+                case "float" -> "getFloat";
+                case "double" -> "getDouble";
+                default -> throw new IllegalStateException("Unsupported primitive " + type);
+            };
+            return CodeBlock.of("rs.$L($T.$L)", getter, metadataType, constName(property));
+        }
+        return CodeBlock.of("rs.getObject($T.$L, $T.class)", metadataType, constName(property), type.box());
+    }
+
+    private void writeSourceFile(String fqn, Element origin, JavaFile javaFile) {
         try {
-            JavaFileObject sourceFile = processingEnv.getFiler()
-                    .createSourceFile(packageName + "." + implementationName, repository);
+            JavaFileObject sourceFile = processingEnv.getFiler().createSourceFile(fqn, origin);
             try (Writer writer = sourceFile.openWriter()) {
                 javaFile.writeTo(writer);
             }
         } catch (IOException e) {
             processingEnv.getMessager().printMessage(Diagnostic.Kind.ERROR,
-                    "Failed to write " + implementationName + ": " + e.getMessage(), repository);
+                    "Failed to write " + fqn + ": " + e.getMessage(), origin);
         }
     }
 
@@ -957,13 +1095,14 @@ public class RepositoryProcessor extends AbstractProcessor {
                 continue;
             }
             String fieldType = field.asType().toString();
+            TypeName fieldTypeName = TypeName.get(field.asType());
             TypeElement valueObject = valueObjectElement(field);
             if (field.getAnnotation(Identity.class) != null || name.equals("id")) {
-                id = new Property(name, Names.columnName(name), false);
+                id = new Property(name, Names.columnName(name), false, fieldTypeName);
                 metadataId = new EntityMetadata.Property(name, fieldType, EntityMetadata.Kind.ID,
                         Names.columnName(name), null, null);
             } else if (field.getAnnotation(Association.class) != null) {
-                properties.add(new Property(name, Names.fkColumn(name), true));
+                properties.add(new Property(name, Names.fkColumn(name), true, fieldTypeName));
                 metadataProperties.add(new EntityMetadata.Property(name, fieldType, EntityMetadata.Kind.MANY_TO_ONE,
                         Names.fkColumn(name), null, null));
             } else if (valueObject != null) {
@@ -972,13 +1111,13 @@ public class RepositoryProcessor extends AbstractProcessor {
                 metadataProperties.add(new EntityMetadata.Property(name, fieldType,
                         EntityMetadata.Kind.ELEMENT_COLLECTION, null, collection.target(), null));
             } else {
-                properties.add(new Property(name, Names.columnName(name), false));
+                properties.add(new Property(name, Names.columnName(name), false, fieldTypeName));
                 metadataProperties.add(new EntityMetadata.Property(name, fieldType, EntityMetadata.Kind.SCALAR,
                         Names.columnName(name), null, null));
             }
         }
         if (id == null) {
-            id = new Property("id", Names.columnName("id"), false);
+            id = new Property("id", Names.columnName("id"), false, ClassName.get(Long.class));
             metadataId = new EntityMetadata.Property("id", "java.lang.Long", EntityMetadata.Kind.ID,
                     Names.columnName("id"), null, null);
         }
@@ -993,10 +1132,37 @@ public class RepositoryProcessor extends AbstractProcessor {
         List<Property> properties = new ArrayList<>();
         for (EntityMetadata.Property property : target.properties()) {
             properties.add(new Property(property.name(), property.column(),
-                    property.kind() == EntityMetadata.Kind.MANY_TO_ONE));
+                    property.kind() == EntityMetadata.Kind.MANY_TO_ONE,
+                    typeNameOfString(property.typeName())));
         }
         return new ElementCollection(field, TypeName.get(types.erasure(valueObject.asType())),
                 childTable, parentFk, properties, target);
+    }
+
+    /**
+     * Converts a metadata type-name string (as recorded on a {@code @ValueObject} property) back into
+     * a {@link TypeName}. Element-collection children are not mapped in this iteration, so this is
+     * best-effort: primitives map to their {@link TypeName} constants and anything
+     * {@link ClassName#bestGuess} cannot parse (arrays, parameterized types) falls back to
+     * {@link TypeName#OBJECT} instead of aborting annotation processing.
+     */
+    private static TypeName typeNameOfString(String typeName) {
+        switch (typeName) {
+            case "boolean": return TypeName.BOOLEAN;
+            case "byte": return TypeName.BYTE;
+            case "short": return TypeName.SHORT;
+            case "int": return TypeName.INT;
+            case "long": return TypeName.LONG;
+            case "float": return TypeName.FLOAT;
+            case "double": return TypeName.DOUBLE;
+            case "char": return TypeName.CHAR;
+            default:
+                try {
+                    return ClassName.bestGuess(typeName);
+                } catch (IllegalArgumentException e) {
+                    return TypeName.OBJECT;
+                }
+        }
     }
 
     /** Builds the id-less metadata for a {@code List<@ValueObject>} element type. */
@@ -1045,7 +1211,7 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     // --------------------------------------------------------------- nested types
 
-    private record Property(String name, String column, boolean association) { }
+    private record Property(String name, String column, boolean association, TypeName type) { }
 
     private record ElementCollection(String field, TypeName valueObjectType, String childTable,
                                      String parentFk, List<Property> properties, EntityMetadata target) { }

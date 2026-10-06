@@ -35,12 +35,12 @@ class MetamodelSortTest {
         profiles.save(profile("Gamma", 2.0));
 
         Page<Profile> byCity = profiles.findAll(
-                PageRequest.ofSize(3), Order.by(_Profile.address_city.asc()));
+                PageRequest.ofSize(3), Order.by(_Profile.address.city.asc()));
         assertThat(byCity.content()).extracting(p -> p.getAddress().getCity())
                 .containsExactly("Alpha", "Beta", "Gamma");
 
         Page<Profile> byLat = profiles.findAll(
-                PageRequest.ofSize(3), Order.by(_Profile.address_point_lat.desc()));
+                PageRequest.ofSize(3), Order.by(_Profile.address.point.lat.desc()));
         assertThat(byLat.content()).extracting(p -> p.getAddress().getPoint().getLat())
                 .containsExactly(3.0, 2.0, 1.0);
     }

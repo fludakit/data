@@ -16,6 +16,7 @@ import io.github.fludakit.data.Names;
 import io.github.fludakit.data.annotation.Association;
 import io.github.fludakit.data.annotation.Identity;
 import io.github.fludakit.data.metadata.ColumnRef;
+import io.github.fludakit.data.metadata.JoinRef;
 import io.github.fludakit.data.processor.DescriptorModel.Prop;
 import io.github.fludakit.data.processor.DescriptorModel.Stereotype;
 import io.github.fludakit.data.page.CursorSupport;
@@ -2252,10 +2253,16 @@ public class RepositoryProcessor extends AbstractProcessor {
         Kind kind = kindOf(returnMirror);
 
         List<Predicate> predicates = predicates(bindings, parameters);
+        // Task 8: resolve every method-name predicate property through the compile model, so a path
+        // that traverses a relation (Reference / EntityList / ElementList) resolves at compile time
+        // and contributes a LEFT JOIN. Local and embedded paths resolve to plain unqualified refs.
+        List<ColumnRef> predicateRefs = resolveCompilePaths(entity.metadata(),
+                predicates.stream().map(Predicate::property).toList(), method);
 
         if ("count".equals(action) || "exists".equals(action)) {
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
-                    new SqlBuilder().countBy(entity.metadata(), predicates));
+                    methodSql(action, entity.metadata(), predicates, predicateRefs,
+                            List.of(), List.of(), 0));
             CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
             appendBoundParameters(call, bindings, parameters);
             call.add(".singleValue($T.class)", Long.class);
@@ -2271,7 +2278,8 @@ public class RepositoryProcessor extends AbstractProcessor {
 
         if ("delete".equals(action)) {
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
-                    new SqlBuilder().deleteBy(entity.metadata(), predicates));
+                    methodSql("delete", entity.metadata(), predicates, predicateRefs,
+                            List.of(), List.of(), 0));
             CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
             appendBoundParameters(call, bindings, parameters);
             call.add(".update()");
@@ -2292,14 +2300,18 @@ public class RepositoryProcessor extends AbstractProcessor {
                                 + " requires a PageRequest parameter", method);
                 return;
             }
+            // The base constant carries the compile-time predicates (join-aware); the runtime sort /
+            // seek resolution in emitPaged stays local-only (deferred to Task 12), so no sort refs here.
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
-                    new SqlBuilder().selectBy(entity.metadata(), predicates, List.of(), 0, null));
+                    methodSql("find", entity.metadata(), predicates, predicateRefs, List.of(), List.of(), 0));
             emitPaged(builder, entity, pageRequest, methodSorts, constant, constants, bindings, parameters,
                     kind == Kind.CURSORED_PAGE, mapperType, hydrate);
             return;
         }
-        String sql = new SqlBuilder().selectBy(entity.metadata(), predicates, methodSorts,
-                parsed != null ? parsed.limit() : 0, null);
+        List<ColumnRef> sortRefs = resolveCompilePaths(entity.metadata(),
+                methodSorts.stream().map(SortSpec::property).toList(), method);
+        String sql = methodSql(action, entity.metadata(), predicates, predicateRefs,
+                methodSorts, sortRefs, parsed != null ? parsed.limit() : 0);
         String constant = addConstant(constants, "SQL_" + upperSnake(name), sql);
         CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
         appendBoundParameters(call, bindings, parameters);
@@ -2337,6 +2349,293 @@ public class RepositoryProcessor extends AbstractProcessor {
                 builder.addStatement("$L", call.build());
             }
         }
+    }
+
+    /**
+     * The outcome of resolving a method-name property path against a {@link DescriptorModel}. A
+     * resolved {@code ref} is either a plain local column (empty {@code joins}) or a relation-traversing
+     * column carrying exactly one {@link JoinRef}; {@code multiHop} flags a path that would need two or
+     * more joins (rejected with a NOTE), and {@code unresolvedRelation} flags a path whose relation head
+     * names a target that could not be resolved (degraded with a NOTE). Both degrade the caller back to
+     * the legacy unqualified rendering; neither aborts the compile.
+     */
+    private record PathResolution(ColumnRef ref, boolean multiHop, boolean unresolvedRelation) {
+        static PathResolution resolved(ColumnRef ref) { return new PathResolution(ref, false, false); }
+        static PathResolution unresolved() { return new PathResolution(null, false, false); }
+        static PathResolution tooManyRelations() { return new PathResolution(null, true, false); }
+        static PathResolution relationUnresolved() { return new PathResolution(null, false, true); }
+    }
+
+    /**
+     * Resolves every property in {@code paths} against {@code md}, reporting the multi-hop and
+     * unresolved-relation NOTEs on {@code method} and falling back to the legacy unqualified column
+     * (identical to {@code SqlBuilder}'s old {@code Names.columnName} rendering) whenever the descriptor
+     * cannot resolve the path. The returned refs line up index-for-index with {@code paths}.
+     */
+    private List<ColumnRef> resolveCompilePaths(DescriptorModel md, List<String> paths, ExecutableElement method) {
+        List<ColumnRef> refs = new ArrayList<>();
+        for (String path : paths) {
+            PathResolution resolution = resolveCompilePath(md, path);
+            if (resolution.multiHop()) {
+                processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
+                        "path '" + path + "' traverses more than one relation; not supported", method);
+                refs.add(legacyColumnRef(path));
+            } else if (resolution.unresolvedRelation()) {
+                processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
+                        "path '" + path + "' traverses a relation whose target could not be resolved;"
+                                + " the predicate was left unqualified", method);
+                refs.add(legacyColumnRef(path));
+            } else if (resolution.ref() != null) {
+                refs.add(resolution.ref());
+            } else {
+                refs.add(legacyColumnRef(path));
+            }
+        }
+        return refs;
+    }
+
+    /** The legacy fully-local ref: physical column via {@link Names#columnName}, no join, no table. */
+    private static ColumnRef legacyColumnRef(String property) {
+        return new ColumnRef(Names.columnName(property), property);
+    }
+
+    /**
+     * Resolves a single method-name property to a {@link ColumnRef} through the compile model, using the
+     * same algorithm as the runtime {@code EntityDescriptor.columnRef} but driven by the concatenated
+     * camel path the {@code qbn} parser emits (which carries NO dots). So a head/remainder split happens
+     * at camel-hump (and any literal {@code '.'}) boundaries rather than at a single dot. Order:
+     * <ol>
+     *   <li>local scan — a dots-stripped, case-insensitive match against each {@link ColumnRef#path()}
+     *       (this keeps flat scalars and flattened embedded leaves byte-identical to today);</li>
+     *   <li>relation descent — the shortest head that is a {@link Prop.Reference}/
+     *       {@link Prop.EntityList}/{@link Prop.ElementList}, with the remainder resolved as a LEAF in the
+     *       target (or against the element columns), contributing exactly one join.</li>
+     * </ol>
+     * A remainder that would itself need a relation yields {@link PathResolution#multiHop()}; a head whose
+     * target cannot be resolved yields {@link PathResolution#relationUnresolved()}.
+     */
+    private PathResolution resolveCompilePath(DescriptorModel md, String path) {
+        ColumnRef local = localColumnRef(md.columns(), path);
+        if (local != null) {
+            return PathResolution.resolved(local);
+        }
+        for (String[] head : candidateHeads(path)) {
+            Prop prop = propOrNull(md, head[0]);
+            if (!isTraversable(prop)) {
+                continue;
+            }
+            PathResolution inner = resolveRelationHead(md, prop, head[1]);
+            if (inner.multiHop() || inner.unresolvedRelation() || inner.ref() != null) {
+                return inner;
+            }
+        }
+        return PathResolution.unresolved();
+    }
+
+    /**
+     * Resolves {@code remainder} as a leaf under a relation {@code prop} and attaches the join edge the
+     * traversal contributes. The alias is exactly the property name.
+     */
+    private PathResolution resolveRelationHead(DescriptorModel md, Prop prop, String remainder) {
+        if (prop instanceof Prop.ElementList elementList) {
+            ColumnRef leaf = localColumnRef(elementList.elementColumns(), remainder);
+            if (leaf == null) {
+                return PathResolution.unresolved();
+            }
+            JoinRef join = new JoinRef(elementList.childTable(), elementList.name(),
+                    md.idColumn(), elementList.parentFkColumn());
+            return PathResolution.resolved(leaf.withPrefix(elementList.name(), join));
+        }
+        String targetFqn = prop instanceof Prop.Reference reference
+                ? reference.targetTypeName() : ((Prop.EntityList) prop).targetTypeName();
+        DescriptorModel target = descriptorByFqn(targetFqn);
+        if (target == null) {
+            return PathResolution.relationUnresolved();
+        }
+        ColumnRef leaf = localColumnRef(target.columns(), remainder);
+        if (leaf == null) {
+            // Not a local leaf of the target — if the remainder names ANOTHER relation the path is
+            // multi-hop; otherwise this head is simply not the right split, so keep searching.
+            for (String[] deeper : candidateHeads(remainder)) {
+                if (isTraversable(propOrNull(target, deeper[0]))) {
+                    return PathResolution.tooManyRelations();
+                }
+            }
+            return PathResolution.unresolved();
+        }
+        JoinRef join = referenceOrListJoin(md, target, prop);
+        if (join == null) {
+            return PathResolution.relationUnresolved();
+        }
+        return PathResolution.resolved(leaf.withPrefix(prop.name(), join));
+    }
+
+    /** The LEFT JOIN edge for a Reference / EntityList traversal; {@code null} when unbuildable. */
+    private static JoinRef referenceOrListJoin(DescriptorModel root, DescriptorModel target, Prop prop) {
+        if (prop instanceof Prop.Reference reference) {
+            if (reference.targetTable() == null || target.idColumn() == null) {
+                return null;
+            }
+            return new JoinRef(reference.targetTable(), reference.name(),
+                    reference.fkColumn(), target.idColumn());
+        }
+        if (prop instanceof Prop.EntityList list) {
+            if (list.targetTable() == null || list.inverseFkColumn() == null) {
+                return null;
+            }
+            return new JoinRef(list.targetTable(), list.name(), root.idColumn(), list.inverseFkColumn());
+        }
+        return null;
+    }
+
+    /** The compile-time descriptor for a relationship target FQN, or {@code null} if unmapped. */
+    private DescriptorModel descriptorByFqn(String fqn) {
+        if (fqn == null) {
+            return null;
+        }
+        String raw = stripGenerics(fqn);
+        DescriptorModel cached = descriptorCache.get(raw);
+        if (cached != null) {
+            return cached;
+        }
+        try {
+            TypeElement te = elements.getTypeElement(raw);
+            return te == null ? null : descriptorFor(te);
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /** First column whose dot-path (dots removed, case-insensitive) equals {@code path} (dots removed). */
+    private static ColumnRef localColumnRef(List<ColumnRef> columns, String path) {
+        String flat = path.replace(".", "");
+        for (ColumnRef c : columns) {
+            if (c.path().replace(".", "").equalsIgnoreCase(flat)) {
+                return c;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * All (head, remainder) splits at camel-hump and literal-{@code '.'} boundaries, shortest head
+     * first. Each entry is {@code {head, remainder}}.
+     */
+    private static List<String[]> candidateHeads(String path) {
+        List<String[]> out = new ArrayList<>();
+        for (int i = 1; i < path.length(); i++) {
+            char c = path.charAt(i);
+            if (c == '.') {
+                out.add(new String[]{path.substring(0, i), path.substring(i + 1)});
+            } else if (Character.isUpperCase(c)) {
+                out.add(new String[]{path.substring(0, i), path.substring(i)});
+            }
+        }
+        return out;
+    }
+
+    private static boolean isTraversable(Prop prop) {
+        return prop instanceof Prop.Reference || prop instanceof Prop.EntityList || prop instanceof Prop.ElementList;
+    }
+
+    /**
+     * {@link DescriptorModel#prop(String)} without the throw: {@code null} for an unknown name. A
+     * mid-path camel segment keeps its leading capital (e.g. {@code "Country"} in
+     * {@code "customerCountryCode"}), so the decapitalized form is matched as a fallback — mirroring how
+     * the {@code qbn} parser only decapitalizes the FIRST hump of the concatenated property string.
+     */
+    private static Prop propOrNull(DescriptorModel md, String name) {
+        Prop exact = propByExactName(md, name);
+        if (exact != null) {
+            return exact;
+        }
+        if (name.isEmpty() || !Character.isUpperCase(name.charAt(0))) {
+            return null;
+        }
+        return propByExactName(md, Character.toLowerCase(name.charAt(0)) + name.substring(1));
+    }
+
+    private static Prop propByExactName(DescriptorModel md, String name) {
+        if (md.id() != null && md.id().name().equals(name)) {
+            return md.id();
+        }
+        for (Prop p : md.props()) {
+            if (p.name().equals(name)) {
+                return p;
+            }
+        }
+        return null;
+    }
+
+    /** True when any resolved ref carries a join, i.e. the statement must splice a LEFT JOIN chain. */
+    private static boolean hasJoins(List<ColumnRef> refs) {
+        for (ColumnRef r : refs) {
+            if (!r.joins().isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Builds a method-name SQL constant. When no predicate or ORDER BY property traverses a relation
+     * this delegates to {@link SqlBuilder}'s classic rendering, so every existing local constant stays
+     * byte-identical. When a traversal is present, the resolved refs contribute a deduplicated
+     * {@link SqlBuilder#joinClause LEFT JOIN chain} spliced right after the {@code FROM} table, the WHERE
+     * columns are alias-qualified through {@link SqlBuilder#render(Predicate, ColumnRef)}, and ORDER BY is
+     * built from the resolved refs with an explicit {@code ASC}/{@code DESC} (local refs unqualified for
+     * legacy parity, joined refs qualified against the root table). Projection is unchanged for
+     * count/delete; parameter binding is untouched (the caller binds the JAVA PARAMETER NAME).
+     */
+    private String methodSql(String action, DescriptorModel md, List<Predicate> predicates,
+                             List<ColumnRef> predicateRefs, List<SortSpec> sorts, List<ColumnRef> sortRefs,
+                             int limit) {
+        if (!hasJoins(predicateRefs) && !hasJoins(sortRefs)) {
+            if ("count".equals(action) || "exists".equals(action)) {
+                return new SqlBuilder().countBy(md, predicates);
+            }
+            if ("delete".equals(action)) {
+                return new SqlBuilder().deleteBy(md, predicates);
+            }
+            return new SqlBuilder().selectBy(md, predicates, sorts, limit, null);
+        }
+        List<ColumnRef> refs = new ArrayList<>(predicateRefs);
+        refs.addAll(sortRefs);
+        StringBuilder sb = new StringBuilder();
+        if ("count".equals(action) || "exists".equals(action)) {
+            sb.append("SELECT COUNT(*) FROM ").append(Names.quote(md.tableName()));
+        } else if ("delete".equals(action)) {
+            sb.append("DELETE FROM ").append(Names.quote(md.tableName()));
+        } else {
+            String cols = md.columns().stream()
+                    .map(c -> Names.quote(c.column()))
+                    .collect(java.util.stream.Collectors.joining(", "));
+            sb.append("SELECT ").append(cols).append(" FROM ").append(Names.quote(md.tableName()));
+        }
+        sb.append(SqlBuilder.joinClause(md, refs));
+        for (int i = 0; i < predicates.size(); i++) {
+            sb.append(i == 0 ? " WHERE " : " AND ")
+                    .append(SqlBuilder.render(predicates.get(i), predicateRefs.get(i)));
+        }
+        if (!sorts.isEmpty()) {
+            StringBuilder orderBy = new StringBuilder();
+            for (int i = 0; i < sorts.size(); i++) {
+                SortSpec sort = sorts.get(i);
+                ColumnRef ref = sortRefs.get(i);
+                String term = ref.joins().isEmpty() && ref.table() == null
+                        ? Names.quote(ref.column())
+                        : SqlBuilder.qualify(ref, md.tableName());
+                if (orderBy.length() > 0) {
+                    orderBy.append(", ");
+                }
+                orderBy.append(term).append(sort.ascending() ? " ASC" : " DESC");
+            }
+            sb.append(" ORDER BY ").append(orderBy);
+        }
+        if (limit > 0) {
+            sb.append(" LIMIT ").append(limit);
+        }
+        return sb.toString();
     }
 
     private String specialParameter(List<? extends VariableElement> parameters,

@@ -2516,6 +2516,296 @@ class RepositoryProcessorTest {
                 "CURSOR statement must splice joins right after the FROM constant, before WHERE:" + System.lineSeparator() + impl);
     }
 
+    /**
+     * Writes the shared {@code relpath} fixture: {@code Customer} / {@code OrderItem} / {@code Order}
+     * (scalar {@code status}, {@code @Association Customer customer}, {@code List<OrderItem> orderItems}
+     * element collection) plus one repository file per repository interface actually compiled by a test.
+     * {@code Country}/{@code Region} exist so a multi-hop traversal ({@code customer.country.region.name})
+     * reaches a genuine relation-on-relation path, and remain OUT of every repository's compiled file
+     * list unless the test needs them.
+     */
+    private void writeRelationFixture(Path sourceDir) throws Exception {
+        Files.writeString(sourceDir.resolve("Customer.java"), """
+                package relpath;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Association;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Customer {
+                    @Identity Long id;
+                    String name;
+                    @Association Country country;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getName() { return name; }
+                    public void setName(String name) { this.name = name; }
+                    public Country getCountry() { return country; }
+                    public void setCountry(Country country) { this.country = country; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Country.java"), """
+                package relpath;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Association;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Country {
+                    @Identity Long id;
+                    String code;
+                    @Association Region region;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getCode() { return code; }
+                    public void setCode(String code) { this.code = code; }
+                    public Region getRegion() { return region; }
+                    public void setRegion(Region region) { this.region = region; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Region.java"), """
+                package relpath;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Region {
+                    @Identity Long id;
+                    String name;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getName() { return name; }
+                    public void setName(String name) { this.name = name; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("OrderItem.java"), """
+                package relpath;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class OrderItem {
+                    int quantity;
+                    String sku;
+                    public int getQuantity() { return quantity; }
+                    public void setQuantity(int quantity) { this.quantity = quantity; }
+                    public String getSku() { return sku; }
+                    public void setSku(String sku) { this.sku = sku; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Order.java"), """
+                package relpath;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Association;
+                import io.github.fludakit.data.annotation.Identity;
+                import java.util.ArrayList;
+                import java.util.List;
+                @AggregateRoot
+                public class Order {
+                    @Identity Long id;
+                    String status;
+                    @Association Customer customer;
+                    List<OrderItem> orderItems = new ArrayList<>();
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getStatus() { return status; }
+                    public void setStatus(String status) { this.status = status; }
+                    public Customer getCustomer() { return customer; }
+                    public void setCustomer(Customer customer) { this.customer = customer; }
+                    public List<OrderItem> getOrderItems() { return orderItems; }
+                    public void setOrderItems(List<OrderItem> orderItems) { this.orderItems = orderItems; }
+                }
+                """);
+    }
+
+    /** Normalises a generated source for SQL-constant pins: unescapes quoted string literals and
+     *  folds whitespace so a JavaPoet soft wrap cannot break the pin. */
+    private static String sqlFlat(Path generatedFile) throws Exception {
+        return Files.readString(generatedFile).replace("\\\"", "\"").replaceAll("\\s+", " ");
+    }
+
+    @Test
+    void methodNamePredicateThroughElementCollectionEmitsLeftJoin() throws Exception {
+        // Task 8: findByOrderItemsQuantityGreaterThan — the qbn property is the concatenated camel
+        // "orderItemsQuantity"; resolveCompilePath splits it at hump boundaries into the element-list
+        // head "orderItems" + leaf "quantity", and the emitted SQL constant carries the LEFT JOIN the
+        // traversal needs, alias-qualified in WHERE. Param binding still uses the JAVA PARAMETER NAME.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-el"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-rp-el"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-rp-el"));
+        writeRelationFixture(sourceDir);
+        Files.writeString(sourceDir.resolve("Orders.java"), """
+                package relpath;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.stream.Stream;
+                @Repository
+                public interface Orders extends CrudRepository<Order, Long> {
+                    Stream<Order> findByOrderItemsQuantityGreaterThan(int quantity);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir,
+                "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "Orders.java");
+
+        // The pin uses the framework's child-table naming: Names.childTable("order", "orderItems")
+        // = "order_order_items" (the brief's "order_items" omitted the parent prefix; the alias,
+        // ON columns and WHERE spellings are exactly as pinned there). sqlFlat folds whitespace so
+        // a JavaPoet soft wrap cannot break the byte pin.
+        String impl = sqlFlat(generatedDir.resolve("relpath/OrdersImpl.java"));
+        assertTrue(impl.contains("FROM \"order\" LEFT JOIN \"order_order_items\" AS \"orderItems\" "
+                        + "ON \"order\".\"id\" = \"orderItems\".\"order_id\" "
+                        + "WHERE \"orderItems\".\"quantity\" > :quantity"),
+                "element-collection predicate must emit the join and the qualified WHERE:"
+                        + System.lineSeparator() + impl);
+        assertTrue(impl.contains(".param(\"quantity\", quantity)"),
+                "the bound parameter must stay the JAVA PARAMETER NAME:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("SQL_FIND_BY_ORDER_ITEMS_QUANTITY_GREATER_THAN"),
+                "constant name should follow the method name:" + System.lineSeparator() + impl);
+    }
+
+    @Test
+    void methodNamePredicateThroughAssociationEmitsLeftJoin() throws Exception {
+        // findByCustomerName → Reference head "customer": the join ON clause binds the root's fk
+        // column to the target's id column (customer.country_id… style, here "order"."customer_id"
+        // = "customer"."id") and the WHERE column is alias-qualified.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-ref"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-rp-ref"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-rp-ref"));
+        writeRelationFixture(sourceDir);
+        Files.writeString(sourceDir.resolve("Ord.java"), """
+                package relpath;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.stream.Stream;
+                @Repository
+                public interface Ord extends CrudRepository<Order, Long> {
+                    Stream<Order> findByCustomerName(String name);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir,
+                "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "Ord.java");
+
+        String impl = sqlFlat(generatedDir.resolve("relpath/OrdImpl.java"));
+        assertTrue(impl.contains("FROM \"order\" LEFT JOIN \"customer\" AS \"customer\" ON \"order\".\"customer_id\" = \"customer\".\"id\" WHERE \"customer\".\"name\" = :name"),
+                "@Association predicate must emit the fk-target-id LEFT JOIN and alias-qualified WHERE:"
+                        + System.lineSeparator() + impl);
+    }
+
+    @Test
+    void multiHopMethodNamePredicateIsRejectedWithNote() throws Exception {
+        // findByCustomerCountryCode traverses TWO relations (order→customer→country). Task 8 rejects
+        // multi-hop with a NOTE (verbatim) and keeps the legacy constant (never aborts the compile).
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-mh"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-rp-mh"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-rp-mh"));
+        writeRelationFixture(sourceDir);
+        Files.writeString(sourceDir.resolve("MultiHopOrders.java"), """
+                package relpath;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.List;
+                @Repository
+                public interface MultiHopOrders extends CrudRepository<Order, Long> {
+                    List<Order> findByCustomerCountryCode(String code);
+                }
+                """);
+
+        List<Diagnostic<? extends JavaFileObject>> diagnostics = compileWithDiagnostics(sourceDir, classesDir, generatedDir,
+                "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "MultiHopOrders.java");
+        // compileWithDiagnostics throws on a failed round, so reaching here proves the multi-hop NOTE
+        // degraded instead of aborting the compile.
+        Path implFile = generatedDir.resolve("relpath/MultiHopOrdersImpl.java");
+        assertTrue(Files.exists(implFile), "a multi-hop NOTE must not abort the compile");
+
+        String notes = notesOf(diagnostics);
+        assertTrue(notes.contains("path 'customerCountryCode' traverses more than one relation; not supported"),
+                "multi-hop must be rejected with the verbatim NOTE:" + System.lineSeparator() + notes);
+        String impl = sqlFlat(implFile);
+        assertTrue(!impl.contains("LEFT JOIN \"country\""),
+                "a rejected multi-hop must NOT emit a two-level join:" + System.lineSeparator() + impl);
+    }
+
+    @Test
+    void localAndEmbeddedMethodPredicatesStayUnqualifiedByteIdentical() throws Exception {
+        // Regression gate for the byte pins: predicates that resolve to LOCAL refs — including an
+        // embedded leaf — must render with no join and no qualifier, exactly like today.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-local"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-rp-local"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-rp-local"));
+        Files.writeString(sourceDir.resolve("Money.java"), """
+                package rplocal;
+                import io.github.fludakit.data.annotation.ValueObject;
+                import java.math.BigDecimal;
+                @ValueObject
+                public class Money {
+                    BigDecimal amount;
+                    String currency;
+                    public BigDecimal getAmount() { return amount; }
+                    public void setAmount(BigDecimal amount) { this.amount = amount; }
+                    public String getCurrency() { return currency; }
+                    public void setCurrency(String currency) { this.currency = currency; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Invoice.java"), """
+                package rplocal;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Invoice {
+                    @Identity Long id;
+                    String number;
+                    Money money;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getNumber() { return number; }
+                    public void setNumber(String number) { this.number = number; }
+                    public Money getMoney() { return money; }
+                    public void setMoney(Money money) { this.money = money; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Invoices.java"), """
+                package rplocal;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.List;
+                @Repository
+                public interface Invoices extends CrudRepository<Invoice, Long> {
+                    List<Invoice> findByNumber(String number);
+                    long countByMoneyCurrency(String currency);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Money.java", "Invoice.java", "Invoices.java");
+
+        String impl = sqlFlat(generatedDir.resolve("rplocal/InvoicesImpl.java"));
+        assertTrue(impl.contains("SELECT \"id\", \"number\", \"money_amount\", \"money_currency\" FROM \"invoice\" WHERE \"number\" = :number"),
+                "local scalar predicate must stay unqualified with no join:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("SELECT COUNT(*) FROM \"invoice\" WHERE \"money_currency\" = :currency"),
+                "embedded-leaf predicate must stay unqualified with no join:" + System.lineSeparator() + impl);
+    }
+
+    @Test
+    void countByThroughRelationEmitsLeftJoin() throws Exception {
+        // countByOrderItemsQuantityGreaterThan: same join-aware treatment; projection stays COUNT(*).
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-count"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-rp-count"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-rp-count"));
+        writeRelationFixture(sourceDir);
+        Files.writeString(sourceDir.resolve("CountOrders.java"), """
+                package relpath;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface CountOrders extends CrudRepository<Order, Long> {
+                    long countByOrderItemsQuantityGreaterThan(int quantity);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir,
+                "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "CountOrders.java");
+
+        String impl = sqlFlat(generatedDir.resolve("relpath/CountOrdersImpl.java"));
+        assertTrue(impl.contains("SELECT COUNT(*) FROM \"order\" LEFT JOIN \"order_order_items\" AS \"orderItems\" ON \"order\".\"id\" = \"orderItems\".\"order_id\" WHERE \"orderItems\".\"quantity\" > :quantity"),
+                "countBy through a relation must splice the join after FROM:" + System.lineSeparator() + impl);
+    }
+
     private void compile(Path sourceDir, Path classesDir, Path generatedDir, String... fileNames) throws Exception {
         compileWithDiagnostics(sourceDir, classesDir, generatedDir, fileNames);
     }

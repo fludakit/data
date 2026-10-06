@@ -73,19 +73,6 @@
                     </annotationProcessorPaths>
                 </configuration>
             </plugin>
-            <!-- The end-to-end test is named *IT; surefire does not match that suffix by default. -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-                <configuration>
-                    <includes>
-                        <include>**/*Test.java</include>
-                        <include>**/*Tests.java</include>
-                        <include>**/*TestCase.java</include>
-                        <include>**/*IT.java</include>
-                    </includes>
-                </configuration>
-            </plugin>
         </plugins>
     </build>
 </project>

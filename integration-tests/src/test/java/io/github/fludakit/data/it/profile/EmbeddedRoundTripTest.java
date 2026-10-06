@@ -23,7 +23,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @AddBeanClasses({DataSourceProducer.class,
                  io.github.fludakit.jdbc.cdi.JdbcClientProducer.class,
                  io.github.fludakit.jdbc.cdi.ConverterRegistryProducer.class})
-class EmbeddedRoundTripIT {
+class EmbeddedRoundTripTest {
 
     @Inject ProfileRepository profiles;
 

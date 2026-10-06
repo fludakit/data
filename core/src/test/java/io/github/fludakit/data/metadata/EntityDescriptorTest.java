@@ -2,6 +2,7 @@ package io.github.fludakit.data.metadata;
 
 import io.github.fludakit.data.metamodel.ElementCollectionAttributeRecord;
 import io.github.fludakit.data.metamodel.EmbeddedAttributeRecord;
+import io.github.fludakit.data.metamodel.ForeignKeyAttributeRecord;
 import io.github.fludakit.data.metamodel.IdAttribute;
 import io.github.fludakit.data.metamodel.IdAttributeRecord;
 import io.github.fludakit.data.metamodel.OneToManyAttributeRecord;
@@ -43,8 +44,10 @@ class EntityDescriptorTest {
                         new EmbeddedAttributeRecord<Person, Address>("address", embeddedAddress),
                         new TextColumnAttributeRecord<Person>("address.street", "address_street"),
                         new SortableColumnAttributeRecord<Person>("address.zip", "address_zip"),
-                        new OneToManyAttributeRecord<Person, Friend>("friends", Friend.class, "bestFriend"),
-                        new ElementCollectionAttributeRecord<Person, String>("nicknames", String.class)));
+                        new OneToManyAttributeRecord<Person, Friend>("friends", Friend.class, "bestFriend",
+                                () -> null),
+                        new ElementCollectionAttributeRecord<Person, String>("nicknames", String.class,
+                                "person_nicknames", "person_id", () -> null)));
     }
 
     @Test
@@ -129,5 +132,97 @@ class EntityDescriptorTest {
         Sort<Person> byZip = ((io.github.fludakit.data.metamodel.SortableColumnAttribute<Person>)
                 descriptor.attribute("address.zip")).asc();
         assertThat(byZip.property()).isEqualTo("address.zip");
+    }
+
+    static class Parent { }
+
+    static class Child { }
+
+    static class Note { }
+
+    record WithColumns<T>(Class<T> entityClass, String tableName, IdAttribute<T> id,
+                          List<Attribute<T>> attributes, List<ColumnRef> columns)
+            implements EntityDescriptor<T> { }
+
+    static EntityDescriptor<Child> childMetadata() {
+        return new WithColumns<>(Child.class, "rel.child",
+                new IdAttributeRecord<>("id", "id"),
+                List.of(new TextColumnAttributeRecord<Child>("label", "label")),
+                List.of(new ColumnRef("id", "id", "rel.child", List.of()),
+                        new ColumnRef("label", "label", "rel.child", List.of()),
+                        new ColumnRef("seq", "seq", "rel.child", List.of())));
+    }
+
+    static EntityDescriptor<Note> noteMetadata() {
+        return new WithColumns<>(Note.class, null, null, List.of(),
+                List.of(new ColumnRef("text", "text")));
+    }
+
+    static EntityDescriptor<Parent> parentMetadata(EntityDescriptor<Child> child,
+                                                   EntityDescriptor<Note> note) {
+        return new Fixture<>(Parent.class, "rel.parent",
+                new IdAttributeRecord<>("id", "id"),
+                List.of(
+                        new TextColumnAttributeRecord<Parent>("name", "name"),
+                        new TextColumnAttributeRecord<Parent>("address.city", "address_city"),
+                        new ForeignKeyAttributeRecord<Parent, Child>("primary", "primary_id", Child.class,
+                                () -> child),
+                        new OneToManyAttributeRecord<Parent, Child>("children", Child.class, "owner",
+                                () -> child),
+                        new ElementCollectionAttributeRecord<Parent, Note>("notes", Note.class,
+                                "parent_notes", "parent_id", () -> note)));
+    }
+
+    @Test
+    void columnRefResolvesLocalAndFlattenedEmbeddedPathsAsPlainColumns() {
+        EntityDescriptor<Parent> descriptor = parentMetadata(childMetadata(), noteMetadata());
+
+        ColumnRef local = descriptor.columnRef("name");
+        assertThat(local.column()).isEqualTo("name");
+        assertThat(local.table()).isNull();
+        assertThat(local.joins()).isEmpty();
+
+        ColumnRef embedded = descriptor.columnRef("address.city");
+        assertThat(embedded.column()).isEqualTo("address_city");
+    }
+
+    @Test
+    void columnRefThroughForeignKeyCarriesTargetTableAndJoin() {
+        ColumnRef viaFk = parentMetadata(childMetadata(), noteMetadata()).columnRef("primary.label");
+
+        assertThat(viaFk.column()).isEqualTo("label");
+        assertThat(viaFk.table()).isEqualTo("rel.child");
+        assertThat(viaFk.joins())
+                .containsExactly(new JoinRef("rel.child", "primary", "primary_id", "id"));
+    }
+
+    @Test
+    void columnRefThroughOneToManyJoinsOnDerivedChildFkColumnAndKeepsFullPath() {
+        ColumnRef viaOtm = parentMetadata(childMetadata(), noteMetadata()).columnRef("children.seq");
+
+        assertThat(viaOtm.joins())
+                .containsExactly(new JoinRef("rel.child", "children", "id", "owner_id"));
+        assertThat(viaOtm.path()).isEqualTo("children.seq");
+    }
+
+    @Test
+    void columnRefThroughElementCollectionJoinsChildTableOnParentFkColumn() {
+        ColumnRef viaEc = parentMetadata(childMetadata(), noteMetadata()).columnRef("notes.text");
+
+        assertThat(viaEc.joins())
+                .containsExactly(new JoinRef("parent_notes", "notes", "id", "parent_id"));
+    }
+
+    @Test
+    void columnRefFailsFastForUnmappedRelationTargetSupplier() {
+        EntityDescriptor<Parent> descriptor = new Fixture<>(Parent.class, "rel.parent",
+                new IdAttributeRecord<>("id", "id"),
+                List.of(new ForeignKeyAttributeRecord<Parent, Child>(
+                        "primary", "primary_id", Child.class, () -> null)));
+
+        assertThatThrownBy(() -> descriptor.columnRef("primary.label"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("primary")
+                .hasMessageContaining("unmapped");
     }
 }

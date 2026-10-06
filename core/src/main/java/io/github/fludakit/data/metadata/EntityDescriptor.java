@@ -1,8 +1,11 @@
 package io.github.fludakit.data.metadata;
 
 import io.github.fludakit.data.metamodel.ColumnAttribute;
+import io.github.fludakit.data.metamodel.ElementCollectionAttribute;
 import io.github.fludakit.data.metamodel.EmbeddedAttribute;
+import io.github.fludakit.data.metamodel.ForeignKeyAttribute;
 import io.github.fludakit.data.metamodel.IdAttribute;
+import io.github.fludakit.data.metamodel.OneToManyAttribute;
 import jakarta.data.metamodel.Attribute;
 
 import java.util.ArrayList;
@@ -76,5 +79,47 @@ public interface EntityDescriptor<T> extends EntitySchema {
             }
         }
         return out;
+    }
+
+    /** Resolves a dot path — local, flattened embedded, or through a relation attribute — to its
+     *  physical column plus contributed joins. Mirrored at compile time by the processor. */
+    default ColumnRef columnRef(String path) {
+        for (ColumnRef c : columns()) {
+            if (c.path().equals(path)) return c;
+        }
+        int dot = path.indexOf('.');
+        if (dot < 0) {
+            throw new IllegalArgumentException("Unknown property '" + path + "' on "
+                    + entityClass().getSimpleName());
+        }
+        String head = path.substring(0, dot);
+        String rest = path.substring(dot + 1);
+        Attribute<T> a = attribute(head);
+        if (a instanceof ForeignKeyAttribute<?, ?> fk) {
+            EntityDescriptor<?> target = fk.targetDescriptor().get();
+            requireNavigable(target, head);
+            return target.columnRef(rest).withPrefix(head,
+                    new JoinRef(target.tableName(), head, fk.column(), target.idColumn()));
+        }
+        if (a instanceof OneToManyAttribute<?, ?> otm) {
+            EntityDescriptor<?> target = otm.targetDescriptor().get();
+            requireNavigable(target, head);
+            return target.columnRef(rest).withPrefix(head,
+                    new JoinRef(target.tableName(), head, idColumn(), otm.childFkColumn()));
+        }
+        if (a instanceof ElementCollectionAttribute<?, ?> ec) {
+            EntityDescriptor<?> target = ec.elementDescriptor().get();
+            requireNavigable(target, head);
+            return target.columnRef(rest).withPrefix(head,
+                    new JoinRef(ec.childTable(), head, idColumn(), ec.parentFkColumn()));
+        }
+        throw new IllegalArgumentException("Property '" + head + "' does not support path navigation");
+    }
+
+    private static void requireNavigable(EntityDescriptor<?> target, String head) {
+        if (target == null) {
+            throw new IllegalArgumentException("Property '" + head
+                    + "' targets an unmapped type and does not support path navigation");
+        }
     }
 }

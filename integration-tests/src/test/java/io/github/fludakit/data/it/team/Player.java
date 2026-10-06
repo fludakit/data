@@ -1,4 +1,4 @@
-package io.github.fludakit.data.it;
+package io.github.fludakit.data.it.team;
 
 import io.github.fludakit.data.annotation.AggregateRoot;
 import io.github.fludakit.data.annotation.Identity;

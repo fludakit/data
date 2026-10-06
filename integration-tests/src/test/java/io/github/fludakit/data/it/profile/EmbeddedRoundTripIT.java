@@ -1,4 +1,6 @@
-package io.github.fludakit.data.it;
+package io.github.fludakit.data.it.profile;
+
+import io.github.fludakit.data.it.DataSourceProducer;
 
 import jakarta.inject.Inject;
 import org.jboss.weld.junit5.auto.AddBeanClasses;

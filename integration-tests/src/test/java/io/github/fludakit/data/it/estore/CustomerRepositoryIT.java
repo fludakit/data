@@ -1,4 +1,6 @@
-package io.github.fludakit.data.it;
+package io.github.fludakit.data.it.estore;
+
+import io.github.fludakit.data.it.DataSourceProducer;
 
 import jakarta.data.page.CursoredPage;
 import jakarta.data.page.Page;

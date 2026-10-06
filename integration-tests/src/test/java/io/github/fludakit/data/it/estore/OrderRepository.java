@@ -1,4 +1,4 @@
-package io.github.fludakit.data.it;
+package io.github.fludakit.data.it.estore;
 
 import jakarta.data.repository.By;
 import jakarta.data.repository.CrudRepository;

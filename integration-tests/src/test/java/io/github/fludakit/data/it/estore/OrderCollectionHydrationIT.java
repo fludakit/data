@@ -1,4 +1,6 @@
-package io.github.fludakit.data.it;
+package io.github.fludakit.data.it.estore;
+
+import io.github.fludakit.data.it.DataSourceProducer;
 
 import io.github.fludakit.jdbc.JdbcClient;
 import jakarta.inject.Inject;

@@ -37,10 +37,13 @@ class SqlBuilderTest {
             @Override public List<Attribute<Customer>> attributes() {
                 return List.of(new TextColumnAttributeRecord<>("name", "name"));
             }
+            @Override public List<ColumnRef> columns() {
+                return List.of(new ColumnRef("id", "id"), new ColumnRef("name", "name"));
+            }
         };
     }
 
-    /** Profile with an embedded Address: the flattened leaf is a direct attribute member. */
+    /** Profile with an embedded Address: the flattened leaves live in the explicit columns() view. */
     static EntityDescriptor<Profile> profile() {
         EntityDescriptor<Address> address = new EntityDescriptor<>() {
             @Override public Class<Address> entityClass() { return Address.class; }
@@ -49,6 +52,9 @@ class SqlBuilderTest {
             @Override public List<Attribute<Address>> attributes() {
                 return List.of(new TextColumnAttributeRecord<>("city", "city"));
             }
+            @Override public List<ColumnRef> columns() {
+                return List.of(new ColumnRef("city", "city"));
+            }
         };
         return new EntityDescriptor<>() {
             @Override public Class<Profile> entityClass() { return Profile.class; }
@@ -56,8 +62,11 @@ class SqlBuilderTest {
             @Override public IdAttributeRecord<Profile> id() { return new IdAttributeRecord<>("id", "id"); }
             @Override public List<Attribute<Profile>> attributes() {
                 return List.of(
-                        new EmbeddedAttributeRecord<Profile, Address>("address", address),
-                        new TextColumnAttributeRecord<Profile>("address.city", "address_city"));
+                        new EmbeddedAttributeRecord<Profile, Address>("address", address));
+            }
+            @Override public List<ColumnRef> columns() {
+                return List.of(new ColumnRef("id", "id"),
+                        new ColumnRef("address_city", "address.city"));
             }
         };
     }

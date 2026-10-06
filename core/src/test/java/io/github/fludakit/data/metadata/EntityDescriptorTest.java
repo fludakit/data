@@ -26,28 +26,36 @@ class EntityDescriptorTest {
 
     static class Address { }
 
+    /**
+     * The generated shape: attributes() holds the ROOT members once (embedded and relation
+     * containers included, flattened leaves NOT) and columns() is the explicit flattened view.
+     */
     record Fixture<T>(Class<T> entityClass, String tableName, IdAttribute<T> id,
-                      List<Attribute<T>> attributes) implements EntityDescriptor<T> { }
+                      List<Attribute<T>> attributes, List<ColumnRef> columns) implements EntityDescriptor<T> { }
 
     static EntityDescriptor<Address> address() {
-        return new Fixture<>(Address.class, null, null, List.of(
-                new TextColumnAttributeRecord<Address>("street", "street"),
-                new TextColumnAttributeRecord<Address>("city", "city")));
+        return new Fixture<>(Address.class, null, null,
+                List.of(
+                        new TextColumnAttributeRecord<Address>("street", "street"),
+                        new TextColumnAttributeRecord<Address>("city", "city")),
+                List.of(new ColumnRef("street", "street"), new ColumnRef("city", "city")));
     }
 
-    /** Person mirrors the generated shape: container followed by its flattened leaves. */
+    /** Person mirrors the generated shape: containers once, leaves only in the column view. */
     static EntityDescriptor<Person> person(EntityDescriptor<Address> embeddedAddress) {
         return new Fixture<>(Person.class, "person",
                 new IdAttributeRecord<>("id", "id"),
                 List.of(
-                        new TextColumnAttributeRecord<Person>("name", "name"),
+                        new SortableColumnAttributeRecord<Person>("name", "name"),
                         new EmbeddedAttributeRecord<Person, Address>("address", embeddedAddress),
-                        new TextColumnAttributeRecord<Person>("address.street", "address_street"),
-                        new SortableColumnAttributeRecord<Person>("address.zip", "address_zip"),
                         new OneToManyAttributeRecord<Person, Friend>("friends", Friend.class, "bestFriend",
                                 () -> null),
                         new ElementCollectionAttributeRecord<Person, String>("nicknames", String.class,
-                                "person_nicknames", "person_id", () -> null)));
+                                "person_nicknames", "person_id", () -> null)),
+                List.of(new ColumnRef("id", "id"),
+                        new ColumnRef("name", "name"),
+                        new ColumnRef("address_street", "address.street"),
+                        new ColumnRef("address_zip", "address.zip")));
     }
 
     @Test
@@ -61,11 +69,15 @@ class EntityDescriptorTest {
     }
 
     @Test
-    void dotPathResolvesFlattenedEmbeddedLeaf() {
+    void flattenedEmbeddedLeafResolvesThroughExplicitColumns() {
+        // Post-Task-6 the leaf is no longer a flat attribute; the generated columns() view answers it.
         EntityDescriptor<Person> descriptor = person(address());
 
-        assertThat(descriptor.attribute("address.street")).isEqualTo(
-                new TextColumnAttributeRecord<Person>("address.street", "address_street"));
+        assertThatThrownBy(() -> descriptor.attribute("address.street"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("address.street");
+        assertThat(descriptor.columnRef("address.street"))
+                .isEqualTo(new ColumnRef("address_street", "address.street"));
     }
 
     @Test
@@ -96,16 +108,6 @@ class EntityDescriptorTest {
     }
 
     @Test
-    void columnsThrowForEmbeddedWithoutResolvedDescriptor() {
-        EntityDescriptor<Person> descriptor = person(null);
-
-        assertThatThrownBy(descriptor::columns)
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("address")
-                .hasMessageContaining("Person");
-    }
-
-    @Test
     void oneToManyAndElementCollectionContributeNoColumn() {
         List<ColumnRef> columns = person(address()).columns();
 
@@ -129,9 +131,9 @@ class EntityDescriptorTest {
     void sortableAttributesEmitJakartaSortsKeyedByAttributeName() {
         EntityDescriptor<Person> descriptor = person(address());
 
-        Sort<Person> byZip = ((io.github.fludakit.data.metamodel.SortableColumnAttribute<Person>)
-                descriptor.attribute("address.zip")).asc();
-        assertThat(byZip.property()).isEqualTo("address.zip");
+        Sort<Person> byName = ((io.github.fludakit.data.metamodel.SortableColumnAttribute<Person>)
+                descriptor.attribute("name")).asc();
+        assertThat(byName.property()).isEqualTo("name");
     }
 
     static class Parent { }
@@ -170,7 +172,11 @@ class EntityDescriptorTest {
                         new OneToManyAttributeRecord<Parent, Child>("children", Child.class, "owner",
                                 () -> child),
                         new ElementCollectionAttributeRecord<Parent, Note>("notes", Note.class,
-                                "parent_notes", "parent_id", () -> note)));
+                                "parent_notes", "parent_id", () -> note)),
+                List.of(new ColumnRef("id", "id"),
+                        new ColumnRef("name", "name"),
+                        new ColumnRef("address_city", "address.city"),
+                        new ColumnRef("primary_id", "primary")));
     }
 
     @Test
@@ -218,7 +224,8 @@ class EntityDescriptorTest {
         EntityDescriptor<Parent> descriptor = new Fixture<>(Parent.class, "rel.parent",
                 new IdAttributeRecord<>("id", "id"),
                 List.of(new ForeignKeyAttributeRecord<Parent, Child>(
-                        "primary", "primary_id", Child.class, () -> null)));
+                        "primary", "primary_id", Child.class, () -> null)),
+                List.of(new ColumnRef("id", "id"), new ColumnRef("primary_id", "primary")));
 
         assertThatThrownBy(() -> descriptor.columnRef("primary.label"))
                 .isInstanceOf(IllegalArgumentException.class)

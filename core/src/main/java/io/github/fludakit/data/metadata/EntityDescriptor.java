@@ -1,81 +1,78 @@
 package io.github.fludakit.data.metadata;
 
+import io.github.fludakit.data.metamodel.ColumnAttribute;
+import io.github.fludakit.data.metamodel.EmbeddedAttribute;
+import io.github.fludakit.data.metamodel.IdAttribute;
+import jakarta.data.metamodel.Attribute;
+
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Acyclic, reflection-free description of an entity (or value object) and its physical columns.
+ * Acyclic, reflection-free description of an entity (or value object), built from the generated
+ * Jakarta Data static metamodel: the accessors return the {@code _Entity} attribute field
+ * instances themselves, so the same object is both the end-user's type-safe API
+ * ({@code Order.by(_Profile.address_city.asc())}) and the engine's descriptor.
  *
- * <p>Implemented both by the annotation processor's compile-time model and by the generated
- * {@code <Entity>Metadata} classes. Relationships are carried as type-name strings
- * ({@link Attribute#targetTypeName()}, {@link Attribute#inverseName()}) rather than object
- * references so the graph cannot form an initialization cycle. The only nested descriptor is
- * {@link Attribute#embedded()}, used to flatten {@code EMBEDDED} value-object leaves.</p>
+ * <p>Classification is carried by the attribute's type, not an enum: {@link ColumnAttribute} for
+ * scalar/leaf/foreign-key columns, {@link EmbeddedAttribute} for {@code @ValueObject} properties
+ * (with the value object's own descriptor), and one-to-many / element-collection attributes for
+ * relationships. This descriptor's role is relationship and column resolution; SQL rendering
+ * consumes only the inherited {@link EntitySchema} view.</p>
  *
- * <p>{@link io.github.fludakit.data.sql.SqlBuilder} renders SQL from {@link #tableName()},
- * {@link #columns()} and {@link #id()} only.</p>
+ * <p>Embedded leaves appear twice: as the container's dot-path leaf attributes flattened into
+ * {@link #attributes()} (name = dot path, column = flattened column) so
+ * {@code attribute("address.city")} resolves in one step, and inside the value object's own
+ * descriptor for leaf-by-leaf mapping.</p>
+ *
+ * @param <T> the entity type
  */
-public interface EntityDescriptor {
+public interface EntityDescriptor<T> extends EntitySchema {
 
-    enum Kind { ID, SCALAR, EMBEDDED, MANY_TO_ONE, ASSOCIATION, ONE_TO_MANY, ELEMENT_COLLECTION }
-
-    /**
-     * @param column         physical column (or fk column); {@code null} for ONE_TO_MANY / ELEMENT_COLLECTION
-     * @param targetTypeName relationship target FQN; {@code null} for ID / SCALAR
-     * @param inverseName    ONE_TO_MANY: the child property that points back; otherwise {@code null}
-     * @param embedded       EMBEDDED: nested value-object descriptor for leaf flattening; otherwise {@code null}
-     */
-    record Attribute(String name, String typeName, Kind kind, String column,
-                     String targetTypeName, String inverseName, EntityDescriptor embedded) { }
-
-    /** A flat physical column plus the dot-separated property path that selects it. */
-    record ColumnRef(String column, String path) { }
-
-    String typeName();
+    Class<T> entityClass();
 
     /** Physical table name, or {@code null} for a value object. */
+    @Override
     String tableName();
 
     /** The identifier attribute, or {@code null} for a value object. */
-    Attribute id();
+    IdAttribute<T> id();
 
-    /** All non-identifier attributes in declaration order. */
-    List<Attribute> attributes();
+    /**
+     * All non-identifier attributes in declaration order: scalars and flattened embedded leaves,
+     * embedded containers, foreign keys, one-to-many and element-collection relationships.
+     */
+    List<Attribute<T>> attributes();
 
     default boolean isValueObject() {
         return tableName() == null;
     }
 
-    /**
-     * Resolves the named attribute, looking the identifier up first. This deliberately diverges
-     * from the old {@code EntityMetadata.property}, which threw when asked for the id name.
-     */
-    default Attribute attribute(String name) {
-        if (id() != null && id().name().equals(name)) return id();
-        for (Attribute a : attributes()) {
-            if (a.name().equals(name)) return a;
-        }
-        throw new IllegalArgumentException("Unknown property '" + name + "' on " + typeName());
+    @Override
+    default String idColumn() {
+        return id() == null ? null : id().column();
     }
 
-    /** Flat physical columns (id, scalar, fk, flattened embedded leaves) with their dot-separated path. */
+    /** Resolves an attribute by name; dot paths hit the flattened embedded leaves directly. */
+    default Attribute<T> attribute(String name) {
+        if (id() != null && id().name().equals(name)) return id();
+        for (Attribute<T> a : attributes()) {
+            if (name.equals(a.name())) return a;
+        }
+        throw new IllegalArgumentException("Unknown property '" + name + "' on "
+                + entityClass().getSimpleName());
+    }
+
+    @Override
     default List<ColumnRef> columns() {
         List<ColumnRef> out = new ArrayList<>();
         if (id() != null) out.add(new ColumnRef(id().column(), id().name()));
-        for (Attribute a : attributes()) {
-            switch (a.kind()) {
-                case SCALAR, MANY_TO_ONE, ASSOCIATION -> out.add(new ColumnRef(a.column(), a.name()));
-                case EMBEDDED -> {
-                    if (a.embedded() == null) {
-                        throw new IllegalStateException("Entity " + typeName()
-                                + " has an embedded property '" + a.name() + "' whose target is unresolved");
-                    }
-                    for (ColumnRef leaf : a.embedded().columns()) {
-                        out.add(new ColumnRef(a.column() + "_" + leaf.column(), a.name() + "." + leaf.path()));
-                    }
-                }
-                case ONE_TO_MANY, ELEMENT_COLLECTION -> { /* no column on this table */ }
-                default -> { }
+        for (Attribute<T> a : attributes()) {
+            if (a instanceof ColumnAttribute<?> column) {
+                out.add(new ColumnRef(column.column(), column.name()));
+            } else if (a instanceof EmbeddedAttribute<?, ?> embedded && embedded.embedded() == null) {
+                throw new IllegalStateException("Entity " + entityClass().getSimpleName()
+                        + " has an embedded property '" + a.name() + "' whose target is unresolved");
             }
         }
         return out;

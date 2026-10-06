@@ -1,7 +1,14 @@
 package io.github.fludakit.data.metadata;
 
-import io.github.fludakit.data.metadata.EntityDescriptor.Attribute;
-import io.github.fludakit.data.metadata.EntityDescriptor.Kind;
+import io.github.fludakit.data.metamodel.ElementCollectionAttributeRecord;
+import io.github.fludakit.data.metamodel.EmbeddedAttributeRecord;
+import io.github.fludakit.data.metamodel.IdAttribute;
+import io.github.fludakit.data.metamodel.IdAttributeRecord;
+import io.github.fludakit.data.metamodel.OneToManyAttributeRecord;
+import io.github.fludakit.data.metamodel.SortableColumnAttributeRecord;
+import io.github.fludakit.data.metamodel.TextColumnAttributeRecord;
+import jakarta.data.Sort;
+import jakarta.data.metamodel.Attribute;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -9,48 +16,58 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-/** Locks the {@link EntityDescriptor} interface defaults before the processor reclassification lands. */
+/** Locks the subtype-based {@link EntityDescriptor} contract: flat leaf resolution, column view, relation accessors. */
 class EntityDescriptorTest {
 
-    record Fixture(String typeName, String tableName, Attribute id, List<Attribute> attributes)
-            implements EntityDescriptor { }
+    static class Person { }
 
-    private static Attribute attribute(String name, Kind kind, String column) {
-        return new Attribute(name, "java.lang.String", kind, column, null, null, null);
+    static class Friend { }
+
+    static class Address { }
+
+    record Fixture<T>(Class<T> entityClass, String tableName, IdAttribute<T> id,
+                      List<Attribute<T>> attributes) implements EntityDescriptor<T> { }
+
+    static EntityDescriptor<Address> address() {
+        return new Fixture<>(Address.class, null, null, List.of(
+                new TextColumnAttributeRecord<Address>("street", "street"),
+                new TextColumnAttributeRecord<Address>("city", "city")));
     }
 
-    private static EntityDescriptor address() {
-        return new Fixture("Address", null, null, List.of(
-                attribute("street", Kind.SCALAR, "street"),
-                attribute("city", Kind.SCALAR, "city")));
-    }
-
-    private static EntityDescriptor person(EntityDescriptor embeddedAddress) {
-        return new Fixture("Person", "person",
-                new Attribute("id", "java.lang.Long", Kind.ID, "id", null, null, null),
+    /** Person mirrors the generated shape: container followed by its flattened leaves. */
+    static EntityDescriptor<Person> person(EntityDescriptor<Address> embeddedAddress) {
+        return new Fixture<>(Person.class, "person",
+                new IdAttributeRecord<>("id", "id"),
                 List.of(
-                        attribute("name", Kind.SCALAR, "name"),
-                        new Attribute("address", "Address", Kind.EMBEDDED, "address",
-                                "Address", null, embeddedAddress),
-                        new Attribute("friends", "java.util.List<Friend>", Kind.ONE_TO_MANY, null,
-                                "Friend", "bestFriend", null),
-                        new Attribute("nicknames", "java.util.List<Nickname>", Kind.ELEMENT_COLLECTION, null,
-                                "Nickname", null, null)));
+                        new TextColumnAttributeRecord<Person>("name", "name"),
+                        new EmbeddedAttributeRecord<Person, Address>("address", embeddedAddress),
+                        new TextColumnAttributeRecord<Person>("address.street", "address_street"),
+                        new SortableColumnAttributeRecord<Person>("address.zip", "address_zip"),
+                        new OneToManyAttributeRecord<Person, Friend>("friends", Friend.class, "bestFriend"),
+                        new ElementCollectionAttributeRecord<Person, String>("nicknames", String.class)));
     }
 
     @Test
     void attributeResolvesIdentifierFirstThenByName() {
-        EntityDescriptor descriptor = person(address());
+        EntityDescriptor<Person> descriptor = person(address());
 
-        assertThat(descriptor.attribute("id"))
-                .isEqualTo(new Attribute("id", "java.lang.Long", Kind.ID, "id", null, null, null));
-        assertThat(descriptor.attribute("name").kind()).isEqualTo(Kind.SCALAR);
-        assertThat(descriptor.attribute("address").kind()).isEqualTo(Kind.EMBEDDED);
+        assertThat(descriptor.attribute("id")).isEqualTo(new IdAttributeRecord<Person>("id", "id"));
+        assertThat(descriptor.attribute("name").name()).isEqualTo("name");
+        assertThat(descriptor.attribute("address")).isInstanceOf(
+                io.github.fludakit.data.metamodel.EmbeddedAttribute.class);
+    }
+
+    @Test
+    void dotPathResolvesFlattenedEmbeddedLeaf() {
+        EntityDescriptor<Person> descriptor = person(address());
+
+        assertThat(descriptor.attribute("address.street")).isEqualTo(
+                new TextColumnAttributeRecord<Person>("address.street", "address_street"));
     }
 
     @Test
     void attributeThrowsForUnknownPropertyNamingPropertyAndType() {
-        EntityDescriptor descriptor = person(address());
+        EntityDescriptor<Person> descriptor = person(address());
 
         assertThatThrownBy(() -> descriptor.attribute("nope"))
                 .isInstanceOf(IllegalArgumentException.class)
@@ -65,19 +82,19 @@ class EntityDescriptorTest {
     }
 
     @Test
-    void columnsFlattenEmbeddedLeavesWithPrefixColumnAndDotPath() {
-        List<EntityDescriptor.ColumnRef> columns = person(address()).columns();
+    void columnsFlattenIdScalarsAndLeavesInDeclarationOrder() {
+        List<ColumnRef> columns = person(address()).columns();
 
         assertThat(columns).containsExactly(
-                new EntityDescriptor.ColumnRef("id", "id"),
-                new EntityDescriptor.ColumnRef("name", "name"),
-                new EntityDescriptor.ColumnRef("address_street", "address.street"),
-                new EntityDescriptor.ColumnRef("address_city", "address.city"));
+                new ColumnRef("id", "id"),
+                new ColumnRef("name", "name"),
+                new ColumnRef("address_street", "address.street"),
+                new ColumnRef("address_zip", "address.zip"));
     }
 
     @Test
     void columnsThrowForEmbeddedWithoutResolvedDescriptor() {
-        EntityDescriptor descriptor = person(null);
+        EntityDescriptor<Person> descriptor = person(null);
 
         assertThatThrownBy(descriptor::columns)
                 .isInstanceOf(IllegalStateException.class)
@@ -87,9 +104,30 @@ class EntityDescriptorTest {
 
     @Test
     void oneToManyAndElementCollectionContributeNoColumn() {
-        List<EntityDescriptor.ColumnRef> columns = person(address()).columns();
+        List<ColumnRef> columns = person(address()).columns();
 
-        assertThat(columns).extracting(EntityDescriptor.ColumnRef::column)
+        assertThat(columns).extracting(ColumnRef::column)
                 .doesNotContain("friends", "nicknames", "friend_id", "nickname_id");
+    }
+
+    @Test
+    void relationAccessorsExposeTargetAndInverse() {
+        EntityDescriptor<Person> descriptor = person(address());
+
+        assertThat(descriptor.attribute("friends")).isInstanceOf(
+                io.github.fludakit.data.metamodel.OneToManyAttribute.class);
+        assertThat(descriptor.attribute("nicknames")).isInstanceOf(
+                io.github.fludakit.data.metamodel.ElementCollectionAttribute.class);
+        assertThat(descriptor.attribute("address")).isInstanceOf(
+                io.github.fludakit.data.metamodel.EmbeddedAttribute.class);
+    }
+
+    @Test
+    void sortableAttributesEmitJakartaSortsKeyedByAttributeName() {
+        EntityDescriptor<Person> descriptor = person(address());
+
+        Sort<Person> byZip = ((io.github.fludakit.data.metamodel.SortableColumnAttribute<Person>)
+                descriptor.attribute("address.zip")).asc();
+        assertThat(byZip.property()).isEqualTo("address.zip");
     }
 }

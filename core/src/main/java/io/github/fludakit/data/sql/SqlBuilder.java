@@ -1,7 +1,8 @@
 package io.github.fludakit.data.sql;
 
 import io.github.fludakit.data.Names;
-import io.github.fludakit.data.metadata.EntityDescriptor;
+import io.github.fludakit.data.metadata.ColumnRef;
+import io.github.fludakit.data.metadata.EntitySchema;
 import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.SortSpec;
@@ -11,7 +12,7 @@ import java.util.stream.Collectors;
 
 public final class SqlBuilder {
 
-    public String selectBy(EntityDescriptor md, List<Predicate> predicates, List<SortSpec> sorts, int limit, String cursorClause) {
+    public String selectBy(EntitySchema md, List<Predicate> predicates, List<SortSpec> sorts, int limit, String cursorClause) {
         String cols = md.columns().stream().map(c -> Names.quote(c.column())).collect(Collectors.joining(", "));
         StringBuilder sb = new StringBuilder("SELECT ").append(cols).append(" FROM ").append(Names.quote(md.tableName()));
         appendWhere(sb, predicates, cursorClause);
@@ -20,13 +21,13 @@ public final class SqlBuilder {
         return sb.toString();
     }
 
-    public String countBy(EntityDescriptor md, List<Predicate> predicates) {
+    public String countBy(EntitySchema md, List<Predicate> predicates) {
         StringBuilder sb = new StringBuilder("SELECT COUNT(*) FROM ").append(Names.quote(md.tableName()));
         appendWhere(sb, predicates, null);
         return sb.toString();
     }
 
-    public String insert(EntityDescriptor md) {
+    public String insert(EntitySchema md) {
         return insert(md, true);
     }
 
@@ -44,11 +45,11 @@ public final class SqlBuilder {
      * database can generate it (identity / auto-increment); binding an explicit NULL to an identity
      * column is rejected by most databases, including H2.
      */
-    public String insert(EntityDescriptor md, boolean includeId) {
-        List<EntityDescriptor.ColumnRef> cols = md.columns();
+    public String insert(EntitySchema md, boolean includeId) {
+        List<ColumnRef> cols = md.columns();
         if (!includeId) {
             cols = cols.stream()
-                    .filter(c -> md.id() == null || !c.column().equals(md.id().column()))
+                    .filter(c -> md.idColumn() == null || !c.column().equals(md.idColumn()))
                     .collect(Collectors.toList());
         }
         String names = cols.stream().map(c -> Names.quote(c.column())).collect(Collectors.joining(", "));
@@ -56,27 +57,27 @@ public final class SqlBuilder {
         return "INSERT INTO " + Names.quote(md.tableName()) + " (" + names + ") VALUES (" + params + ")";
     }
 
-    public String update(EntityDescriptor md) {
-        List<EntityDescriptor.ColumnRef> cols = md.columns();
-        String idCol = Names.quote(md.id().column());
+    public String update(EntitySchema md) {
+        List<ColumnRef> cols = md.columns();
+        String idCol = Names.quote(md.idColumn());
         String sets = cols.stream()
-                .filter(c -> !c.column().equals(md.id().column()))
+                .filter(c -> !c.column().equals(md.idColumn()))
                 .map(c -> Names.quote(c.column()) + " = :" + paramName(c.path()))
                 .collect(Collectors.joining(", "));
         return "UPDATE " + Names.quote(md.tableName()) + " SET " + sets + " WHERE " + idCol + " = :id";
     }
 
-    public String deleteById(EntityDescriptor md) {
-        return "DELETE FROM " + Names.quote(md.tableName()) + " WHERE " + Names.quote(md.id().column()) + " = :id";
+    public String deleteById(EntitySchema md) {
+        return "DELETE FROM " + Names.quote(md.tableName()) + " WHERE " + Names.quote(md.idColumn()) + " = :id";
     }
 
-    public String deleteBy(EntityDescriptor md, List<Predicate> predicates) {
+    public String deleteBy(EntitySchema md, List<Predicate> predicates) {
         StringBuilder sb = new StringBuilder("DELETE FROM ").append(Names.quote(md.tableName()));
         appendWhere(sb, predicates, null);
         return sb.toString();
     }
 
-    public String orderBy(EntityDescriptor md, List<SortSpec> sorts) {
+    public String orderBy(EntitySchema md, List<SortSpec> sorts) {
         if (sorts.isEmpty()) return "";
         return " ORDER BY " + sorts.stream()
                 .map(s -> Names.quote(resolveColumn(md, s.property())) + (s.ascending() ? " ASC" : " DESC"))
@@ -87,8 +88,8 @@ public final class SqlBuilder {
      * Resolves a sort property — a bare attribute name or an embedded dot path such as
      * {@code "address.city"} — to its physical column via the descriptor's flattened view.
      */
-    public static String resolveColumn(EntityDescriptor md, String property) {
-        for (EntityDescriptor.ColumnRef c : md.columns()) {
+    public static String resolveColumn(EntitySchema md, String property) {
+        for (ColumnRef c : md.columns()) {
             if (c.path().equals(property)) return c.column();
         }
         throw new IllegalArgumentException("Unknown sort property: " + property);

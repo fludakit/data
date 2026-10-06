@@ -473,26 +473,30 @@ class RepositoryProcessorTest {
         compile(sourceDir, classesDir, generatedDir, "Author.java", "Book.java", "Books.java");
 
         String md = Files.readString(generatedDir.resolve("meta/BookMetadata.java"));
-        assertTrue(md.contains("implements EntityDescriptor"),
-                "generated metadata must implement the interface:" + System.lineSeparator() + md);
+        assertTrue(md.contains("implements EntityDescriptor<Book>"),
+                "generated metadata must implement the generic interface:" + System.lineSeparator() + md);
         assertTrue(md.contains("import io.github.fludakit.data.metadata.EntityDescriptor;"), md);
         assertTrue(md.contains("public static final BookMetadata INSTANCE"), md);
-        assertTrue(md.contains("Kind.ASSOCIATION"),
-                "@Association must be exposed as ASSOCIATION:" + System.lineSeparator() + md);
-        assertTrue(md.contains("\"meta.Author\""),
-                "association target type name must be recorded:" + System.lineSeparator() + md);
+        // Decision 1: the descriptor returns the _Book metamodel field instances, not literals,
+        // and the association target is a Class literal on the typed FK field.
+        assertTrue(md.contains("_Book.author"),
+                "@Association must be exposed through the FK-typed metamodel field:" + System.lineSeparator() + md);
+        String mm = Files.readString(generatedDir.resolve("meta/_Book.java")).replaceAll("\\s+", "");
+        assertTrue(mm.contains("ForeignKeyAttribute<Book,Author>author="
+                        + "newForeignKeyAttributeRecord<>(AUTHOR,\"author_id\",Author.class);"),
+                "association target must be a Class literal, not an FQN string:" + System.lineSeparator() + mm);
         // Plan A column constants are preserved:
         assertTrue(md.contains("public static final String TABLE_NAME = \"book\";"), md);
         assertTrue(md.contains("public static final String TITLE = \"title\";"), md);
-        // The id() accessor emits the Kind.ID attribute literal (ruling 8).
-        assertTrue(md.contains("public EntityDescriptor.Attribute id()"), md);
-        assertTrue(md.contains("Kind.ID"), "id() must expose the ID attribute:" + System.lineSeparator() + md);
-        // typeName() carries the entity FQN.
-        assertTrue(md.contains("public String typeName()"), md);
-        assertTrue(md.contains("\"meta.Book\""), md);
-        // The SCALAR attribute literal has null targetTypeName/inverseName/embedded: a $S null crash
-        // would have failed the compile() above, so reaching this line proves null-safe emission.
-        assertTrue(md.contains("EntityDescriptor.Kind.SCALAR"), md);
+        // The id() accessor returns the typed metamodel id field (ruling 8).
+        assertTrue(md.contains("public IdAttribute<Book> id()"), md);
+        assertTrue(md.contains("return _Book.id;"), "id() must expose the ID attribute:" + System.lineSeparator() + md);
+        // entityClass() replaces the old typeName() string.
+        assertTrue(md.contains("public Class<Book> entityClass()"), md);
+        assertTrue(md.contains("return Book.class;"), md);
+        // The scalar field rides the same metamodel reference list: a $S null crash would have
+        // failed the compile() above, so reaching this line proves null-safe emission.
+        assertTrue(md.contains("_Book.title"), md);
     }
 
     @Test
@@ -562,27 +566,32 @@ class RepositoryProcessorTest {
                 "owner metadata must be generated alongside the mapper");
 
         // The value object gets a descriptor-only Metadata: no TABLE_NAME, null tableName(), null id().
+        // Whitespace collapsed so the record-literal pins survive JavaPoet soft wraps.
         Path voMetadata = generatedDir.resolve("emb/AddressMetadata.java");
         assertTrue(Files.exists(voMetadata), "Expected generated " + voMetadata);
-        String vmd = Files.readString(voMetadata);
-        assertTrue(vmd.contains("implements EntityDescriptor"), vmd);
+        String vmd = Files.readString(voMetadata).replaceAll("\\s+", " ");
+        assertTrue(vmd.contains("implements EntityDescriptor<Address>"), vmd);
         assertTrue(vmd.contains("public static final AddressMetadata INSTANCE"), vmd);
         assertTrue(!vmd.contains("TABLE_NAME"),
                 "a value object has no table and must not emit TABLE_NAME:" + System.lineSeparator() + vmd);
         assertTrue(vmd.contains("public String tableName()") && vmd.contains("return null;"),
                 "value objects report a null table name:" + System.lineSeparator() + vmd);
-        assertTrue(vmd.contains("public EntityDescriptor.Attribute id()") && vmd.contains("return null;"),
+        // A VO has no metamodel, so its members are fresh attribute-record literals (Decision 1's
+        // fallback mode) and the id accessor is a typed null.
+        assertTrue(vmd.contains("public IdAttribute<Address> id()") && vmd.contains("return null;"),
                 "value objects report a null id:" + System.lineSeparator() + vmd);
         assertTrue(vmd.contains("public static final String CITY = \"city\";"), vmd);
         // The nested EMBEDDED attribute references the innermost value object's INSTANCE ...
         assertTrue(vmd.contains("GeoPointMetadata.INSTANCE"),
                 "embedded attribute must reference the nested value object's INSTANCE:" + System.lineSeparator() + vmd);
+        assertTrue(vmd.contains("new EmbeddedAttributeRecord<Address,GeoPoint>(\"point\", GeoPointMetadata.INSTANCE)"),
+                "the embedded literal must carry the VO type arguments:" + System.lineSeparator() + vmd);
         // ... which must itself have been generated (transitive EMBEDDED tree walk).
         Path innerMetadata = generatedDir.resolve("emb/GeoPointMetadata.java");
         assertTrue(Files.exists(innerMetadata), "Expected generated " + innerMetadata);
-        String imd = Files.readString(innerMetadata);
+        String imd = Files.readString(innerMetadata).replaceAll("\\s+", " ");
         assertTrue(imd.contains("public static final String LAT = \"lat\";"), imd);
-        assertTrue(imd.contains("EntityDescriptor.Kind.SCALAR"), imd);
+        assertTrue(imd.contains("new SortableColumnAttributeRecord<GeoPoint>(\"lat\", \"lat\")"), imd);
     }
 
     @Test
@@ -1087,23 +1096,23 @@ class RepositoryProcessorTest {
         compile(sourceDir, classesDir, generatedDir,
                 "Child.java", "Parent.java", "ParentRepository.java", "ChildRepository.java");
 
-        // Flatten JavaPoet's soft wraps so the positional literals can be pinned verbatim: five of
-        // the seven Attribute components are Strings, so ONLY an exact full-literal assertion
-        // detects a swapped column/targetTypeName/inverseName argument (M-6).
-        String md = Files.readString(generatedDir.resolve("rel/ParentMetadata.java")).replaceAll("\\s+", " ");
+        // Flatten JavaPoet's soft wraps so the positional pins hold verbatim: the FK column and the
+        // resolved OTM inverse now live in the attribute RECORD ARGUMENTS on _Parent (Decision 1),
+        // so ONLY an exact metamodel-literal assertion detects a swapped column/target/inverse
+        // argument (M-6).
+        String pm = Files.readString(generatedDir.resolve("rel/_Parent.java")).replaceAll("\\s+", "");
+        assertTrue(pm.contains("ForeignKeyAttribute<Parent,Child>primary="
+                        + "newForeignKeyAttributeRecord<>(PRIMARY,\"primary_id\",Child.class);"),
+                "un-annotated entity field must be a FK attribute with an fk column:" + System.lineSeparator() + pm);
+        assertTrue(pm.contains("OneToManyAttribute<Parent,Child>children="
+                        + "newOneToManyAttributeRecord<>(CHILDREN,Child.class,\"owner\");"),
+                "entity list must be ONE_TO_MANY with the resolved inverse name:" + System.lineSeparator() + pm);
 
-        // Bare entity-typed field: MANY_TO_ONE + fk column + target FQN (coverage lock, I-2).
-        assertTrue(md.contains("new EntityDescriptor.Attribute(\"primary\", \"rel.Child\","
-                        + " EntityDescriptor.Kind.MANY_TO_ONE, \"primary_id\", \"rel.Child\", null, null)"),
-                "un-annotated entity field must be MANY_TO_ONE with an fk column:" + System.lineSeparator() + md);
+        String md = Files.readString(generatedDir.resolve("rel/ParentMetadata.java")).replaceAll("\\s+", " ");
+        assertTrue(md.contains("return List.of(_Parent.name, _Parent.primary, _Parent.children);"),
+                "attributes() must return the metamodel field instances, not literals:" + System.lineSeparator() + md);
         assertTrue(md.contains("public static final String PRIMARY = \"primary_id\";"),
                 "the fk column constant must be emitted from the Property list:" + System.lineSeparator() + md);
-
-        // List<@Entity>: ONE_TO_MANY via the second pass, column null, inverse resolved from the
-        // child's own MANY_TO_ONE back-reference (coverage lock, I-2 + positional lock, M-6).
-        assertTrue(md.contains("new EntityDescriptor.Attribute(\"children\", \"java.util.List<rel.Child>\","
-                        + " EntityDescriptor.Kind.ONE_TO_MANY, null, \"rel.Child\", \"owner\", null)"),
-                "entity list must be ONE_TO_MANY with the resolved inverse name:" + System.lineSeparator() + md);
         assertTrue(!md.contains("public static final String CHILDREN"),
                 "ONE_TO_MANY contributes no column constant:" + System.lineSeparator() + md);
 
@@ -1455,8 +1464,8 @@ class RepositoryProcessorTest {
         assertTrue(mm.contains("@Generated(\"io.github.fludakit.data.processor.RepositoryProcessor\")"), mm);
         assertTrue(mm.contains("StringID=\"id\";"), mm);
         assertTrue(mm.contains("StringTITLE=\"title\";"), mm);
-        assertTrue(mm.contains("SortableAttribute<Book>id=newSortableAttributeRecord<>(ID);"), mm);
-        assertTrue(mm.contains("TextAttribute<Book>title=newTextAttributeRecord<>(TITLE);"), mm);
+        assertTrue(mm.contains("IdAttribute<Book>id=newIdAttributeRecord<>(ID,\"id\");"), mm);
+        assertTrue(mm.contains("TextColumnAttribute<Book>title=newTextColumnAttributeRecord<>(TITLE,\"title\");"), mm);
         // The metamodel is additive: the internal descriptor class remains.
         assertTrue(Files.exists(generatedDir.resolve("mmbook/BookMetadata.java")),
                 "the internal <Entity>Metadata must still be generated");
@@ -1528,12 +1537,17 @@ class RepositoryProcessorTest {
         assertTrue(mm.contains("StringADDRESS_POINT=\"address.point\";"), mm);
         assertTrue(mm.contains("StringADDRESS_POINT_LAT=\"address.point.lat\";"), mm);
         assertTrue(mm.contains("StringADDRESS_POINT_LNG=\"address.point.lng\";"), mm);
-        assertTrue(mm.contains("Attribute<Profile>address=newAttributeRecord<>(ADDRESS);"), mm);
-        assertTrue(mm.contains("TextAttribute<Profile>address_city=newTextAttributeRecord<>(ADDRESS_CITY);"), mm);
-        assertTrue(mm.contains("SortableAttribute<Profile>address_zip=newSortableAttributeRecord<>(ADDRESS_ZIP);"), mm);
-        assertTrue(mm.contains("Attribute<Profile>address_point=newAttributeRecord<>(ADDRESS_POINT);"), mm);
-        assertTrue(mm.contains("SortableAttribute<Profile>address_point_lat=newSortableAttributeRecord<>(ADDRESS_POINT_LAT);"), mm);
-        assertTrue(mm.contains("SortableAttribute<Profile>id=newSortableAttributeRecord<>(ID);"), mm);
+        assertTrue(mm.contains("EmbeddedAttribute<Profile,Address>address="
+                + "newEmbeddedAttributeRecord<>(ADDRESS,AddressMetadata.INSTANCE);"), mm);
+        assertTrue(mm.contains("TextColumnAttribute<Profile>address_city="
+                + "newTextColumnAttributeRecord<>(ADDRESS_CITY,\"address_city\");"), mm);
+        assertTrue(mm.contains("SortableColumnAttribute<Profile>address_zip="
+                + "newSortableColumnAttributeRecord<>(ADDRESS_ZIP,\"address_zip\");"), mm);
+        assertTrue(mm.contains("EmbeddedAttribute<Profile,GeoPoint>address_point="
+                + "newEmbeddedAttributeRecord<>(ADDRESS_POINT,GeoPointMetadata.INSTANCE);"), mm);
+        assertTrue(mm.contains("SortableColumnAttribute<Profile>address_point_lat="
+                + "newSortableColumnAttributeRecord<>(ADDRESS_POINT_LAT,\"address_point_lat\");"), mm);
+        assertTrue(mm.contains("IdAttribute<Profile>id=newIdAttributeRecord<>(ID,\"id\");"), mm);
         // Value objects never get their own metamodel classes (aggregate roots only).
         assertTrue(!Files.exists(generatedDir.resolve("mmgp/_Address.java")),
                 "no _VO class for a value object");
@@ -1601,15 +1615,18 @@ class RepositoryProcessorTest {
         compile(sourceDir, classesDir, generatedDir,
                 "Parent.java", "Child.java", "ParentRepository.java", "ChildRepository.java");
 
-        // Relationship properties surface as plain Attribute fields, keyed by ATTRIBUTE name.
+        // Relationship properties surface as typed attribute fields, keyed by ATTRIBUTE name.
         String pm = Files.readString(generatedDir.resolve("mmrel/_Parent.java")).replaceAll("\\s+", "");
         assertTrue(pm.contains("StringCHILDREN=\"children\";"), pm);
-        assertTrue(pm.contains("Attribute<Parent>children=newAttributeRecord<>(CHILDREN);"), pm);
+        assertTrue(pm.contains("OneToManyAttribute<Parent,Child>children="
+                + "newOneToManyAttributeRecord<>(CHILDREN,Child.class,\"owner\");"), pm);
         assertTrue(pm.contains("StringPRIMARY=\"primary\";"), pm);
-        assertTrue(pm.contains("Attribute<Parent>primary=newAttributeRecord<>(PRIMARY);"), pm);
-        assertTrue(pm.contains("TextAttribute<Parent>name=newTextAttributeRecord<>(NAME);"), pm);
+        assertTrue(pm.contains("ForeignKeyAttribute<Parent,Child>primary="
+                + "newForeignKeyAttributeRecord<>(PRIMARY,\"primary_id\",Child.class);"), pm);
+        assertTrue(pm.contains("TextColumnAttribute<Parent>name=newTextColumnAttributeRecord<>(NAME,\"name\");"), pm);
         String cm = Files.readString(generatedDir.resolve("mmrel/_Child.java")).replaceAll("\\s+", "");
-        assertTrue(cm.contains("Attribute<Child>owner=newAttributeRecord<>(OWNER);"), cm);
+        assertTrue(cm.contains("ForeignKeyAttribute<Child,Parent>owner="
+                + "newForeignKeyAttributeRecord<>(OWNER,\"owner_id\",Parent.class);"), cm);
 
         // The runtime sort switch resolves dot paths to flattened columns and carries no
         // EMBEDDED-container case.

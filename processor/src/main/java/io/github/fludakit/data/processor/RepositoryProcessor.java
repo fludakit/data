@@ -14,7 +14,7 @@ import com.squareup.javapoet.TypeVariableName;
 import io.github.fludakit.data.Names;
 import io.github.fludakit.data.annotation.Association;
 import io.github.fludakit.data.annotation.Identity;
-import io.github.fludakit.data.metadata.EntityDescriptor;
+import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.page.CursorSupport;
 import io.github.fludakit.data.page.SimpleCursoredPage;
 import io.github.fludakit.data.page.SimplePage;
@@ -72,7 +72,7 @@ import java.util.Set;
 /**
  * Generates four artifacts at compile time: a {@code <Repository>Impl} class for every
  * {@link Repository @Repository} interface, a reflection-free {@code <Entity>Metadata} class
- * implementing {@link EntityDescriptor} (the compile-time descriptor model behind all SQL), a
+ * implementing {@link io.github.fludakit.data.metadata.EntityDescriptor} (the compile-time descriptor model behind all SQL), a
  * {@code <Entity>RowMapper} for entities whose fields are all JDBC-safe or embeddable value objects,
  * and a Jakarta Data 1.0 {@code _Entity} static metamodel interface per aggregate root
  * (see {@link #generateStaticMetamodel}).
@@ -97,17 +97,39 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     /** Jakarta Data 1.0 §3.3 static metamodel types (string-form so the processor needs no new deps). */
     private static final ClassName MM_ATTRIBUTE = ClassName.get("jakarta.data.metamodel", "Attribute");
-    private static final ClassName MM_SORTABLE = ClassName.get("jakarta.data.metamodel", "SortableAttribute");
-    private static final ClassName MM_TEXT = ClassName.get("jakarta.data.metamodel", "TextAttribute");
-    private static final ClassName MM_ATTRIBUTE_RECORD =
-            ClassName.get("jakarta.data.metamodel.impl", "AttributeRecord");
-    private static final ClassName MM_SORTABLE_RECORD =
-            ClassName.get("jakarta.data.metamodel.impl", "SortableAttributeRecord");
-    private static final ClassName MM_TEXT_RECORD =
-            ClassName.get("jakarta.data.metamodel.impl", "TextAttributeRecord");
     private static final ClassName MM_STATIC_METAMODEL =
             ClassName.get("jakarta.data.metamodel", "StaticMetamodel");
     private static final ClassName MM_GENERATED = ClassName.get("jakarta.annotation", "Generated");
+
+    /**
+     * FluDa's extended attribute types ({@code io.github.fludakit.data.metamodel}): the Jakarta Data
+     * 1.0 attribute subtypes the generated metamodel fields instantiate, so one field instance is
+     * both the user-facing sort anchor and the runtime descriptor attribute.
+     */
+    private static final ClassName FM_COLUMN = ClassName.get("io.github.fludakit.data.metamodel", "ColumnAttribute");
+    private static final ClassName FM_ID = ClassName.get("io.github.fludakit.data.metamodel", "IdAttribute");
+    private static final ClassName FM_SORTABLE = ClassName.get("io.github.fludakit.data.metamodel", "SortableColumnAttribute");
+    private static final ClassName FM_TEXT = ClassName.get("io.github.fludakit.data.metamodel", "TextColumnAttribute");
+    private static final ClassName FM_EMBEDDED = ClassName.get("io.github.fludakit.data.metamodel", "EmbeddedAttribute");
+    private static final ClassName FM_FK = ClassName.get("io.github.fludakit.data.metamodel", "ForeignKeyAttribute");
+    private static final ClassName FM_OTM = ClassName.get("io.github.fludakit.data.metamodel", "OneToManyAttribute");
+    private static final ClassName FM_EC = ClassName.get("io.github.fludakit.data.metamodel", "ElementCollectionAttribute");
+    private static final ClassName FM_COLUMN_RECORD =
+            ClassName.get("io.github.fludakit.data.metamodel", "ColumnAttributeRecord");
+    private static final ClassName FM_ID_RECORD =
+            ClassName.get("io.github.fludakit.data.metamodel", "IdAttributeRecord");
+    private static final ClassName FM_SORTABLE_RECORD =
+            ClassName.get("io.github.fludakit.data.metamodel", "SortableColumnAttributeRecord");
+    private static final ClassName FM_TEXT_RECORD =
+            ClassName.get("io.github.fludakit.data.metamodel", "TextColumnAttributeRecord");
+    private static final ClassName FM_EMBEDDED_RECORD =
+            ClassName.get("io.github.fludakit.data.metamodel", "EmbeddedAttributeRecord");
+    private static final ClassName FM_FK_RECORD =
+            ClassName.get("io.github.fludakit.data.metamodel", "ForeignKeyAttributeRecord");
+    private static final ClassName FM_OTM_RECORD =
+            ClassName.get("io.github.fludakit.data.metamodel", "OneToManyAttributeRecord");
+    private static final ClassName FM_EC_RECORD =
+            ClassName.get("io.github.fludakit.data.metamodel", "ElementCollectionAttributeRecord");
 
     /** Attribute-name types that get the spec's {@code TextAttribute} treatment. */
     private static final Set<String> METAMODEL_TEXT_TYPES = Set.of(
@@ -265,26 +287,21 @@ public class RepositoryProcessor extends AbstractProcessor {
         DeclaredType entityErasure = (DeclaredType) types.erasure(entityMirror);
         TypeElement entityElement = (TypeElement) entityErasure.asElement();
         EntityModel entity = buildEntity(entityElement);
+        String entityFqn = entityElement.getQualifiedName().toString();
         ClassName mapperType = null;
+        boolean mapperPending = false;
         if (canGenerateRowMapper(entity)) {
-            String entityFqn = entityElement.getQualifiedName().toString();
             mapperType = rowMappers.get(entityFqn);
-            if (mapperType == null) {
-                ClassName metadataType = generateMetadata(entityElement, entity);
-                metadataTypes.put(entityFqn, metadataType);
-                mapperType = generateRowMapper(entityElement, entity, metadataType);
-                rowMappers.put(entityFqn, mapperType);
-            }
+            mapperPending = mapperType == null;
         }
-        // Jakarta Data 1.0 §3.3 static metamodel: additive `_Entity` interface for aggregate roots,
-        // independent of the row-mapper gate (it references no JDBC types). Value objects surface
-        // only as dot-path members of their owner's metamodel, never as `_VO` classes.
-        String entityTypeName = entityElement.getQualifiedName().toString();
-        if (!isValueObjectType(entityElement) && !metamodelTypes.containsKey(entityTypeName)) {
-            String entityPackage = elements.getPackageOf(entityElement).getQualifiedName().toString();
-            metamodelTypes.put(entityTypeName,
-                    ClassName.get(entityPackage, "_" + entityElement.getSimpleName()));
-            generateStaticMetamodel(entityElement, entity);
+        // Jakarta Data 1.0 §3.3 static metamodel + <Entity>Metadata descriptor: the metamodel is
+        // additive for aggregate roots (it references no JDBC types) and its field instances ARE the
+        // descriptor's attributes (Decision 1). Value objects surface only as dot-path members of
+        // their owner's metamodel, never as `_VO` classes.
+        ensureDescriptorArtifacts(entityElement, entity, mapperPending);
+        if (mapperPending) {
+            mapperType = generateRowMapper(entityElement, entity, metadataTypes.get(entityFqn));
+            rowMappers.put(entityFqn, mapperType);
         }
         // EMBEDDED value objects carry descriptor metadata even when the owner's mapper gate skips
         // them; the generated <VO>Metadata classes are what the owner's attributes() reference.
@@ -311,11 +328,11 @@ public class RepositoryProcessor extends AbstractProcessor {
         // repository or calling a mapper that was never emitted. The gate is checked BEFORE resolving
         // the target model so an unmanaged target never gets a row mapper generated for it.
         List<EntityRelationship> hydratedRelationships = new ArrayList<>();
-        for (EntityDescriptor.Attribute a : entity.metadata().attributes()) {
-            if (a.kind() != EntityDescriptor.Kind.MANY_TO_ONE && a.kind() != EntityDescriptor.Kind.ONE_TO_MANY) {
+        for (DescriptorModel.Attribute a : entity.metadata().attributes()) {
+            if (a.kind() != DescriptorModel.Kind.MANY_TO_ONE && a.kind() != DescriptorModel.Kind.ONE_TO_MANY) {
                 continue;
             }
-            if (a.kind() == EntityDescriptor.Kind.ONE_TO_MANY && a.inverseName() == null) {
+            if (a.kind() == DescriptorModel.Kind.ONE_TO_MANY && a.inverseName() == null) {
                 processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
                         "relationship '" + a.name() + "' on " + entityElement.getQualifiedName()
                                 + ": one-to-many inverse is unresolved on the target — left unmapped on read",
@@ -374,7 +391,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                 methods.add(appendCollectionHydration(constants, entity, c, collectionMappers.get(c.field())));
             }
             for (EntityRelationship r : hydratedRelationships) {
-                methods.add(r.attribute().kind() == EntityDescriptor.Kind.MANY_TO_ONE
+                methods.add(r.attribute().kind() == DescriptorModel.Kind.MANY_TO_ONE
                         ? appendManyToOneHydration(constants, entity, r)
                         : appendOneToManyHydration(constants, entity, r));
             }
@@ -432,13 +449,13 @@ public class RepositoryProcessor extends AbstractProcessor {
             return false;
         }
         for (Property p : entity.properties()) {
-            if (p.association() || p.kind() == EntityDescriptor.Kind.MANY_TO_ONE) {
+            if (p.association() || p.kind() == DescriptorModel.Kind.MANY_TO_ONE) {
                 continue; // FK-only or hydrated by loaders (Tasks 3-4)
             }
             if (isJdbcSafe(p.type())) {
                 continue;
             }
-            if (p.kind() == EntityDescriptor.Kind.EMBEDDED && p.embeddedModel() != null
+            if (p.kind() == DescriptorModel.Kind.EMBEDDED && p.embeddedModel() != null
                     && canGenerateRowMapper(p.embeddedModel())) {
                 continue;
             }
@@ -448,27 +465,32 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /**
-     * Emits {@code <Entity>Metadata implements EntityDescriptor}: Plan A's column-name constants
-     * (one per mapped property plus the table name) alongside the descriptor view — {@code INSTANCE},
-     * {@code typeName()}, {@code tableName()}, {@code id()} and {@code attributes()}. A value
-     * object (EMBEDDED target) has no table and no id, so its TABLE_NAME constant is omitted and the
-     * matching accessors return {@code null}. An EMBEDDED property contributes no constant of its
-     * own — its {@code column} slot holds a leaf prefix, so no physical column named after the
-     * property exists — but each flattened leaf of its value-object descriptor gets a constant
-     * {@code <PREFIX>_<LEAF>} named {@code <prefix>_<leaf>} (Decision 3; nesting is resolved inside
-     * the descriptor, so one loop per embedded attribute suffices).
+     * Emits {@code <Entity>Metadata implements EntityDescriptor<Entity>}: Plan A's column-name
+     * constants (one per mapped property plus the table name) alongside the descriptor view —
+     * {@code INSTANCE}, {@code entityClass()}, {@code tableName()}, {@code id()} and
+     * {@code attributes()}. A value object (EMBEDDED target) has no table and no id, so its
+     * TABLE_NAME constant is omitted and the matching accessors return {@code null}. An EMBEDDED
+     * property contributes no constant of its own — its {@code column} slot holds a leaf prefix,
+     * so no physical column named after the property exists — but each flattened leaf of its
+     * value-object descriptor gets a constant {@code <PREFIX>_<LEAF>} named
+     * {@code <prefix>_<leaf>} (Decision 3; nesting is resolved inside the descriptor, so one loop
+     * per embedded attribute suffices). The accessor bodies return the {@code _Entity} metamodel
+     * field instances when a metamodel was generated (Decision 1); a value object has none, so its
+     * members are emitted as fresh attribute-record literals with the same shapes. Embedded leaves
+     * appear flat in {@code attributes()}, making {@code attribute("address.city")} a direct hit
+     * and {@code columns()} a {@code ColumnAttribute} filter in declaration order.
      */
-    private ClassName generateMetadata(TypeElement entityElement, EntityModel entity) {
+    private ClassName generateMetadata(TypeElement entityElement, EntityModel entity,
+                                       List<MmMember> members, ClassName metamodelType) {
         String packageName = elements.getPackageOf(entityElement).getQualifiedName().toString();
         String simpleName = entityElement.getSimpleName() + "Metadata";
         ClassName self = ClassName.get(packageName, simpleName);
+        TypeName entityType = entity.typeName();
         ClassName descriptor = ClassName.get("io.github.fludakit.data.metadata", "EntityDescriptor");
-        ClassName attribute = descriptor.nestedClass("Attribute");
-        ClassName kind = descriptor.nestedClass("Kind");
 
         TypeSpec.Builder builder = TypeSpec.classBuilder(simpleName)
                 .addModifiers(Modifier.PUBLIC, Modifier.FINAL)
-                .addSuperinterface(descriptor)
+                .addSuperinterface(ParameterizedTypeName.get(descriptor, entityType))
                 .addMethod(MethodSpec.constructorBuilder().addModifiers(Modifier.PRIVATE).build())
                 .addField(FieldSpec.builder(self, "INSTANCE", Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
                         .initializer("new $T()", self).build());
@@ -479,8 +501,8 @@ public class RepositoryProcessor extends AbstractProcessor {
             builder.addField(stringConstant(constName(entity.id().name()), entity.id().column()));
         }
         Set<String> embeddedNames = new HashSet<>();
-        for (EntityDescriptor.Attribute a : entity.metadata().attributes()) {
-            if (a.kind() == EntityDescriptor.Kind.EMBEDDED) {
+        for (DescriptorModel.Attribute a : entity.metadata().attributes()) {
+            if (a.kind() == DescriptorModel.Kind.EMBEDDED) {
                 embeddedNames.add(a.name());
             }
         }
@@ -495,34 +517,55 @@ public class RepositoryProcessor extends AbstractProcessor {
         // <prefix>_<leaf>, e.g. an embedded "point" yields POINT_LAT = "point_lat". The constant
         // NAME derives from the leaf's COLUMN (not the attribute name) so name and value agree
         // whenever the attribute name is not the snake case of its column.
-        for (EntityDescriptor.Attribute a : entity.metadata().attributes()) {
-            if (a.kind() != EntityDescriptor.Kind.EMBEDDED || a.embedded() == null) {
+        for (DescriptorModel.Attribute a : entity.metadata().attributes()) {
+            if (a.kind() != DescriptorModel.Kind.EMBEDDED || a.embedded() == null) {
                 continue;
             }
-            for (EntityDescriptor.ColumnRef leaf : a.embedded().columns()) {
+            for (ColumnRef leaf : a.embedded().columns()) {
                 builder.addField(stringConstant(
                         Names.toSnakeCase(a.column() + "_" + leaf.column()).toUpperCase(),
                         a.column() + "_" + leaf.column()));
             }
         }
 
-        builder.addMethod(stringAccessor("typeName", entityElement.getQualifiedName().toString()));
+        builder.addMethod(MethodSpec.methodBuilder("entityClass").addModifiers(Modifier.PUBLIC)
+                .addAnnotation(Override.class)
+                .returns(ParameterizedTypeName.get(ClassName.get(Class.class), entityType))
+                .addStatement("return $T.class", entityType).build());
         builder.addMethod(stringAccessor("tableName", entity.metadata().tableName()));
-        EntityDescriptor.Attribute idAttribute = entity.metadata().id();
-        if (idAttribute != null) {
-            builder.addMethod(attributeAccessor("id", idAttribute, attribute, kind));
-        } else {
-            builder.addMethod(MethodSpec.methodBuilder("id").addModifiers(Modifier.PUBLIC)
-                    .addAnnotation(Override.class).returns(attribute)
-                    .addStatement("return null").build());
+
+        MmMember idMember = null;
+        for (MmMember m : members) {
+            if (m.kind() == DescriptorModel.Kind.ID) {
+                idMember = m;
+                break;
+            }
         }
-        List<EntityDescriptor.Attribute> attrs = entity.metadata().attributes();
+        MethodSpec.Builder id = MethodSpec.methodBuilder("id").addModifiers(Modifier.PUBLIC)
+                .addAnnotation(Override.class).returns(ParameterizedTypeName.get(FM_ID, entityType));
+        if (idMember == null) {
+            id.addStatement("return null");
+        } else if (metamodelType != null) {
+            id.addStatement("return $T.$L", metamodelType, idMember.identifier());
+        } else {
+            id.addStatement("return $L", memberInitializer(entityType, idMember, false));
+        }
+        builder.addMethod(id.build());
+
+        TypeName attribute = ParameterizedTypeName.get(MM_ATTRIBUTE, entityType);
         CodeBlock.Builder list = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
-        for (int i = 0; i < attrs.size(); i++) {
-            if (i > 0) {
+        boolean first = true;
+        for (MmMember m : members) {
+            if (m.kind() == DescriptorModel.Kind.ID) {
+                continue; // exposed through id(), not duplicated in attributes()
+            }
+            if (!first) {
                 list.add(", ");
             }
-            list.add(attributeLiteral(attrs.get(i), attribute, kind));
+            first = false;
+            list.add(metamodelType != null
+                    ? CodeBlock.of("$T.$L", metamodelType, m.identifier())
+                    : memberInitializer(entityType, m, false));
         }
         list.add(")");
         builder.addMethod(MethodSpec.methodBuilder("attributes").addModifiers(Modifier.PUBLIC)
@@ -541,9 +584,9 @@ public class RepositoryProcessor extends AbstractProcessor {
      * {@code <VO>Metadata.INSTANCE} reference resolves to a generated class; the
      * {@link #metadataTypes} guard is set before recursing, which bounds cycles (A embeds B embeds A).
      */
-    private void generateEmbeddedDescriptors(EntityDescriptor owner) {
-        for (EntityDescriptor.Attribute a : owner.attributes()) {
-            if (a.kind() != EntityDescriptor.Kind.EMBEDDED || a.embedded() == null) {
+    private void generateEmbeddedDescriptors(DescriptorModel owner) {
+        for (DescriptorModel.Attribute a : owner.attributes()) {
+            if (a.kind() != DescriptorModel.Kind.EMBEDDED || a.embedded() == null) {
                 continue;
             }
             String voFqn = a.embedded().typeName();
@@ -558,7 +601,36 @@ public class RepositoryProcessor extends AbstractProcessor {
             String voPackage = elements.getPackageOf(voElement).getQualifiedName().toString();
             metadataTypes.put(voFqn, ClassName.get(voPackage, voElement.getSimpleName() + "Metadata"));
             generateEmbeddedDescriptors(voModel.metadata());
-            generateMetadata(voElement, voModel);
+            // The metadataTypes guard above is what bounds VO cycles; emit directly (a VO has no
+            // metamodel, so its members become record literals — the `metamodelType == null` mode).
+            generateMetadata(voElement, voModel, collectMembers(voElement, voModel.metadata()), null);
+        }
+    }
+
+    /**
+     * Emits the aggregate's {@code _Entity} static metamodel (idempotent via {@link #metamodelTypes})
+     * and, when {@code withMetadata} asks for it, its {@code <Entity>Metadata} descriptor (idempotent
+     * via {@link #metadataTypes}). One member list drives both, so the descriptor's
+     * {@code id()}/{@code attributes()} return the very metamodel field instances (Decision 1);
+     * value objects have no metamodel and their metadata falls back to record literals.
+     */
+    private void ensureDescriptorArtifacts(TypeElement entityElement, EntityModel entity,
+                                           boolean withMetadata) {
+        String fqn = entityElement.getQualifiedName().toString();
+        boolean needMetamodel = !isValueObjectType(entityElement) && !metamodelTypes.containsKey(fqn);
+        boolean needMetadata = withMetadata && !metadataTypes.containsKey(fqn);
+        if (!needMetamodel && !needMetadata) {
+            return;
+        }
+        List<MmMember> members = collectMembers(entityElement, entity.metadata());
+        if (needMetamodel) {
+            String entityPackage = elements.getPackageOf(entityElement).getQualifiedName().toString();
+            metamodelTypes.put(fqn, ClassName.get(entityPackage, "_" + entityElement.getSimpleName()));
+            generateStaticMetamodel(entityElement, members);
+        }
+        if (needMetadata) {
+            metadataTypes.put(fqn,
+                    generateMetadata(entityElement, entity, members, metamodelTypes.get(fqn)));
         }
     }
 
@@ -566,60 +638,105 @@ public class RepositoryProcessor extends AbstractProcessor {
      * Emits the Jakarta Data 1.0 §3.3 static metamodel: {@code _Entity}, a generated interface annotated
      * {@code @Generated} + {@code @StaticMetamodel(Entity.class)} whose {@code UPPER_CASE} String
      * constants hold entity ATTRIBUTE names (dot paths for embedded leaves, e.g.
-     * {@code ADDRESS_CITY = "address.city"}) and whose mixed-case fields are {@code Attribute},
-     * {@code SortableAttribute} or {@code TextAttribute} records from {@code jakarta.data.metamodel}.
-     * This is deliberately additive: the internal {@code <Entity>Metadata} keeps holding COLUMN-name
-     * constants for the generated SQL, which uses the same constant shape with different values.
-     * {@code ONE_TO_MANY}/{@code ELEMENT_COLLECTION} attributes exist only on the descriptor, not in
-     * {@link EntityModel#properties()}, so they are iterated separately.
+     * {@code ADDRESS_CITY = "address.city"}) and whose mixed-case fields are FluDa attribute records
+     * from {@code io.github.fludakit.data.metamodel}, each also carrying the physical COLUMN — so one
+     * field instance is both the user-facing sort anchor and the runtime descriptor attribute
+     * (Decision 1). Embedded leaves are emitted flat; {@code <Entity>Metadata} returns these very
+     * instances. The member list comes from {@link #collectMembers}, shared with the metadata emitter.
      */
-    private void generateStaticMetamodel(TypeElement entityElement, EntityModel entity) {
+    private void generateStaticMetamodel(TypeElement entityElement, List<MmMember> members) {
         String packageName = elements.getPackageOf(entityElement).getQualifiedName().toString();
-        ClassName entityName = ClassName.get(packageName, entityElement.getSimpleName().toString());
+        ClassName owner = ClassName.get(packageName, entityElement.getSimpleName().toString());
         String simpleName = "_" + entityElement.getSimpleName();
-
-        MetamodelFields fields = new MetamodelFields(entityElement);
-        if (entity.id() != null) {
-            fields.add(entity.id().name(), entity.id().type(), entity.id().kind(), null);
-        }
-        for (Property p : entity.properties()) {
-            fields.add(p.name(), p.type(), p.kind(), p.embeddedModel());
-        }
-        for (EntityDescriptor.Attribute a : entity.metadata().attributes()) {
-            if (a.kind() == EntityDescriptor.Kind.ONE_TO_MANY
-                    || a.kind() == EntityDescriptor.Kind.ELEMENT_COLLECTION) {
-                fields.add(a.name(), ClassName.get("java.lang", "Object"), a.kind(), null);
-            }
-        }
 
         TypeSpec.Builder builder = TypeSpec.interfaceBuilder(simpleName)
                 .addModifiers(Modifier.PUBLIC)
                 .addAnnotation(AnnotationSpec.builder(MM_GENERATED)
                         .addMember("value", "$S", RepositoryProcessor.class.getName()).build())
                 .addAnnotation(AnnotationSpec.builder(MM_STATIC_METAMODEL)
-                        .addMember("value", "$T.class", entityName).build());
-        fields.constants.forEach(builder::addField);
-        fields.attributes.forEach(builder::addField);
+                        .addMember("value", "$T.class", owner).build());
+        for (MmMember m : members) {
+            // JavaPoet requires explicit visibility on interface fields (static/final are implicit).
+            builder.addField(FieldSpec.builder(String.class, m.constant(),
+                    Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
+                    .initializer("$S", m.path()).build());
+        }
+        for (MmMember m : members) {
+            builder.addField(FieldSpec.builder(memberAttrType(owner, m), m.identifier(),
+                    Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
+                    .initializer(memberInitializer(owner, m, true)).build());
+        }
 
         writeSourceFile(packageName + "." + simpleName, entityElement,
                 JavaFile.builder(packageName, builder.build()).skipJavaLangImports(true).build());
     }
 
-    /** The spec's attribute-kind classification for a metamodel member of the given type. */
-    private MetamodelKind metamodelKind(TypeName type) {
-        if (METAMODEL_TEXT_TYPES.contains(type.toString())) {
+    /**
+     * One metamodel member in emission order: the list entry shared by {@code _Entity} and
+     * {@code <Entity>Metadata}. {@code path} is the dot-separated attribute path (identifier =
+     * {@code path.replace('.','_')}, UPPER constant = its uppercase), {@code column} the flattened
+     * physical column for column-bearing kinds, and {@code embedded}/{@code targetFqn}/
+     * {@code inverse} the relation metadata for the descriptor-carrying kinds.
+     */
+    private record MmMember(String path, String identifier, String constant,
+                            DescriptorModel.Kind kind, String typeFqn, String column,
+                            DescriptorModel embedded, String targetFqn, String inverse) { }
+
+    /** The member list of one descriptor: id first, then attributes in declaration order. */
+    private List<MmMember> collectMembers(Element origin, DescriptorModel model) {
+        List<MmMember> members = new ArrayList<>();
+        addMembers(members, new HashSet<>(), origin, model, "", "");
+        return members;
+    }
+
+    private void addMembers(List<MmMember> out, Set<String> taken, Element origin,
+                             DescriptorModel model, String pathPrefix, String columnPrefix) {
+        if (model.id() != null) {
+            addMember(out, taken, origin, model.id(), pathPrefix, columnPrefix);
+        }
+        for (DescriptorModel.Attribute a : model.attributes()) {
+            addMember(out, taken, origin, a, pathPrefix, columnPrefix);
+        }
+    }
+
+    /**
+     * One member plus, for a resolved {@code EMBEDDED}, its value object's flattened leaves
+     * (recursion). Column and path prefixes thread through nesting exactly as
+     * {@link DescriptorModel#columns()} flattens, so a leaf reads {@code ADDRESS_POINT_LAT =
+     * "address.point.lat"} / column {@code address_point_lat}. Duplicate identifiers keep the first
+     * member and report a NOTE (spec collision handling).
+     */
+    private void addMember(List<MmMember> out, Set<String> taken, Element origin,
+                           DescriptorModel.Attribute a, String pathPrefix, String columnPrefix) {
+        String path = pathPrefix.isEmpty() ? a.name() : pathPrefix + "." + a.name();
+        String identifier = path.replace('.', '_');
+        if (!taken.add(identifier)) {
+            processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
+                    "static metamodel collision on '" + path + "': member '" + identifier
+                            + "' already emitted; this path is skipped", origin);
+            return;
+        }
+        String column = a.column() == null ? null : columnPrefix + a.column();
+        out.add(new MmMember(path, identifier, identifier.toUpperCase(), a.kind(), a.typeName(),
+                column, a.embedded(), a.targetTypeName(), a.inverseName()));
+        if (a.kind() == DescriptorModel.Kind.EMBEDDED && a.embedded() != null) {
+            addMembers(out, taken, origin, a.embedded(), path, column + "_");
+        }
+    }
+
+    /** The spec's attribute-kind classification for a metamodel member of the given type name. */
+    private MetamodelKind metamodelKind(String typeFqn) {
+        if (typeFqn == null) {
+            return MetamodelKind.PLAIN;
+        }
+        if (METAMODEL_TEXT_TYPES.contains(typeFqn)) {
             return MetamodelKind.TEXT;
         }
-        if (type instanceof ClassName cn && cn.canonicalName().equals(type.toString())) {
-            if (METAMODEL_SORTABLE_TYPES.contains(cn.canonicalName())) {
-                return MetamodelKind.SORTABLE;
-            }
-            TypeElement te = elements.getTypeElement(cn.canonicalName());
-            if (te != null && te.getKind() == ElementKind.ENUM) {
-                return MetamodelKind.SORTABLE;
-            }
-        } else if (type.isPrimitive()
-                && METAMODEL_SORTABLE_TYPES.contains(type.toString())) {
+        if (METAMODEL_SORTABLE_TYPES.contains(typeFqn)) {
+            return MetamodelKind.SORTABLE;
+        }
+        TypeElement te = elements.getTypeElement(typeFqn);
+        if (te != null && te.getKind() == ElementKind.ENUM) {
             return MetamodelKind.SORTABLE;
         }
         return MetamodelKind.PLAIN;
@@ -627,62 +744,77 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     private enum MetamodelKind { PLAIN, SORTABLE, TEXT }
 
-    /** Accumulates the constants-then-fields member lists of one {@code _Entity} interface. */
-    private final class MetamodelFields {
-
-        private final List<FieldSpec> constants = new ArrayList<>();
-        private final List<FieldSpec> attributes = new ArrayList<>();
-        private final Set<String> taken = new HashSet<>();
-        private final Element origin;
-
-        private MetamodelFields(Element origin) {
-            this.origin = origin;
+    /** The class literal argument for a target FQN, erasing generics; {@code Object} when unknown. */
+    private TypeName classArgOf(String fqn) {
+        if (fqn == null) {
+            return ClassName.OBJECT;
         }
-
-        /** One member: UPPER constant = dotted attribute path, mixed-case field = its record. */
-        private void add(String path, TypeName type, EntityDescriptor.Kind kind, EntityModel embedded) {
-            String constant = path.replace('.', '_').toUpperCase();
-            String field = path.replace('.', '_');
-            if (!taken.add(field)) {
-                processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
-                        "static metamodel collision on '" + path + "': member '" + field
-                                + "' already emitted; this path is skipped", origin);
-                return;
-            }
-            // JavaPoet requires explicit visibility on interface fields (static/final are implicit).
-            constants.add(FieldSpec.builder(String.class, constant,
-                    Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
-                    .initializer("$S", path).build());
-            ClassName attr;
-            ClassName impl;
-            if (kind == EntityDescriptor.Kind.EMBEDDED) {
-                attr = MM_ATTRIBUTE;
-                impl = MM_ATTRIBUTE_RECORD;
-            } else {
-                switch (metamodelKind(type)) {
-                    case TEXT -> { attr = MM_TEXT; impl = MM_TEXT_RECORD; }
-                    case SORTABLE -> { attr = MM_SORTABLE; impl = MM_SORTABLE_RECORD; }
-                    default -> { attr = MM_ATTRIBUTE; impl = MM_ATTRIBUTE_RECORD; }
-                }
-            }
-            attributes.add(FieldSpec.builder(ParameterizedTypeName.get(attr, originEntityName()), field,
-                    Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
-                    .initializer("new $T<>($L)", impl, constant).build());
-            if (kind == EntityDescriptor.Kind.EMBEDDED && embedded != null) {
-                if (embedded.id() != null) {
-                    add(path + "." + embedded.id().name(), embedded.id().type(),
-                            embedded.id().kind(), embedded.id().embeddedModel());
-                }
-                for (Property p : embedded.properties()) {
-                    add(path + "." + p.name(), p.type(), p.kind(), p.embeddedModel());
-                }
-            }
+        int angle = fqn.indexOf('<');
+        String name = angle < 0 ? fqn : fqn.substring(0, angle);
+        TypeElement te = elements.getTypeElement(name);
+        if (te != null) {
+            return TypeName.get(types.erasure(te.asType()));
         }
+        int dot = name.lastIndexOf('.');
+        return dot < 0 ? ClassName.OBJECT : ClassName.get(name.substring(0, dot), name.substring(dot + 1));
+    }
 
-        private ClassName originEntityName() {
-            return ClassName.get(elements.getPackageOf((TypeElement) origin)
-                    .getQualifiedName().toString(), origin.getSimpleName().toString());
-        }
+    /** The declared static type of one metamodel field / descriptor attribute, by member kind. */
+    private TypeName memberAttrType(TypeName owner, MmMember m) {
+        return switch (m.kind()) {
+            case ID -> ParameterizedTypeName.get(FM_ID, owner);
+            case SCALAR -> switch (metamodelKind(m.typeFqn())) {
+                case TEXT -> ParameterizedTypeName.get(FM_TEXT, owner);
+                case SORTABLE -> ParameterizedTypeName.get(FM_SORTABLE, owner);
+                default -> ParameterizedTypeName.get(FM_COLUMN, owner);
+            };
+            case EMBEDDED -> ParameterizedTypeName.get(FM_EMBEDDED, owner, classArgOf(m.targetFqn()));
+            case MANY_TO_ONE, ASSOCIATION ->
+                    ParameterizedTypeName.get(FM_FK, owner, classArgOf(m.targetFqn()));
+            case ONE_TO_MANY -> ParameterizedTypeName.get(FM_OTM, owner, classArgOf(m.targetFqn()));
+            case ELEMENT_COLLECTION ->
+                    ParameterizedTypeName.get(FM_EC, owner, classArgOf(m.targetFqn()));
+        };
+    }
+
+    /**
+     * The initializer of one member. In the metamodel file ({@code constRef}) the attribute name is
+     * the interface's own UPPER constant and {@code <>} infers from the declared field type; in the
+     * VO metadata literal mode the name is the dot path string and type arguments are explicit,
+     * because {@code List.of(...)} targets do not reliably push inference into record constructors.
+     */
+    private CodeBlock memberInitializer(TypeName owner, MmMember m, boolean constRef) {
+        CodeBlock name = constRef ? CodeBlock.of("$L", m.constant()) : CodeBlock.of("$S", m.path());
+        CodeBlock typeArgs = constRef ? CodeBlock.of("<>") : explicitTypeArgs(owner, m);
+        return switch (m.kind()) {
+            case ID -> CodeBlock.of("new $T$L($L, $S)", FM_ID_RECORD, typeArgs, name, m.column());
+            case SCALAR -> {
+                ClassName rec = switch (metamodelKind(m.typeFqn())) {
+                    case TEXT -> FM_TEXT_RECORD;
+                    case SORTABLE -> FM_SORTABLE_RECORD;
+                    default -> FM_COLUMN_RECORD;
+                };
+                yield CodeBlock.of("new $T$L($L, $S)", rec, typeArgs, name, m.column());
+            }
+            case EMBEDDED -> m.embedded() != null
+                    ? CodeBlock.of("new $T$L($L, $T.INSTANCE)", FM_EMBEDDED_RECORD, typeArgs, name,
+                            embeddedMetadataName(m.embedded().typeName()))
+                    : CodeBlock.of("new $T<$T,$T>($L, null)", FM_EMBEDDED_RECORD, owner,
+                            classArgOf(m.targetFqn()), name);
+            case MANY_TO_ONE, ASSOCIATION -> CodeBlock.of("new $T$L($L, $S, $T.class)",
+                    FM_FK_RECORD, typeArgs, name, m.column(), classArgOf(m.targetFqn()));
+            case ONE_TO_MANY -> CodeBlock.of("new $T$L($L, $T.class, $L)",
+                    FM_OTM_RECORD, typeArgs, name, classArgOf(m.targetFqn()), stringLiteral(m.inverse()));
+            case ELEMENT_COLLECTION -> CodeBlock.of("new $T$L($L, $T.class)",
+                    FM_EC_RECORD, typeArgs, name, classArgOf(m.targetFqn()));
+        };
+    }
+
+    private CodeBlock explicitTypeArgs(TypeName owner, MmMember m) {
+        return switch (m.kind()) {
+            case ID, SCALAR -> CodeBlock.of("<$T>", owner);
+            default -> CodeBlock.of("<$T,$T>", owner, classArgOf(m.targetFqn()));
+        };
     }
 
     /** Null-safe string emission: JavaPoet's {@code $S} is replaced by a literal {@code null} arg. */
@@ -694,26 +826,6 @@ public class RepositoryProcessor extends AbstractProcessor {
         return MethodSpec.methodBuilder(name).addModifiers(Modifier.PUBLIC)
                 .addAnnotation(Override.class).returns(String.class)
                 .addStatement("return $L", stringLiteral(value)).build();
-    }
-
-    private MethodSpec attributeAccessor(String name, EntityDescriptor.Attribute attributeValue,
-                                         ClassName attribute, ClassName kind) {
-        return MethodSpec.methodBuilder(name).addModifiers(Modifier.PUBLIC)
-                .addAnnotation(Override.class).returns(attribute)
-                .addStatement("return $L", attributeLiteral(attributeValue, attribute, kind)).build();
-    }
-
-    /** Renders one {@code new EntityDescriptor.Attribute(...)} literal with the record's 7 components. */
-    private CodeBlock attributeLiteral(EntityDescriptor.Attribute a, ClassName attribute, ClassName kind) {
-        CodeBlock embedded = a.embedded() == null
-                ? CodeBlock.of("null")
-                : CodeBlock.of("$T.INSTANCE", embeddedMetadataName(a.embedded().typeName()));
-        return CodeBlock.of("new $T($L, $L, $T.$L, $L, $L, $L, $L)",
-                attribute,
-                stringLiteral(a.name()), stringLiteral(a.typeName()),
-                kind, a.kind().name(),
-                stringLiteral(a.column()), stringLiteral(a.targetTypeName()), stringLiteral(a.inverseName()),
-                embedded);
     }
 
     /**
@@ -751,10 +863,10 @@ public class RepositoryProcessor extends AbstractProcessor {
                     entity.id().column(), entityElement.getSimpleName().toString());
         }
         for (Property p : entity.properties()) {
-            if (p.association() || p.kind() == EntityDescriptor.Kind.MANY_TO_ONE) {
+            if (p.association() || p.kind() == DescriptorModel.Kind.MANY_TO_ONE) {
                 continue; // FK-only reference; left null on read (loaders fill it in Tasks 3-4)
             }
-            if (p.kind() == EntityDescriptor.Kind.EMBEDDED) {
+            if (p.kind() == DescriptorModel.Kind.EMBEDDED) {
                 appendEmbeddedRead(mapRow, metadataType, p, entityElement.getSimpleName().toString());
                 continue;
             }
@@ -802,7 +914,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
         if (!metadataTypes.containsKey(voFqn)) {
             generateEmbeddedDescriptors(voModel.metadata());
-            metadataTypes.put(voFqn, generateMetadata(voElement, voModel));
+            ensureDescriptorArtifacts(voElement, voModel, true);
         }
         ClassName voMetadata = metadataTypes.get(voFqn);
         ClassName mapper = generateValueObjectRowMapper(voElement, voModel, voMetadata);
@@ -837,10 +949,10 @@ public class RepositoryProcessor extends AbstractProcessor {
                 .addStatement("$T entity = new $T()", voType, voType);
 
         for (Property p : voModel.properties()) {
-            if (p.association() || p.kind() == EntityDescriptor.Kind.MANY_TO_ONE) {
+            if (p.association() || p.kind() == DescriptorModel.Kind.MANY_TO_ONE) {
                 continue; // FK-only reference; left null (loaders fill it in Task 4)
             }
-            if (p.kind() == EntityDescriptor.Kind.EMBEDDED) {
+            if (p.kind() == DescriptorModel.Kind.EMBEDDED) {
                 appendEmbeddedRead(mapRow, voMetadataType, p, voName);
                 continue;
             }
@@ -916,10 +1028,10 @@ public class RepositoryProcessor extends AbstractProcessor {
     private void readEmbeddedLeaves(MethodSpec.Builder mapRow, ClassName ownerMetadata, EntityModel vo,
                                     String prefix, String path, List<String> presence, String entityName) {
         for (Property p : vo.properties()) {
-            if (p.association() || p.kind() == EntityDescriptor.Kind.MANY_TO_ONE) {
+            if (p.association() || p.kind() == DescriptorModel.Kind.MANY_TO_ONE) {
                 continue; // fk-only children stay null on read, as at owner level
             }
-            if (p.kind() == EntityDescriptor.Kind.EMBEDDED) {
+            if (p.kind() == DescriptorModel.Kind.EMBEDDED) {
                 readEmbeddedLeaves(mapRow, ownerMetadata, p.embeddedModel(),
                         prefix + "_" + p.column(), path + "." + p.name(), presence, entityName);
                 continue;
@@ -951,14 +1063,14 @@ public class RepositoryProcessor extends AbstractProcessor {
     private void buildEmbeddedValue(MethodSpec.Builder mapRow, EntityModel vo, String prefix, String local) {
         mapRow.addStatement("$T $L = new $T()", vo.typeName(), local, vo.typeName());
         for (Property p : vo.properties()) {
-            if (p.association() || p.kind() == EntityDescriptor.Kind.MANY_TO_ONE
-                    || p.kind() == EntityDescriptor.Kind.EMBEDDED) {
+            if (p.association() || p.kind() == DescriptorModel.Kind.MANY_TO_ONE
+                    || p.kind() == DescriptorModel.Kind.EMBEDDED) {
                 continue;
             }
             mapRow.addStatement("$L.$L($L)", local, setter(p.name()), prefix + "_" + p.column());
         }
         for (Property p : vo.properties()) {
-            if (p.kind() != EntityDescriptor.Kind.EMBEDDED) {
+            if (p.kind() != DescriptorModel.Kind.EMBEDDED) {
                 continue;
             }
             String childLocal = prefix + "_" + p.column();
@@ -979,10 +1091,10 @@ public class RepositoryProcessor extends AbstractProcessor {
     /** The boxed-leaf locals whose nullness marks absence within {@code vo}'s subtree rooted at {@code prefix}. */
     private void collectPresenceTerms(EntityModel vo, String prefix, List<String> terms) {
         for (Property p : vo.properties()) {
-            if (p.association() || p.kind() == EntityDescriptor.Kind.MANY_TO_ONE) {
+            if (p.association() || p.kind() == DescriptorModel.Kind.MANY_TO_ONE) {
                 continue;
             }
-            if (p.kind() == EntityDescriptor.Kind.EMBEDDED) {
+            if (p.kind() == DescriptorModel.Kind.EMBEDDED) {
                 collectPresenceTerms(p.embeddedModel(), prefix + "_" + p.column(), terms);
                 continue;
             }
@@ -1219,7 +1331,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         // descriptor columns (:product_id, :quantity), so the params must match them. The value still
         // walks the descriptor path through boundValue, which makes fk-bearing children bind their
         // id exactly like the previous property-driven loop did.
-        for (EntityDescriptor.ColumnRef ref : collection.descriptor().columns()) {
+        for (ColumnRef ref : collection.descriptor().columns()) {
             insert.add(".param($S, $L)", ref.column(), boundValue(collection.descriptor(), "item", ref));
         }
         insert.add(".update()");
@@ -1236,7 +1348,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     private List<String> childColumnNames(ElementCollection collection) {
         List<String> columns = new ArrayList<>();
         columns.add(collection.parentFk());
-        for (EntityDescriptor.ColumnRef ref : collection.descriptor().columns()) {
+        for (ColumnRef ref : collection.descriptor().columns()) {
             columns.add(ref.column());
         }
         return columns;
@@ -1251,14 +1363,14 @@ public class RepositoryProcessor extends AbstractProcessor {
      */
     private String quotedColumnList(ElementCollection collection) {
         StringBuilder sb = new StringBuilder(Names.quote(collection.parentFk()));
-        for (EntityDescriptor.Attribute a : collection.descriptor().attributes()) {
+        for (DescriptorModel.Attribute a : collection.descriptor().attributes()) {
             switch (a.kind()) {
                 case SCALAR, ID -> sb.append(", ").append(Names.quote(a.column()));
                 case EMBEDDED -> {
                     if (a.embedded() == null) {
                         continue;
                     }
-                    for (EntityDescriptor.ColumnRef leaf : a.embedded().columns()) {
+                    for (ColumnRef leaf : a.embedded().columns()) {
                         sb.append(", ").append(Names.quote(a.column() + "_" + leaf.column()));
                     }
                 }
@@ -1318,8 +1430,8 @@ public class RepositoryProcessor extends AbstractProcessor {
      * would drift against the rendered placeholders.
      */
     private void appendColumnParams(CodeBlock.Builder sql, EntityModel entity, String var) {
-        EntityDescriptor md = entity.metadata();
-        for (EntityDescriptor.ColumnRef ref : md.columns()) {
+        DescriptorModel md = entity.metadata();
+        for (ColumnRef ref : md.columns()) {
             if (md.id() != null && ref.column().equals(md.id().column())) {
                 continue;
             }
@@ -1332,19 +1444,19 @@ public class RepositoryProcessor extends AbstractProcessor {
      * or a FK-bearing {@code primary}) rooted at {@code rootVar}. Every intermediate null short-
      * circuits to SQL NULL; a final ASSOCIATION/MANY_TO_ONE attribute binds its id.
      */
-    private static CodeBlock boundValue(EntityDescriptor md, String rootVar, EntityDescriptor.ColumnRef ref) {
+    private static CodeBlock boundValue(DescriptorModel md, String rootVar, ColumnRef ref) {
         String[] segments = ref.path().split("\\.");
         StringBuilder chain = new StringBuilder(rootVar);
         List<String> nullChecks = new ArrayList<>();
-        EntityDescriptor current = md;
+        DescriptorModel current = md;
         for (int i = 0; i < segments.length; i++) {
-            EntityDescriptor.Attribute attr = current.attribute(segments[i]);
+            DescriptorModel.Attribute attr = current.attribute(segments[i]);
             chain.append('.').append(getter(segments[i])).append("()");
             if (i < segments.length - 1) {
                 nullChecks.add(chain.toString());
                 current = attr.embedded();
-            } else if (attr.kind() == EntityDescriptor.Kind.ASSOCIATION
-                    || attr.kind() == EntityDescriptor.Kind.MANY_TO_ONE) {
+            } else if (attr.kind() == DescriptorModel.Kind.ASSOCIATION
+                    || attr.kind() == DescriptorModel.Kind.MANY_TO_ONE) {
                 nullChecks.add(chain.toString());
                 chain.append(".getId()");
             }
@@ -1587,7 +1699,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                 .returns(String.class)
                 .addParameter(String.class, "property");
         helper.beginControlFlow("switch (property)");
-        for (EntityDescriptor.ColumnRef column : entity.metadata().columns()) {
+        for (ColumnRef column : entity.metadata().columns()) {
             helper.addStatement("case $S: return $S", column.path(), column.column());
         }
         helper.addStatement("default: throw new $T($S + property)", IllegalArgumentException.class,
@@ -1893,7 +2005,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      */
     private MethodSpec appendOneToManyHydration(Map<String, String> constants, EntityModel entity,
                                                 EntityRelationship relationship) {
-        EntityDescriptor.Attribute a = relationship.attribute();
+        DescriptorModel.Attribute a = relationship.attribute();
         EntityModel targetModel = relationship.targetModel();
         String inverseFk = Names.fkColumn(a.inverseName());
         String selectConst = addConstant(constants, "SQL_SELECT_" + upperSnake(a.name()),
@@ -1985,7 +2097,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      */
     private MethodSpec appendManyToOneHydration(Map<String, String> constants, EntityModel entity,
                                                 EntityRelationship relationship) {
-        EntityDescriptor.Attribute a = relationship.attribute();
+        DescriptorModel.Attribute a = relationship.attribute();
         EntityModel targetModel = relationship.targetModel();
         ClassName targetMapper = relationship.targetMapper();
         TypeName targetType = targetModel.typeName();
@@ -2100,7 +2212,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      */
     private static String entityColumnList(EntityModel entity) {
         StringBuilder sb = new StringBuilder();
-        for (EntityDescriptor.ColumnRef column : entity.metadata().columns()) {
+        for (ColumnRef column : entity.metadata().columns()) {
             if (!sb.isEmpty()) {
                 sb.append(", ");
             }
@@ -2144,7 +2256,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
         if (!metadataTypes.containsKey(targetFqn)) {
             generateEmbeddedDescriptors(targetModel.metadata());
-            metadataTypes.put(targetFqn, generateMetadata(targetElement, targetModel));
+            ensureDescriptorArtifacts(targetElement, targetModel, true);
         }
         ClassName mapper = generateRowMapper(targetElement, targetModel, metadataTypes.get(targetFqn));
         rowMappers.put(targetFqn, mapper);
@@ -2157,7 +2269,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * loader's delegate. Produced only by {@link #generate}'s eligibility scan, so every instance is
      * emittable.
      */
-    private record EntityRelationship(EntityDescriptor.Attribute attribute, EntityModel targetModel,
+    private record EntityRelationship(DescriptorModel.Attribute attribute, EntityModel targetModel,
                                       ClassName targetMapper) { }
 
 
@@ -2349,9 +2461,9 @@ public class RepositoryProcessor extends AbstractProcessor {
         String table = valueObject ? null : Names.tableName(element.getSimpleName().toString());
         String typeNameString = element.getQualifiedName().toString();
         Property id = null;
-        EntityDescriptor.Attribute idAttr = null;
+        DescriptorModel.Attribute idAttr = null;
         List<Property> properties = new ArrayList<>();
-        List<EntityDescriptor.Attribute> attrs = new ArrayList<>();
+        List<DescriptorModel.Attribute> attrs = new ArrayList<>();
         List<ElementCollection> collections = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         for (Element member : elements.getAllMembers(element)) {
@@ -2371,14 +2483,14 @@ public class RepositoryProcessor extends AbstractProcessor {
 
             if (field.getAnnotation(Identity.class) != null || (!valueObject && name.equals("id"))) {
                 id = new Property(name, Names.columnName(name), false, fieldTypeName);
-                idAttr = new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.ID,
+                idAttr = new DescriptorModel.Attribute(name, fieldType, DescriptorModel.Kind.ID,
                         Names.columnName(name), null, null, null);
 
             } else if (field.getAnnotation(Association.class) != null) {
                 // External aggregate reference: fk-only, never hydrated.
                 properties.add(new Property(name, Names.fkColumn(name), true, fieldTypeName));
                 TypeElement target = declaredElement(field);
-                attrs.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.ASSOCIATION,
+                attrs.add(new DescriptorModel.Attribute(name, fieldType, DescriptorModel.Kind.ASSOCIATION,
                         Names.fkColumn(name),
                         target != null ? target.getQualifiedName().toString() : null, null, null));
 
@@ -2388,8 +2500,8 @@ public class RepositoryProcessor extends AbstractProcessor {
                 TypeElement vo = embeddedTarget(field);
                 Descriptor embedded = descriptorFor(vo);
                 properties.add(new Property(name, Names.columnName(name), false, fieldTypeName,
-                        EntityDescriptor.Kind.EMBEDDED, voModel(vo)));
-                attrs.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.EMBEDDED,
+                        DescriptorModel.Kind.EMBEDDED, voModel(vo)));
+                attrs.add(new DescriptorModel.Attribute(name, fieldType, DescriptorModel.Kind.EMBEDDED,
                         Names.columnName(name), vo.getQualifiedName().toString(), null, embedded));
 
             } else if (isEntityType(declaredElement(field))) {
@@ -2398,8 +2510,8 @@ public class RepositoryProcessor extends AbstractProcessor {
                 // loaders (Task 4) fill it, so it skips the gate via its kind, not the flag.
                 TypeElement target = declaredElement(field);
                 properties.add(new Property(name, Names.fkColumn(name), false, fieldTypeName,
-                        EntityDescriptor.Kind.MANY_TO_ONE, null));
-                attrs.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.MANY_TO_ONE,
+                        DescriptorModel.Kind.MANY_TO_ONE, null));
+                attrs.add(new DescriptorModel.Attribute(name, fieldType, DescriptorModel.Kind.MANY_TO_ONE,
                         Names.fkColumn(name), target.getQualifiedName().toString(), null, null));
 
             } else if (valueObjectElementType(field) != null) {
@@ -2407,42 +2519,42 @@ public class RepositoryProcessor extends AbstractProcessor {
                 TypeElement vo = valueObjectElementType(field);
                 ElementCollection collection = buildCollection(table, name, vo);
                 collections.add(collection);
-                attrs.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.ELEMENT_COLLECTION,
+                attrs.add(new DescriptorModel.Attribute(name, fieldType, DescriptorModel.Kind.ELEMENT_COLLECTION,
                         null, vo.getQualifiedName().toString(), null, null));
 
             } else if (entityTypeElement(field) != null) {
                 // List<@Entity>: one-to-many across the child's own table. The inverse is resolved
                 // in the second pass below, so the placeholder inverse stays null here.
                 TypeElement child = entityTypeElement(field);
-                attrs.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.ONE_TO_MANY,
+                attrs.add(new DescriptorModel.Attribute(name, fieldType, DescriptorModel.Kind.ONE_TO_MANY,
                         null, child.getQualifiedName().toString(), null, null));
 
             } else {
                 properties.add(new Property(name, Names.columnName(name), false, fieldTypeName));
-                attrs.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.SCALAR,
+                attrs.add(new DescriptorModel.Attribute(name, fieldType, DescriptorModel.Kind.SCALAR,
                         Names.columnName(name), null, null, null));
             }
         }
         if (!valueObject && id == null) {
             id = new Property("id", Names.columnName("id"), false, ClassName.get(Long.class));
-            idAttr = new EntityDescriptor.Attribute("id", "java.lang.Long", EntityDescriptor.Kind.ID,
+            idAttr = new DescriptorModel.Attribute("id", "java.lang.Long", DescriptorModel.Kind.ID,
                     Names.columnName("id"), null, null, null);
         }
         // Second pass: resolve ONE_TO_MANY inverses now that all parent attributes are known.
         Descriptor self = new Descriptor(typeNameString, table, idAttr, attrs);
-        List<EntityDescriptor.Attribute> resolved = new ArrayList<>(attrs.size());
-        for (EntityDescriptor.Attribute a : attrs) {
-            if (a.kind() == EntityDescriptor.Kind.ONE_TO_MANY && a.targetTypeName() != null) {
+        List<DescriptorModel.Attribute> resolved = new ArrayList<>(attrs.size());
+        for (DescriptorModel.Attribute a : attrs) {
+            if (a.kind() == DescriptorModel.Kind.ONE_TO_MANY && a.targetTypeName() != null) {
                 TypeElement childEl = elements.getTypeElement(a.targetTypeName());
                 Descriptor child = childEl != null ? descriptorFor(childEl) : null;
                 String inverse = child != null ? findInverseName(self, child) : null;
-                resolved.add(new EntityDescriptor.Attribute(a.name(), a.typeName(), a.kind(), a.column(),
+                resolved.add(new DescriptorModel.Attribute(a.name(), a.typeName(), a.kind(), a.column(),
                         a.targetTypeName(), inverse, a.embedded()));
             } else {
                 resolved.add(a);
             }
         }
-        EntityDescriptor metadata = new Descriptor(typeNameString, table, idAttr, resolved);
+        DescriptorModel metadata = new Descriptor(typeNameString, table, idAttr, resolved);
         return new EntityModel(typeMirror, typeName, id, properties, collections, metadata);
     }
 
@@ -2452,7 +2564,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         // The value object's flattened descriptor is the single source for the child-table column list
         // and the param bindings; per the global contract an @Association field is Kind.ASSOCIATION
         // there, exactly as in buildEntity, and binds the target's id through boundValue.
-        EntityDescriptor target = valueObjectMetadata(valueObject);
+        DescriptorModel target = valueObjectMetadata(valueObject);
         return new ElementCollection(field, TypeName.get(types.erasure(valueObject.asType())),
                 childTable, parentFk, target);
     }
@@ -2477,8 +2589,8 @@ public class RepositoryProcessor extends AbstractProcessor {
      * follows the global contract: {@code @Association} → {@code ASSOCIATION} (never
      * {@code MANY_TO_ONE}); everything else is a {@code SCALAR} column.
      */
-    private EntityDescriptor valueObjectMetadata(TypeElement valueObject) {
-        List<EntityDescriptor.Attribute> attributes = new ArrayList<>();
+    private DescriptorModel valueObjectMetadata(TypeElement valueObject) {
+        List<DescriptorModel.Attribute> attributes = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         for (Element member : elements.getAllMembers(valueObject)) {
             if (member.getKind() != ElementKind.FIELD) {
@@ -2497,11 +2609,11 @@ public class RepositoryProcessor extends AbstractProcessor {
                 // Mirror buildEntity's ASSOCIATION branch: carry the target's FQN so Tasks 2-4
                 // (relationship hydration / embedded mapping) can resolve the association target.
                 TypeElement target = declaredElement(field);
-                attributes.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.ASSOCIATION,
+                attributes.add(new DescriptorModel.Attribute(name, fieldType, DescriptorModel.Kind.ASSOCIATION,
                         Names.fkColumn(name), target != null ? target.getQualifiedName().toString() : null,
                         null, null));
             } else {
-                attributes.add(new EntityDescriptor.Attribute(name, fieldType, EntityDescriptor.Kind.SCALAR,
+                attributes.add(new DescriptorModel.Attribute(name, fieldType, DescriptorModel.Kind.SCALAR,
                         Names.columnName(name), null, null, null));
             }
         }
@@ -2617,8 +2729,8 @@ public class RepositoryProcessor extends AbstractProcessor {
      * the child's own generated metadata. An unresolved inverse is treated as read-only/unmapped.
      */
     private String findInverseName(Descriptor parent, Descriptor child) {
-        for (EntityDescriptor.Attribute a : child.attributes()) {
-            if ((a.kind() == EntityDescriptor.Kind.MANY_TO_ONE || a.kind() == EntityDescriptor.Kind.ASSOCIATION)
+        for (DescriptorModel.Attribute a : child.attributes()) {
+            if ((a.kind() == DescriptorModel.Kind.MANY_TO_ONE || a.kind() == DescriptorModel.Kind.ASSOCIATION)
                     && parent.typeName().equals(a.targetTypeName())) {
                 return a.name();
             }
@@ -2635,16 +2747,16 @@ public class RepositoryProcessor extends AbstractProcessor {
      * that do not consume the new components use the 4-arg convenience constructor.
      */
     private record Property(String name, String column, boolean association, TypeName type,
-                            EntityDescriptor.Kind kind, EntityModel embeddedModel) {
+                            DescriptorModel.Kind kind, EntityModel embeddedModel) {
         Property(String name, String column, boolean association, TypeName type) {
-            this(name, column, association, type, association ? EntityDescriptor.Kind.ASSOCIATION
-                    : EntityDescriptor.Kind.SCALAR, null);
+            this(name, column, association, type, association ? DescriptorModel.Kind.ASSOCIATION
+                    : DescriptorModel.Kind.SCALAR, null);
         }
     }
 
     private record Descriptor(String typeName, String tableName,
-                              EntityDescriptor.Attribute id,
-                              List<EntityDescriptor.Attribute> attributes) implements EntityDescriptor {
+                              DescriptorModel.Attribute id,
+                              List<DescriptorModel.Attribute> attributes) implements DescriptorModel {
         Descriptor {
             // Defensive copy: the immutability invariant of a descriptor must not rely on
             // call-site discipline.
@@ -2658,11 +2770,11 @@ public class RepositoryProcessor extends AbstractProcessor {
      * resolve through the same {@link #boundValue} walk as parent-entity paths.
      */
     private record ElementCollection(String field, TypeName valueObjectType, String childTable,
-                                     String parentFk, EntityDescriptor descriptor) { }
+                                     String parentFk, DescriptorModel descriptor) { }
 
     private record EntityModel(TypeMirror typeMirror, TypeName typeName, Property id,
                                List<Property> properties, List<ElementCollection> collections,
-                               EntityDescriptor metadata) { }
+                               DescriptorModel metadata) { }
 
     private record Binding(String property, Operator operator, int paramIndex) { }
 

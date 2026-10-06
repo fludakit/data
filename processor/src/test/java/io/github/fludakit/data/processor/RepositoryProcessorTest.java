@@ -745,19 +745,32 @@ class RepositoryProcessorTest {
                 @AggregateRoot
                 public class Basket {
                     @Identity Long id;
+                    String name;
                     List<Line> lines = new ArrayList<>();
                     public Long getId() { return id; }
                     public void setId(Long id) { this.id = id; }
+                    public String getName() { return name; }
+                    public void setName(String name) { this.name = name; }
                     public List<Line> getLines() { return lines; }
                     public void setLines(List<Line> lines) { this.lines = lines; }
                 }
                 """);
         Files.writeString(sourceDir.resolve("Baskets.java"), """
                 package hyd;
+                import jakarta.data.repository.By;
                 import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Find;
                 import jakarta.data.repository.Repository;
+                import java.util.List;
+                import java.util.Optional;
+                import java.util.stream.Stream;
                 @Repository
-                public interface Baskets extends CrudRepository<Basket, Long> { }
+                public interface Baskets extends CrudRepository<Basket, Long> {
+                    @Find List<Basket> findByName(@By("name") String name);
+                    @Find Stream<Basket> streamByName(@By("name") String name);
+                    @Find Optional<Basket> optionalByName(@By("name") String name);
+                    @Find Basket singleByName(@By("name") String name);
+                }
                 """);
 
         compile(sourceDir, classesDir, generatedDir, "Product.java", "Line.java", "Basket.java", "Baskets.java");
@@ -795,6 +808,32 @@ class RepositoryProcessorTest {
                 "findById must hydrate through the umbrella:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("hydrateAll(content)"),
                 "paged read must hydrate the materialized content list:" + System.lineSeparator() + impl);
+
+        // I-2: the hydrated @Find branches (LIST / STREAM / OPTIONAL / SINGLE) each wrap the umbrella.
+        assertTrue(impl.contains("List<Basket> results = jdbcClient.sql(SQL_FIND_BY_NAME)"
+                        + ".param(\"name\", name).query(new BasketRowMapper()).list();\n"
+                        + "    hydrateAll(results);\n"
+                        + "    return results;"),
+                "hydrated LIST @Find must materialize, hydrateAll, then return:"
+                        + System.lineSeparator() + impl);
+        assertTrue(impl.contains("List<Basket> results = jdbcClient.sql(SQL_STREAM_BY_NAME)"
+                        + ".param(\"name\", name).query(new BasketRowMapper()).list();\n"
+                        + "    hydrateAll(results);\n"
+                        + "    return results.stream();"),
+                "hydrated STREAM @Find must materialize, hydrateAll, then stream:"
+                        + System.lineSeparator() + impl);
+        assertTrue(impl.contains("Optional<Basket> found = jdbcClient.sql(SQL_OPTIONAL_BY_NAME)"
+                        + ".param(\"name\", name).query(new BasketRowMapper()).optional();\n"
+                        + "    found.ifPresent(e -> hydrateAll(java.util.List.of(e)));\n"
+                        + "    return found;"),
+                "hydrated OPTIONAL @Find must hydrateAll the present value:"
+                        + System.lineSeparator() + impl);
+        assertTrue(impl.contains("Basket found = jdbcClient.sql(SQL_SINGLE_BY_NAME)"
+                        + ".param(\"name\", name).query(new BasketRowMapper()).single();\n"
+                        + "    hydrateAll(java.util.List.of(found));\n"
+                        + "    return found;"),
+                "hydrated SINGLE @Find must hydrateAll the single value:"
+                        + System.lineSeparator() + impl);
 
         // Replace-all update: children deleted by parent fk (child param stays COLUMN-named), then re-inserted.
         assertTrue(impl.contains(".param(\"basket_id\", entity.getId())"),
@@ -1247,8 +1286,24 @@ class RepositoryProcessorTest {
         String mapper = Files.readString(generatedDir.resolve("gp/ProfileRowMapper.java"));
         assertTrue(mapper.contains("String address_city = rs.getObject(ProfileMetadata.ADDRESS_CITY, String.class);"),
                 "flattened boxed leaf must be read into a prefixed local:" + System.lineSeparator() + mapper);
-        assertTrue(mapper.contains("GeoPoint address_point = new GeoPoint();"),
-                "nested child VO must be constructed before its parent:" + System.lineSeparator() + mapper);
+        // I-1 / Decision 2 per-subtree presence: the nested GeoPoint child is constructed AND set only
+        // when a leaf of ITS subtree is non-null — the guard lists the point leaves alone, not the
+        // address scalars (case B: any point leaf set constructs the child). An all-null point subtree
+        // must leave the child null with setPoint never called (case A).
+        assertTrue(mapper.contains("if (address_point_lat != null || address_point_lng != null) {\n"
+                        + "        GeoPoint address_point = new GeoPoint();\n"
+                        + "        address_point.setLat(address_point_lat);\n"
+                        + "        address_point.setLng(address_point_lng);\n"
+                        + "        address.setPoint(address_point);\n"
+                        + "      }"),
+                "nested child VO must be constructed and set under its own subtree presence guard:"
+                        + System.lineSeparator() + mapper);
+        assertTrue(!mapper.contains("GeoPoint address_point = new GeoPoint();\n"
+                        + "      address_point.setLat(address_point_lat);\n"
+                        + "      address_point.setLng(address_point_lng);\n"
+                        + "      Address address = new Address();"),
+                "nested child VO must not be constructed unconditionally outside its subtree guard:"
+                        + System.lineSeparator() + mapper);
         assertTrue(mapper.contains("entity.setAddress(address);"),
                 "the embedded property must be assigned on the entity:" + System.lineSeparator() + mapper);
         assertTrue(!mapper.contains("getDeclaredField"), "mapper must not reflect:" + System.lineSeparator() + mapper);

@@ -718,11 +718,13 @@ public class RepositoryProcessor extends AbstractProcessor {
     /**
      * Emits the read and construction of one {@code EMBEDDED} property (Decision 2): every flattened
      * leaf of the value-object tree is read into a local named after its physical column
-     * ({@code <prefix>_<leaf>}, e.g. {@code address_point_lat}); the tree is then constructed
-     * post-order — deepest child first — inside a single guard that fires iff at least one boxed
-     * leaf is non-null. Primitive leaves follow the {@link #appendPropertyRead} temp+{@code wasNull()}
-     * rule and never join the presence test, so a VO with a primitive leaf cannot be NULL-absent in
-     * the database. The whole block stays reflection-free.
+     * ({@code <prefix>_<leaf>}, e.g. {@code address_point_lat}); the top VO is then constructed inside
+     * a guard firing iff at least one boxed leaf anywhere in its subtree is non-null, and each nested
+     * child VO is constructed and set iff at least one boxed leaf in <em>its own</em> subtree is
+     * non-null — an all-null child subtree leaves the child null (per-subtree presence). Primitive
+     * leaves follow the {@link #appendPropertyRead} temp+{@code wasNull()} rule, never join any
+     * presence test, and so a VO with a primitive leaf cannot be NULL-absent in the database. The
+     * whole block stays reflection-free.
      */
     private void appendEmbeddedRead(MethodSpec.Builder mapRow, ClassName ownerMetadata,
                                     Property embedded, String entityName) {
@@ -770,22 +772,53 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /**
-     * Constructs one value-object instance from its already-read leaf locals: nested children are
-     * emitted first (post-order, mirroring {@link #generateEmbeddedDescriptors}) so every child local
-     * exists before this node's setters reference it.
+     * Constructs one value-object instance from its already-read leaf locals (parent first): the VO's
+     * own scalar leaves are assigned, then each nested child is constructed and set under its OWN
+     * subtree presence guard (Decision 2 — an all-null child subtree leaves the child null). A child
+     * whose subtree holds no boxed leaf has no presence signal and is constructed unconditionally
+     * under the parent's guard.
      */
     private void buildEmbeddedValue(MethodSpec.Builder mapRow, EntityModel vo, String prefix, String local) {
+        mapRow.addStatement("$T $L = new $T()", vo.typeName(), local, vo.typeName());
         for (Property p : vo.properties()) {
-            if (p.kind() == EntityDescriptor.Kind.EMBEDDED) {
-                buildEmbeddedValue(mapRow, p.embeddedModel(), prefix + "_" + p.column(), prefix + "_" + p.column());
+            if (p.association() || p.kind() == EntityDescriptor.Kind.MANY_TO_ONE
+                    || p.kind() == EntityDescriptor.Kind.EMBEDDED) {
+                continue;
+            }
+            mapRow.addStatement("$L.$L($L)", local, setter(p.name()), prefix + "_" + p.column());
+        }
+        for (Property p : vo.properties()) {
+            if (p.kind() != EntityDescriptor.Kind.EMBEDDED) {
+                continue;
+            }
+            String childLocal = prefix + "_" + p.column();
+            List<String> terms = new ArrayList<>();
+            collectPresenceTerms(p.embeddedModel(), childLocal, terms);
+            if (terms.isEmpty()) {
+                buildEmbeddedValue(mapRow, p.embeddedModel(), childLocal, childLocal);
+                mapRow.addStatement("$L.$L($L)", local, setter(p.name()), childLocal);
+            } else {
+                mapRow.beginControlFlow("if ($L)", String.join(" || ", terms));
+                buildEmbeddedValue(mapRow, p.embeddedModel(), childLocal, childLocal);
+                mapRow.addStatement("$L.$L($L)", local, setter(p.name()), childLocal);
+                mapRow.endControlFlow();
             }
         }
-        mapRow.addStatement("$T $L = new $T()", vo.typeName(), local, vo.typeName());
+    }
+
+    /** The boxed-leaf locals whose nullness marks absence within {@code vo}'s subtree rooted at {@code prefix}. */
+    private void collectPresenceTerms(EntityModel vo, String prefix, List<String> terms) {
         for (Property p : vo.properties()) {
             if (p.association() || p.kind() == EntityDescriptor.Kind.MANY_TO_ONE) {
                 continue;
             }
-            mapRow.addStatement("$L.$L($L)", local, setter(p.name()), prefix + "_" + p.column());
+            if (p.kind() == EntityDescriptor.Kind.EMBEDDED) {
+                collectPresenceTerms(p.embeddedModel(), prefix + "_" + p.column(), terms);
+                continue;
+            }
+            if (!p.type().isPrimitive()) {
+                terms.add(prefix + "_" + p.column() + " != null");
+            }
         }
     }
 
@@ -1649,6 +1682,8 @@ public class RepositoryProcessor extends AbstractProcessor {
     private MethodSpec hydrationUmbrella(EntityModel entity, List<ElementCollection> hydrated,
                                          List<EntityRelationship> relationships) {
         MethodSpec.Builder umbrella = MethodSpec.methodBuilder("hydrateAll")
+                .addJavadoc("Dispatches every generated hydration loader over the given parents. "
+                        + "Hydration is depth-1: entities produced by a loader are not themselves hydrated.\n")
                 .addModifiers(Modifier.PRIVATE)
                 .addParameter(ParameterizedTypeName.get(ClassName.get(java.util.Collection.class),
                         entity.typeName()), "parents");
@@ -1727,6 +1762,8 @@ public class RepositoryProcessor extends AbstractProcessor {
                 ParameterizedTypeName.get(ClassName.get(java.util.List.class), childType));
 
         MethodSpec.Builder loader = MethodSpec.methodBuilder("hydrate" + capitalize(field))
+                .addJavadoc("Hydrates the $L collection over the given parents. Depth-1: the loaded "
+                        + "children's own relationships are not hydrated.\n", field)
                 .addModifiers(Modifier.PRIVATE)
                 .addParameter(ParameterizedTypeName.get(ClassName.get(java.util.Collection.class), entityType), "parents");
         loader.beginControlFlow("if (parents.isEmpty())").addStatement("return").endControlFlow();
@@ -1811,6 +1848,8 @@ public class RepositoryProcessor extends AbstractProcessor {
                 targetKeyType, targetType);
 
         MethodSpec.Builder loader = MethodSpec.methodBuilder("hydrate" + capitalize(a.name()))
+                .addJavadoc("Hydrates the $L reference over the given parents (fk re-read, then target "
+                        + "fetch). Depth-1: a fetched target's own relationships are not hydrated.\n", a.name())
                 .addModifiers(Modifier.PRIVATE)
                 .addParameter(ParameterizedTypeName.get(ClassName.get(java.util.Collection.class), entityType), "parents");
         loader.beginControlFlow("if (parents.isEmpty())").addStatement("return").endControlFlow();
@@ -2239,21 +2278,12 @@ public class RepositoryProcessor extends AbstractProcessor {
     private ElementCollection buildCollection(String parentTable, String field, TypeElement valueObject) {
         String childTable = Names.childTable(parentTable, field);
         String parentFk = parentTable + "_id";
-        // The child columns are classified by the value-object-local classifier below; per the
-        // global contract an @Association field is Kind.ASSOCIATION there, exactly as in
-        // buildEntity. Both fk-bearing relationship kinds (MANY_TO_ONE for an in-aggregate target
-        // and ASSOCIATION for an external reference) bind the target's id, so the association flag
-        // must accept BOTH: dropping either label here silently breaks the child-table fk binding.
+        // The value object's flattened descriptor is the single source for the child-table column list
+        // and the param bindings; per the global contract an @Association field is Kind.ASSOCIATION
+        // there, exactly as in buildEntity, and binds the target's id through boundValue.
         EntityDescriptor target = valueObjectMetadata(valueObject);
-        List<Property> properties = new ArrayList<>();
-        for (EntityDescriptor.Attribute attribute : target.attributes()) {
-            properties.add(new Property(attribute.name(), attribute.column(),
-                    attribute.kind() == EntityDescriptor.Kind.MANY_TO_ONE
-                            || attribute.kind() == EntityDescriptor.Kind.ASSOCIATION,
-                    typeNameOfString(attribute.typeName()), attribute.kind(), null));
-        }
         return new ElementCollection(field, TypeName.get(types.erasure(valueObject.asType())),
-                childTable, parentFk, properties, target);
+                childTable, parentFk, target);
     }
 
     /**
@@ -2268,32 +2298,6 @@ public class RepositoryProcessor extends AbstractProcessor {
             return TypeName.get(type);
         } catch (IllegalArgumentException e) {
             return TypeName.OBJECT;
-        }
-    }
-
-    /**
-     * Converts a metadata type-name string (as recorded on a {@code @ValueObject} property) back into
-     * a {@link TypeName}. Element-collection children are not mapped in this iteration, so this is
-     * best-effort: primitives map to their {@link TypeName} constants and anything
-     * {@link ClassName#bestGuess} cannot parse (arrays, parameterized types) falls back to
-     * {@link TypeName#OBJECT} instead of aborting annotation processing.
-     */
-    private static TypeName typeNameOfString(String typeName) {
-        switch (typeName) {
-            case "boolean": return TypeName.BOOLEAN;
-            case "byte": return TypeName.BYTE;
-            case "short": return TypeName.SHORT;
-            case "int": return TypeName.INT;
-            case "long": return TypeName.LONG;
-            case "float": return TypeName.FLOAT;
-            case "double": return TypeName.DOUBLE;
-            case "char": return TypeName.CHAR;
-            default:
-                try {
-                    return ClassName.bestGuess(typeName);
-                } catch (IllegalArgumentException e) {
-                    return TypeName.OBJECT;
-                }
         }
     }
 
@@ -2478,13 +2482,12 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /**
-     * A {@code List<@ValueObject>} element collection. {@code properties} drives the child-table column
-     * list; {@code descriptor} (the value object's flattened column view) drives the param bindings so
-     * fk-bearing children resolve through the same {@link #boundValue} walk as parent-entity paths.
+     * A {@code List<@ValueObject>} element collection. {@code descriptor} (the value object's flattened
+     * column view) drives the child-table column list and the param bindings, so fk-bearing children
+     * resolve through the same {@link #boundValue} walk as parent-entity paths.
      */
     private record ElementCollection(String field, TypeName valueObjectType, String childTable,
-                                     String parentFk, List<Property> properties,
-                                     EntityDescriptor descriptor) { }
+                                     String parentFk, EntityDescriptor descriptor) { }
 
     private record EntityModel(TypeMirror typeMirror, TypeName typeName, Property id,
                                List<Property> properties, List<ElementCollection> collections,

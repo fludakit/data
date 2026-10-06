@@ -8,6 +8,7 @@ import org.jboss.weld.junit5.auto.EnableAutoWeld;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -70,6 +71,24 @@ class OrderCollectionHydrationIT {
         Long remaining = jdbcClient.sql("SELECT COUNT(*) FROM order_order_items WHERE order_id = :id")
                 .param("id", saved.getId()).singleValue(Long.class);
         assertThat(remaining).isZero();
+    }
+
+    @Test
+    void findByAmountHydratesOrderItems() {
+        // I-2: a hydrated LIST @Find must run the umbrella — the returned orders carry hydrated
+        // orderItems (and the Decision 8 @Association child target stays null through this read too).
+        Customer ana = customers.save(customer("Ana", "ana@example.com"));
+        Product widget = products.save(product("Widget", new BigDecimal("1.00")));
+        Order order = new Order(ana);
+        order.setAmount(new BigDecimal("42.00"));
+        order.addItem(widget, 3);
+        orders.save(order);
+
+        List<Order> found = orders.findByAmount(new BigDecimal("42.00"));
+        assertThat(found).hasSize(1);
+        assertThat(found.get(0).getOrderItems()).hasSize(1);
+        assertThat(found.get(0).getOrderItems().get(0).getQuantity()).isEqualTo(3);
+        assertThat(found.get(0).getOrderItems().get(0).getProduct()).isNull();
     }
 
     private static Customer customer(String name, String email) {

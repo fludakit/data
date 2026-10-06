@@ -45,6 +45,43 @@ class EmbeddedRoundTripIT {
     }
 
     @Test
+    void nestedChildWithAllNullLeavesStaysNull() {
+        // Decision 2 per-subtree presence (I-1): the address scalars are set, every point leaf is
+        // NULL — the nested GeoPoint child must stay null instead of being built from nulls.
+        Profile p = new Profile();
+        Address a = new Address();
+        a.setCity("Springfield");
+        a.setZip(4915);
+        p.setAddress(a);
+
+        Profile saved = profiles.save(p);
+        Profile found = profiles.findById(saved.getId()).orElseThrow();
+        assertThat(found.getAddress().getCity()).isEqualTo("Springfield");
+        assertThat(found.getAddress().getZip()).isEqualTo(4915);
+        assertThat(found.getAddress().getPoint()).isNull();
+    }
+
+    @Test
+    void nestedChildWithLeavesSetIsReconstructed() {
+        // The inverse case: point leaves set while the sibling scalars are null — the child subtree
+        // guard fires on its own leaves, so the GeoPoint is reconstructed and assigned.
+        Profile p = new Profile();
+        Address a = new Address();
+        GeoPoint gp = new GeoPoint();
+        gp.setLat(39.8);
+        gp.setLng(-83.9);
+        a.setPoint(gp);
+        p.setAddress(a);
+
+        Profile saved = profiles.save(p);
+        Profile found = profiles.findById(saved.getId()).orElseThrow();
+        assertThat(found.getAddress().getPoint().getLat()).isEqualTo(39.8);
+        assertThat(found.getAddress().getPoint().getLng()).isEqualTo(-83.9);
+        assertThat(found.getAddress().getCity()).isNull();
+        assertThat(found.getAddress().getZip()).isNull();
+    }
+
+    @Test
     void fullyNullEmbeddedStaysNull() {
         Profile p = new Profile();
         Profile saved = profiles.save(p);

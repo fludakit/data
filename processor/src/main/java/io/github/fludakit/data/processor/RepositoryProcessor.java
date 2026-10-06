@@ -330,7 +330,10 @@ public class RepositoryProcessor extends AbstractProcessor {
         // additive for aggregate roots (it references no JDBC types) and its field instances ARE the
         // descriptor's attributes (Decision 1). Value objects surface only as navigable member
         // classes (_<Entity><Field> chains) of their owner's metamodel, never as `_VO` classes.
-        ensureDescriptorArtifacts(entityElement, entity, mapperPending);
+        // The descriptor is generated for EVERY repository entity (not just mappable ones): dynamic
+        // paging resolves sort paths through <Entity>Metadata.columnRef, so the descriptor is a hard
+        // runtime dependency that stands independent of the row-mapper gate.
+        ensureDescriptorArtifacts(entityElement, entity, true);
         if (mapperPending) {
             mapperType = generateRowMapper(entityElement, entity, metadataTypes.get(entityFqn));
             rowMappers.put(entityFqn, mapperType);
@@ -449,7 +452,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                 .build());
         methods.forEach(classBuilder::addMethod);
         if (paginatedFindAll) {
-            classBuilder.addMethod(columnHelper(entity));
+            classBuilder.addMethod(resolveRefHelper(entity));
         }
 
         writeSourceFile(packageName + "." + implementationName, repository,
@@ -2036,24 +2039,36 @@ public class RepositoryProcessor extends AbstractProcessor {
         String countConstant = addConstant(constants, "SQL_COUNT_ALL",
                 new SqlBuilder().countBy(entity.metadata(), List.of()));
 
+        String entityFqn = entity.typeName().toString();
+        ClassName metadataClass = metadataTypes.get(entityFqn);
+        if (metadataClass == null) {
+            metadataClass = embeddedMetadataName(entityFqn);
+        }
+        String rootTable = entity.metadata().tableName();
+
         builder.addStatement("$T cols = new $T<>()", List.class, ArrayList.class);
         builder.addStatement("$T dirs = new $T<>()", List.class, ArrayList.class);
         builder.addStatement("$T props = new $T<>()", List.class, ArrayList.class);
+        builder.addStatement("$T<$T> refs = new $T<>()", List.class, MD_COLUMN_REF, ArrayList.class);
         builder.addStatement("$T orderBy = new $T()", StringBuilder.class, StringBuilder.class);
         builder.beginControlFlow("for ($T<?> s : $L)", Sort.class, sortBy);
-        builder.addStatement("cols.add(column(s.property()))");
+        builder.addStatement("$T r = resolveRef(s.property())", MD_COLUMN_REF);
+        builder.addStatement("cols.add(r.column())");
+        builder.addStatement("refs.add(r)");
         builder.addStatement("dirs.add(s.isAscending())");
         builder.addStatement("props.add(s.property())");
         builder.beginControlFlow("if (orderBy.length() > 0)");
         builder.addStatement("orderBy.append($S)", ", ");
         builder.endControlFlow();
-        builder.addStatement("orderBy.append($S).append(column(s.property())).append($S)"
-                        + ".append(s.isAscending() ? $S : $S)", "\"", "\"", " ASC", " DESC");
+        builder.addStatement("orderBy.append($T.qualify(r, $S)).append(s.isAscending() ? $S : $S)",
+                SqlBuilder.class, rootTable, " ASC", " DESC");
         builder.endControlFlow();
+        builder.addStatement("$T joins = $T.joinClause($T.INSTANCE, refs)",
+                String.class, SqlBuilder.class, metadataClass);
 
         builder.beginControlFlow("if ($L.mode() == $T.Mode.OFFSET)", pageRequest, PageRequest.class);
         builder.addStatement("long offset = ($L.page() - 1) * $L.size()", pageRequest, pageRequest);
-        builder.addStatement("$T<$T> content = jdbcClient.sql($L + (orderBy.length() > 0 ? $S + orderBy : $S)"
+        builder.addStatement("$T<$T> content = jdbcClient.sql($L + joins + (orderBy.length() > 0 ? $S + orderBy : $S)"
                         + " + $S + $L.size() + $S + offset).query($L).list()",
                 List.class, entity.typeName(), findConstant, " ORDER BY ", "", " LIMIT ", pageRequest, " OFFSET ",
                 queryArg(entity, mapperType));
@@ -2068,7 +2083,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         builder.addStatement("$T.Cursor cursor = $L.cursor().orElseThrow()", PageRequest.class, pageRequest);
         builder.addStatement("$T where = $T.seekWhere(cols, dirs, cursor, $L.mode() == $T.Mode.CURSOR_NEXT)",
                 String.class, CursorSupport.class, pageRequest, PageRequest.class);
-        builder.addStatement("$T<$T> content = jdbcClient.sql($L + $S + where + (orderBy.length() > 0 ? $S + orderBy : $S)"
+        builder.addStatement("$T<$T> content = jdbcClient.sql($L + joins + $S + where + (orderBy.length() > 0 ? $S + orderBy : $S)"
                         + " + $S + $L.size() + $S).params($T.cursorParams(cursor)).query($L).list()",
                 List.class, entity.typeName(), findConstant, " WHERE ", " ORDER BY ", "", " LIMIT ", pageRequest,
                 " + 1", CursorSupport.class, queryArg(entity, mapperType));
@@ -2177,25 +2192,25 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /**
-     * Emits the private {@code column(String)} helper that maps an entity property (or embedded
-     * dot path, e.g. {@code "address.city"}) to its SQL column, used by the paginated
-     * {@code findAll} to honour the runtime {@link Sort} criteria. Iterating the descriptor's
-     * flattened {@code columns()} covers id, scalars, fk columns and embedded leaf paths in one
-     * loop; an EMBEDDED container contributes no case (sorting by it addresses no column).
+     * Emits the private {@code resolveRef(String)} helper the paginated {@code findAll} uses to map a
+     * runtime {@link Sort} property (bare name or embedded dot path, e.g. {@code "address.city"}) to a
+     * physical {@code ColumnRef}. Resolution delegates to the descriptor ({@code <Entity>Metadata.columnRef}),
+     * so a relation-traversing path carries the {@code JoinRef}s the paging code turns into a
+     * {@code LEFT JOIN} chain, while an embedded leaf stays a plain local column (no join). Unknown
+     * properties throw, as the prior string-switch helper did.
      */
-    private MethodSpec columnHelper(EntityModel entity) {
-        MethodSpec.Builder helper = MethodSpec.methodBuilder("column")
-                .addModifiers(Modifier.PRIVATE, Modifier.STATIC)
-                .returns(String.class)
-                .addParameter(String.class, "property");
-        helper.beginControlFlow("switch (property)");
-        for (ColumnRef column : entity.metadata().columns()) {
-            helper.addStatement("case $S: return $S", column.path(), column.column());
+    private MethodSpec resolveRefHelper(EntityModel entity) {
+        String entityFqn = entity.typeName().toString();
+        ClassName metadataType = metadataTypes.get(entityFqn);
+        if (metadataType == null) {
+            metadataType = embeddedMetadataName(entityFqn);
         }
-        helper.addStatement("default: throw new $T($S + property)", IllegalArgumentException.class,
-                "Unknown sort property: ");
-        helper.endControlFlow();
-        return helper.build();
+        return MethodSpec.methodBuilder("resolveRef")
+                .addModifiers(Modifier.PRIVATE, Modifier.STATIC)
+                .returns(MD_COLUMN_REF)
+                .addParameter(String.class, "property")
+                .addStatement("return $T.INSTANCE.columnRef($L)", metadataType, "property")
+                .build();
     }
 
     // ------------------------------------------------------------------ @Query

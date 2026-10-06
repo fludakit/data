@@ -157,8 +157,9 @@ class RepositoryProcessorTest {
                 "repository impl must still be generated");
         assertTrue(Files.notExists(generatedDir.resolve("demo2/TicketRowMapper.java")),
                 "no mapper for an entity with a non-JDBC-safe field type");
-        assertTrue(Files.notExists(generatedDir.resolve("demo2/TicketMetadata.java")),
-                "no metadata when the mapper is skipped");
+        assertTrue(Files.exists(generatedDir.resolve("demo2/TicketMetadata.java")),
+                "the descriptor is generated even when the row mapper is skipped: dynamic paging "
+                        + "resolves sort paths through <Entity>Metadata.columnRef, independent of the mapper gate");
 
         // The central fallback promise: unsafe entities keep the reflective class-based read path.
         String impl = Files.readString(generatedDir.resolve("demo2/TicketsImpl.java"));
@@ -364,11 +365,15 @@ class RepositoryProcessorTest {
         compile(sourceDir, classesDir, generatedDir, "Author.java", "Book.java", "Books.java");
 
         // The @Association field must appear as an fk column (author_id), never as flattened embedded leaves.
-        String impl = Files.readString(generatedDir.resolve("cls/BooksImpl.java"));
-        assertTrue(impl.contains("\"author_id\""),
-                "association must contribute its fk column:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("\"title\""),
-                "scalar column must be present:" + System.lineSeparator() + impl);
+        String md = Files.readString(generatedDir.resolve("cls/BookMetadata.java"));
+        assertTrue(md.contains("new ColumnRef(\"author_id\", \"author\")"),
+                "association must contribute its fk column to the descriptor's columns():"
+                        + System.lineSeparator() + md);
+        assertTrue(md.contains("new ColumnRef(\"title\", \"title\")"),
+                "scalar column must be present:" + System.lineSeparator() + md);
+        assertTrue(!md.replace(" ", "").contains("\"author_name\""),
+                "an @Association must NOT flatten the target's fields into the owner's columns:"
+                        + System.lineSeparator() + md);
     }
 
     @Test
@@ -2013,7 +2018,7 @@ class RepositoryProcessorTest {
     }
 
     @Test
-    void staticMetamodelCoversRelationshipsAndSortSwitchResolvesDotPaths() throws Exception {
+    void staticMetamodelCoversRelationshipsAndSortPathsResolveThroughDescriptor() throws Exception {
         Path sourceDir = Files.createDirectories(workspace.resolve("src/mmrel"));
         Path classesDir = Files.createDirectories(workspace.resolve("classes-mmrel"));
         Path generatedDir = Files.createDirectories(workspace.resolve("generated-mmrel"));
@@ -2100,8 +2105,9 @@ class RepositoryProcessorTest {
                         + "newColumnAttributeRecord<>(\"owner.primary\",\"primary_id\");"), ownerNav);
         assertTrue(ownerNav.contains("targetDescriptor(){return()->ParentMetadata.INSTANCE;}"), ownerNav);
 
-        // The runtime sort switch resolves dot paths to flattened columns and carries no
-        // EMBEDDED-container case.
+        // Sort dot paths now resolve through the descriptor: the flattened embedded leaves live in
+        // the generated columns(), the paging impl calls <Entity>Metadata.columnRef, and an
+        // EMBEDDED container contributes no column of its own.
         Files.writeString(sourceDir.resolve("Loc.java"), """
                 package mmrel;
                 import io.github.fludakit.data.annotation.ValueObject;
@@ -2141,15 +2147,19 @@ class RepositoryProcessorTest {
                 "Parent.java", "Child.java", "ParentRepository.java", "ChildRepository.java",
                 "Loc.java", "Holder.java", "Holders.java");
 
+        String md = Files.readString(generatedDir.resolve("mmrel/HolderMetadata.java"))
+                .replaceAll("\\s+", "");
+        assertTrue(md.contains("newColumnRef(\"loc_city\",\"loc.city\")"),
+                "embedded leaf path must resolve to its flattened column:" + System.lineSeparator() + md);
+        assertTrue(md.contains("newColumnRef(\"loc_zip\",\"loc.zip\")"),
+                "embedded leaf path must resolve to its flattened column:" + System.lineSeparator() + md);
+        assertTrue(!md.contains("newColumnRef(\"loc\","),
+                "no container column for an EMBEDDED property:" + System.lineSeparator() + md);
+        assertTrue(md.contains("newColumnRef(\"id\",\"id\")"),
+                "the id column must remain:" + System.lineSeparator() + md);
         String impl = Files.readString(generatedDir.resolve("mmrel/HoldersImpl.java"));
-        assertTrue(impl.contains("case \"loc.city\": return \"loc_city\";"),
-                "embedded leaf path must resolve to its flattened column:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("case \"loc.zip\": return \"loc_zip\";"),
-                "embedded leaf path must resolve to its flattened column:" + System.lineSeparator() + impl);
-        assertTrue(!impl.replace(" ", "").contains("case\"loc\":"),
-                "no container case for an EMBEDDED property:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("case \"id\": return \"id\";"),
-                "the id case must remain:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("return HolderMetadata.INSTANCE.columnRef(property)"),
+                "sort paths must resolve through the descriptor:" + System.lineSeparator() + impl);
     }
 
     @Test
@@ -2382,6 +2392,128 @@ class RepositoryProcessorTest {
         assertTrue(md.contains("public static final String START_ID = \"start_id\";"),
                 "the @Identity field must flatten as a scalar leaf column, not an identity:"
                         + System.lineSeparator() + md);
+    }
+
+    @Test
+    void dynamicSortResolvesThroughDescriptorAndContributesJoins() throws Exception {
+        // A paginated findAll(PageRequest, Order) builds its ORDER BY at RUNTIME from the caller's
+        // Sort criteria. Task 7 replaces the compile-time string-switch column() helper with a
+        // descriptor-backed resolveRef(...) -> <Entity>Metadata.columnRef(path), so each sort
+        // resolves through the descriptor: relation-traversing paths contribute LEFT JOINs, while
+        // embedded leaves stay on the root table (no join). This pins the emitted wiring; the
+        // runtime relation-sort join behaviour is asserted by the ITs (Task 12).
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/dsort"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-dsort"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-dsort"));
+
+        Files.writeString(sourceDir.resolve("GeoPoint.java"), """
+                package dsort;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class GeoPoint {
+                    double lat;
+                    double lng;
+                    public double getLat() { return lat; }
+                    public void setLat(double lat) { this.lat = lat; }
+                    public double getLng() { return lng; }
+                    public void setLng(double lng) { this.lng = lng; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Address.java"), """
+                package dsort;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class Address {
+                    String city;
+                    GeoPoint point;
+                    public String getCity() { return city; }
+                    public void setCity(String city) { this.city = city; }
+                    public GeoPoint getPoint() { return point; }
+                    public void setPoint(GeoPoint point) { this.point = point; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Author.java"), """
+                package dsort;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Author {
+                    @Identity Long id;
+                    String name;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getName() { return name; }
+                    public void setName(String name) { this.name = name; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Book.java"), """
+                package dsort;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Association;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Book {
+                    @Identity Long id;
+                    String title;
+                    Address address;
+                    @Association Author author;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getTitle() { return title; }
+                    public void setTitle(String title) { this.title = title; }
+                    public Address getAddress() { return address; }
+                    public void setAddress(Address address) { this.address = address; }
+                    public Author getAuthor() { return author; }
+                    public void setAuthor(Author author) { this.author = author; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Books.java"), """
+                package dsort;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Books extends CrudRepository<Book, Long> { }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir,
+                "GeoPoint.java", "Address.java", "Author.java", "Book.java", "Books.java");
+
+        String impl = Files.readString(generatedDir.resolve("dsort/BooksImpl.java"))
+                .replaceAll("\\s+", " ");
+
+        // (1) The compile-time string-switch helper is gone; the descriptor-backed resolver replaces it.
+        assertTrue(!impl.contains("String column(String property)"),
+                "the old column(String) switch helper must be removed:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("ColumnRef resolveRef(String property)"),
+                "expected a private static resolveRef(String) returning a ColumnRef:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("return BookMetadata.INSTANCE.columnRef(property)"),
+                "resolveRef must resolve through the entity descriptor:" + System.lineSeparator() + impl);
+
+        // (2) The runtime loop resolves each property ONCE and reuses the local for cols / refs /
+        //     ORDER BY, so descriptor work is not repeated and cursor seek keeps its cols list.
+        assertTrue(impl.contains("ColumnRef r = resolveRef(s.property())"),
+                "the loop must resolve each property once:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("cols.add(r.column())"),
+                "cols must carry the resolved leaf column:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("refs.add(r)"),
+                "refs must collect the resolved ColumnRefs:" + System.lineSeparator() + impl);
+
+        // (3) ORDER BY is qualified through SqlBuilder.qualify against the root table with an
+        //     EXPLICIT direction (R-T3a: never a direction-less ref-based ORDER BY), and the
+        //     LEFT JOIN chain is computed once from the collected refs.
+        assertTrue(impl.contains("SqlBuilder.qualify(r, \"book\")"),
+                "ORDER BY must qualify the resolved ref against the root table:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("s.isAscending() ? \" ASC\" : \" DESC\""),
+                "every ORDER BY term must carry an explicit ASC/DESC (R-T3a):" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("String joins = SqlBuilder.joinClause(BookMetadata.INSTANCE, refs)"),
+                "the join clause must be computed from the descriptor and refs:" + System.lineSeparator() + impl);
+
+        // (4) joins is spliced immediately after the FROM-bound SQL_FIND_ALL constant in BOTH the
+        //     OFFSET and CURSOR statements — before WHERE / ORDER BY.
+        assertTrue(impl.contains("jdbcClient.sql(SQL_FIND_ALL + joins + (orderBy.length() > 0"),
+                "OFFSET statement must splice joins right after the FROM constant:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("jdbcClient.sql(SQL_FIND_ALL + joins + \" WHERE \" + where"),
+                "CURSOR statement must splice joins right after the FROM constant, before WHERE:" + System.lineSeparator() + impl);
     }
 
     private void compile(Path sourceDir, Path classesDir, Path generatedDir, String... fileNames) throws Exception {

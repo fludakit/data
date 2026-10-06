@@ -61,7 +61,7 @@ class CustomerRepositoryTest {
 
         Page<Customer> page = customers.findAll(
                 PageRequest.ofSize(2),
-                jakarta.data.Order.by(jakarta.data.Sort.asc("name")));
+                jakarta.data.Order.by(_Customer.name.asc()));
 
         assertThat(page.numberOfElements()).isEqualTo(2);
         assertThat(page.content()).extracting(Customer::getName).containsExactly("Alice", "Bob");

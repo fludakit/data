@@ -21,13 +21,23 @@ interface DescriptorModel extends EntitySchema {
     enum Kind { ID, SCALAR, EMBEDDED, MANY_TO_ONE, ASSOCIATION, ONE_TO_MANY, ELEMENT_COLLECTION }
 
     /**
-     * @param column         physical column (or fk column); {@code null} for ONE_TO_MANY / ELEMENT_COLLECTION
-     * @param targetTypeName relationship target FQN; {@code null} for ID / SCALAR
-     * @param inverseName    ONE_TO_MANY: the child property that points back; otherwise {@code null}
-     * @param embedded       EMBEDDED: nested value-object model for leaf flattening; otherwise {@code null}
+     * @param column          physical column (or fk column); {@code null} for ONE_TO_MANY / ELEMENT_COLLECTION
+     * @param targetTypeName  relationship target FQN; {@code null} for ID / SCALAR
+     * @param inverseName     ONE_TO_MANY: the child property that points back; otherwise {@code null}
+     * @param embedded        EMBEDDED: nested value-object model for leaf flattening; otherwise {@code null}
+     * @param childTable      ELEMENT_COLLECTION: the child table the elements persist to; otherwise {@code null}
+     * @param parentFkColumn  ELEMENT_COLLECTION: the child table's column referencing the parent; otherwise {@code null}
      */
     record Attribute(String name, String typeName, Kind kind, String column,
-                     String targetTypeName, String inverseName, DescriptorModel embedded) { }
+                     String targetTypeName, String inverseName, DescriptorModel embedded,
+                     String childTable, String parentFkColumn) {
+
+        /** Relation-free/legacy construction: element-collection physical placement defaults to unset. */
+        Attribute(String name, String typeName, Kind kind, String column,
+                  String targetTypeName, String inverseName, DescriptorModel embedded) {
+            this(name, typeName, kind, column, targetTypeName, inverseName, embedded, null, null);
+        }
+    }
 
     /** Fully-qualified entity or value-object type name. */
     String typeName();

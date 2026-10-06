@@ -97,29 +97,31 @@ public interface EntityDescriptor<T> extends EntitySchema {
         Attribute<T> a = attribute(head);
         if (a instanceof ForeignKeyAttribute<?, ?> fk) {
             EntityDescriptor<?> target = fk.targetDescriptor().get();
-            requireNavigable(target, head);
+            requireNavigable(target, head, path);
             return target.columnRef(rest).withPrefix(head,
                     new JoinRef(target.tableName(), head, fk.column(), target.idColumn()));
         }
         if (a instanceof OneToManyAttribute<?, ?> otm) {
             EntityDescriptor<?> target = otm.targetDescriptor().get();
-            requireNavigable(target, head);
+            requireNavigable(target, head, path);
             return target.columnRef(rest).withPrefix(head,
                     new JoinRef(target.tableName(), head, idColumn(), otm.childFkColumn()));
         }
         if (a instanceof ElementCollectionAttribute<?, ?> ec) {
             EntityDescriptor<?> target = ec.elementDescriptor().get();
-            requireNavigable(target, head);
+            requireNavigable(target, head, path);
             return target.columnRef(rest).withPrefix(head,
                     new JoinRef(ec.childTable(), head, idColumn(), ec.parentFkColumn()));
         }
-        throw new IllegalArgumentException("Property '" + head + "' does not support path navigation");
+        throw new IllegalArgumentException("Property '" + head + "' does not support path navigation"
+                + " (path: " + path + ")");
     }
 
-    private static void requireNavigable(EntityDescriptor<?> target, String head) {
+    private static void requireNavigable(EntityDescriptor<?> target, String head, String path) {
         if (target == null) {
             throw new IllegalArgumentException("Property '" + head
-                    + "' targets an unmapped type and does not support path navigation");
+                    + "' targets an unmapped type and does not support path navigation"
+                    + " (path: " + path + ")");
         }
     }
 }

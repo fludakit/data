@@ -10,7 +10,7 @@ import java.util.List;
  */
 public record ColumnRef(String column, String path, String table, List<JoinRef> joins) {
 
-    public ColumnRef { joins = List.copyOf(joins); }
+    public ColumnRef { joins = joins == null ? List.of() : List.copyOf(joins); }
 
     /** A local column of the owner table: no join, no table override. */
     public ColumnRef(String column, String path) { this(column, path, null, List.of()); }

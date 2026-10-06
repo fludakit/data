@@ -483,7 +483,7 @@ class RepositoryProcessorTest {
                 "@Association must be exposed through the FK-typed metamodel field:" + System.lineSeparator() + md);
         String mm = Files.readString(generatedDir.resolve("meta/_Book.java")).replaceAll("\\s+", "");
         assertTrue(mm.contains("ForeignKeyAttribute<Book,Author>author="
-                        + "newForeignKeyAttributeRecord<>(AUTHOR,\"author_id\",Author.class);"),
+                        + "newForeignKeyAttributeRecord<>(AUTHOR,\"author_id\",Author.class,()->null);"),
                 "association target must be a Class literal, not an FQN string:" + System.lineSeparator() + mm);
         // Plan A column constants are preserved:
         assertTrue(md.contains("public static final String TABLE_NAME = \"book\";"), md);
@@ -1102,10 +1102,10 @@ class RepositoryProcessorTest {
         // argument (M-6).
         String pm = Files.readString(generatedDir.resolve("rel/_Parent.java")).replaceAll("\\s+", "");
         assertTrue(pm.contains("ForeignKeyAttribute<Parent,Child>primary="
-                        + "newForeignKeyAttributeRecord<>(PRIMARY,\"primary_id\",Child.class);"),
+                        + "newForeignKeyAttributeRecord<>(PRIMARY,\"primary_id\",Child.class,()->ChildMetadata.INSTANCE);"),
                 "un-annotated entity field must be a FK attribute with an fk column:" + System.lineSeparator() + pm);
         assertTrue(pm.contains("OneToManyAttribute<Parent,Child>children="
-                        + "newOneToManyAttributeRecord<>(CHILDREN,Child.class,\"owner\");"),
+                        + "newOneToManyAttributeRecord<>(CHILDREN,Child.class,\"owner\",()->ChildMetadata.INSTANCE);"),
                 "entity list must be ONE_TO_MANY with the resolved inverse name:" + System.lineSeparator() + pm);
 
         String md = Files.readString(generatedDir.resolve("rel/ParentMetadata.java")).replaceAll("\\s+", " ");
@@ -1619,14 +1619,14 @@ class RepositoryProcessorTest {
         String pm = Files.readString(generatedDir.resolve("mmrel/_Parent.java")).replaceAll("\\s+", "");
         assertTrue(pm.contains("StringCHILDREN=\"children\";"), pm);
         assertTrue(pm.contains("OneToManyAttribute<Parent,Child>children="
-                + "newOneToManyAttributeRecord<>(CHILDREN,Child.class,\"owner\");"), pm);
+                + "newOneToManyAttributeRecord<>(CHILDREN,Child.class,\"owner\",()->ChildMetadata.INSTANCE);"), pm);
         assertTrue(pm.contains("StringPRIMARY=\"primary\";"), pm);
         assertTrue(pm.contains("ForeignKeyAttribute<Parent,Child>primary="
-                + "newForeignKeyAttributeRecord<>(PRIMARY,\"primary_id\",Child.class);"), pm);
+                + "newForeignKeyAttributeRecord<>(PRIMARY,\"primary_id\",Child.class,()->ChildMetadata.INSTANCE);"), pm);
         assertTrue(pm.contains("TextColumnAttribute<Parent>name=newTextColumnAttributeRecord<>(NAME,\"name\");"), pm);
         String cm = Files.readString(generatedDir.resolve("mmrel/_Child.java")).replaceAll("\\s+", "");
         assertTrue(cm.contains("ForeignKeyAttribute<Child,Parent>owner="
-                + "newForeignKeyAttributeRecord<>(OWNER,\"owner_id\",Parent.class);"), cm);
+                + "newForeignKeyAttributeRecord<>(OWNER,\"owner_id\",Parent.class,()->ParentMetadata.INSTANCE);"), cm);
 
         // The runtime sort switch resolves dot paths to flattened columns and carries no
         // EMBEDDED-container case.

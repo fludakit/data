@@ -680,7 +680,8 @@ public class RepositoryProcessor extends AbstractProcessor {
      */
     private record MmMember(String path, String identifier, String constant,
                             DescriptorModel.Kind kind, String typeFqn, String column,
-                            DescriptorModel embedded, String targetFqn, String inverse) { }
+                            DescriptorModel embedded, String targetFqn, String inverse,
+                            String childTable, String parentFkColumn) { }
 
     /** The member list of one descriptor: id first, then attributes in declaration order. */
     private List<MmMember> collectMembers(Element origin, DescriptorModel model) {
@@ -718,7 +719,8 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
         String column = a.column() == null ? null : columnPrefix + a.column();
         out.add(new MmMember(path, identifier, identifier.toUpperCase(), a.kind(), a.typeName(),
-                column, a.embedded(), a.targetTypeName(), a.inverseName()));
+                column, a.embedded(), a.targetTypeName(), a.inverseName(),
+                a.childTable(), a.parentFkColumn()));
         if (a.kind() == DescriptorModel.Kind.EMBEDDED && a.embedded() != null) {
             addMembers(out, taken, origin, a.embedded(), path, column + "_");
         }
@@ -801,13 +803,44 @@ public class RepositoryProcessor extends AbstractProcessor {
                             embeddedMetadataName(m.embedded().typeName()))
                     : CodeBlock.of("new $T<$T,$T>($L, null)", FM_EMBEDDED_RECORD, owner,
                             classArgOf(m.targetFqn()), name);
-            case MANY_TO_ONE, ASSOCIATION -> CodeBlock.of("new $T$L($L, $S, $T.class)",
-                    FM_FK_RECORD, typeArgs, name, m.column(), classArgOf(m.targetFqn()));
-            case ONE_TO_MANY -> CodeBlock.of("new $T$L($L, $T.class, $L)",
-                    FM_OTM_RECORD, typeArgs, name, classArgOf(m.targetFqn()), stringLiteral(m.inverse()));
-            case ELEMENT_COLLECTION -> CodeBlock.of("new $T$L($L, $T.class)",
-                    FM_EC_RECORD, typeArgs, name, classArgOf(m.targetFqn()));
+            case MANY_TO_ONE, ASSOCIATION -> CodeBlock.of("new $T$L($L, $S, $T.class, $L)",
+                    FM_FK_RECORD, typeArgs, name, m.column(), classArgOf(m.targetFqn()),
+                    relationDescriptorSupplier(m.targetFqn(), false));
+            case ONE_TO_MANY -> CodeBlock.of("new $T$L($L, $T.class, $L, $L)",
+                    FM_OTM_RECORD, typeArgs, name, classArgOf(m.targetFqn()), stringLiteral(m.inverse()),
+                    relationDescriptorSupplier(m.targetFqn(), false));
+            case ELEMENT_COLLECTION -> CodeBlock.of("new $T$L($L, $T.class, $S, $S, $L)",
+                    FM_EC_RECORD, typeArgs, name, classArgOf(m.targetFqn()),
+                    m.childTable(), m.parentFkColumn(),
+                    relationDescriptorSupplier(m.targetFqn(), true));
         };
+    }
+
+    /**
+     * The descriptor supplier appended to a relation attribute record: {@code () -> <Target>Metadata.INSTANCE}
+     * when that metadata class is (or will be) emitted in this round, else {@code () -> null}. A managed
+     * relationship target's {@code <Target>Metadata} is emitted exactly when the target is a managed entity
+     * that clears the reflection-free mapper gate — the same predicate its own {@link #generate} pass and the
+     * loader gate ({@link #ensureEntityRowMapper}) guard on — so the reference below always resolves against a
+     * file the processor is committed to writing. An element-collection element VO's {@code <Vo>Metadata} is
+     * emitted exactly when the VO resolves and clears that gate, mirroring {@link #voRowMapperFor}. The
+     * referenced class name comes from {@link #metadataTypes} when already resolved, else the same
+     * {@code <SimpleName>Metadata} the emitter writes.
+     */
+    private CodeBlock relationDescriptorSupplier(String targetFqn, boolean elementCollection) {
+        if (targetFqn == null) {
+            return CodeBlock.of("() -> null");
+        }
+        int angle = targetFqn.indexOf('<');
+        String rawName = angle < 0 ? targetFqn : targetFqn.substring(0, angle);
+        TypeElement targetElement = elements.getTypeElement(rawName);
+        if (targetElement == null || !canGenerateRowMapper(entityModel(targetElement))) {
+            return CodeBlock.of("() -> null");
+        }
+        if (!elementCollection && !managedEntities.contains(rawName)) {
+            return CodeBlock.of("() -> null");
+        }
+        return CodeBlock.of("() -> $T.INSTANCE", embeddedMetadataName(rawName));
     }
 
     private CodeBlock explicitTypeArgs(TypeName owner, MmMember m) {
@@ -2520,7 +2553,8 @@ public class RepositoryProcessor extends AbstractProcessor {
                 ElementCollection collection = buildCollection(table, name, vo);
                 collections.add(collection);
                 attrs.add(new DescriptorModel.Attribute(name, fieldType, DescriptorModel.Kind.ELEMENT_COLLECTION,
-                        null, vo.getQualifiedName().toString(), null, null));
+                        null, vo.getQualifiedName().toString(), null, null,
+                        collection.childTable(), collection.parentFk()));
 
             } else if (entityTypeElement(field) != null) {
                 // List<@Entity>: one-to-many across the child's own table. The inverse is resolved
@@ -2549,7 +2583,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                 Descriptor child = childEl != null ? descriptorFor(childEl) : null;
                 String inverse = child != null ? findInverseName(self, child) : null;
                 resolved.add(new DescriptorModel.Attribute(a.name(), a.typeName(), a.kind(), a.column(),
-                        a.targetTypeName(), inverse, a.embedded()));
+                        a.targetTypeName(), inverse, a.embedded(), a.childTable(), a.parentFkColumn()));
             } else {
                 resolved.add(a);
             }

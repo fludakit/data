@@ -225,4 +225,16 @@ class EntityDescriptorTest {
                 .hasMessageContaining("primary")
                 .hasMessageContaining("unmapped");
     }
+
+    @Test
+    void columnRefRejectsUnknownHeadAndNonNavigableHead() {
+        EntityDescriptor<Parent> descriptor = parentMetadata(childMetadata(), noteMetadata());
+
+        assertThatThrownBy(() -> descriptor.columnRef("nope"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Unknown property 'nope'");
+        assertThatThrownBy(() -> descriptor.columnRef("name.x"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("does not support path navigation");
+    }
 }

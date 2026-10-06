@@ -203,6 +203,22 @@ public class RepositoryProcessor extends AbstractProcessor {
     /** Entity/value-object FQN → compile-time descriptor, memoized for {@link #descriptorFor}. */
     private final Map<String, DescriptorModel> descriptorCache = new HashMap<>();
 
+    /**
+     * Every generated type FQN this processing session claims or emits: the {@code _Entity}
+     * metamodels, the navigable member classes ({@code _<Entity><Field>} chains), the
+     * {@code <Entity>Metadata} descriptors, the row mappers and the repository implementations.
+     * A nav-class name is derived from its OWNER-RELATIVE member name, so it can collide with a
+     * DIFFERENT entity's generated type (an {@code Order.item} relation nav is {@code pkg._OrderItem}
+     * — the same FQN as the {@code OrderItem} aggregate root's own metamodel). The nav-collision
+     * guard consults this registry so a colliding nav degrades to the NOTE + plain attribute
+     * record instead of {@code Filer.createSourceFile} throwing and aborting the user build.
+     * {@code _Entity} metamodel FQNs are additionally PRE-CLAIMED in {@link #process}'s round
+     * pre-scan — metamodels always win the name, independent of repository iteration order — and
+     * every emission registers through {@link #writeSourceFile}. Session-scoped (survives rounds),
+     * mirroring the cross-round dedup of {@link #metamodelTypes}.
+     */
+    private final Set<String> generatedTypeNames = new HashSet<>();
+
     /** FQNs whose descriptor is currently being built; the cycle guard for {@link #descriptorFor}. */
     private final Set<String> inProgress = new HashSet<>();
 
@@ -268,6 +284,14 @@ public class RepositoryProcessor extends AbstractProcessor {
                     && types.erasure(entityMirror) instanceof DeclaredType declared
                     && declared.asElement() instanceof TypeElement entityElement) {
                 managed.add(entityElement.getQualifiedName().toString());
+                // Pre-claim every aggregate-root metamodel FQN BEFORE any nav class is generated:
+                // a nav for another entity (e.g. Order.item → pkg._OrderItem) must lose the name
+                // race and degrade to the NOTE path, whichever repository the round processes first.
+                // Value objects get no metamodel, so their name stays available to owners' navs.
+                if (!isValueObjectType(entityElement)) {
+                    generatedTypeNames.add(elements.getPackageOf(entityElement).getQualifiedName()
+                            + "._" + entityElement.getSimpleName());
+                }
             }
         }
         this.managedEntities = Set.copyOf(managed);
@@ -677,8 +701,10 @@ public class RepositoryProcessor extends AbstractProcessor {
      * generated top-level member class ({@code _<Entity><Field>}) implementing the corresponding
      * attribute interface, instantiated as the field value; its leaf fields carry the owner-rooted
      * dot-path names. {@code <Entity>Metadata} returns these very instances. The member list comes
-     * from {@link #collectMembers}, shared with the metadata emitter. A nav-class name collision
-     * degrades to a NOTE and the plain attribute record (spec collision handling).
+     * from {@link #collectMembers}, shared with the metadata emitter. A nav-class name collision —
+     * against ANY type in the session-global {@link #generatedTypeNames} registry, including another
+     * entity's {@code _Entity} metamodel — degrades to a NOTE and the plain attribute record (spec
+     * collision handling), never to a Filer error.
      */
     private void generateStaticMetamodel(TypeElement entityElement, List<MmMember> members) {
         String packageName = elements.getPackageOf(entityElement).getQualifiedName().toString();
@@ -698,16 +724,20 @@ public class RepositoryProcessor extends AbstractProcessor {
                     .initializer("$S", m.path()).build());
         }
         // One navigable member class per embedded/relation member, collected here and written to the
-        // Filer after the interface itself (same round, distinct top-level types).
+        // Filer after the interface itself (same round, distinct top-level types). The collision guard
+        // is the SESSION-GLOBAL generatedTypeNames registry (every _Entity metamodel, nav, metadata,
+        // row mapper and repository impl FQN): a nav whose name collides with ANY generated type —
+        // including another entity's metamodel (Order.item → pkg._OrderItem vs the OrderItem
+        // root's own _OrderItem) — degrades to the NOTE + plain attribute record instead of colliding
+        // at the Filer. This entity's own _Entity FQN is already pre-claimed in process()'s round
+        // pre-scan, so metamodels win the name race independently of repository iteration order.
         List<NavUnit> units = new ArrayList<>();
-        Set<String> claimed = new HashSet<>();
-        claimed.add(packageName + "." + simpleName);
         for (MmMember m : members) {
             Prop p = m.prop();
             boolean navigable = p instanceof Prop.Embedded || p instanceof Prop.Reference
                     || p instanceof Prop.EntityList || p instanceof Prop.ElementList;
             ClassName navType = navigable
-                    ? generateNav(entityElement, packageName, owner, m, claimed, units)
+                    ? generateNav(entityElement, packageName, owner, m, generatedTypeNames, units)
                     : null;
             if (navType != null) {
                 builder.addField(FieldSpec.builder(navType, m.identifier(),
@@ -1578,6 +1608,10 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     private void writeSourceFile(String fqn, Element origin, JavaFile javaFile) {
+        // Register the emitted type name in the session-global collision registry so every later
+        // claim (nav classes especially) sees it — this is the audit point covering ALL emissions
+        // (_Entity metamodels, navs, metadata, row mappers, repository impls) through one funnel.
+        generatedTypeNames.add(fqn);
         try {
             JavaFileObject sourceFile = processingEnv.getFiler().createSourceFile(fqn, origin);
             try (Writer writer = sourceFile.openWriter()) {

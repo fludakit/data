@@ -1734,6 +1734,285 @@ class RepositoryProcessorTest {
     }
 
     @Test
+    void crossEntityNavClassNameCollisionDegradesToNote() throws Exception {
+        // Task 6 fix review I-1: the nav-class collision guard must be GLOBAL across the
+        // processing session, not per entity. Order.item (a relation member) names its nav class
+        // pkg._OrderItem — the exact FQN of the OrderItem root's own static metamodel. The old
+        // per-entity `claimed` set never saw the other entity's name, so the second
+        // Filer.createSourceFile threw (printed as ERROR) and aborted the user build instead of
+        // degrading. The metamodel wins the name (pre-claimed in the round pre-scan); the nav
+        // degrades to the plain attribute record with a NOTE — and the whole build still compiles.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/ncol"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-ncol"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-ncol"));
+
+        Files.writeString(sourceDir.resolve("OrderItem.java"), """
+                package ncol;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class OrderItem {
+                    @Identity Long id;
+                    String sku;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getSku() { return sku; }
+                    public void setSku(String sku) { this.sku = sku; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Order.java"), """
+                package ncol;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Order {
+                    @Identity Long id;
+                    OrderItem item;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public OrderItem getItem() { return item; }
+                    public void setItem(OrderItem item) { this.item = item; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Orders.java"), """
+                package ncol;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Orders extends CrudRepository<Order, Long> { }
+                """);
+        Files.writeString(sourceDir.resolve("OrderItems.java"), """
+                package ncol;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface OrderItems extends CrudRepository<OrderItem, Long> { }
+                """);
+
+        // compileWithDiagnostics asserts the whole task succeeds: at BASE (per-entity claimed) the
+        // second createSourceFile of ncol._OrderItem printed an ERROR and failed this.
+        List<Diagnostic<? extends JavaFileObject>> diagnostics = compileWithDiagnostics(
+                sourceDir, classesDir, generatedDir,
+                "Order.java", "OrderItem.java", "Orders.java", "OrderItems.java");
+
+        // The root entity's OWN metamodel wins the name: _OrderItem is the interface, not a nav class.
+        String itemMm = Files.readString(generatedDir.resolve("ncol/_OrderItem.java")).replaceAll("\\s+", "");
+        assertTrue(itemMm.contains("publicinterface_OrderItem{"),
+                "_OrderItem must be the OrderItem metamodel interface:" + System.lineSeparator() + itemMm);
+
+        // The colliding nav degrades to the plain attribute record inside _Order.
+        String orderMm = Files.readString(generatedDir.resolve("ncol/_Order.java")).replaceAll("\\s+", "");
+        assertTrue(!orderMm.contains("new _OrderItem()"),
+                "the colliding nav must NOT be instantiated:" + System.lineSeparator() + orderMm);
+        assertTrue(orderMm.contains(
+                        "ForeignKeyAttribute<Order,OrderItem>item=newForeignKeyAttributeRecord<>(ITEM,\"item_id\",OrderItem.class,()->OrderItemMetadata.INSTANCE);"),
+                "the member must fall back to the plain fk attribute record:" + System.lineSeparator() + orderMm);
+
+        // The degradation is recorded as a NOTE (never an ERROR — asserted by the success above).
+        String notes = notesOf(diagnostics);
+        assertTrue(notes.contains("static metamodel collision on navigable member 'item': type 'ncol._OrderItem' already claimed"),
+                "the nav-collision NOTE must be recorded:" + System.lineSeparator() + notes);
+    }
+
+    @Test
+    void valueObjectCycleStopsAtContainerOnlyNav() throws Exception {
+        // Task 6 fix review M-1: a @ValueObject cycle (Root.head:Node, Node.tail:Tail, Tail.node:Node
+        // — Java-legal) must bound at the descriptor layer and stop nav recursion: the back-reference
+        // nav is a CONTAINER-ONLY class — it implements EmbeddedAttribute with NO leaf fields — and
+        // the whole build still compiles (the null/cycle-target degrade at RepositoryProcessor's
+        // embeddedNav, previously unpinned).
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/cyc"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-cyc"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-cyc"));
+
+        Files.writeString(sourceDir.resolve("Node.java"), """
+                package cyc;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class Node {
+                    String label;
+                    Tail tail;
+                    public String getLabel() { return label; }
+                    public void setLabel(String label) { this.label = label; }
+                    public Tail getTail() { return tail; }
+                    public void setTail(Tail tail) { this.tail = tail; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Tail.java"), """
+                package cyc;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class Tail {
+                    String name;
+                    Node node;
+                    public String getName() { return name; }
+                    public void setName(String name) { this.name = name; }
+                    public Node getNode() { return node; }
+                    public void setNode(Node node) { this.node = node; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Root.java"), """
+                package cyc;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Root {
+                    @Identity Long id;
+                    Node head;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public Node getHead() { return head; }
+                    public void setHead(Node head) { this.head = head; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Roots.java"), """
+                package cyc;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Roots extends CrudRepository<Root, Long> { }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Node.java", "Tail.java", "Root.java", "Roots.java");
+
+        // The chain recurses one cycle lap: _RootHead → _RootHeadTail → the back-reference nav.
+        String headNav = Files.readString(generatedDir.resolve("cyc/_RootHead.java")).replaceAll("\\s+", "");
+        assertTrue(headNav.contains("TextColumnAttribute<Root>label=newTextColumnAttributeRecord<>(\"head.label\",\"head_label\");"),
+                headNav);
+        assertTrue(headNav.contains("_RootHeadTailtail=new_RootHeadTail();"), headNav);
+
+        // The cycle-closing nav is CONTAINER-ONLY: no leaf records, no nested navs, just the
+        // EmbeddedAttribute contract.
+        String backNav = Files.readString(generatedDir.resolve("cyc/_RootHeadTailNode.java")).replaceAll("\\s+", "");
+        assertTrue(backNav.contains("publicfinalclass_RootHeadTailNodeimplementsEmbeddedAttribute<Root,Node>"),
+                "the back-reference must still be a typed container nav:" + System.lineSeparator() + backNav);
+        assertTrue(!backNav.contains("AttributeRecord"),
+                "the cycle nav must carry NO leaf fields:" + System.lineSeparator() + backNav);
+        assertTrue(!backNav.contains("new _"),
+                "the cycle nav must not recurse into further navs:" + System.lineSeparator() + backNav);
+        assertTrue(backNav.contains("publicStringname(){return\"head.tail.node\";}"), backNav);
+        // The cycle guard (descriptorFor) bounds the recursion with an EMPTY placeholder model that
+        // keeps the type name — so the observable degrade is: no leaves, but a still-valid typed
+        // descriptor reference (the embedded() accessors are lazy method bodies, no static-init cycle).
+        // The `target() == null` null-embedded branch in embeddedNav is defensive for that case.
+        assertTrue(backNav.contains("embedded(){returnNodeMetadata.INSTANCE;}"), backNav);
+    }
+
+    @Test
+    void relationAndElementCollectionNavLeavesPinFlattenedNaming() throws Exception {
+        // Task 6 fix review M-2: pins the two leaf-naming paths that were only inspected —
+        // (a) the FK nav flattening the TARGET's nested embedded VO into target-local chained
+        // columns (depot.addr.street → "addr_street"), and (b) the EC nav leaves rebuilt from the
+        // element VO's props (tags.sku → "sku"), verifying the "identical by construction" claim
+        // for the elementColumns mirror.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/navleaf"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-navleaf"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-navleaf"));
+
+        Files.writeString(sourceDir.resolve("Addr.java"), """
+                package navleaf;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class Addr {
+                    String street;
+                    Integer no;
+                    public String getStreet() { return street; }
+                    public void setStreet(String street) { this.street = street; }
+                    public Integer getNo() { return no; }
+                    public void setNo(Integer no) { this.no = no; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Depot.java"), """
+                package navleaf;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Depot {
+                    @Identity Long id;
+                    String city;
+                    Addr addr;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getCity() { return city; }
+                    public void setCity(String city) { this.city = city; }
+                    public Addr getAddr() { return addr; }
+                    public void setAddr(Addr addr) { this.addr = addr; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Tags.java"), """
+                package navleaf;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class Tags {
+                    String sku;
+                    int qty;
+                    public String getSku() { return sku; }
+                    public void setSku(String sku) { this.sku = sku; }
+                    public int getQty() { return qty; }
+                    public void setQty(int qty) { this.qty = qty; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Load.java"), """
+                package navleaf;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                import java.util.ArrayList;
+                import java.util.List;
+                @AggregateRoot
+                public class Load {
+                    @Identity Long id;
+                    Depot depot;
+                    List<Tags> tags = new ArrayList<>();
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public Depot getDepot() { return depot; }
+                    public void setDepot(Depot depot) { this.depot = depot; }
+                    public List<Tags> getTags() { return tags; }
+                    public void setTags(List<Tags> tags) { this.tags = tags; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Loads.java"), """
+                package navleaf;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Loads extends CrudRepository<Load, Long> { }
+                """);
+        Files.writeString(sourceDir.resolve("Depots.java"), """
+                package navleaf;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Depots extends CrudRepository<Depot, Long> { }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir,
+                "Addr.java", "Tags.java", "Depot.java", "Load.java", "Loads.java", "Depots.java");
+
+        // (a) FK nav: owner-typed leaves over the target's flattened LOCAL paths; the target's
+        // nested embedded VO flattens into target-local chained columns, dotted in the path.
+        String fkNav = Files.readString(generatedDir.resolve("navleaf/_LoadDepot.java")).replaceAll("\\s+", "");
+        assertTrue(fkNav.contains("publicfinalclass_LoadDepotimplementsForeignKeyAttribute<Load,Depot>"), fkNav);
+        assertTrue(fkNav.contains("IdAttribute<Load>id=newIdAttributeRecord<>(\"depot.id\",\"id\");"), fkNav);
+        assertTrue(fkNav.contains("TextColumnAttribute<Load>city=newTextColumnAttributeRecord<>(\"depot.city\",\"city\");"), fkNav);
+        assertTrue(fkNav.contains("TextColumnAttribute<Load>street=newTextColumnAttributeRecord<>(\"depot.addr.street\",\"addr_street\");"),
+                "the target's nested embedded leaf must use the TARGET-LOCAL chained column:"
+                        + System.lineSeparator() + fkNav);
+        assertTrue(fkNav.contains("SortableColumnAttribute<Load>no=newSortableColumnAttributeRecord<>(\"depot.addr.no\",\"addr_no\");"), fkNav);
+        assertTrue(fkNav.contains("publicStringcolumn(){return\"depot_id\";}"), fkNav);
+
+        // (b) EC nav: leaves rebuilt from the element VO props must carry the elementColumns
+        // paths/columns exactly (child table contributes no table prefix to the leaf columns).
+        String ecNav = Files.readString(generatedDir.resolve("navleaf/_LoadTags.java")).replaceAll("\\s+", "");
+        assertTrue(ecNav.contains("publicfinalclass_LoadTagsimplementsElementCollectionAttribute<Load,Tags>"), ecNav);
+        assertTrue(ecNav.contains("TextColumnAttribute<Load>sku=newTextColumnAttributeRecord<>(\"tags.sku\",\"sku\");"), ecNav);
+        assertTrue(ecNav.contains("SortableColumnAttribute<Load>qty=newSortableColumnAttributeRecord<>(\"tags.qty\",\"qty\");"), ecNav);
+        assertTrue(ecNav.contains("publicStringchildTable(){return\"load_tags\";}"), ecNav);
+        assertTrue(ecNav.contains("publicStringparentFkColumn(){return\"load_id\";}"), ecNav);
+        assertTrue(ecNav.contains("elementDescriptor(){return()->TagsMetadata.INSTANCE;}"), ecNav);
+    }
+
+    @Test
     void staticMetamodelCoversRelationshipsAndSortSwitchResolvesDotPaths() throws Exception {
         Path sourceDir = Files.createDirectories(workspace.resolve("src/mmrel"));
         Path classesDir = Files.createDirectories(workspace.resolve("classes-mmrel"));

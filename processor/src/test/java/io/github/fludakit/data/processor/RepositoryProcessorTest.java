@@ -1415,6 +1415,254 @@ class RepositoryProcessorTest {
                 "owner-level nested leaf constant must chain both prefixes:" + System.lineSeparator() + cmd);
     }
 
+    @Test
+    void staticMetamodelHasSpecShapeForEntityAttributes() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/mmbook"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-mmbook"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-mmbook"));
+
+        Files.writeString(sourceDir.resolve("Book.java"), """
+                package mmbook;
+
+                public class Book {
+                    public Long id;
+                    public String title;
+
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getTitle() { return title; }
+                    public void setTitle(String title) { this.title = title; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Shelf.java"), """
+                package mmbook;
+
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+
+                @Repository
+                public interface Shelf extends CrudRepository<Book, Long> { }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Book.java", "Shelf.java");
+
+        Path metamodel = generatedDir.resolve("mmbook/_Book.java");
+        assertTrue(Files.exists(metamodel), "Expected generated " + metamodel);
+        // Whitespace-stripped so JavaPoet's soft wraps cannot break the positional pins.
+        String mm = Files.readString(metamodel).replaceAll("\\s+", "");
+        assertTrue(mm.contains("publicinterface_Book"), mm);
+        assertTrue(mm.contains("@StaticMetamodel(Book.class)"), mm);
+        assertTrue(mm.contains("@Generated(\"io.github.fludakit.data.processor.RepositoryProcessor\")"), mm);
+        assertTrue(mm.contains("StringID=\"id\";"), mm);
+        assertTrue(mm.contains("StringTITLE=\"title\";"), mm);
+        assertTrue(mm.contains("SortableAttribute<Book>id=newSortableAttributeRecord<>(ID);"), mm);
+        assertTrue(mm.contains("TextAttribute<Book>title=newTextAttributeRecord<>(TITLE);"), mm);
+        // The metamodel is additive: the internal descriptor class remains.
+        assertTrue(Files.exists(generatedDir.resolve("mmbook/BookMetadata.java")),
+                "the internal <Entity>Metadata must still be generated");
+    }
+
+    @Test
+    void staticMetamodelEmbeddedLeavesBecomeDotPathAttributes() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/mmgp"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-mmgp"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-mmgp"));
+
+        Files.writeString(sourceDir.resolve("Profile.java"), """
+                package mmgp;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Profile {
+                    @Identity Long id;
+                    Address address;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public Address getAddress() { return address; }
+                    public void setAddress(Address address) { this.address = address; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Address.java"), """
+                package mmgp;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class Address {
+                    String city;
+                    Integer zip;
+                    GeoPoint point;
+                    public String getCity() { return city; }
+                    public void setCity(String city) { this.city = city; }
+                    public Integer getZip() { return zip; }
+                    public void setZip(Integer zip) { this.zip = zip; }
+                    public GeoPoint getPoint() { return point; }
+                    public void setPoint(GeoPoint point) { this.point = point; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("GeoPoint.java"), """
+                package mmgp;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class GeoPoint {
+                    Double lat;
+                    Double lng;
+                    public Double getLat() { return lat; }
+                    public void setLat(Double lat) { this.lat = lat; }
+                    public Double getLng() { return lng; }
+                    public void setLng(Double lng) { this.lng = lng; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("ProfileRepository.java"), """
+                package mmgp;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository interface ProfileRepository extends CrudRepository<Profile, Long> { }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir,
+                "Profile.java", "Address.java", "GeoPoint.java", "ProfileRepository.java");
+
+        String mm = Files.readString(generatedDir.resolve("mmgp/_Profile.java")).replaceAll("\\s+", "");
+        assertTrue(mm.contains("StringADDRESS=\"address\";"), mm);
+        assertTrue(mm.contains("StringADDRESS_CITY=\"address.city\";"), mm);
+        assertTrue(mm.contains("StringADDRESS_ZIP=\"address.zip\";"), mm);
+        assertTrue(mm.contains("StringADDRESS_POINT=\"address.point\";"), mm);
+        assertTrue(mm.contains("StringADDRESS_POINT_LAT=\"address.point.lat\";"), mm);
+        assertTrue(mm.contains("StringADDRESS_POINT_LNG=\"address.point.lng\";"), mm);
+        assertTrue(mm.contains("Attribute<Profile>address=newAttributeRecord<>(ADDRESS);"), mm);
+        assertTrue(mm.contains("TextAttribute<Profile>address_city=newTextAttributeRecord<>(ADDRESS_CITY);"), mm);
+        assertTrue(mm.contains("SortableAttribute<Profile>address_zip=newSortableAttributeRecord<>(ADDRESS_ZIP);"), mm);
+        assertTrue(mm.contains("Attribute<Profile>address_point=newAttributeRecord<>(ADDRESS_POINT);"), mm);
+        assertTrue(mm.contains("SortableAttribute<Profile>address_point_lat=newSortableAttributeRecord<>(ADDRESS_POINT_LAT);"), mm);
+        assertTrue(mm.contains("SortableAttribute<Profile>id=newSortableAttributeRecord<>(ID);"), mm);
+        // Value objects never get their own metamodel classes (aggregate roots only).
+        assertTrue(!Files.exists(generatedDir.resolve("mmgp/_Address.java")),
+                "no _VO class for a value object");
+        assertTrue(!Files.exists(generatedDir.resolve("mmgp/_GeoPoint.java")),
+                "no _VO class for a nested value object");
+    }
+
+    @Test
+    void staticMetamodelCoversRelationshipsAndSortSwitchResolvesDotPaths() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/mmrel"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-mmrel"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-mmrel"));
+
+        Files.writeString(sourceDir.resolve("Parent.java"), """
+                package mmrel;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                import java.util.ArrayList;
+                import java.util.List;
+                @AggregateRoot
+                public class Parent {
+                    @Identity Long id;
+                    String name;
+                    Child primary;
+                    List<Child> children = new ArrayList<>();
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getName() { return name; }
+                    public void setName(String name) { this.name = name; }
+                    public Child getPrimary() { return primary; }
+                    public void setPrimary(Child primary) { this.primary = primary; }
+                    public List<Child> getChildren() { return children; }
+                    public void setChildren(List<Child> children) { this.children = children; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Child.java"), """
+                package mmrel;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Child {
+                    @Identity Long id;
+                    Parent owner;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public Parent getOwner() { return owner; }
+                    public void setOwner(Parent owner) { this.owner = owner; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("ParentRepository.java"), """
+                package mmrel;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface ParentRepository extends CrudRepository<Parent, Long> { }
+                """);
+        Files.writeString(sourceDir.resolve("ChildRepository.java"), """
+                package mmrel;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface ChildRepository extends CrudRepository<Child, Long> { }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir,
+                "Parent.java", "Child.java", "ParentRepository.java", "ChildRepository.java");
+
+        // Relationship properties surface as plain Attribute fields, keyed by ATTRIBUTE name.
+        String pm = Files.readString(generatedDir.resolve("mmrel/_Parent.java")).replaceAll("\\s+", "");
+        assertTrue(pm.contains("StringCHILDREN=\"children\";"), pm);
+        assertTrue(pm.contains("Attribute<Parent>children=newAttributeRecord<>(CHILDREN);"), pm);
+        assertTrue(pm.contains("StringPRIMARY=\"primary\";"), pm);
+        assertTrue(pm.contains("Attribute<Parent>primary=newAttributeRecord<>(PRIMARY);"), pm);
+        assertTrue(pm.contains("TextAttribute<Parent>name=newTextAttributeRecord<>(NAME);"), pm);
+        String cm = Files.readString(generatedDir.resolve("mmrel/_Child.java")).replaceAll("\\s+", "");
+        assertTrue(cm.contains("Attribute<Child>owner=newAttributeRecord<>(OWNER);"), cm);
+
+        // The runtime sort switch resolves dot paths to flattened columns and carries no
+        // EMBEDDED-container case.
+        Files.writeString(sourceDir.resolve("Loc.java"), """
+                package mmrel;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class Loc {
+                    String city;
+                    Integer zip;
+                    public String getCity() { return city; }
+                    public void setCity(String city) { this.city = city; }
+                    public Integer getZip() { return zip; }
+                    public void setZip(Integer zip) { this.zip = zip; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Holder.java"), """
+                package mmrel;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Holder {
+                    @Identity Long id;
+                    Loc loc;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public Loc getLoc() { return loc; }
+                    public void setLoc(Loc loc) { this.loc = loc; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Holders.java"), """
+                package mmrel;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Holders extends CrudRepository<Holder, Long> { }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir,
+                "Parent.java", "Child.java", "ParentRepository.java", "ChildRepository.java",
+                "Loc.java", "Holder.java", "Holders.java");
+
+        String impl = Files.readString(generatedDir.resolve("mmrel/HoldersImpl.java"));
+        assertTrue(impl.contains("case \"loc.city\": return \"loc_city\";"),
+                "embedded leaf path must resolve to its flattened column:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("case \"loc.zip\": return \"loc_zip\";"),
+                "embedded leaf path must resolve to its flattened column:" + System.lineSeparator() + impl);
+        assertTrue(!impl.replace(" ", "").contains("case\"loc\":"),
+                "no container case for an EMBEDDED property:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("case \"id\": return \"id\";"),
+                "the id case must remain:" + System.lineSeparator() + impl);
+    }
+
     private void compile(Path sourceDir, Path classesDir, Path generatedDir, String... fileNames) throws Exception {
         compileWithDiagnostics(sourceDir, classesDir, generatedDir, fileNames);
     }

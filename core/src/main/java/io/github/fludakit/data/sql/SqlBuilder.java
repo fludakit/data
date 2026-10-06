@@ -15,7 +15,7 @@ public final class SqlBuilder {
         String cols = md.columns().stream().map(c -> Names.quote(c.column())).collect(Collectors.joining(", "));
         StringBuilder sb = new StringBuilder("SELECT ").append(cols).append(" FROM ").append(Names.quote(md.tableName()));
         appendWhere(sb, predicates, cursorClause);
-        appendOrderBy(sb, sorts);
+        sb.append(orderBy(md, sorts));
         if (limit > 0) sb.append(" LIMIT ").append(limit);
         return sb.toString();
     }
@@ -76,11 +76,22 @@ public final class SqlBuilder {
         return sb.toString();
     }
 
-    public String orderBy(List<SortSpec> sorts) {
+    public String orderBy(EntityDescriptor md, List<SortSpec> sorts) {
         if (sorts.isEmpty()) return "";
         return " ORDER BY " + sorts.stream()
-                .map(s -> Names.quote(Names.columnName(s.property())) + (s.ascending() ? " ASC" : " DESC"))
+                .map(s -> Names.quote(resolveColumn(md, s.property())) + (s.ascending() ? " ASC" : " DESC"))
                 .collect(Collectors.joining(", "));
+    }
+
+    /**
+     * Resolves a sort property — a bare attribute name or an embedded dot path such as
+     * {@code "address.city"} — to its physical column via the descriptor's flattened view.
+     */
+    public static String resolveColumn(EntityDescriptor md, String property) {
+        for (EntityDescriptor.ColumnRef c : md.columns()) {
+            if (c.path().equals(property)) return c.column();
+        }
+        throw new IllegalArgumentException("Unknown sort property: " + property);
     }
 
     private void appendWhere(StringBuilder sb, List<Predicate> predicates, String cursorClause) {
@@ -96,10 +107,6 @@ public final class SqlBuilder {
             where.append(cursorClause);
         }
         if (where.length() > 0) sb.append(" WHERE ").append(where);
-    }
-
-    private void appendOrderBy(StringBuilder sb, List<SortSpec> sorts) {
-        sb.append(orderBy(sorts));
     }
 
     private String render(Predicate p) {

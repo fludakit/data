@@ -1,5 +1,6 @@
 package io.github.fludakit.data.processor;
 
+import com.squareup.javapoet.AnnotationSpec;
 import com.squareup.javapoet.ArrayTypeName;
 import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.CodeBlock;
@@ -69,10 +70,12 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Generates three artifacts at compile time: a {@code <Repository>Impl} class for every
+ * Generates four artifacts at compile time: a {@code <Repository>Impl} class for every
  * {@link Repository @Repository} interface, a reflection-free {@code <Entity>Metadata} class
- * implementing {@link EntityDescriptor} (the compile-time descriptor model behind all SQL), and a
- * {@code <Entity>RowMapper} for entities whose fields are all JDBC-safe or embeddable value objects.
+ * implementing {@link EntityDescriptor} (the compile-time descriptor model behind all SQL), a
+ * {@code <Entity>RowMapper} for entities whose fields are all JDBC-safe or embeddable value objects,
+ * and a Jakarta Data 1.0 {@code _Entity} static metamodel interface per aggregate root
+ * (see {@link #generateStaticMetamodel}).
  *
  * <p>The generated implementation class is {@link ApplicationScoped} and carries a single injected
  * collaborator, a {@link JdbcClient}. Every query's SQL is emitted as a {@code private static final
@@ -91,6 +94,34 @@ public class RepositoryProcessor extends AbstractProcessor {
     private static final String ORDER = "jakarta.data.Order";
     private static final String LIMIT = "jakarta.data.Limit";
     private static final String SORT = "jakarta.data.Sort";
+
+    /** Jakarta Data 1.0 §3.3 static metamodel types (string-form so the processor needs no new deps). */
+    private static final ClassName MM_ATTRIBUTE = ClassName.get("jakarta.data.metamodel", "Attribute");
+    private static final ClassName MM_SORTABLE = ClassName.get("jakarta.data.metamodel", "SortableAttribute");
+    private static final ClassName MM_TEXT = ClassName.get("jakarta.data.metamodel", "TextAttribute");
+    private static final ClassName MM_ATTRIBUTE_RECORD =
+            ClassName.get("jakarta.data.metamodel.impl", "AttributeRecord");
+    private static final ClassName MM_SORTABLE_RECORD =
+            ClassName.get("jakarta.data.metamodel.impl", "SortableAttributeRecord");
+    private static final ClassName MM_TEXT_RECORD =
+            ClassName.get("jakarta.data.metamodel.impl", "TextAttributeRecord");
+    private static final ClassName MM_STATIC_METAMODEL =
+            ClassName.get("jakarta.data.metamodel", "StaticMetamodel");
+    private static final ClassName MM_GENERATED = ClassName.get("jakarta.annotation", "Generated");
+
+    /** Attribute-name types that get the spec's {@code TextAttribute} treatment. */
+    private static final Set<String> METAMODEL_TEXT_TYPES = Set.of(
+            "java.lang.String", "char", "java.lang.Character");
+
+    /** Attribute-name types that get the spec's {@code SortableAttribute} treatment. */
+    private static final Set<String> METAMODEL_SORTABLE_TYPES = Set.of(
+            "boolean", "byte", "short", "int", "long", "float", "double",
+            "java.lang.Boolean", "java.lang.Byte", "java.lang.Short", "java.lang.Integer",
+            "java.lang.Long", "java.lang.Float", "java.lang.Double",
+            "java.math.BigDecimal", "java.math.BigInteger",
+            "java.time.Instant", "java.time.LocalDate", "java.time.LocalDateTime",
+            "java.time.LocalTime", "java.time.OffsetDateTime", "java.time.OffsetTime",
+            "java.time.ZonedDateTime", "java.util.Date");
 
     private static final Set<String> CONTAINER_TYPES = Set.of(
             "java.util.List", "java.util.Set", "java.util.Collection", "java.lang.Iterable",
@@ -132,6 +163,12 @@ public class RepositoryProcessor extends AbstractProcessor {
      * <em>before</em> the class is emitted (cycle-bounded).
      */
     private final Map<String, ClassName> metadataTypes = new LinkedHashMap<>();
+
+    /**
+     * Entity FQN → generated {@code _Entity} Jakarta Data static metamodel type. Doubles as the
+     * "already emitted" guard so several repositories over the same entity produce one metamodel.
+     */
+    private final Map<String, ClassName> metamodelTypes = new LinkedHashMap<>();
 
     /** Entity/value-object FQN → compile-time descriptor, memoized for {@link #descriptorFor}. */
     private final Map<String, Descriptor> descriptorCache = new HashMap<>();
@@ -238,6 +275,16 @@ public class RepositoryProcessor extends AbstractProcessor {
                 mapperType = generateRowMapper(entityElement, entity, metadataType);
                 rowMappers.put(entityFqn, mapperType);
             }
+        }
+        // Jakarta Data 1.0 §3.3 static metamodel: additive `_Entity` interface for aggregate roots,
+        // independent of the row-mapper gate (it references no JDBC types). Value objects surface
+        // only as dot-path members of their owner's metamodel, never as `_VO` classes.
+        String entityTypeName = entityElement.getQualifiedName().toString();
+        if (!isValueObjectType(entityElement) && !metamodelTypes.containsKey(entityTypeName)) {
+            String entityPackage = elements.getPackageOf(entityElement).getQualifiedName().toString();
+            metamodelTypes.put(entityTypeName,
+                    ClassName.get(entityPackage, "_" + entityElement.getSimpleName()));
+            generateStaticMetamodel(entityElement, entity);
         }
         // EMBEDDED value objects carry descriptor metadata even when the owner's mapper gate skips
         // them; the generated <VO>Metadata classes are what the owner's attributes() reference.
@@ -512,6 +559,129 @@ public class RepositoryProcessor extends AbstractProcessor {
             metadataTypes.put(voFqn, ClassName.get(voPackage, voElement.getSimpleName() + "Metadata"));
             generateEmbeddedDescriptors(voModel.metadata());
             generateMetadata(voElement, voModel);
+        }
+    }
+
+    /**
+     * Emits the Jakarta Data 1.0 §3.3 static metamodel: {@code _Entity}, a generated interface annotated
+     * {@code @Generated} + {@code @StaticMetamodel(Entity.class)} whose {@code UPPER_CASE} String
+     * constants hold entity ATTRIBUTE names (dot paths for embedded leaves, e.g.
+     * {@code ADDRESS_CITY = "address.city"}) and whose mixed-case fields are {@code Attribute},
+     * {@code SortableAttribute} or {@code TextAttribute} records from {@code jakarta.data.metamodel}.
+     * This is deliberately additive: the internal {@code <Entity>Metadata} keeps holding COLUMN-name
+     * constants for the generated SQL, which uses the same constant shape with different values.
+     * {@code ONE_TO_MANY}/{@code ELEMENT_COLLECTION} attributes exist only on the descriptor, not in
+     * {@link EntityModel#properties()}, so they are iterated separately.
+     */
+    private void generateStaticMetamodel(TypeElement entityElement, EntityModel entity) {
+        String packageName = elements.getPackageOf(entityElement).getQualifiedName().toString();
+        ClassName entityName = ClassName.get(packageName, entityElement.getSimpleName().toString());
+        String simpleName = "_" + entityElement.getSimpleName();
+
+        MetamodelFields fields = new MetamodelFields(entityElement);
+        if (entity.id() != null) {
+            fields.add(entity.id().name(), entity.id().type(), entity.id().kind(), null);
+        }
+        for (Property p : entity.properties()) {
+            fields.add(p.name(), p.type(), p.kind(), p.embeddedModel());
+        }
+        for (EntityDescriptor.Attribute a : entity.metadata().attributes()) {
+            if (a.kind() == EntityDescriptor.Kind.ONE_TO_MANY
+                    || a.kind() == EntityDescriptor.Kind.ELEMENT_COLLECTION) {
+                fields.add(a.name(), ClassName.get("java.lang", "Object"), a.kind(), null);
+            }
+        }
+
+        TypeSpec.Builder builder = TypeSpec.interfaceBuilder(simpleName)
+                .addModifiers(Modifier.PUBLIC)
+                .addAnnotation(AnnotationSpec.builder(MM_GENERATED)
+                        .addMember("value", "$S", RepositoryProcessor.class.getName()).build())
+                .addAnnotation(AnnotationSpec.builder(MM_STATIC_METAMODEL)
+                        .addMember("value", "$T.class", entityName).build());
+        fields.constants.forEach(builder::addField);
+        fields.attributes.forEach(builder::addField);
+
+        writeSourceFile(packageName + "." + simpleName, entityElement,
+                JavaFile.builder(packageName, builder.build()).skipJavaLangImports(true).build());
+    }
+
+    /** The spec's attribute-kind classification for a metamodel member of the given type. */
+    private MetamodelKind metamodelKind(TypeName type) {
+        if (METAMODEL_TEXT_TYPES.contains(type.toString())) {
+            return MetamodelKind.TEXT;
+        }
+        if (type instanceof ClassName cn && cn.canonicalName().equals(type.toString())) {
+            if (METAMODEL_SORTABLE_TYPES.contains(cn.canonicalName())) {
+                return MetamodelKind.SORTABLE;
+            }
+            TypeElement te = elements.getTypeElement(cn.canonicalName());
+            if (te != null && te.getKind() == ElementKind.ENUM) {
+                return MetamodelKind.SORTABLE;
+            }
+        } else if (type.isPrimitive()
+                && METAMODEL_SORTABLE_TYPES.contains(type.toString())) {
+            return MetamodelKind.SORTABLE;
+        }
+        return MetamodelKind.PLAIN;
+    }
+
+    private enum MetamodelKind { PLAIN, SORTABLE, TEXT }
+
+    /** Accumulates the constants-then-fields member lists of one {@code _Entity} interface. */
+    private final class MetamodelFields {
+
+        private final List<FieldSpec> constants = new ArrayList<>();
+        private final List<FieldSpec> attributes = new ArrayList<>();
+        private final Set<String> taken = new HashSet<>();
+        private final Element origin;
+
+        private MetamodelFields(Element origin) {
+            this.origin = origin;
+        }
+
+        /** One member: UPPER constant = dotted attribute path, mixed-case field = its record. */
+        private void add(String path, TypeName type, EntityDescriptor.Kind kind, EntityModel embedded) {
+            String constant = path.replace('.', '_').toUpperCase();
+            String field = path.replace('.', '_');
+            if (!taken.add(field)) {
+                processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
+                        "static metamodel collision on '" + path + "': member '" + field
+                                + "' already emitted; this path is skipped", origin);
+                return;
+            }
+            // JavaPoet requires explicit visibility on interface fields (static/final are implicit).
+            constants.add(FieldSpec.builder(String.class, constant,
+                    Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
+                    .initializer("$S", path).build());
+            ClassName attr;
+            ClassName impl;
+            if (kind == EntityDescriptor.Kind.EMBEDDED) {
+                attr = MM_ATTRIBUTE;
+                impl = MM_ATTRIBUTE_RECORD;
+            } else {
+                switch (metamodelKind(type)) {
+                    case TEXT -> { attr = MM_TEXT; impl = MM_TEXT_RECORD; }
+                    case SORTABLE -> { attr = MM_SORTABLE; impl = MM_SORTABLE_RECORD; }
+                    default -> { attr = MM_ATTRIBUTE; impl = MM_ATTRIBUTE_RECORD; }
+                }
+            }
+            attributes.add(FieldSpec.builder(ParameterizedTypeName.get(attr, originEntityName()), field,
+                    Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
+                    .initializer("new $T<>($L)", impl, constant).build());
+            if (kind == EntityDescriptor.Kind.EMBEDDED && embedded != null) {
+                if (embedded.id() != null) {
+                    add(path + "." + embedded.id().name(), embedded.id().type(),
+                            embedded.id().kind(), embedded.id().embeddedModel());
+                }
+                for (Property p : embedded.properties()) {
+                    add(path + "." + p.name(), p.type(), p.kind(), p.embeddedModel());
+                }
+            }
+        }
+
+        private ClassName originEntityName() {
+            return ClassName.get(elements.getPackageOf((TypeElement) origin)
+                    .getQualifiedName().toString(), origin.getSimpleName().toString());
         }
     }
 
@@ -1325,14 +1495,14 @@ public class RepositoryProcessor extends AbstractProcessor {
         List<String> properties = new ArrayList<>();
         List<String> directions = new ArrayList<>();
         for (SortSpec s : effective) {
-            columns.add(Names.columnName(s.property()));
+            columns.add(SqlBuilder.resolveColumn(entity.metadata(), s.property()));
             properties.add(s.property());
             directions.add(Boolean.toString(s.ascending()));
         }
         String colsExpr = "java.util.List.of(" + quoted(columns) + ")";
         String propsExpr = "java.util.List.of(" + quoted(properties) + ")";
         String dirsExpr = "java.util.List.of(" + String.join(", ", directions) + ")";
-        String orderBy = new SqlBuilder().orderBy(effective);
+        String orderBy = new SqlBuilder().orderBy(entity.metadata(), effective);
         String wherePrefix = bindings.isEmpty() ? " WHERE " : " AND ";
 
         if (!cursored) {
@@ -1405,9 +1575,11 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /**
-     * Emits the private {@code column(String)} helper that maps an entity property name to its SQL column,
-     * used by the paginated {@code findAll} to honour the runtime {@link Sort} criteria. Every scalar column
-     * and the identifier are mapped; associations map to their foreign-key column.
+     * Emits the private {@code column(String)} helper that maps an entity property (or embedded
+     * dot path, e.g. {@code "address.city"}) to its SQL column, used by the paginated
+     * {@code findAll} to honour the runtime {@link Sort} criteria. Iterating the descriptor's
+     * flattened {@code columns()} covers id, scalars, fk columns and embedded leaf paths in one
+     * loop; an EMBEDDED container contributes no case (sorting by it addresses no column).
      */
     private MethodSpec columnHelper(EntityModel entity) {
         MethodSpec.Builder helper = MethodSpec.methodBuilder("column")
@@ -1415,9 +1587,8 @@ public class RepositoryProcessor extends AbstractProcessor {
                 .returns(String.class)
                 .addParameter(String.class, "property");
         helper.beginControlFlow("switch (property)");
-        helper.addStatement("case $S: return $S", entity.id().name(), entity.id().column());
-        for (Property property : entity.properties()) {
-            helper.addStatement("case $S: return $S", property.name(), property.column());
+        for (EntityDescriptor.ColumnRef column : entity.metadata().columns()) {
+            helper.addStatement("case $S: return $S", column.path(), column.column());
         }
         helper.addStatement("default: throw new $T($S + property)", IllegalArgumentException.class,
                 "Unknown sort property: ");

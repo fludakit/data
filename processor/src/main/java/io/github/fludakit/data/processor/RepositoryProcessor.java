@@ -2545,6 +2545,9 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     private EntityModel buildEntity(TypeElement element) {
         boolean valueObject = isValueObjectType(element);
+        // The owner stereotype drives relationship classification (Classification Table): a bare
+        // entity-typed field composes only inside an @AggregateRoot; elsewhere it is an association.
+        Stereotype ownerStereotype = stereotypeOf(element);
         TypeMirror typeMirror = types.erasure(element.asType());
         TypeName typeName = TypeName.get(typeMirror);
         String table = valueObject ? null : Names.tableName(element.getSimpleName().toString());
@@ -2569,8 +2572,17 @@ public class RepositoryProcessor extends AbstractProcessor {
             }
             String fieldType = field.asType().toString();
             TypeName fieldTypeName = safeFieldType(field.asType());
+            boolean identityAnnotated = field.getAnnotation(Identity.class) != null;
 
-            if (field.getAnnotation(Identity.class) != null || (!valueObject && name.equals("id"))) {
+            if (valueObject && identityAnnotated) {
+                // A value object has no identity: an @Identity field is demoted to a scalar and a
+                // NOTE records the ignored annotation. (A field merely NAMED "id" is already scalar
+                // via the !valueObject guard below, so it needs no NOTE.)
+                processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
+                        "value object '" + element.getSimpleName() + "' declares '" + name
+                                + "'; ignored — value objects have no identity", element);
+            }
+            if (!valueObject && (identityAnnotated || name.equals("id"))) {
                 idProp = new Prop.Id(name, Names.columnName(name), fieldType);
                 id = new Property(name, idProp.column(), fieldTypeName, idProp, null);
 
@@ -2591,12 +2603,14 @@ public class RepositoryProcessor extends AbstractProcessor {
                 props.add(embedded);
 
             } else if (isEntityType(declaredElement(field))) {
-                // In-aggregate many-to-one / one-to-one: fk column, hydrated on read (Plan C).
-                // Not an external ASSOCIATION: the field is left null by the mapper and the
-                // loaders (Task 4) fill it, so it skips the gate as a composing Reference.
+                // A bare entity-typed field is a many-to-one whose ownership is set by the OWNER
+                // stereotype (Classification Table): it composes only inside an @AggregateRoot (root-
+                // owned, hydrated on read). Inside an @Entity or a @ValueObject the same field is an
+                // association (composition=false) — the fk column is kept but no loader is emitted.
                 TypeElement target = declaredElement(field);
+                boolean composition = ownerStereotype == Stereotype.AGGREGATE_ROOT;
                 Prop.Reference ref = referenceProp(name, Names.fkColumn(name),
-                        target.getQualifiedName().toString(), target, true);
+                        target.getQualifiedName().toString(), target, composition);
                 properties.add(new Property(name, ref.fkColumn(), fieldTypeName, ref, null));
                 props.add(ref);
 
@@ -2626,8 +2640,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             id = new Property("id", idProp.column(), ClassName.get(Long.class), idProp, null);
         }
         // Second pass: resolve ONE_TO_MANY inverses now that all parent properties are known.
-        Stereotype stereotype = stereotypeOf(element);
-        DescriptorModel self = new DescriptorModel(stereotype, typeNameString, table, idProp, props);
+        DescriptorModel self = new DescriptorModel(ownerStereotype, typeNameString, table, idProp, props);
         List<Prop> resolved = new ArrayList<>(props.size());
         for (Prop p : props) {
             if (p instanceof Prop.EntityList entityList && entityList.targetTypeName() != null) {
@@ -2640,7 +2653,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                 resolved.add(p);
             }
         }
-        DescriptorModel metadata = new DescriptorModel(stereotype, typeNameString, table, idProp, resolved);
+        DescriptorModel metadata = new DescriptorModel(ownerStereotype, typeNameString, table, idProp, resolved);
         return new EntityModel(typeMirror, typeName, id, properties, collections, metadata);
     }
 

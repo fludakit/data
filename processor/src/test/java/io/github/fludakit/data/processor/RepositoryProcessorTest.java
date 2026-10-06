@@ -1680,6 +1680,230 @@ class RepositoryProcessorTest {
                 "the id case must remain:" + System.lineSeparator() + impl);
     }
 
+    @Test
+    void bareEntityFieldOnEntityOwnerIsNonComposingAssociation() throws Exception {
+        // Classification Table: a bare entity-typed field inside an @Entity owner is treated as an
+        // ASSOCIATION (Prop.Reference composition=false), NOT a composition — so no two-phase loader is
+        // emitted even though the target is managed. estore/team fixtures stay @AggregateRoot, so this
+        // is the first behavior change and must not move their generated output.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/sbr"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-sbr"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-sbr"));
+
+        Files.writeString(sourceDir.resolve("Owner.java"), """
+                package sbr;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Owner {
+                    @Identity Long id;
+                    String label;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getLabel() { return label; }
+                    public void setLabel(String label) { this.label = label; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("TeamWithBareRef.java"), """
+                package sbr;
+                import io.github.fludakit.data.annotation.Entity;
+                import io.github.fludakit.data.annotation.Identity;
+                @Entity
+                public class TeamWithBareRef {
+                    @Identity Long id;
+                    Owner owner;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public Owner getOwner() { return owner; }
+                    public void setOwner(Owner owner) { this.owner = owner; }
+                }
+                """);
+        // Owner is a MANAGED target (has its own repository) so the pre-change composing classification
+        // would emit a loader; only composition=false (this task) suppresses it.
+        Files.writeString(sourceDir.resolve("OwnerRepository.java"), """
+                package sbr;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface OwnerRepository extends CrudRepository<Owner, Long> { }
+                """);
+        Files.writeString(sourceDir.resolve("TeamWithBareRefRepository.java"), """
+                package sbr;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface TeamWithBareRefRepository extends CrudRepository<TeamWithBareRef, Long> { }
+                """);
+
+        List<Diagnostic<? extends JavaFileObject>> diagnostics = compileWithDiagnostics(
+                sourceDir, classesDir, generatedDir,
+                "Owner.java", "TeamWithBareRef.java", "OwnerRepository.java", "TeamWithBareRefRepository.java");
+
+        String impl = Files.readString(generatedDir.resolve("sbr/TeamWithBareRefRepositoryImpl.java"))
+                .replace("\\\"", "\"");
+        assertTrue(!impl.contains("hydrateOwner"),
+                "a bare entity field on an @Entity owner must NOT get a two-phase Owner loader:"
+                        + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("hydrateAll"),
+                "no hydration umbrella when the only relationship is a non-composing association:"
+                        + System.lineSeparator() + impl);
+
+        // The metamodel still classifies owner as a foreign-key Reference (an association, not embedded).
+        String mm = Files.readString(generatedDir.resolve("sbr/_TeamWithBareRef.java")).replaceAll("\\s+", "");
+        assertTrue(mm.contains("ForeignKeyAttribute<TeamWithBareRef,Owner>owner="
+                        + "newForeignKeyAttributeRecord<>(OWNER,\"owner_id\",Owner.class,()->OwnerMetadata.INSTANCE);"),
+                "a bare entity field on @Entity must classify as an FK Reference (association):"
+                        + System.lineSeparator() + mm);
+
+        // The composition-gated managed-target NOTE is only emitted for composing references; an
+        // association is skipped entirely, so no relationship NOTE appears for owner.
+        String notes = notesOf(diagnostics);
+        assertTrue(!notes.contains("relationship 'owner' on sbr.TeamWithBareRef"),
+                "a non-composing association must not emit a relationship NOTE:" + System.lineSeparator() + notes);
+    }
+
+    @Test
+    void valueObjectEntityListIsOneToManyNotElementCollection() throws Exception {
+        // Requirements Lock item 3: a @ValueObject may hold entity collections; a List<@Entity> inside a
+        // VO classifies as a one-to-many (Prop.EntityList), never an element collection. Driven through
+        // an aggregate-root owner (the same idiom the embedded VO tests use to force VO model generation).
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/voel"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-voel"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-voel"));
+
+        Files.writeString(sourceDir.resolve("Thing.java"), """
+                package voel;
+                import io.github.fludakit.data.annotation.Entity;
+                import io.github.fludakit.data.annotation.Identity;
+                @Entity
+                public class Thing {
+                    @Identity Long id;
+                    String label;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getLabel() { return label; }
+                    public void setLabel(String label) { this.label = label; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Holder.java"), """
+                package voel;
+                import io.github.fludakit.data.annotation.ValueObject;
+                import java.util.ArrayList;
+                import java.util.List;
+                @ValueObject
+                public class Holder {
+                    List<Thing> things = new ArrayList<>();
+                    public List<Thing> getThings() { return things; }
+                    public void setThings(List<Thing> things) { this.things = things; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Widget.java"), """
+                package voel;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Widget {
+                    @Identity Long id;
+                    Holder holder;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public Holder getHolder() { return holder; }
+                    public void setHolder(Holder holder) { this.holder = holder; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("ThingRepository.java"), """
+                package voel;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface ThingRepository extends CrudRepository<Thing, Long> { }
+                """);
+        Files.writeString(sourceDir.resolve("WidgetRepository.java"), """
+                package voel;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface WidgetRepository extends CrudRepository<Widget, Long> { }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir,
+                "Thing.java", "Holder.java", "Widget.java", "ThingRepository.java", "WidgetRepository.java");
+
+        Path holderMetadata = generatedDir.resolve("voel/HolderMetadata.java");
+        assertTrue(Files.exists(holderMetadata), "Expected generated " + holderMetadata);
+        String vmd = Files.readString(holderMetadata).replaceAll("\\s+", " ");
+        assertTrue(vmd.contains("OneToManyAttribute") || vmd.contains("newOneToManyAttributeRecord"),
+                "a List<@Entity> in a value object must expose a one-to-many attribute:" + System.lineSeparator() + vmd);
+        assertTrue(!vmd.contains("ElementCollectionAttribute") && !vmd.contains("newElementCollectionAttributeRecord"),
+                "an entity list is NOT an element collection:" + System.lineSeparator() + vmd);
+    }
+
+    @Test
+    void valueObjectDeclaringIdentityIsScalarWithNote() throws Exception {
+        // Value object identity rule: a @ValueObject must have NO id. An @Identity field on a VO is a
+        // scalar and emits an exact NOTE. Reached through an aggregate root that embeds the VO.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/void1"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-void1"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-void1"));
+
+        Files.writeString(sourceDir.resolve("Point.java"), """
+                package void1;
+                import io.github.fludakit.data.annotation.Identity;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class Point {
+                    @Identity Long id;
+                    double x;
+                    double y;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public double getX() { return x; }
+                    public void setX(double x) { this.x = x; }
+                    public double getY() { return y; }
+                    public void setY(double y) { this.y = y; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Line.java"), """
+                package void1;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Line {
+                    @Identity Long id;
+                    Point start;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public Point getStart() { return start; }
+                    public void setStart(Point start) { this.start = start; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("LineRepository.java"), """
+                package void1;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface LineRepository extends CrudRepository<Line, Long> { }
+                """);
+
+        List<Diagnostic<? extends JavaFileObject>> diagnostics = compileWithDiagnostics(
+                sourceDir, classesDir, generatedDir, "Point.java", "Line.java", "LineRepository.java");
+
+        String notes = notesOf(diagnostics);
+        assertTrue(notes.contains(
+                        "value object 'Point' declares 'id'; ignored — value objects have no identity"),
+                "the exact value-object identity NOTE must be emitted:" + System.lineSeparator() + notes);
+
+        // The id is treated as a scalar: it flattens into the owner table as start_id, and the VO
+        // metadata reports a null id (value objects have no identity accessor).
+        String vmd = Files.readString(generatedDir.resolve("void1/PointMetadata.java")).replaceAll("\\s+", " ");
+        assertTrue(vmd.contains("public IdAttribute<Point> id()") && vmd.contains("return null;"),
+                "a value object reports a null id even when it declares @Identity:" + System.lineSeparator() + vmd);
+        String md = Files.readString(generatedDir.resolve("void1/LineMetadata.java"));
+        assertTrue(md.contains("public static final String START_ID = \"start_id\";"),
+                "the @Identity field must flatten as a scalar leaf column, not an identity:"
+                        + System.lineSeparator() + md);
+    }
+
     private void compile(Path sourceDir, Path classesDir, Path generatedDir, String... fileNames) throws Exception {
         compileWithDiagnostics(sourceDir, classesDir, generatedDir, fileNames);
     }

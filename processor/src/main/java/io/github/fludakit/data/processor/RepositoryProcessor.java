@@ -11,6 +11,7 @@ import com.squareup.javapoet.ParameterizedTypeName;
 import com.squareup.javapoet.TypeName;
 import com.squareup.javapoet.TypeSpec;
 import com.squareup.javapoet.TypeVariableName;
+import com.squareup.javapoet.WildcardTypeName;
 import io.github.fludakit.data.Names;
 import io.github.fludakit.data.annotation.Association;
 import io.github.fludakit.data.annotation.Identity;
@@ -132,6 +133,11 @@ public class RepositoryProcessor extends AbstractProcessor {
             ClassName.get("io.github.fludakit.data.metamodel", "OneToManyAttributeRecord");
     private static final ClassName FM_EC_RECORD =
             ClassName.get("io.github.fludakit.data.metamodel", "ElementCollectionAttributeRecord");
+    private static final ClassName MD_ENTITY_DESCRIPTOR =
+            ClassName.get("io.github.fludakit.data.metadata", "EntityDescriptor");
+    private static final ClassName MD_COLUMN_REF =
+            ClassName.get("io.github.fludakit.data.metadata", "ColumnRef");
+    private static final ClassName JAVA_SUPPLIER = ClassName.get("java.util.function", "Supplier");
 
     /** Attribute-name types that get the spec's {@code TextAttribute} treatment. */
     private static final Set<String> METAMODEL_TEXT_TYPES = Set.of(
@@ -298,8 +304,8 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
         // Jakarta Data 1.0 §3.3 static metamodel + <Entity>Metadata descriptor: the metamodel is
         // additive for aggregate roots (it references no JDBC types) and its field instances ARE the
-        // descriptor's attributes (Decision 1). Value objects surface only as dot-path members of
-        // their owner's metamodel, never as `_VO` classes.
+        // descriptor's attributes (Decision 1). Value objects surface only as navigable member
+        // classes (_<Entity><Field> chains) of their owner's metamodel, never as `_VO` classes.
         ensureDescriptorArtifacts(entityElement, entity, mapperPending);
         if (mapperPending) {
             mapperType = generateRowMapper(entityElement, entity, metadataTypes.get(entityFqn));
@@ -484,8 +490,9 @@ public class RepositoryProcessor extends AbstractProcessor {
      * per embedded attribute suffices). The accessor bodies return the {@code _Entity} metamodel
      * field instances when a metamodel was generated (Decision 1); a value object has none, so its
      * members are emitted as fresh attribute-record literals with the same shapes. Embedded leaves
-     * appear flat in {@code attributes()}, making {@code attribute("address.city")} a direct hit
-     * and {@code columns()} a {@code ColumnAttribute} filter in declaration order.
+     * are NOT flat {@code attributes()} members: the navigable metamodel classes carry them, and the
+     * explicit {@code columns()} override (emitted from {@link DescriptorModel#columns()} in
+     * declaration order) answers flattened dot paths for the engine.
      */
     private ClassName generateMetadata(TypeElement entityElement, EntityModel entity,
                                        List<MmMember> members, ClassName metamodelType) {
@@ -580,6 +587,25 @@ public class RepositoryProcessor extends AbstractProcessor {
                 .returns(ParameterizedTypeName.get(ClassName.get(java.util.List.class), attribute))
                 .addStatement("return $L", list.build()).build());
 
+        // Task 6: the flattened column view is generated EXPLICITLY from the compile-time model in
+        // declaration order (the derived EntityDescriptor.columns() default is gone), in BOTH the
+        // reference and the literal (value-object) mode. Two-arg ColumnRef literals: the root table
+        // is implicit, so no per-entry table/join overrides are emitted.
+        CodeBlock.Builder columns = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
+        boolean firstColumn = true;
+        for (ColumnRef column : entity.metadata().columns()) {
+            if (!firstColumn) {
+                columns.add(", ");
+            }
+            firstColumn = false;
+            columns.add("new $T($S, $S)", MD_COLUMN_REF, column.column(), column.path());
+        }
+        columns.add(")");
+        builder.addMethod(MethodSpec.methodBuilder("columns").addModifiers(Modifier.PUBLIC)
+                .addAnnotation(Override.class)
+                .returns(ParameterizedTypeName.get(ClassName.get(java.util.List.class), MD_COLUMN_REF))
+                .addStatement("return $L", columns.build()).build());
+
         writeSourceFile(packageName + "." + simpleName, entityElement,
                 JavaFile.builder(packageName, builder.build()).skipJavaLangImports(true).build());
         return self;
@@ -644,12 +670,15 @@ public class RepositoryProcessor extends AbstractProcessor {
     /**
      * Emits the Jakarta Data 1.0 §3.3 static metamodel: {@code _Entity}, a generated interface annotated
      * {@code @Generated} + {@code @StaticMetamodel(Entity.class)} whose {@code UPPER_CASE} String
-     * constants hold entity ATTRIBUTE names (dot paths for embedded leaves, e.g.
-     * {@code ADDRESS_CITY = "address.city"}) and whose mixed-case fields are FluDa attribute records
-     * from {@code io.github.fludakit.data.metamodel}, each also carrying the physical COLUMN — so one
-     * field instance is both the user-facing sort anchor and the runtime descriptor attribute
-     * (Decision 1). Embedded leaves are emitted flat; {@code <Entity>Metadata} returns these very
-     * instances. The member list comes from {@link #collectMembers}, shared with the metadata emitter.
+     * constants hold entity ATTRIBUTE names (root members only, Task 6) and whose mixed-case fields are
+     * FluDa attribute records from {@code io.github.fludakit.data.metamodel}, each also carrying the
+     * physical COLUMN — so one field instance is both the user-facing sort anchor and the runtime
+     * descriptor attribute (Decision 1). Embedded and relation members are NAVIGABLE: each gets a
+     * generated top-level member class ({@code _<Entity><Field>}) implementing the corresponding
+     * attribute interface, instantiated as the field value; its leaf fields carry the owner-rooted
+     * dot-path names. {@code <Entity>Metadata} returns these very instances. The member list comes
+     * from {@link #collectMembers}, shared with the metadata emitter. A nav-class name collision
+     * degrades to a NOTE and the plain attribute record (spec collision handling).
      */
     private void generateStaticMetamodel(TypeElement entityElement, List<MmMember> members) {
         String packageName = elements.getPackageOf(entityElement).getQualifiedName().toString();
@@ -668,14 +697,338 @@ public class RepositoryProcessor extends AbstractProcessor {
                     Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
                     .initializer("$S", m.path()).build());
         }
+        // One navigable member class per embedded/relation member, collected here and written to the
+        // Filer after the interface itself (same round, distinct top-level types).
+        List<NavUnit> units = new ArrayList<>();
+        Set<String> claimed = new HashSet<>();
+        claimed.add(packageName + "." + simpleName);
         for (MmMember m : members) {
-            builder.addField(FieldSpec.builder(memberAttrType(owner, m), m.identifier(),
-                    Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
-                    .initializer(memberInitializer(owner, m, true)).build());
+            Prop p = m.prop();
+            boolean navigable = p instanceof Prop.Embedded || p instanceof Prop.Reference
+                    || p instanceof Prop.EntityList || p instanceof Prop.ElementList;
+            ClassName navType = navigable
+                    ? generateNav(entityElement, packageName, owner, m, claimed, units)
+                    : null;
+            if (navType != null) {
+                builder.addField(FieldSpec.builder(navType, m.identifier(),
+                        Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
+                        .initializer("new $T()", navType).build());
+            } else {
+                builder.addField(FieldSpec.builder(memberAttrType(owner, m), m.identifier(),
+                        Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
+                        .initializer(memberInitializer(owner, m, true)).build());
+            }
         }
 
         writeSourceFile(packageName + "." + simpleName, entityElement,
                 JavaFile.builder(packageName, builder.build()).skipJavaLangImports(true).build());
+        for (NavUnit unit : units) {
+            writeSourceFile(unit.fqn(), entityElement, unit.file());
+        }
+    }
+
+    /** One generated navigable member class: its Filer name plus the file to write. */
+    private record NavUnit(String fqn, JavaFile file) { }
+
+    /**
+     * Dispatch: the navigable member class for one embedded/relation root member, named
+     * {@code _<EntitySimpleName><PascalCase field>} per the spec. Returns the generated type name or
+     * {@code null} when the name collides (NOTE; the caller falls back to the plain record).
+     */
+    private ClassName generateNav(TypeElement origin, String packageName, ClassName owner,
+                                  MmMember m, Set<String> claimed, List<NavUnit> units) {
+        String navSimple = "_" + owner.simpleName() + capitalize(m.prop().name());
+        Prop p = m.prop();
+        if (p instanceof Prop.Embedded embedded) {
+            return embeddedNav(origin, packageName, owner, navSimple, m.path(),
+                    m.column() + "_", embedded, claimed, units);
+        }
+        if (p instanceof Prop.Reference || p instanceof Prop.EntityList) {
+            return relationNav(origin, packageName, owner, navSimple, m, claimed, units);
+        }
+        return elementCollectionNav(origin, packageName, owner, navSimple, m.path(),
+                (Prop.ElementList) p, claimed, units);
+    }
+
+    /**
+     * The navigable class for an EMBEDDED member: implements
+     * {@code EmbeddedAttribute<owner, target>} with owner-typed leaf fields for the value object's
+     * direct members (nested embeddeds recurse into their own {@code _Parent<Field>} nav class), the
+     * flattened column chain as leaf columns ({@code address_point_lat}) and the full dot path as
+     * leaf/attribute names ({@code address.point.lat}). A VO cycle (unresolved target) degrades to a
+     * container-only nav: no leaves and {@code embedded() { return null; }}. {@code columnPrefix} is
+     * the flattened physical column chain from the owner root ({@code address_}, then
+     * {@code address_point_}), threading exactly as {@link DescriptorModel#columns()} flattens.
+     */
+    private ClassName embeddedNav(TypeElement origin, String packageName, TypeName owner,
+                                  String navSimple, String path, String columnPrefix,
+                                  Prop.Embedded embedded, Set<String> claimed, List<NavUnit> units) {
+        String fqn = packageName + "." + navSimple;
+        if (!claimed.add(fqn)) {
+            navCollision(origin, fqn, path);
+            return null;
+        }
+        DescriptorModel target = embedded.target();
+        TypeName targetType = classArgOf(target == null ? null : target.typeName());
+        TypeSpec.Builder builder = TypeSpec.classBuilder(navSimple)
+                .addModifiers(Modifier.PUBLIC, Modifier.FINAL)
+                .addSuperinterface(ParameterizedTypeName.get(FM_EMBEDDED, owner, targetType))
+                .addAnnotation(AnnotationSpec.builder(MM_GENERATED)
+                        .addMember("value", "$S", RepositoryProcessor.class.getName()).build());
+        Set<String> taken = new HashSet<>();
+        if (target != null) {
+            if (target.id() != null) {
+                addNavLeaf(builder, taken, origin, packageName, owner, path, navSimple,
+                        columnPrefix, target.id(), claimed, units);
+            }
+            for (Prop p : target.props()) {
+                addNavLeaf(builder, taken, origin, packageName, owner, path, navSimple,
+                        columnPrefix, p, claimed, units);
+            }
+        }
+        builder.addMethod(overrideAccessor("name", String.class, CodeBlock.of("$S", path)));
+        builder.addMethod(overrideAccessor("embedded",
+                ParameterizedTypeName.get(MD_ENTITY_DESCRIPTOR, targetType),
+                target != null
+                        ? CodeBlock.of("$T.INSTANCE", embeddedMetadataName(target.typeName()))
+                        : CodeBlock.of("null")));
+        units.add(new NavUnit(fqn, navFile(packageName, builder)));
+        return ClassName.get(packageName, navSimple);
+    }
+
+    /**
+     * The navigable class for a MANY_TO_ONE ({@code ForeignKeyAttribute}) or ONE_TO_MANY
+     * ({@code OneToManyAttribute}) member: container contract methods plus owner-typed leaf fields
+     * for the managed target's flattened LOCAL paths ({@code primary.id} → column {@code id}). An
+     * unmanaged or gate-failed target keeps the container methods, no leaves and a {@code () -> null}
+     * supplier — the same degradation the attribute records already follow.
+     */
+    private ClassName relationNav(TypeElement origin, String packageName, TypeName owner,
+                                  String navSimple, MmMember m, Set<String> claimed, List<NavUnit> units) {
+        Prop p = m.prop();
+        boolean fk = p instanceof Prop.Reference;
+        String targetFqn = memberTargetFqn(p);
+        String fqn = packageName + "." + navSimple;
+        if (!claimed.add(fqn)) {
+            navCollision(origin, fqn, m.path());
+            return null;
+        }
+        TypeName targetType = classArgOf(targetFqn);
+        TypeSpec.Builder builder = TypeSpec.classBuilder(navSimple)
+                .addModifiers(Modifier.PUBLIC, Modifier.FINAL)
+                .addSuperinterface(ParameterizedTypeName.get(fk ? FM_FK : FM_OTM, owner, targetType))
+                .addAnnotation(AnnotationSpec.builder(MM_GENERATED)
+                        .addMember("value", "$S", RepositoryProcessor.class.getName()).build());
+        Set<String> taken = new HashSet<>();
+        if (relationTargetResolved(targetFqn, false)) {
+            TypeElement targetElement = elements.getTypeElement(stripGenerics(targetFqn));
+            DescriptorModel target = entityModel(targetElement).metadata();
+            if (target.id() != null) {
+                addRelationLeaf(builder, taken, origin, owner, m.path(), "", target.id());
+            }
+            for (Prop tp : target.props()) {
+                addRelationLeaf(builder, taken, origin, owner, m.path(), "", tp);
+            }
+        }
+        builder.addMethod(overrideAccessor("name", String.class, CodeBlock.of("$S", m.path())));
+        if (fk) {
+            builder.addMethod(overrideAccessor("column", String.class,
+                    CodeBlock.of("$S", ((Prop.Reference) p).fkColumn())));
+        } else {
+            builder.addMethod(overrideAccessor("inverseName", String.class,
+                    stringLiteral(((Prop.EntityList) p).inverseName())));
+        }
+        builder.addMethod(overrideAccessor("target",
+                ParameterizedTypeName.get(ClassName.get(Class.class), targetType),
+                CodeBlock.of("$T.class", targetType)));
+        builder.addMethod(overrideAccessor("targetDescriptor", supplierOf(targetType),
+                relationDescriptorSupplier(targetFqn, false)));
+        units.add(new NavUnit(fqn, navFile(packageName, builder)));
+        return ClassName.get(packageName, navSimple);
+    }
+
+    /**
+     * The navigable class for an ELEMENT_COLLECTION member: implements
+     * {@code ElementCollectionAttribute<owner, element>} with owner-typed leaf fields for the element
+     * value object's columns (mirroring {@link Prop.ElementList#elementColumns()}) plus the
+     * {@code childTable()}/{@code parentFkColumn()} literals and the descriptor supplier.
+     */
+    private ClassName elementCollectionNav(TypeElement origin, String packageName, TypeName owner,
+                                           String navSimple, String path, Prop.ElementList elementList,
+                                           Set<String> claimed, List<NavUnit> units) {
+        String fqn = packageName + "." + navSimple;
+        if (!claimed.add(fqn)) {
+            navCollision(origin, fqn, path);
+            return null;
+        }
+        String targetFqn = elementList.elementTypeName();
+        TypeName targetType = classArgOf(targetFqn);
+        TypeSpec.Builder builder = TypeSpec.classBuilder(navSimple)
+                .addModifiers(Modifier.PUBLIC, Modifier.FINAL)
+                .addSuperinterface(ParameterizedTypeName.get(FM_EC, owner, targetType))
+                .addAnnotation(AnnotationSpec.builder(MM_GENERATED)
+                        .addMember("value", "$S", RepositoryProcessor.class.getName()).build());
+        Set<String> taken = new HashSet<>();
+        if (relationTargetResolved(targetFqn, true)) {
+            TypeElement elementElement = elements.getTypeElement(stripGenerics(targetFqn));
+            if (elementElement != null) {
+                for (Prop ep : valueObjectMetadata(elementElement).props()) {
+                    addRelationLeaf(builder, taken, origin, owner, path, "", ep);
+                }
+            }
+        }
+        builder.addMethod(overrideAccessor("name", String.class, CodeBlock.of("$S", path)));
+        builder.addMethod(overrideAccessor("elementType",
+                ParameterizedTypeName.get(ClassName.get(Class.class), targetType),
+                CodeBlock.of("$T.class", targetType)));
+        builder.addMethod(overrideAccessor("childTable", String.class,
+                CodeBlock.of("$S", elementList.childTable())));
+        builder.addMethod(overrideAccessor("parentFkColumn", String.class,
+                CodeBlock.of("$S", elementList.parentFkColumn())));
+        builder.addMethod(overrideAccessor("elementDescriptor", supplierOf(targetType),
+                relationDescriptorSupplier(targetFqn, true)));
+        units.add(new NavUnit(fqn, navFile(packageName, builder)));
+        return ClassName.get(packageName, navSimple);
+    }
+
+    /**
+     * One nav field inside an embedded navigable class. A nested {@link Prop.Embedded} recurses into
+     * its own nav class (name {@code <parentNav><PascalCase field>}, threaded through the same
+     * {@code claimed}/{@code units} context); entity/element collections inside a value object carry
+     * no column and are skipped.
+     */
+    private void addNavLeaf(TypeSpec.Builder builder, Set<String> taken, TypeElement origin,
+                            String packageName, TypeName owner, String parentPath, String parentNav,
+                            String columnPrefix, Prop p, Set<String> claimed, List<NavUnit> units) {
+        String path = parentPath + "." + p.name();
+        if (p instanceof Prop.Embedded embedded) {
+            String childNav = parentNav + capitalize(p.name());
+            ClassName nav = embeddedNav(origin, packageName, owner, childNav, path,
+                    columnPrefix + embedded.column() + "_", embedded, claimed, units);
+            if (nav != null) {
+                addNavField(builder, taken, origin, owner, childNav, p.name(), nav,
+                        CodeBlock.of("new $T()", nav));
+            }
+            return;
+        }
+        String column = memberColumn(p);
+        if (column == null) {
+            return; // EntityList / ElementList inside a value object: no column on this table.
+        }
+        addLeafField(builder, taken, origin, owner, parentNav, p.name(), path, columnPrefix + column, p);
+    }
+
+    /**
+     * One owner-typed leaf for a relation nav: name = {@code <relation>.<local path>}, column = the
+     * target's LOCAL flattened column (threaded through {@code columnPrefix} exactly as
+     * {@link DescriptorModel#columns()} flattens). Embedded targets expand recursively; collections
+     * inside the target carry no column and are skipped.
+     */
+    private void addRelationLeaf(TypeSpec.Builder builder, Set<String> taken, TypeElement origin,
+                                 TypeName owner, String parentPath, String columnPrefix, Prop p) {
+        String path = parentPath + "." + p.name();
+        // Java 17 safety: instanceof chain, never a pattern switch.
+        if (p instanceof Prop.Embedded embedded) {
+            String prefix = columnPrefix + embedded.column() + "_";
+            DescriptorModel vo = embedded.target();
+            if (vo != null && vo.id() != null) {
+                addRelationLeaf(builder, taken, origin, owner, path, prefix, vo.id());
+            }
+            if (vo != null && !vo.props().isEmpty()) {
+                for (Prop vp : vo.props()) {
+                    addRelationLeaf(builder, taken, origin, owner, path, prefix, vp);
+                }
+            } else {
+                // unresolved (or empty) cycle target: one plain leaf at the container column
+                addLeafField(builder, taken, origin, owner, parentPath, embedded.name(), path,
+                        columnPrefix + embedded.column(),
+                        new Prop.Scalar(embedded.name(), embedded.column(), null));
+            }
+            return;
+        }
+        String column = memberColumn(p);
+        if (column == null) {
+            return;
+        }
+        addLeafField(builder, taken, origin, owner, parentPath, p.name(), path,
+                columnPrefix + column, p);
+    }
+
+    /** The typed leaf attribute field: kind from the property type, diamond record initializer. */
+    private void addLeafField(TypeSpec.Builder builder, Set<String> taken, TypeElement origin,
+                              TypeName owner, String navSimple, String identifier,
+                              String path, String column, Prop p) {
+        ClassName attrType;
+        ClassName recordType;
+        // Java 17 safety: instanceof chain, never a pattern switch.
+        if (p instanceof Prop.Id) {
+            attrType = FM_ID;
+            recordType = FM_ID_RECORD;
+        } else if (p instanceof Prop.Scalar scalar) {
+            switch (metamodelKind(scalar.typeFqn())) {
+                case TEXT -> {
+                    attrType = FM_TEXT;
+                    recordType = FM_TEXT_RECORD;
+                }
+                case SORTABLE -> {
+                    attrType = FM_SORTABLE;
+                    recordType = FM_SORTABLE_RECORD;
+                }
+                default -> {
+                    attrType = FM_COLUMN;
+                    recordType = FM_COLUMN_RECORD;
+                }
+            }
+        } else {
+            attrType = FM_COLUMN; // relation/embedded foreign keys surface as plain column leaves
+            recordType = FM_COLUMN_RECORD;
+        }
+        addNavField(builder, taken, origin, owner, navSimple, identifier,
+                ParameterizedTypeName.get(attrType, owner),
+                CodeBlock.of("new $T<>($S, $S)", recordType, path, column));
+    }
+
+    private void addNavField(TypeSpec.Builder builder, Set<String> taken, TypeElement origin,
+                             TypeName owner, String navSimple, String identifier,
+                             TypeName declaredType, CodeBlock initializer) {
+        if (!taken.add(navSimple + "." + identifier)) {
+            processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
+                    "static metamodel collision in '" + navSimple + "': leaf '" + identifier
+                            + "' already emitted; this member is skipped", origin);
+            return;
+        }
+        builder.addField(FieldSpec.builder(declaredType, identifier, Modifier.PUBLIC, Modifier.FINAL)
+                .initializer(initializer).build());
+    }
+
+    private void navCollision(TypeElement origin, String fqn, String path) {
+        processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
+                "static metamodel collision on navigable member '" + path + "': type '" + fqn
+                        + "' already claimed; emitting a plain attribute record instead", origin);
+    }
+
+    private static JavaFile navFile(String packageName, TypeSpec.Builder builder) {
+        return JavaFile.builder(packageName, builder.build()).skipJavaLangImports(true).build();
+    }
+
+    private static TypeName supplierOf(TypeName targetType) {
+        return ParameterizedTypeName.get(JAVA_SUPPLIER,
+                WildcardTypeName.subtypeOf(ParameterizedTypeName.get(MD_ENTITY_DESCRIPTOR, targetType)));
+    }
+
+    private static MethodSpec overrideAccessor(String name, TypeName returnType, CodeBlock body) {
+        return MethodSpec.methodBuilder(name).addModifiers(Modifier.PUBLIC)
+                .addAnnotation(Override.class).returns(returnType)
+                .addStatement("return $L", body).build();
+    }
+
+    private static MethodSpec overrideAccessor(String name, Class<?> returnType, CodeBlock body) {
+        return overrideAccessor(name, ClassName.get(returnType), body);
+    }
+
+    private static String stripGenerics(String fqn) {
+        int angle = fqn.indexOf('<');
+        return angle < 0 ? fqn : fqn.substring(0, angle);
     }
 
     /**
@@ -706,11 +1059,11 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /**
-     * One member plus, for a resolved {@link Prop.Embedded}, its value object's flattened leaves
-     * (recursion). Column and path prefixes thread through nesting exactly as
-     * {@link DescriptorModel#columns()} flattens, so a leaf reads {@code ADDRESS_POINT_LAT =
-     * "address.point.lat"} / column {@code address_point_lat}. Duplicate identifiers keep the first
-     * member and report a NOTE (spec collision handling).
+     * One root member. Task 6: a resolved {@link Prop.Embedded} contributes NO flat leaf recursion
+     * here — its value object's leaves live on the navigable member class emitted by
+     * {@link #generateStaticMetamodel}, and the flattened dot paths stay answerable through the
+     * explicit {@code columns()} view. Duplicate identifiers keep the first member and report a NOTE
+     * (spec collision handling).
      */
     private void addMember(List<MmMember> out, Set<String> taken, Element origin,
                            Prop a, String pathPrefix, String columnPrefix) {
@@ -725,9 +1078,6 @@ public class RepositoryProcessor extends AbstractProcessor {
         String rawColumn = memberColumn(a);
         String column = rawColumn == null ? null : columnPrefix + rawColumn;
         out.add(new MmMember(path, identifier, identifier.toUpperCase(), column, a));
-        if (a instanceof Prop.Embedded embedded && embedded.target() != null) {
-            addMembers(out, taken, origin, embedded.target(), path, column + "_");
-        }
     }
 
     /** The property's own physical column (or fk column), {@code null} for a columnless container. */
@@ -882,19 +1232,27 @@ public class RepositoryProcessor extends AbstractProcessor {
      * {@code <SimpleName>Metadata} the emitter writes.
      */
     private CodeBlock relationDescriptorSupplier(String targetFqn, boolean elementCollection) {
-        if (targetFqn == null) {
+        if (!relationTargetResolved(targetFqn, elementCollection)) {
             return CodeBlock.of("() -> null");
         }
-        int angle = targetFqn.indexOf('<');
-        String rawName = angle < 0 ? targetFqn : targetFqn.substring(0, angle);
+        return CodeBlock.of("() -> $T.INSTANCE", embeddedMetadataName(stripGenerics(targetFqn)));
+    }
+
+    /**
+     * Whether {@link #relationDescriptorSupplier} resolves to a {@code <Target>Metadata.INSTANCE}: the
+     * same managed-target / mapper-gate predicate the descriptor supplier and the navigable member
+     * classes (Task 6) share, so a nav's leaf fields exist exactly when its supplier is non-null.
+     */
+    private boolean relationTargetResolved(String targetFqn, boolean elementCollection) {
+        if (targetFqn == null) {
+            return false;
+        }
+        String rawName = stripGenerics(targetFqn);
         TypeElement targetElement = elements.getTypeElement(rawName);
         if (targetElement == null || !canGenerateRowMapper(entityModel(targetElement))) {
-            return CodeBlock.of("() -> null");
+            return false;
         }
-        if (!elementCollection && !managedEntities.contains(rawName)) {
-            return CodeBlock.of("() -> null");
-        }
-        return CodeBlock.of("() -> $T.INSTANCE", embeddedMetadataName(rawName));
+        return elementCollection || managedEntities.contains(rawName);
     }
 
     private CodeBlock explicitTypeArgs(TypeName owner, MmMember m) {
@@ -917,17 +1275,26 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /**
-     * The {@code <VO>Metadata} type for a value-object FQN: the registered name from the embedded
-     * tree walk when available, otherwise a best-effort split of the FQN (default-package safe).
+     * The {@code <VO>Metadata} type for a value-object (or relation-target) FQN: the registered name
+     * from the embedded tree walk when available. The fallback resolves the element so a NESTED value
+     * object ({@code pkg.Cfg.Geo}) maps to the TOP-LEVEL {@code pkg.GeoMetadata} the emitter actually
+     * writes — the old last-dot split produced the member-class name {@code pkg.Cfg.GeoMetadata},
+     * which never exists (parked Task 3 bug, re-checked and pinned in Task 6).
      */
     private ClassName embeddedMetadataName(String voFqn) {
         ClassName known = metadataTypes.get(voFqn);
         if (known != null) {
             return known;
         }
-        int dot = voFqn.lastIndexOf('.');
-        String pkg = dot < 0 ? "" : voFqn.substring(0, dot);
-        return ClassName.get(pkg, voFqn.substring(dot + 1) + "Metadata");
+        String rawName = stripGenerics(voFqn);
+        TypeElement element = elements.getTypeElement(rawName);
+        if (element != null) {
+            return ClassName.get(elements.getPackageOf(element).getQualifiedName().toString(),
+                    element.getSimpleName() + "Metadata");
+        }
+        int dot = rawName.lastIndexOf('.');
+        String pkg = dot < 0 ? "" : rawName.substring(0, dot);
+        return ClassName.get(pkg, rawName.substring(dot + 1) + "Metadata");
     }
 
     /** Emits {@code <Entity>RowMapper implements io.github.fludakit.jdbc.RowMapper<Entity>}; reflection-free. */

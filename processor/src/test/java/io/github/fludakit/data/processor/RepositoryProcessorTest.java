@@ -472,22 +472,39 @@ class RepositoryProcessorTest {
 
         compile(sourceDir, classesDir, generatedDir, "Author.java", "Book.java", "Books.java");
 
-        String md = Files.readString(generatedDir.resolve("meta/BookMetadata.java"));
+        String md = Files.readString(generatedDir.resolve("meta/BookMetadata.java")).replaceAll("\\s+", " ");
         assertTrue(md.contains("implements EntityDescriptor<Book>"),
                 "generated metadata must implement the generic interface:" + System.lineSeparator() + md);
         assertTrue(md.contains("import io.github.fludakit.data.metadata.EntityDescriptor;"), md);
         assertTrue(md.contains("public static final BookMetadata INSTANCE"), md);
         // Decision 1: the descriptor returns the _Book metamodel field instances, not literals,
-        // and the association target is a Class literal on the typed FK field.
+        // and the association is a navigable member class implementing the FK attribute interface.
         assertTrue(md.contains("_Book.author"),
-                "@Association must be exposed through the FK-typed metamodel field:" + System.lineSeparator() + md);
+                "@Association must be exposed through the navigable metamodel member:" + System.lineSeparator() + md);
         String mm = Files.readString(generatedDir.resolve("meta/_Book.java")).replaceAll("\\s+", "");
-        assertTrue(mm.contains("ForeignKeyAttribute<Book,Author>author="
-                        + "newForeignKeyAttributeRecord<>(AUTHOR,\"author_id\",Author.class,()->null);"),
-                "association target must be a Class literal, not an FQN string:" + System.lineSeparator() + mm);
+        assertTrue(mm.contains("_BookAuthorauthor=new_BookAuthor();"),
+                "the association member must instantiate its nav class:" + System.lineSeparator() + mm);
+        // The unmapped target (meta.Author has no repository) still gets the nav class with the
+        // container methods, a () -> null supplier and NO leaf fields (Task 6 gate degradation).
+        String nav = Files.readString(generatedDir.resolve("meta/_BookAuthor.java")).replaceAll("\\s+", "");
+        assertTrue(nav.contains("publicfinalclass_BookAuthorimplementsForeignKeyAttribute<Book,Author>"), nav);
+        assertTrue(nav.contains("publicStringname(){return\"author\";}"), nav);
+        assertTrue(nav.contains("publicStringcolumn(){return\"author_id\";}"), nav);
+        assertTrue(nav.contains("publicClass<Author>target(){returnAuthor.class;}"), nav);
+        assertTrue(nav.contains("targetDescriptor(){return()->null;}"), nav);
+        assertTrue(!nav.contains("IdAttributeRecord"),
+                "an unmapped relation target must carry no leaf fields:" + System.lineSeparator() + nav);
         // Plan A column constants are preserved:
         assertTrue(md.contains("public static final String TABLE_NAME = \"book\";"), md);
         assertTrue(md.contains("public static final String TITLE = \"title\";"), md);
+        // The descriptor's column view is generated EXPLICITLY from the compile-time model in
+        // declaration order (the derived EntityDescriptor.columns() default is gone): 2-arg refs.
+        String mflat = Files.readString(generatedDir.resolve("meta/BookMetadata.java")).replaceAll("\\s+", "");
+        assertTrue(mflat.contains("publicList<ColumnRef>columns(){returnList.of("
+                        + "newColumnRef(\"id\",\"id\"),"
+                        + "newColumnRef(\"title\",\"title\"),"
+                        + "newColumnRef(\"author_id\",\"author\"));}"),
+                "columns() must be emitted explicitly from the model:" + System.lineSeparator() + mflat);
         // The id() accessor returns the typed metamodel id field (ruling 8).
         assertTrue(md.contains("public IdAttribute<Book> id()"), md);
         assertTrue(md.contains("return _Book.id;"), "id() must expose the ID attribute:" + System.lineSeparator() + md);
@@ -577,21 +594,68 @@ class RepositoryProcessorTest {
         assertTrue(vmd.contains("public String tableName()") && vmd.contains("return null;"),
                 "value objects report a null table name:" + System.lineSeparator() + vmd);
         // A VO has no metamodel, so its members are fresh attribute-record literals (Decision 1's
-        // fallback mode) and the id accessor is a typed null.
+        // fallback mode) and the id accessor is a typed null. The list carries the ROOT members only:
+        // the nested EMBEDDED container appears once and its leaves are no longer flat attributes.
         assertTrue(vmd.contains("public IdAttribute<Address> id()") && vmd.contains("return null;"),
                 "value objects report a null id:" + System.lineSeparator() + vmd);
         assertTrue(vmd.contains("public static final String CITY = \"city\";"), vmd);
+        String vflat = Files.readString(voMetadata).replaceAll("\\s+", "");
+        assertTrue(vflat.contains("attributes(){returnList.of("
+                        + "newTextColumnAttributeRecord<Address>(\"city\",\"city\"),"
+                        + "newEmbeddedAttributeRecord<Address,GeoPoint>(\"point\",GeoPointMetadata.INSTANCE));}"),
+                "VO attributes() must list root members once, without flattened leaves:"
+                        + System.lineSeparator() + vflat);
         // The nested EMBEDDED attribute references the innermost value object's INSTANCE ...
         assertTrue(vmd.contains("GeoPointMetadata.INSTANCE"),
                 "embedded attribute must reference the nested value object's INSTANCE:" + System.lineSeparator() + vmd);
-        assertTrue(vmd.contains("new EmbeddedAttributeRecord<Address,GeoPoint>(\"point\", GeoPointMetadata.INSTANCE)"),
-                "the embedded literal must carry the VO type arguments:" + System.lineSeparator() + vmd);
+        assertTrue(vflat.contains("newEmbeddedAttributeRecord<Address,GeoPoint>(\"point\",GeoPointMetadata.INSTANCE)"),
+                "the embedded literal must carry the VO type arguments:" + System.lineSeparator() + vflat);
+        // ... and the VO's column view is emitted explicitly from the flattened model.
+        assertTrue(vflat.contains("publicList<ColumnRef>columns(){returnList.of("
+                        + "newColumnRef(\"city\",\"city\"),"
+                        + "newColumnRef(\"point_lat\",\"point.lat\"),"
+                        + "newColumnRef(\"point_lng\",\"point.lng\"));}"),
+                "VO columns() must be generated explicitly in declaration order:" + System.lineSeparator() + vflat);
         // ... which must itself have been generated (transitive EMBEDDED tree walk).
         Path innerMetadata = generatedDir.resolve("emb/GeoPointMetadata.java");
         assertTrue(Files.exists(innerMetadata), "Expected generated " + innerMetadata);
         String imd = Files.readString(innerMetadata).replaceAll("\\s+", " ");
         assertTrue(imd.contains("public static final String LAT = \"lat\";"), imd);
         assertTrue(imd.contains("new SortableColumnAttributeRecord<GeoPoint>(\"lat\", \"lat\")"), imd);
+
+        // The owner's descriptor lists the root metamodel members (scalar + embedded nav) once, and
+        // the navigable member classes carry the flattened leaves as owner-typed fields.
+        String cmd = Files.readString(generatedDir.resolve("emb/ContactMetadata.java")).replaceAll("\\s+", " ");
+        assertTrue(cmd.contains("return List.of(_Contact.name, _Contact.address);"),
+                "attributes() must expose containers once, no flattened leaves:" + System.lineSeparator() + cmd);
+        String cflat = Files.readString(generatedDir.resolve("emb/ContactMetadata.java")).replaceAll("\\s+", "");
+        assertTrue(cflat.contains("publicList<ColumnRef>columns(){returnList.of("
+                        + "newColumnRef(\"id\",\"id\"),"
+                        + "newColumnRef(\"name\",\"name\"),"
+                        + "newColumnRef(\"address_city\",\"address.city\"),"
+                        + "newColumnRef(\"address_point_lat\",\"address.point.lat\"),"
+                        + "newColumnRef(\"address_point_lng\",\"address.point.lng\"));}"),
+                "owner columns() must flatten the embedded chain:" + System.lineSeparator() + cflat);
+        String addrNav = Files.readString(generatedDir.resolve("emb/_ContactAddress.java")).replaceAll("\\s+", "");
+        assertTrue(addrNav.contains("publicfinalclass_ContactAddressimplementsEmbeddedAttribute<Contact,Address>"),
+                addrNav);
+        assertTrue(addrNav.contains(
+                "TextColumnAttribute<Contact>city=newTextColumnAttributeRecord<>(\"address.city\",\"address_city\");"),
+                "embedded leaf must be an owner-typed nav field:" + System.lineSeparator() + addrNav);
+        assertTrue(addrNav.contains("_ContactAddressPointpoint=new_ContactAddressPoint();"),
+                "nested embedded must recurse into its own nav class:" + System.lineSeparator() + addrNav);
+        assertTrue(addrNav.contains("publicStringname(){return\"address\";}")
+                        && addrNav.contains("publicEntityDescriptor<Address>embedded(){returnAddressMetadata.INSTANCE;}"),
+                "the nav must implement the container contract:" + System.lineSeparator() + addrNav);
+        String pointNav = Files.readString(generatedDir.resolve("emb/_ContactAddressPoint.java")).replaceAll("\\s+", "");
+        assertTrue(pointNav.contains("publicfinalclass_ContactAddressPointimplementsEmbeddedAttribute<Contact,GeoPoint>"),
+                pointNav);
+        assertTrue(pointNav.contains("SortableColumnAttribute<Contact>lat="
+                        + "newSortableColumnAttributeRecord<>(\"address.point.lat\",\"address_point_lat\");"),
+                "nested leaf keeps the full owner-rooted dot path and chained column:"
+                        + System.lineSeparator() + pointNav);
+        assertTrue(pointNav.contains("publicStringname(){return\"address.point\";}"), pointNav);
+        assertTrue(pointNav.contains("embedded(){returnGeoPointMetadata.INSTANCE;}"), pointNav);
     }
 
     @Test
@@ -1096,21 +1160,45 @@ class RepositoryProcessorTest {
         compile(sourceDir, classesDir, generatedDir,
                 "Child.java", "Parent.java", "ParentRepository.java", "ChildRepository.java");
 
-        // Flatten JavaPoet's soft wraps so the positional pins hold verbatim: the FK column and the
-        // resolved OTM inverse now live in the attribute RECORD ARGUMENTS on _Parent (Decision 1),
-        // so ONLY an exact metamodel-literal assertion detects a swapped column/target/inverse
-        // argument (M-6).
+        // Flatten JavaPoet's soft wraps so the positional pins hold verbatim: relations are now
+        // NAVIGABLE member classes whose leaf fields and container contract carry the fk column and
+        // the resolved inverse, so ONLY an exact nav assertion detects a swapped argument (M-6).
         String pm = Files.readString(generatedDir.resolve("rel/_Parent.java")).replaceAll("\\s+", "");
-        assertTrue(pm.contains("ForeignKeyAttribute<Parent,Child>primary="
-                        + "newForeignKeyAttributeRecord<>(PRIMARY,\"primary_id\",Child.class,()->ChildMetadata.INSTANCE);"),
-                "un-annotated entity field must be a FK attribute with an fk column:" + System.lineSeparator() + pm);
-        assertTrue(pm.contains("OneToManyAttribute<Parent,Child>children="
-                        + "newOneToManyAttributeRecord<>(CHILDREN,Child.class,\"owner\",()->ChildMetadata.INSTANCE);"),
-                "entity list must be ONE_TO_MANY with the resolved inverse name:" + System.lineSeparator() + pm);
+        assertTrue(pm.contains("_ParentPrimaryprimary=new_ParentPrimary();"),
+                "the FK member must instantiate its nav class:" + System.lineSeparator() + pm);
+        assertTrue(pm.contains("_ParentChildrenchildren=new_ParentChildren();"),
+                "the one-to-many member must instantiate its nav class:" + System.lineSeparator() + pm);
+
+        String fkNav = Files.readString(generatedDir.resolve("rel/_ParentPrimary.java")).replaceAll("\\s+", "");
+        assertTrue(fkNav.contains("publicfinalclass_ParentPrimaryimplementsForeignKeyAttribute<Parent,Child>"), fkNav);
+        assertTrue(fkNav.contains("IdAttribute<Parent>id=newIdAttributeRecord<>(\"primary.id\",\"id\");"),
+                "the managed target's id must surface as an owner-typed leaf field:" + System.lineSeparator() + fkNav);
+        assertTrue(fkNav.contains("ColumnAttribute<Parent>owner=newColumnAttributeRecord<>(\"primary.owner\",\"owner_id\");"),
+                "the target's own FK column must surface as a plain leaf:" + System.lineSeparator() + fkNav);
+        assertTrue(fkNav.contains("publicStringcolumn(){return\"primary_id\";}"), fkNav);
+        assertTrue(fkNav.contains("targetDescriptor(){return()->ChildMetadata.INSTANCE;}"),
+                "a managed target keeps the supplier form:" + System.lineSeparator() + fkNav);
+
+        String otmNav = Files.readString(generatedDir.resolve("rel/_ParentChildren.java")).replaceAll("\\s+", "");
+        assertTrue(otmNav.contains("publicfinalclass_ParentChildrenimplementsOneToManyAttribute<Parent,Child>"), otmNav);
+        assertTrue(otmNav.contains("IdAttribute<Parent>id=newIdAttributeRecord<>(\"children.id\",\"id\");"), otmNav);
+        assertTrue(otmNav.contains("publicStringinverseName(){return\"owner\";}"),
+                "the resolved inverse must live on the nav container:" + System.lineSeparator() + otmNav);
+        assertTrue(otmNav.contains("targetDescriptor(){return()->ChildMetadata.INSTANCE;}"), otmNav);
+        // childFkColumn() stays the interface default derived from the inverse (snake("owner") + "_id").
+        assertTrue(!otmNav.contains("childFkColumn"),
+                "the nav must not override the derived childFkColumn() default:" + System.lineSeparator() + otmNav);
 
         String md = Files.readString(generatedDir.resolve("rel/ParentMetadata.java")).replaceAll("\\s+", " ");
         assertTrue(md.contains("return List.of(_Parent.name, _Parent.primary, _Parent.children);"),
                 "attributes() must return the metamodel field instances, not literals:" + System.lineSeparator() + md);
+        String mflat = Files.readString(generatedDir.resolve("rel/ParentMetadata.java")).replaceAll("\\s+", "");
+        assertTrue(mflat.contains("publicList<ColumnRef>columns(){returnList.of("
+                        + "newColumnRef(\"id\",\"id\"),"
+                        + "newColumnRef(\"name\",\"name\"),"
+                        + "newColumnRef(\"primary_id\",\"primary\"));}"),
+                "columns() lists the local table's columns; the one-to-many contributes none:"
+                        + System.lineSeparator() + mflat);
         assertTrue(md.contains("public static final String PRIMARY = \"primary_id\";"),
                 "the fk column constant must be emitted from the Property list:" + System.lineSeparator() + md);
         assertTrue(!md.contains("public static final String CHILDREN"),
@@ -1466,9 +1554,13 @@ class RepositoryProcessorTest {
         assertTrue(mm.contains("StringTITLE=\"title\";"), mm);
         assertTrue(mm.contains("IdAttribute<Book>id=newIdAttributeRecord<>(ID,\"id\");"), mm);
         assertTrue(mm.contains("TextColumnAttribute<Book>title=newTextColumnAttributeRecord<>(TITLE,\"title\");"), mm);
-        // The metamodel is additive: the internal descriptor class remains.
+        // The metamodel is additive: the internal descriptor class remains, now with the explicit
+        // column view generated from the compile-time model (the derived default is gone).
         assertTrue(Files.exists(generatedDir.resolve("mmbook/BookMetadata.java")),
                 "the internal <Entity>Metadata must still be generated");
+        String mdb = Files.readString(generatedDir.resolve("mmbook/BookMetadata.java")).replaceAll("\\s+", "");
+        assertTrue(mdb.contains("publicList<ColumnRef>columns(){returnList.of("
+                        + "newColumnRef(\"id\",\"id\"),newColumnRef(\"title\",\"title\"));}"), mdb);
     }
 
     @Test
@@ -1531,28 +1623,114 @@ class RepositoryProcessorTest {
                 "Profile.java", "Address.java", "GeoPoint.java", "ProfileRepository.java");
 
         String mm = Files.readString(generatedDir.resolve("mmgp/_Profile.java")).replaceAll("\\s+", "");
+        assertTrue(mm.contains("StringID=\"id\";"), mm);
         assertTrue(mm.contains("StringADDRESS=\"address\";"), mm);
-        assertTrue(mm.contains("StringADDRESS_CITY=\"address.city\";"), mm);
-        assertTrue(mm.contains("StringADDRESS_ZIP=\"address.zip\";"), mm);
-        assertTrue(mm.contains("StringADDRESS_POINT=\"address.point\";"), mm);
-        assertTrue(mm.contains("StringADDRESS_POINT_LAT=\"address.point.lat\";"), mm);
-        assertTrue(mm.contains("StringADDRESS_POINT_LNG=\"address.point.lng\";"), mm);
-        assertTrue(mm.contains("EmbeddedAttribute<Profile,Address>address="
-                + "newEmbeddedAttributeRecord<>(ADDRESS,AddressMetadata.INSTANCE);"), mm);
-        assertTrue(mm.contains("TextColumnAttribute<Profile>address_city="
-                + "newTextColumnAttributeRecord<>(ADDRESS_CITY,\"address_city\");"), mm);
-        assertTrue(mm.contains("SortableColumnAttribute<Profile>address_zip="
-                + "newSortableColumnAttributeRecord<>(ADDRESS_ZIP,\"address_zip\");"), mm);
-        assertTrue(mm.contains("EmbeddedAttribute<Profile,GeoPoint>address_point="
-                + "newEmbeddedAttributeRecord<>(ADDRESS_POINT,GeoPointMetadata.INSTANCE);"), mm);
-        assertTrue(mm.contains("SortableColumnAttribute<Profile>address_point_lat="
-                + "newSortableColumnAttributeRecord<>(ADDRESS_POINT_LAT,\"address_point_lat\");"), mm);
+        // The embedded chain no longer flattens into the root interface: no dotted constants and no
+        // leaf fields survive there — the leaves live in the navigable member classes.
+        assertTrue(!mm.contains("StringADDRESS_CITY"), mm);
+        assertTrue(!mm.contains("StringADDRESS_POINT_LAT"), mm);
+        assertTrue(mm.contains("_ProfileAddressaddress=new_ProfileAddress();"), mm);
         assertTrue(mm.contains("IdAttribute<Profile>id=newIdAttributeRecord<>(ID,\"id\");"), mm);
+
+        String addr = Files.readString(generatedDir.resolve("mmgp/_ProfileAddress.java")).replaceAll("\\s+", "");
+        assertTrue(addr.contains("publicfinalclass_ProfileAddressimplementsEmbeddedAttribute<Profile,Address>"), addr);
+        assertTrue(addr.contains("TextColumnAttribute<Profile>city="
+                        + "newTextColumnAttributeRecord<>(\"address.city\",\"address_city\");"),
+                "embedded leaf keeps the dot-path name and flattened column:" + System.lineSeparator() + addr);
+        assertTrue(addr.contains("SortableColumnAttribute<Profile>zip="
+                        + "newSortableColumnAttributeRecord<>(\"address.zip\",\"address_zip\");"), addr);
+        assertTrue(addr.contains("_ProfileAddressPointpoint=new_ProfileAddressPoint();"),
+                "nested embedded recurses into its own nav class instead of flat leaves:" + System.lineSeparator() + addr);
+        assertTrue(addr.contains("publicStringname(){return\"address\";}"), addr);
+        assertTrue(addr.contains("publicEntityDescriptor<Address>embedded(){returnAddressMetadata.INSTANCE;}"), addr);
+
+        String point = Files.readString(generatedDir.resolve("mmgp/_ProfileAddressPoint.java")).replaceAll("\\s+", "");
+        assertTrue(point.contains("publicfinalclass_ProfileAddressPointimplementsEmbeddedAttribute<Profile,GeoPoint>"),
+                point);
+        assertTrue(point.contains("SortableColumnAttribute<Profile>lat="
+                        + "newSortableColumnAttributeRecord<>(\"address.point.lat\",\"address_point_lat\");"), point);
+        assertTrue(point.contains("SortableColumnAttribute<Profile>lng="
+                        + "newSortableColumnAttributeRecord<>(\"address.point.lng\",\"address_point_lng\");"), point);
+        assertTrue(point.contains("publicStringname(){return\"address.point\";}"), point);
+        assertTrue(point.contains("embedded(){returnGeoPointMetadata.INSTANCE;}"), point);
         // Value objects never get their own metamodel classes (aggregate roots only).
         assertTrue(!Files.exists(generatedDir.resolve("mmgp/_Address.java")),
                 "no _VO class for a value object");
         assertTrue(!Files.exists(generatedDir.resolve("mmgp/_GeoPoint.java")),
                 "no _VO class for a nested value object");
+
+        // The owner descriptor: root members once, explicit flattened columns in legacy order.
+        String cmd = Files.readString(generatedDir.resolve("mmgp/ProfileMetadata.java")).replaceAll("\\s+", " ");
+        assertTrue(cmd.contains("return List.of(_Profile.address);"), cmd);
+        String cmdFlat = Files.readString(generatedDir.resolve("mmgp/ProfileMetadata.java")).replaceAll("\\s+", "");
+        assertTrue(cmdFlat.contains("publicList<ColumnRef>columns(){returnList.of("
+                        + "newColumnRef(\"id\",\"id\"),"
+                        + "newColumnRef(\"address_city\",\"address.city\"),"
+                        + "newColumnRef(\"address_zip\",\"address.zip\"),"
+                        + "newColumnRef(\"address_point_lat\",\"address.point.lat\"),"
+                        + "newColumnRef(\"address_point_lng\",\"address.point.lng\"));}"), cmdFlat);
+    }
+
+    @Test
+    void nestedValueObjectNavReferencesTopLevelMetadataSimpleName() throws Exception {
+        // Task 6 re-check of the parked embeddedMetadataName bug: a @ValueObject declared as a nested
+        // class has canonical FQN "pkg.Cfg.Geo", but its metadata is emitted as the TOP-LEVEL
+        // <SimpleName>Metadata (pkg.GeoMetadata). The naive last-dot FQN split rendered
+        // pkg.Cfg.GeoMetadata — a member class that never exists, breaking compilation of the nav.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/nestvo"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-nestvo"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-nestvo"));
+
+        Files.writeString(sourceDir.resolve("Cfg.java"), """
+                package nestvo;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class Cfg {
+                    @ValueObject
+                    public static class Geo {
+                        String tag;
+                        public String getTag() { return tag; }
+                        public void setTag(String tag) { this.tag = tag; }
+                    }
+                    Geo geo;
+                    public Geo getGeo() { return geo; }
+                    public void setGeo(Geo geo) { this.geo = geo; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Holder.java"), """
+                package nestvo;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Holder {
+                    @Identity Long id;
+                    Cfg cfg;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public Cfg getCfg() { return cfg; }
+                    public void setCfg(Cfg cfg) { this.cfg = cfg; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Holders.java"), """
+                package nestvo;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository interface Holders extends CrudRepository<Holder, Long> { }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Cfg.java", "Holder.java", "Holders.java");
+
+        Path geoMetadata = generatedDir.resolve("nestvo/GeoMetadata.java");
+        assertTrue(Files.exists(geoMetadata), "nested VO metadata is a top-level <SimpleName>Metadata: " + geoMetadata);
+        String cfgNav = Files.readString(generatedDir.resolve("nestvo/_HolderCfg.java")).replaceAll("\\s+", "");
+        assertTrue(cfgNav.contains("_HolderCfgGeogeo=new_HolderCfgGeo();"), cfgNav);
+        String geoNav = Files.readString(generatedDir.resolve("nestvo/_HolderCfgGeo.java")).replaceAll("\\s+", "");
+        assertTrue(geoNav.contains("publicfinalclass_HolderCfgGeoimplementsEmbeddedAttribute<Holder,Cfg.Geo>"), geoNav);
+        assertTrue(geoNav.contains("embedded(){returnGeoMetadata.INSTANCE;}"),
+                "the nav must reference the top-level GeoMetadata, not a Cfg.GeoMember:"
+                        + System.lineSeparator() + geoNav);
+        assertTrue(!geoNav.contains("Cfg.GeoMetadata"),
+                "no qualified member-class metadata reference may be emitted:" + System.lineSeparator() + geoNav);
     }
 
     @Test
@@ -1615,18 +1793,33 @@ class RepositoryProcessorTest {
         compile(sourceDir, classesDir, generatedDir,
                 "Parent.java", "Child.java", "ParentRepository.java", "ChildRepository.java");
 
-        // Relationship properties surface as typed attribute fields, keyed by ATTRIBUTE name.
+        // Relationship properties surface as navigable member classes; the managed targets carry
+        // owner-typed leaf fields for their flattened local paths plus the container contract.
         String pm = Files.readString(generatedDir.resolve("mmrel/_Parent.java")).replaceAll("\\s+", "");
         assertTrue(pm.contains("StringCHILDREN=\"children\";"), pm);
-        assertTrue(pm.contains("OneToManyAttribute<Parent,Child>children="
-                + "newOneToManyAttributeRecord<>(CHILDREN,Child.class,\"owner\",()->ChildMetadata.INSTANCE);"), pm);
+        assertTrue(pm.contains("_ParentChildrenchildren=new_ParentChildren();"), pm);
         assertTrue(pm.contains("StringPRIMARY=\"primary\";"), pm);
-        assertTrue(pm.contains("ForeignKeyAttribute<Parent,Child>primary="
-                + "newForeignKeyAttributeRecord<>(PRIMARY,\"primary_id\",Child.class,()->ChildMetadata.INSTANCE);"), pm);
+        assertTrue(pm.contains("_ParentPrimaryprimary=new_ParentPrimary();"), pm);
         assertTrue(pm.contains("TextColumnAttribute<Parent>name=newTextColumnAttributeRecord<>(NAME,\"name\");"), pm);
+        String fkNav = Files.readString(generatedDir.resolve("mmrel/_ParentPrimary.java")).replaceAll("\\s+", "");
+        assertTrue(fkNav.contains("publicfinalclass_ParentPrimaryimplementsForeignKeyAttribute<Parent,Child>"), fkNav);
+        assertTrue(fkNav.contains("IdAttribute<Parent>id=newIdAttributeRecord<>(\"primary.id\",\"id\");"),
+                "the child's id must be a nav leaf named by its owner-rooted path:" + System.lineSeparator() + fkNav);
+        assertTrue(fkNav.contains("targetDescriptor(){return()->ChildMetadata.INSTANCE;}"), fkNav);
+        String otmNav = Files.readString(generatedDir.resolve("mmrel/_ParentChildren.java")).replaceAll("\\s+", "");
+        assertTrue(otmNav.contains("publicfinalclass_ParentChildrenimplementsOneToManyAttribute<Parent,Child>"), otmNav);
+        assertTrue(otmNav.contains("ColumnAttribute<Parent>owner=newColumnAttributeRecord<>(\"children.owner\",\"owner_id\");"),
+                "the child's own FK column must flatten into the collection nav:" + System.lineSeparator() + otmNav);
+        assertTrue(otmNav.contains("publicStringinverseName(){return\"owner\";}"), otmNav);
         String cm = Files.readString(generatedDir.resolve("mmrel/_Child.java")).replaceAll("\\s+", "");
-        assertTrue(cm.contains("ForeignKeyAttribute<Child,Parent>owner="
-                + "newForeignKeyAttributeRecord<>(OWNER,\"owner_id\",Parent.class,()->ParentMetadata.INSTANCE);"), cm);
+        assertTrue(cm.contains("_ChildOwnerowner=new_ChildOwner();"), cm);
+        String ownerNav = Files.readString(generatedDir.resolve("mmrel/_ChildOwner.java")).replaceAll("\\s+", "");
+        assertTrue(ownerNav.contains("publicfinalclass_ChildOwnerimplementsForeignKeyAttribute<Child,Parent>"), ownerNav);
+        assertTrue(ownerNav.contains("TextColumnAttribute<Child>name="
+                        + "newTextColumnAttributeRecord<>(\"owner.name\",\"name\");"), ownerNav);
+        assertTrue(ownerNav.contains("ColumnAttribute<Child>primary="
+                        + "newColumnAttributeRecord<>(\"owner.primary\",\"primary_id\");"), ownerNav);
+        assertTrue(ownerNav.contains("targetDescriptor(){return()->ParentMetadata.INSTANCE;}"), ownerNav);
 
         // The runtime sort switch resolves dot paths to flattened columns and carries no
         // EMBEDDED-container case.
@@ -1748,12 +1941,20 @@ class RepositoryProcessorTest {
                 "no hydration umbrella when the only relationship is a non-composing association:"
                         + System.lineSeparator() + impl);
 
-        // The metamodel still classifies owner as a foreign-key Reference (an association, not embedded).
+        // The metamodel still classifies owner as a foreign-key Reference (an association, not
+        // embedded): a navigable member class implementing the FK contract with the managed target's
+        // leaf fields and supplier-form descriptor.
         String mm = Files.readString(generatedDir.resolve("sbr/_TeamWithBareRef.java")).replaceAll("\\s+", "");
-        assertTrue(mm.contains("ForeignKeyAttribute<TeamWithBareRef,Owner>owner="
-                        + "newForeignKeyAttributeRecord<>(OWNER,\"owner_id\",Owner.class,()->OwnerMetadata.INSTANCE);"),
+        assertTrue(mm.contains("_TeamWithBareRefOwnerowner=new_TeamWithBareRefOwner();"),
                 "a bare entity field on @Entity must classify as an FK Reference (association):"
                         + System.lineSeparator() + mm);
+        String ownerNav = Files.readString(generatedDir.resolve("sbr/_TeamWithBareRefOwner.java")).replaceAll("\\s+", "");
+        assertTrue(ownerNav.contains(
+                "publicfinalclass_TeamWithBareRefOwnerimplementsForeignKeyAttribute<TeamWithBareRef,Owner>"), ownerNav);
+        assertTrue(ownerNav.contains("TextColumnAttribute<TeamWithBareRef>label="
+                        + "newTextColumnAttributeRecord<>(\"owner.label\",\"label\");"), ownerNav);
+        assertTrue(ownerNav.contains("publicStringcolumn(){return\"owner_id\";}"), ownerNav);
+        assertTrue(ownerNav.contains("targetDescriptor(){return()->OwnerMetadata.INSTANCE;}"), ownerNav);
 
         // The composition-gated managed-target NOTE is only emitted for composing references; an
         // association is skipped entirely, so no relationship NOTE appears for owner.

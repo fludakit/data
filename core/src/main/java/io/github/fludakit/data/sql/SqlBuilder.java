@@ -88,36 +88,6 @@ public final class SqlBuilder {
     }
 
     /**
-     * Orders by already-resolved column refs, each qualified via {@link #qualify(ColumnRef)}.
-     * Refs must carry a join or an explicit table; fully-local refs need the {@code rootTable}
-     * overload. Empty input renders {@code ""}.
-     */
-    public String orderBy(List<ColumnRef> resolvedSortRefs) {
-        if (resolvedSortRefs.isEmpty()) return "";
-        return " ORDER BY " + resolvedSortRefs.stream()
-                .map(SqlBuilder::qualify)
-                .collect(Collectors.joining(", "));
-    }
-
-    /** As {@link #orderBy(List)} with {@code rootTable} as the qualifier for fully-local refs. */
-    public String orderBy(List<ColumnRef> resolvedSortRefs, String rootTable) {
-        if (resolvedSortRefs.isEmpty()) return "";
-        return " ORDER BY " + resolvedSortRefs.stream()
-                .map(ref -> qualify(ref, rootTable))
-                .collect(Collectors.joining(", "));
-    }
-
-    /**
-     * Qualifies a ref's leaf column: the LAST join's alias when the path contributes joins
-     * (per the {@link ColumnRef} contract), else the explicit owning table. Fully-local refs
-     * ({@code table == null}, no joins) have no root here and are rejected; use
-     * {@link #qualify(ColumnRef, String)}.
-     */
-    public static String qualify(ColumnRef ref) {
-        return qualify(ref, null);
-    }
-
-    /**
      * Qualifies a ref's leaf column: last-join alias when joins are present, else
      * {@code ref.table()} when non-null, else {@code rootTable}.
      */
@@ -137,30 +107,34 @@ public final class SqlBuilder {
     }
 
     /**
-     * The deduplicated {@code LEFT JOIN} chain these refs require, in first-appearance order by
-     * alias (first occurrence wins). Each fragment is
+     * The deduplicated {@code LEFT JOIN} chain these refs require. Joins are chained PER PATH:
+     * within one ref's joins list, the first join is qualified by the root table and every later
+     * join by the previous join's alias IN THAT SAME ref. Across refs, joins are deduplicated by
+     * alias (first appearance wins) and emitted in first-appearance order, so a shared head join
+     * keeps a single fragment while each ref's divergent tail chains off its own predecessor.
+     * Each fragment is
      * {@code  LEFT JOIN "<table>" AS "<alias>" ON <qualifier>."<parentColumn>" = "<alias>"."<childColumn>";}
-     * the first qualifier is the root table, every later qualifier is the previous fragment's
-     * alias — regardless of which ref contributed the join. Returns {@code ""} when no ref
-     * carries a join.
+     * Returns {@code ""} when no ref carries a join.
      */
     public static String joinClause(EntitySchema md, List<ColumnRef> refs) {
         Map<String, JoinRef> byAlias = new LinkedHashMap<>();
-        for (ColumnRef ref : refs) {
-            for (JoinRef join : ref.joins()) {
-                byAlias.putIfAbsent(join.alias(), join);
-            }
-        }
-        if (byAlias.isEmpty()) return "";
         StringBuilder sb = new StringBuilder();
-        String qualifier = Names.quote(md.tableName());
-        for (JoinRef join : byAlias.values()) {
-            String alias = Names.quote(join.alias());
-            sb.append(" LEFT JOIN ").append(Names.quote(join.table()))
-                    .append(" AS ").append(alias)
-                    .append(" ON ").append(qualifier).append('.').append(Names.quote(join.parentColumn()))
-                    .append(" = ").append(alias).append('.').append(Names.quote(join.childColumn()));
-            qualifier = alias;
+        for (ColumnRef ref : refs) {
+            String previous = null;
+            for (JoinRef join : ref.joins()) {
+                if (byAlias.containsKey(join.alias())) {
+                    previous = join.alias();
+                    continue;
+                }
+                byAlias.put(join.alias(), join);
+                String qualifier = previous == null ? Names.quote(md.tableName()) : Names.quote(previous);
+                previous = join.alias();
+                String alias = Names.quote(join.alias());
+                sb.append(" LEFT JOIN ").append(Names.quote(join.table()))
+                        .append(" AS ").append(alias)
+                        .append(" ON ").append(qualifier).append('.').append(Names.quote(join.parentColumn()))
+                        .append(" = ").append(alias).append('.').append(Names.quote(join.childColumn()));
+            }
         }
         return sb.toString();
     }
@@ -202,7 +176,7 @@ public final class SqlBuilder {
     public static String render(Predicate p, ColumnRef ref) {
         String col = ref.joins().isEmpty() && ref.table() == null
                 ? Names.quote(ref.column())
-                : qualify(ref);
+                : qualify(ref, null);
         return renderOperator(p.operator(), col, p.param());
     }
 

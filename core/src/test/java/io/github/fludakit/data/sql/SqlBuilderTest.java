@@ -136,6 +136,29 @@ class SqlBuilderTest {
     }
 
     @Test
+    void joinClauseChainsQualifiersPerPathAcrossDivergingRefs() {
+        // Ref A navigates primary -> players; ref C navigates primary -> squads. They share the
+        // head join "primary" but diverge on the second hop. Per-path chaining must qualify C's
+        // second hop with ITS OWN previous alias ("primary"), not with the globally last-emitted
+        // fragment alias ("players"), which the old global chaining would have produced.
+        JoinRef primary = new JoinRef("player", "primary", "primary_player_id", "id");
+        ColumnRef a = new ColumnRef("name", "primary.players.name", null, List.of(
+                primary,
+                new JoinRef("team", "players", "team_id", "id")));
+        ColumnRef c = new ColumnRef("label", "primary.squads.label", null, List.of(
+                primary,
+                new JoinRef("squad", "squads", "squad_id", "id")));
+        String clause = SqlBuilder.joinClause(rootSchema("game", List.of(a, c)), List.of(a, c));
+        assertEquals(" LEFT JOIN \"player\" AS \"primary\" ON \"game\".\"primary_player_id\" = \"primary\".\"id\""
+                        + " LEFT JOIN \"team\" AS \"players\" ON \"primary\".\"team_id\" = \"players\".\"id\""
+                        + " LEFT JOIN \"squad\" AS \"squads\" ON \"primary\".\"squad_id\" = \"squads\".\"id\"",
+                clause);
+        // C's second hop is qualified by the shared head "primary", not by A's "players".
+        assertThat(clause).contains("\"primary\".\"squad_id\" = \"squads\".\"id\"");
+        assertThat(clause).doesNotContain("\"players\".\"squad_id\"");
+    }
+
+    @Test
     void joinClauseDedupesByAliasFirstOccurrenceWins() {
         JoinRef head = new JoinRef("order_item", "orderItems", "id", "order_id");
         ColumnRef a = new ColumnRef("amount", "orderItems.amount", null, List.of(head));
@@ -160,9 +183,10 @@ class SqlBuilderTest {
         assertEquals("\"order\".\"total\"", SqlBuilder.qualify(new ColumnRef("total", "total"), "order"));
         assertEquals("\"other\".\"total\"",
                 SqlBuilder.qualify(new ColumnRef("total", "total", "other", List.of()), "order"));
-        assertThatThrownBy(() -> SqlBuilder.qualify(new ColumnRef("total", "total")))
+        assertThatThrownBy(() -> SqlBuilder.qualify(new ColumnRef("total", "total"), null))
                 .isInstanceOf(IllegalStateException.class);
-        assertEquals("\"other\".\"total\"", SqlBuilder.qualify(new ColumnRef("total", "total", "other", List.of())));
+        assertEquals("\"other\".\"total\"",
+                SqlBuilder.qualify(new ColumnRef("total", "total", "other", List.of()), null));
     }
 
     @Test
@@ -179,15 +203,5 @@ class SqlBuilderTest {
         ColumnRef local = new ColumnRef("total", "total");
         assertEquals("\"total\" = :total",
                 SqlBuilder.render(Predicate.of("total", Operator.EQ, "total"), local));
-    }
-
-    @Test
-    void orderByOverloadQualifiesResolvedRefs() {
-        ColumnRef joined = new ColumnRef("amount", "orderItems.amount", null,
-                List.of(new JoinRef("order_item", "orderItems", "id", "order_id")));
-        ColumnRef local = new ColumnRef("total", "total");
-        assertEquals(" ORDER BY \"orderItems\".\"amount\"", new SqlBuilder().orderBy(List.of(joined)));
-        assertEquals(" ORDER BY \"order\".\"total\"", new SqlBuilder().orderBy(List.of(local), "order"));
-        assertEquals("", new SqlBuilder().orderBy(List.<ColumnRef>of()));
     }
 }

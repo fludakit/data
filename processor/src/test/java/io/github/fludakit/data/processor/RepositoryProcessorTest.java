@@ -2622,6 +2622,222 @@ class RepositoryProcessorTest {
     }
 
     @Test
+    void entityOwnerDoesNotCascadeEntityCollectionWrites() throws Exception {
+        // Fix-round 2 I-1 (Requirements Lock md:33/md:34): the composition lifecycle is bound to the
+        // root ONLY for @AggregateRoot owners. Inside an @Entity an EntityList is a collection of
+        // ASSOCIATED objects — the READ hydration loader stays, but save/insert/update/deleteById must
+        // emit NO child cascade: a replace-all on an association owner would silently delete rows the
+        // owner does not own (the planned Team→@Entity conversion landmine).
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/cascnone"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-cascnone"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-cascnone"));
+
+        Files.writeString(sourceDir.resolve("Device.java"), """
+                package cascnone;
+                import io.github.fludakit.data.annotation.Entity;
+                import io.github.fludakit.data.annotation.Identity;
+                import java.util.ArrayList;
+                import java.util.List;
+                @Entity
+                public class Device {
+                    @Identity Long id;
+                    String name;
+                    List<Module> modules = new ArrayList<>();
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getName() { return name; }
+                    public void setName(String name) { this.name = name; }
+                    public List<Module> getModules() { return modules; }
+                    public void setModules(List<Module> modules) { this.modules = modules; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Module.java"), """
+                package cascnone;
+                import io.github.fludakit.data.annotation.Entity;
+                import io.github.fludakit.data.annotation.Identity;
+                @Entity
+                public class Module {
+                    @Identity Long id;
+                    String label;
+                    Device device;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getLabel() { return label; }
+                    public void setLabel(String label) { this.label = label; }
+                    public Device getDevice() { return device; }
+                    public void setDevice(Device device) { this.device = device; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("DeviceRepository.java"), """
+                package cascnone;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface DeviceRepository extends CrudRepository<Device, Long> { }
+                """);
+        Files.writeString(sourceDir.resolve("ModuleRepository.java"), """
+                package cascnone;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface ModuleRepository extends CrudRepository<Module, Long> { }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir,
+                "Device.java", "Module.java", "DeviceRepository.java", "ModuleRepository.java");
+
+        String impl = Files.readString(generatedDir.resolve("cascnone/DeviceRepositoryImpl.java"))
+                .replace("\\\"", "\"").replaceAll("\\s+", " ");
+
+        // Read side UNCHANGED: the managed/mapped EntityList still gets its hydration loader.
+        assertTrue(impl.contains("private void hydrateModules"),
+                "an @Entity owner keeps its read hydration loader:" + System.lineSeparator() + impl);
+        // Write side: NO child INSERT constant, NO child DELETE constant, no cascade loops anywhere.
+        assertTrue(!impl.contains("SQL_INSERT_MODULES"),
+                "an @Entity owner must not generate the child-insert cascade constant:"
+                        + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("SQL_DELETE_MODULES"),
+                "an @Entity owner must not generate the child-delete cascade constant:"
+                        + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("INSERT INTO \"module\"") && !impl.contains("DELETE FROM \"module\""),
+                "no child-table write statement may appear for an @Entity owner:"
+                        + System.lineSeparator() + impl);
+        // deleteById is the bare root delete (children-first cascade suppressed).
+        assertTrue(impl.contains("public void deleteById(Long id) { jdbcClient.sql(SQL_DELETE).param(\"id\", id).update(); }"),
+                "deleteById must delete ONLY the root row for an @Entity owner:" + System.lineSeparator() + impl);
+    }
+
+    @Test
+    void writeCascadeDecoupledFromReadMapperGate() throws Exception {
+        // Fix-round 2 I-2: the entity-collection write cascade is gated by WRITABILITY only (child id +
+        // table metadata), mirroring the element-collection write path. A target failing the READ
+        // managed/mapper gate keeps losing its loader (read NOTE) but still cascades on save/update/
+        // deleteById; every genuine write skip (here: a non-generated-key-coercible id) records a
+        // write-honest NOTE naming save/update/delete, so children are never dropped silently.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/cascgate"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-cascgate"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-cascgate"));
+
+        Files.writeString(sourceDir.resolve("Hub.java"), """
+                package cascgate;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                import java.util.ArrayList;
+                import java.util.List;
+                @AggregateRoot
+                public class Hub {
+                    @Identity Long id;
+                    String name;
+                    List<Spoke> spokes = new ArrayList<>();
+                    List<Tag> tags = new ArrayList<>();
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getName() { return name; }
+                    public void setName(String name) { this.name = name; }
+                    public List<Spoke> getSpokes() { return spokes; }
+                    public void setSpokes(List<Spoke> spokes) { this.spokes = spokes; }
+                    public List<Tag> getTags() { return tags; }
+                    public void setTags(List<Tag> tags) { this.tags = tags; }
+                }
+                """);
+        // Spoke fails the row-mapper gate (a List<String> scalar is not JDBC-safe) but is fully
+        // writable: Long @Identity + resolved table — the write cascade must still be emitted.
+        Files.writeString(sourceDir.resolve("Spoke.java"), """
+                package cascgate;
+                import io.github.fludakit.data.annotation.Entity;
+                import io.github.fludakit.data.annotation.Identity;
+                import java.util.ArrayList;
+                import java.util.List;
+                @Entity
+                public class Spoke {
+                    @Identity Long id;
+                    String label;
+                    Hub hub;
+                    List<String> notes = new ArrayList<>();
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getLabel() { return label; }
+                    public void setLabel(String label) { this.label = label; }
+                    public Hub getHub() { return hub; }
+                    public void setHub(Hub hub) { this.hub = hub; }
+                    public List<String> getNotes() { return notes; }
+                    public void setNotes(List<String> notes) { this.notes = notes; }
+                }
+                """);
+        // Tag is NOT writable through the generated-key machinery (String id → not generated-key
+        // coercible) and has no repository of its own (an unmanaged String-id entity must not get a
+        // repository impl here: the pre-existing longValue() fallback does not compile for String ids,
+        // which is exactly the id shape the WRITE blocker is there to degrade). Its cascade must
+        // skip with a write-honest NOTE, and the read gate independently leaves it unmapped.
+        Files.writeString(sourceDir.resolve("Tag.java"), """
+                package cascgate;
+                import io.github.fludakit.data.annotation.Entity;
+                import io.github.fludakit.data.annotation.Identity;
+                @Entity
+                public class Tag {
+                    @Identity String id;
+                    String label;
+                    Hub hub;
+                    public String getId() { return id; }
+                    public void setId(String id) { this.id = id; }
+                    public String getLabel() { return label; }
+                    public void setLabel(String label) { this.label = label; }
+                    public Hub getHub() { return hub; }
+                    public void setHub(Hub hub) { this.hub = hub; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("HubRepository.java"), """
+                package cascgate;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface HubRepository extends CrudRepository<Hub, Long> { }
+                """);
+        Files.writeString(sourceDir.resolve("SpokeRepository.java"), """
+                package cascgate;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface SpokeRepository extends CrudRepository<Spoke, Long> { }
+                """);
+
+        List<Diagnostic<? extends JavaFileObject>> diagnostics = compileWithDiagnostics(sourceDir,
+                classesDir, generatedDir, "Hub.java", "Spoke.java", "Tag.java",
+                "HubRepository.java", "SpokeRepository.java");
+
+        String impl = Files.readString(generatedDir.resolve("cascgate/HubRepositoryImpl.java"))
+                .replace("\\\"", "\"").replaceAll("\\s+", " ");
+
+        // (1) READ gate: Spoke has no row mapper → no loader + the read-worded NOTE (unchanged gate).
+        assertTrue(!impl.contains("private void hydrateSpokes"),
+                "a read-gate-failed target must keep losing its hydration loader:"
+                        + System.lineSeparator() + impl);
+        String notes = notesOf(diagnostics);
+        assertTrue(notes.contains("relationship 'spokes' on cascgate.Hub: target cascgate.Spoke has no generated row mapper"),
+                "the read gate must still record its NOTE:" + System.lineSeparator() + notes);
+        // (2) WRITE path DECOUPLED: despite the read skip, the plain-SQL cascade is emitted.
+        assertTrue(impl.contains("SQL_INSERT_SPOKES"),
+                "the write cascade must survive the READ gate skip (child id + table suffice):"
+                        + System.lineSeparator() + impl);
+        assertTrue(impl.contains("jdbcClient.sql(SQL_DELETE_SPOKES).param(\"hub_id\", id).update(); jdbcClient.sql(SQL_DELETE).param(\"id\", id).update(); }"),
+                "deleteById must cascade the read-gate-skipped child first (children-first):"
+                        + System.lineSeparator() + impl);
+        // (3) A genuine WRITE skip (non-coercible id) gets the write-honest NOTE, not silence.
+        assertTrue(notes.contains("entity collection 'tags' on cascgate.Hub: target id type java.lang.String is not generated-key coercible — children will NOT be cascaded on save/update/delete"),
+                "the write skip must carry a write-honest NOTE naming save/update/delete:"
+                        + System.lineSeparator() + notes);
+        assertTrue(!impl.contains("SQL_INSERT_TAGS") && !impl.contains("SQL_DELETE_TAGS"),
+                "the blocked collection must not emit any cascade constant:"
+                        + System.lineSeparator() + impl);
+        // Read side for Tag stays gate-degraded (unmanaged target): no loader, read NOTE (unchanged).
+        assertTrue(!impl.contains("hydrateTags"),
+                "an unmanaged target must not get a hydration loader:" + System.lineSeparator() + impl);
+        assertTrue(notes.contains("relationship 'tags' on cascgate.Hub: target cascgate.Tag has no generated row mapper — left unmapped on read"),
+                "the read gate NOTE stays for the unmanaged tags collection:"
+                        + System.lineSeparator() + notes);
+    }
+
+    @Test
     void relationFreePagedFindAllKeepsSingleConstantShape() throws Exception {
         // Legacy-parity guard for R-T11c: a descriptor WITHOUT traversable props can never produce a
         // join, so its paged findAll keeps the byte-identical single-constant emission — no

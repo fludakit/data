@@ -397,26 +397,47 @@ public class RepositoryProcessor extends AbstractProcessor {
             }
             hydratedRelationships.add(new EntityRelationship(a, targetModel, targetMapper));
         }
-        // Aggregate write cascade (Task 11 fix / ruling R-T11a): the composition lifecycle of an
-        // aggregate root is bound to the root, so save/insert/update/deleteById also WRITE the
-        // members of every cascading EntityList — the SAME gate as the read loader (managed target,
-        // generated row mapper, resolved inverse), plus a NOTE-degrade writability check: a child
-        // whose id cannot carry a generated key (missing @Identity, non-coercible id type, unresolved
-        // table) skips only its own collection's cascade rather than aborting the compile.
+        // Aggregate write cascade (Task 11 fix / ruling R-T11a, fix-round 2 findings I-1 + I-2).
+        // I-1 — stereotype gate: the composition lifecycle is bound to the root ONLY for
+        // @AggregateRoot owners (Requirements Lock md:33); inside an @Entity an entity collection is a
+        // "collection of associated objects" whose lifecycle is NOT bound (md:34), so a replace-all
+        // there would silently DELETE associated child rows. Non-root owners therefore get NO write
+        // cascade at all — their read hydration loaders (the scan above) are untouched.
+        // I-2 — write-gate decoupling: membership is computed from EVERY EntityList on the descriptor,
+        // NOT from the read-gate-passed hydratedRelationships, mirroring the element-collection write
+        // path (appendUpdateStatements "iterates EVERY collection"): the cascade INSERT/DELETE constants
+        // are plain SQL driven by the child's OWN table metadata + generated-key-coercible id
+        // (entityCollectionWriteBlocker) and need no row mapper. A target that fails the managed/mapper
+        // read gate thereby loses only its hydration LOADER, never its write cascade. Every write skip
+        // emits its own write-honest NOTE ("children will NOT be cascaded on save/update/delete") so
+        // save() can never silently drop children without write-side diagnostics.
         List<EntityRelationship> cascadeRelationships = new ArrayList<>();
-        for (EntityRelationship r : hydratedRelationships) {
-            if (!(r.attribute() instanceof Prop.EntityList)) {
-                continue;
+        if (stereotypeOf(entityElement) == Stereotype.AGGREGATE_ROOT) {
+            for (Prop a : entity.metadata().props()) {
+                if (!(a instanceof Prop.EntityList list)) {
+                    continue;
+                }
+                String targetFqn = list.targetTypeName();
+                TypeElement targetElement = targetFqn == null ? null : elements.getTypeElement(targetFqn);
+                // entityModel() is a pure memo of the idempotent buildEntity — safe for targets the
+                // read gate excluded; no mapper or descriptor artifact is generated from this path.
+                EntityModel targetModel = targetElement == null ? null : entityModel(targetElement);
+                String blocker = targetModel == null
+                        ? "target type " + targetFqn + " is unresolvable"
+                        : list.inverseName() == null
+                                ? "one-to-many inverse is unresolved on the target"
+                                : entityCollectionWriteBlocker(targetModel);
+                if (blocker != null) {
+                    processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
+                            "entity collection '" + list.name() + "' on " + entityElement.getQualifiedName()
+                                    + ": " + blocker + " — children will NOT be cascaded on save/update/delete",
+                            entityElement);
+                    continue;
+                }
+                // The write emitters read only attribute()/targetModel(); the row mapper is
+                // irrelevant to plain-SQL writes, so a cascade member may carry a null mapper.
+                cascadeRelationships.add(new EntityRelationship(a, targetModel, null));
             }
-            String blocker = entityCollectionWriteBlocker(r.targetModel());
-            if (blocker != null) {
-                processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
-                        "entity collection '" + r.attribute().name() + "' on " + entityElement.getQualifiedName()
-                                + ": " + blocker + " — write cascade skipped for this collection",
-                        entityElement);
-                continue;
-            }
-            cascadeRelationships.add(r);
         }
         boolean hydrate = hasGeneratedHydration(entity, mapperType, hydratedCollections, hydratedRelationships);
 
@@ -1915,9 +1936,10 @@ public class RepositoryProcessor extends AbstractProcessor {
      * NOTE-degrade writability check for the R-T11a entity-collection cascade: a child whose identity
      * cannot be written through the generated-key machinery (no id property, an id type {@link
      * #generatedKeyCoercion} cannot produce from a {@code Number} key, unresolved table metadata) skips
-     * ONLY its own collection's cascade — the repository still compiles, reads keep working. The
-     * hydrated EntityList gate has already guaranteed a resolved inverse and a generated target mapper
-     * before this is consulted.
+     * ONLY its own collection's cascade — the repository still compiles, reads keep working. Consulted
+     * by the {@link #generate} cascade scan on the WRITABILITY path only: like element collections,
+     * the plain-SQL child INSERT/DELETE needs this weaker requirement and NOT a row mapper, so a
+     * target that fails the managed/mapper READ gate still cascades on write (fix-round 2, I-2).
      */
     private static String entityCollectionWriteBlocker(EntityModel target) {
         if (target.id() == null) {
@@ -3614,10 +3636,12 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /**
-     * A relationship that cleared the Task 4 managed-target gate: the descriptor attribute, the target's
-     * compile-time model (id/column/table metadata the loader reads) and its generated row mapper, the
-     * loader's delegate. Produced only by {@link #generate}'s eligibility scan, so every instance is
-     * emittable.
+     * A relationship carried into emission: either a READ hydration loader member (cleared the Task 4
+     * managed-target gate: attribute, target's compile-time model, generated row mapper — every such
+     * instance is loader-emittable) or a WRITE cascade member from {@link #generate}'s EntityList scan
+     * (fix-round 2 I-2 decoupling: the plain-SQL child INSERT/DELETE uses only attribute/targetModel,
+     * so a cascade member may carry a {@code null} {@code targetMapper} — the child's row mapper is
+     * irrelevant to writes).
      */
     private record EntityRelationship(Prop attribute, EntityModel targetModel,
                                       ClassName targetMapper) { }

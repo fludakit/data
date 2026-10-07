@@ -2608,14 +2608,14 @@ public class RepositoryProcessor extends AbstractProcessor {
         builder.beginControlFlow("if (hasMore)");
         builder.addStatement("content = content.subList(0, $L.size())", pageRequest);
         builder.endControlFlow();
+        if (hydrate) {
+            builder.addStatement("$L", hydrationCall(entity, "content"));
+        }
         builder.addStatement("$T<$T.Cursor> cursors = new $T<>()", List.class, PageRequest.class, ArrayList.class);
         builder.beginControlFlow("for ($T e : content)", entity.typeName());
         builder.addStatement("cursors.add($T.cursorFor(props, dirs, $T.INSTANCE, e))",
                 CursorSupport.class, metadataClass);
         builder.endControlFlow();
-        if (hydrate) {
-            builder.addStatement("$L", hydrationCall(entity, "content"));
-        }
         builder.addStatement("return new $T<>($L, content, cursors, -1L)", SimpleCursoredPage.class, pageRequest);
     }
 
@@ -2731,14 +2731,14 @@ public class RepositoryProcessor extends AbstractProcessor {
         appendBoundParameters(offsetCall, bindings, parameters);
         offsetCall.add(".query($L).list()", queryArg(entity, mapperType));
         builder.addStatement("$T<$T> content = $L", List.class, entity.typeName(), offsetCall.build());
+        if (hydrate) {
+            builder.addStatement("$L", hydrationCall(entity, "content"));
+        }
         builder.addStatement("$T<$T.Cursor> cursors = new $T<>()", List.class, PageRequest.class, ArrayList.class);
         builder.beginControlFlow("for ($T e : content)", entity.typeName());
         builder.addStatement("cursors.add($T.cursorFor($L, $L, $T.INSTANCE, e))",
                 CursorSupport.class, propsExpr, dirsExpr, metadataClass);
         builder.endControlFlow();
-        if (hydrate) {
-            builder.addStatement("$L", hydrationCall(entity, "content"));
-        }
         builder.addStatement("return new $T<>($L, content, cursors, -1L)", SimpleCursoredPage.class, pageRequest);
         builder.endControlFlow();
         if (toManySort) {
@@ -2759,14 +2759,14 @@ public class RepositoryProcessor extends AbstractProcessor {
         builder.beginControlFlow("if (hasMore)");
         builder.addStatement("content = content.subList(0, $L.size())", pageRequest);
         builder.endControlFlow();
+        if (hydrate) {
+            builder.addStatement("$L", hydrationCall(entity, "content"));
+        }
         builder.addStatement("$T<$T.Cursor> cursors = new $T<>()", List.class, PageRequest.class, ArrayList.class);
         builder.beginControlFlow("for ($T e : content)", entity.typeName());
         builder.addStatement("cursors.add($T.cursorFor($L, $L, $T.INSTANCE, e))",
                 CursorSupport.class, propsExpr, dirsExpr, metadataClass);
         builder.endControlFlow();
-        if (hydrate) {
-            builder.addStatement("$L", hydrationCall(entity, "content"));
-        }
         builder.addStatement("return new $T<>($L, content, cursors, -1L)", SimpleCursoredPage.class, pageRequest);
     }
 

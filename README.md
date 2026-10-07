@@ -25,3 +25,21 @@ Contributions are welcome — issues, pull requests, and feature suggestions are
 ## License
 
 Apache License, Version 2.0. See [LICENSE](LICENSE).
+
+## Breaking changes in 1.0.0-SNAPSHOT (navigable metamodel iteration)
+
+- `EntityDescriptor.columns()` no longer has a derived default implementation. Implementers must
+  supply the explicit column view (the generated `<Entity>Metadata` does; hand-written test
+  descriptors must too).
+- `EntityDescriptor.attributes()` no longer flattens embedded leaves. `attribute("address.city")`
+  does not resolve — dot paths resolve through `EntityDescriptor.columnRef(String)`, which also
+  reports the joins a path contributes.
+- Method-name finders whose predicate path traverses one relation (`findByCustomerName`) now
+  generate join-aware SQL. `findByCustomerId`-style names traverse the relation's id instead of
+  comparing the owner's FK column directly (Jakarta Data 1.0.1 traversal semantics); orphan FK
+  rows are consequently excluded from such results.
+- Path-depth asymmetry (known, documented): compile-side method-name resolution accepts at most
+  ONE relation hop (multi-hop paths emit a NOTE and keep the legacy unqualified column); the
+  runtime `columnRef` used by `Order.by`/`Sort` is unbounded. The same dotted string can therefore
+  be a working sort and a rejected finder name.
+- Cursors for relation-sorted paged reads now end with the root id key.

@@ -3391,9 +3391,9 @@ public class RepositoryProcessor extends AbstractProcessor {
      * TARGET's own physical columns — INCLUDING the inverse fk, which the anonymous pairing reads by
      * label — WHERE {@code <inverse>_id IN (...)}. The delegate row mapper is the target entity's
      * generated {@code <Target>RowMapper} (no VO involved), and the grouped list is assigned to the
-     * parent's collection setter. The target's own relationships are NOT hydrated here (depth-1), and
-     * the back-reference on hydrated children stays NULL because the target's row mapper skips the
-     * inverse's fk column on read (coverage lock, ruling 6).
+     * parent's collection setter. The target's own relationships are NOT hydrated here (depth-1);
+     * non-composing back-references on children materialized by this loader carry an id-only partial
+     * when the child's row mapper resolves the FK, and composing references stay loader-filled.
      */
     private MethodSpec appendOneToManyHydration(Map<String, String> constants, EntityModel entity,
                                                 EntityRelationship relationship) {

@@ -190,9 +190,12 @@ class ProfileCvTest {
                 PageRequest.ofPage(1).size(10), Order.by(_Profile.workHistory.company.asc()));
         assertThat(page.content()).extracting(Profile::getFullName)
                 .containsExactly("Grace", "Ada"); // "Beta" < "alpha"; each root once
-        // Discriminating leg: pin the ascending sort KEYS themselves (per-root MIN(company)), not just
-        // the name sequence a first-occurrence join dedup would coincidentally also produce.
-        // relies on H2 default collation: uppercase sorts before lowercase (BINARY), so "Beta" < "alpha"
+        // Second leg pins the HYDRATED collections (per-root MIN(company) recomputed in memory): fan-out
+        // rows that partially overwrite workHistory (e.g. last-occurrence-wins -> Ada keeps only "zeta")
+        // fail here even when the root sequence above still matches. A first-occurrence join dedup would
+        // pass both legs — Grace's single child makes min=max — so this is hydration coverage, not a
+        // MIN-vs-dedup sort discriminator.
+        // Relies on H2 default collation: uppercase sorts before lowercase (BINARY), so "Beta" < "alpha".
         assertThat(page.content())
                 .extracting(p -> p.getWorkHistory().stream().map(WorkExperience::getCompany)
                         .min(String::compareTo).orElseThrow())

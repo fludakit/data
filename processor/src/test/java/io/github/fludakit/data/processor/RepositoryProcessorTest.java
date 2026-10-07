@@ -3154,11 +3154,11 @@ class RepositoryProcessorTest {
     }
 
     @Test
-    void methodNamePredicateThroughElementCollectionEmitsLeftJoin() throws Exception {
+    void methodNamePredicateThroughElementCollectionEmitsExists() throws Exception {
         // Task 8: findByOrderItemsQuantityGreaterThan — the qbn property is the concatenated camel
         // "orderItemsQuantity"; resolveCompilePath splits it at hump boundaries into the element-list
-        // head "orderItems" + leaf "quantity", and the emitted SQL constant carries the LEFT JOIN the
-        // traversal needs, alias-qualified in WHERE. Param binding still uses the JAVA PARAMETER NAME.
+        // head "orderItems" + leaf "quantity", and the emitted SQL constant carries the EXISTS semi-join the
+        // traversal needs (Task 5: a to-many head must never fan out into a LEFT JOIN). Param binding still uses the JAVA PARAMETER NAME.
         Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-el"));
         Path classesDir = Files.createDirectories(workspace.resolve("classes-rp-el"));
         Path generatedDir = Files.createDirectories(workspace.resolve("generated-rp-el"));
@@ -3178,15 +3178,17 @@ class RepositoryProcessorTest {
                 "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "Orders.java");
 
         // The pin uses the framework's child-table naming: Names.childTable("order", "orderItems")
-        // = "order_order_items" (the brief's "order_items" omitted the parent prefix; the alias,
-        // ON columns and WHERE spellings are exactly as pinned there). sqlFlat folds whitespace so
-        // a JavaPoet soft wrap cannot break the byte pin.
+        // = "order_order_items" (the brief's "order_items" omitted the parent prefix). Task 5: the
+        // to-many head renders an EXISTS semi-join, not a LEFT JOIN. sqlFlat folds whitespace so a
+        // JavaPoet soft wrap cannot break the byte pin.
         String impl = sqlFlat(generatedDir.resolve("relpath/OrdersImpl.java"));
-        assertTrue(impl.contains("FROM \"order\" LEFT JOIN \"order_order_items\" AS \"orderItems\" "
-                        + "ON \"order\".\"id\" = \"orderItems\".\"order_id\" "
-                        + "WHERE \"orderItems\".\"quantity\" > :quantity"),
-                "element-collection predicate must emit the join and the qualified WHERE:"
+        assertTrue(impl.contains("FROM \"order\" WHERE EXISTS (SELECT 1 FROM \"order_order_items\" "
+                        + "\"orderItems\" WHERE \"orderItems\".\"order_id\" = \"order\".\"id\" "
+                        + "AND \"orderItems\".\"quantity\" > :quantity)"),
+                "element-collection predicate must render EXISTS with the aliased child table:"
                         + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("LEFT JOIN"),
+                "a to-many predicate must NOT splice a LEFT JOIN:" + System.lineSeparator() + impl);
         assertTrue(impl.contains(".param(\"quantity\", quantity)"),
                 "the bound parameter must stay the JAVA PARAMETER NAME:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("SQL_FIND_BY_ORDER_ITEMS_QUANTITY_GREATER_THAN"),
@@ -3220,6 +3222,215 @@ class RepositoryProcessorTest {
         assertTrue(impl.contains("FROM \"order\" LEFT JOIN \"customer\" AS \"customer\" ON \"order\".\"customer_id\" = \"customer\".\"id\" WHERE \"customer\".\"name\" = :name"),
                 "@Association predicate must emit the fk-target-id LEFT JOIN and alias-qualified WHERE:"
                         + System.lineSeparator() + impl);
+    }
+
+    /**
+     * Writes the Task 5 EntityList fixture (package {@code exa}): {@code Order} is an
+     * {@code @AggregateRoot} carrying {@code List<Line> lines}; {@code Line} is a MANAGED
+     * {@code @Entity} (its own {@code LineRepository}, Decision 7) with {@code String product} and
+     * a back-reference {@code Order order}, so the one-to-many inverse resolves to the fk column
+     * {@code "order_id"} on the target table {@code "line"}.
+     */
+    private void writeLinesFixture(Path sourceDir) throws Exception {
+        Files.writeString(sourceDir.resolve("Line.java"), """
+                package exa;
+                import io.github.fludakit.data.annotation.Entity;
+                import io.github.fludakit.data.annotation.Identity;
+                @Entity
+                public class Line {
+                    @Identity Long id;
+                    String product;
+                    Order order;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getProduct() { return product; }
+                    public void setProduct(String product) { this.product = product; }
+                    public Order getOrder() { return order; }
+                    public void setOrder(Order order) { this.order = order; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Order.java"), """
+                package exa;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                import java.util.ArrayList;
+                import java.util.List;
+                @AggregateRoot
+                public class Order {
+                    @Identity Long id;
+                    String status;
+                    List<Line> lines = new ArrayList<>();
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getStatus() { return status; }
+                    public void setStatus(String status) { this.status = status; }
+                    public List<Line> getLines() { return lines; }
+                    public void setLines(List<Line> lines) { this.lines = lines; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("LineRepository.java"), """
+                package exa;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface LineRepository extends CrudRepository<Line, Long> { }
+                """);
+    }
+
+    @Test
+    void predicateThroughEntityListRendersExistsNotJoin() throws Exception {
+        // Task 5: findByLinesProduct - the head "lines" is a Prop.EntityList (to-many). The predicate
+        // renders as an EXISTS semi-join over the target table, aliased by the relation PROPERTY name,
+        // and the statement carries NO LEFT JOIN, so the root row cannot fan out. The bound parameter
+        // stays the JAVA PARAMETER NAME ("product"), exactly like the join version rendered.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-exa"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-rp-exa"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-rp-exa"));
+        writeLinesFixture(sourceDir);
+        Files.writeString(sourceDir.resolve("Orders.java"), """
+                package exa;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.List;
+                @Repository
+                public interface Orders extends CrudRepository<Order, Long> {
+                    List<Order> findByLinesProduct(String product);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir,
+                "Line.java", "Order.java", "LineRepository.java", "Orders.java");
+
+        String impl = sqlFlat(generatedDir.resolve("exa/OrdersImpl.java"));
+        assertTrue(impl.contains("SQL_FIND_BY_LINES_PRODUCT"),
+                "constant name should follow the method name:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("EXISTS (SELECT 1 FROM \"line\" \"lines\" WHERE \"lines\".\"order_id\" = \"order\".\"id\" AND \"lines\".\"product\" = :product)"),
+                "entity-list predicate must render EXISTS, alias-qualified by the relation property:"
+                        + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("LEFT JOIN"),
+                "a to-many predicate must NOT splice a LEFT JOIN:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains(".param(\"product\", product)"),
+                "the bound parameter must stay the JAVA PARAMETER NAME:" + System.lineSeparator() + impl);
+    }
+
+    @Test
+    void predicateThroughElementListRendersExistsNotJoin() throws Exception {
+        // Task 5: findByContactsValue - the head "contacts" is a Prop.ElementList; the EXISTS renders
+        // over the element child table ("profile_contacts"), aliased by the relation property name and
+        // keyed by the parent fk column ("profile_id"). No LEFT JOIN anywhere.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-exe"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-rp-exe"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-rp-exe"));
+        Files.writeString(sourceDir.resolve("Contact.java"), """
+                package exv;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class Contact {
+                    String kind;
+                    String value;
+                    public String getKind() { return kind; }
+                    public void setKind(String kind) { this.kind = kind; }
+                    public String getValue() { return value; }
+                    public void setValue(String value) { this.value = value; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Profile.java"), """
+                package exv;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                import java.util.ArrayList;
+                import java.util.List;
+                @AggregateRoot
+                public class Profile {
+                    @Identity Long id;
+                    String fullName;
+                    List<Contact> contacts = new ArrayList<>();
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getFullName() { return fullName; }
+                    public void setFullName(String fullName) { this.fullName = fullName; }
+                    public List<Contact> getContacts() { return contacts; }
+                    public void setContacts(List<Contact> contacts) { this.contacts = contacts; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Profiles.java"), """
+                package exv;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.List;
+                @Repository
+                public interface Profiles extends CrudRepository<Profile, Long> {
+                    List<Profile> findByContactsValue(String contactsValue);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Contact.java", "Profile.java", "Profiles.java");
+
+        String impl = sqlFlat(generatedDir.resolve("exv/ProfilesImpl.java"));
+        assertTrue(impl.contains("EXISTS (SELECT 1 FROM \"profile_contacts\" \"contacts\" WHERE \"contacts\".\"profile_id\" = \"profile\".\"id\" AND \"contacts\".\"value\" = :contactsValue)"),
+                "element-list predicate must render EXISTS over the child table:"
+                        + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("LEFT JOIN"),
+                "a to-many predicate must NOT splice a LEFT JOIN:" + System.lineSeparator() + impl);
+    }
+
+    @Test
+    void predicateThroughReferenceStillLeftJoinsWithoutExists() throws Exception {
+        // Task 5 guard: a to-one (Reference) head keeps the existing LEFT JOIN splice BYTE-IDENTICAL
+        // and never renders an EXISTS - the fan-out risk the EXISTS fixes exists only at to-many heads.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-exr"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-rp-exr"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-rp-exr"));
+        writeRelationFixture(sourceDir);
+        Files.writeString(sourceDir.resolve("GuardOrd.java"), """
+                package relpath;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.stream.Stream;
+                @Repository
+                public interface GuardOrd extends CrudRepository<Order, Long> {
+                    Stream<Order> findByCustomerName(String name);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir,
+                "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "GuardOrd.java");
+
+        String impl = sqlFlat(generatedDir.resolve("relpath/GuardOrdImpl.java"));
+        assertTrue(impl.contains("FROM \"order\" LEFT JOIN \"customer\" AS \"customer\" ON \"order\".\"customer_id\" = \"customer\".\"id\" WHERE \"customer\".\"name\" = :name"),
+                "a to-one predicate must keep the byte-identical LEFT JOIN splice:"
+                        + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("EXISTS"),
+                "a to-one predicate must NOT render an EXISTS:" + System.lineSeparator() + impl);
+    }
+
+    @Test
+    void countThroughEntityListUsesExistsAndStaysUnjoinedTotal() throws Exception {
+        // Task 5: countByLinesProduct keeps the COUNT(*) projection, renders the same EXISTS conjunct
+        // and carries NO LEFT JOIN anywhere - the total counts ROOT rows, not root-child pairs.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-exc"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-rp-exc"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-rp-exc"));
+        writeLinesFixture(sourceDir);
+        Files.writeString(sourceDir.resolve("CountOrders.java"), """
+                package exa;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface CountOrders extends CrudRepository<Order, Long> {
+                    long countByLinesProduct(String product);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir,
+                "Line.java", "Order.java", "LineRepository.java", "CountOrders.java");
+
+        String impl = sqlFlat(generatedDir.resolve("exa/CountOrdersImpl.java"));
+        assertTrue(impl.contains("SELECT COUNT(*) FROM \"order\" WHERE EXISTS (SELECT 1 FROM \"line\" \"lines\" WHERE \"lines\".\"order_id\" = \"order\".\"id\" AND \"lines\".\"product\" = :product)"),
+                "countBy through an EntityList must render EXISTS on the unjoined COUNT(*) total:"
+                        + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("LEFT JOIN"),
+                "no LEFT JOIN anywhere:" + System.lineSeparator() + impl);
     }
 
     @Test
@@ -3316,8 +3527,9 @@ class RepositoryProcessorTest {
     }
 
     @Test
-    void countByThroughRelationEmitsLeftJoin() throws Exception {
-        // countByOrderItemsQuantityGreaterThan: same join-aware treatment; projection stays COUNT(*).
+    void countByThroughRelationEmitsExists() throws Exception {
+        // countByOrderItemsQuantityGreaterThan: the to-many head renders EXISTS; the projection stays
+        // COUNT(*) and the total counts root rows, not root-child pairs.
         Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-count"));
         Path classesDir = Files.createDirectories(workspace.resolve("classes-rp-count"));
         Path generatedDir = Files.createDirectories(workspace.resolve("generated-rp-count"));
@@ -3336,8 +3548,11 @@ class RepositoryProcessorTest {
                 "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "CountOrders.java");
 
         String impl = sqlFlat(generatedDir.resolve("relpath/CountOrdersImpl.java"));
-        assertTrue(impl.contains("SELECT COUNT(*) FROM \"order\" LEFT JOIN \"order_order_items\" AS \"orderItems\" ON \"order\".\"id\" = \"orderItems\".\"order_id\" WHERE \"orderItems\".\"quantity\" > :quantity"),
-                "countBy through a relation must splice the join after FROM:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("SELECT COUNT(*) FROM \"order\" WHERE EXISTS (SELECT 1 FROM \"order_order_items\" \"orderItems\" WHERE \"orderItems\".\"order_id\" = \"order\".\"id\" AND \"orderItems\".\"quantity\" > :quantity)"),
+                "countBy through a to-many must render EXISTS on the unjoined COUNT(*) total:"
+                        + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("LEFT JOIN"),
+                "a to-many countBy must NOT splice a LEFT JOIN anywhere:" + System.lineSeparator() + impl);
     }
 
     @Test

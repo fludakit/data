@@ -2754,14 +2754,17 @@ public class RepositoryProcessor extends AbstractProcessor {
 
         List<Predicate> predicates = predicates(bindings, parameters);
         // Task 8: resolve every method-name predicate property through the compile model, so a path
-        // that traverses a relation (Reference / EntityList / ElementList) resolves at compile time
-        // and contributes a LEFT JOIN. Local and embedded paths resolve to plain unqualified refs.
-        List<ColumnRef> predicateRefs = resolveCompilePaths(entity.metadata(),
+        // that traverses a relation (Reference / EntityList / ElementList) resolves at compile time,
+        // a to-one head contributing a LEFT JOIN and (Task 5) a to-many head an EXISTS semi-join.
+        // Local and embedded paths resolve to plain unqualified refs.
+        List<PathResolution> predicatePaths = resolveCompilePaths(entity.metadata(),
                 predicates.stream().map(Predicate::property).toList(), method);
+        List<ColumnRef> predicateRefs = predicatePaths.stream().map(PathResolution::ref).toList();
+        List<Boolean> existentialPredicates = predicatePaths.stream().map(PathResolution::existential).toList();
 
         if ("count".equals(action) || "exists".equals(action)) {
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
-                    methodSql(action, entity.metadata(), predicates, predicateRefs,
+                    methodSql(action, entity.metadata(), predicates, predicateRefs, existentialPredicates,
                             List.of(), List.of(), 0, ""));
             CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
             appendBoundParameters(call, bindings, parameters);
@@ -2799,7 +2802,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                     hasJoins(predicateRefs)
                             ? new SqlBuilder().deleteBy(entity.metadata(), predicates)
                             : methodSql("delete", entity.metadata(), predicates, predicateRefs,
-                                    List.of(), List.of(), 0, ""));
+                                    existentialPredicates, List.of(), List.of(), 0, ""));
             CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
             appendBoundParameters(call, bindings, parameters);
             call.add(".update()");
@@ -2832,13 +2835,15 @@ public class RepositoryProcessor extends AbstractProcessor {
             // The base constant carries the compile-time predicates (join-aware); the runtime sort /
             // seek resolution in emitPaged stays local-only (deferred to Task 12), so no sort refs here.
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
-                    methodSql("find", entity.metadata(), predicates, predicateRefs, List.of(), List.of(), 0, ""));
+                    methodSql("find", entity.metadata(), predicates, predicateRefs, existentialPredicates,
+                            List.of(), List.of(), 0, ""));
             emitPaged(builder, entity, pageRequest, methodSorts, constant, constants, bindings, parameters,
                     kind == Kind.CURSORED_PAGE, mapperType, hydrate);
             return;
         }
         List<ColumnRef> sortRefs = resolveCompilePaths(entity.metadata(),
-                methodSorts.stream().map(SortSpec::property).toList(), method);
+                methodSorts.stream().map(SortSpec::property).toList(), method)
+                .stream().map(PathResolution::ref).toList();
 
         // Task 9 (join-returns-all-fields): when a method-name predicate/sort path traversed a Reference,
         // the SELECT carries the target's aliased flattened columns and the read uses a generated
@@ -2854,7 +2859,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             auxMethods.add(buildFullMapper(fullMapper, entity, mapperType, traversed));
             queryArgForMethod = CodeBlock.of("(rs, rowNum) -> $L(rs, rowNum)", fullMapper);
         }
-        String sql = methodSql(action, entity.metadata(), predicates, predicateRefs,
+        String sql = methodSql(action, entity.metadata(), predicates, predicateRefs, existentialPredicates,
                 methodSorts, sortRefs, parsed != null ? parsed.limit() : 0, extraProjection);
         String constant = addConstant(constants, "SQL_" + upperSnake(name), sql);
         CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
@@ -3111,41 +3116,45 @@ public class RepositoryProcessor extends AbstractProcessor {
      * column carrying exactly one {@link JoinRef}; {@code multiHop} flags a path that would need two or
      * more joins (rejected with a NOTE), and {@code unresolvedRelation} flags a path whose relation head
      * names a target that could not be resolved (degraded with a NOTE). Both degrade the caller back to
-     * the legacy unqualified rendering; neither aborts the compile.
+     * the legacy unqualified rendering; neither aborts the compile. {@code existential} marks a ref
+     * whose single head is a to-many {@link Prop.EntityList}/{@link Prop.ElementList}: the caller
+     * renders it as an {@link SqlBuilder#existsClause EXISTS semi-join} conjunct and splices NO join.
      */
-    private record PathResolution(ColumnRef ref, boolean multiHop, boolean unresolvedRelation) {
-        static PathResolution resolved(ColumnRef ref) { return new PathResolution(ref, false, false); }
-        static PathResolution unresolved() { return new PathResolution(null, false, false); }
-        static PathResolution tooManyRelations() { return new PathResolution(null, true, false); }
-        static PathResolution relationUnresolved() { return new PathResolution(null, false, true); }
+    private record PathResolution(ColumnRef ref, boolean multiHop, boolean unresolvedRelation,
+                                  boolean existential) {
+        static PathResolution resolved(ColumnRef ref) { return new PathResolution(ref, false, false, false); }
+        static PathResolution existentialRef(ColumnRef ref) { return new PathResolution(ref, false, false, true); }
+        static PathResolution unresolved() { return new PathResolution(null, false, false, false); }
+        static PathResolution tooManyRelations() { return new PathResolution(null, true, false, false); }
+        static PathResolution relationUnresolved() { return new PathResolution(null, false, true, false); }
     }
 
     /**
      * Resolves every property in {@code paths} against {@code md}, reporting the multi-hop and
      * unresolved-relation NOTEs on {@code method} and falling back to the legacy unqualified column
      * (identical to {@code SqlBuilder}'s old {@code Names.columnName} rendering) whenever the descriptor
-     * cannot resolve the path. The returned refs line up index-for-index with {@code paths}.
+     * cannot resolve the path. The returned resolutions line up index-for-index with {@code paths}.
      */
-    private List<ColumnRef> resolveCompilePaths(DescriptorModel md, List<String> paths, ExecutableElement method) {
-        List<ColumnRef> refs = new ArrayList<>();
+    private List<PathResolution> resolveCompilePaths(DescriptorModel md, List<String> paths, ExecutableElement method) {
+        List<PathResolution> out = new ArrayList<>();
         for (String path : paths) {
             PathResolution resolution = resolveCompilePath(md, path);
             if (resolution.multiHop()) {
                 processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
                         "path '" + path + "' traverses more than one relation; not supported", method);
-                refs.add(legacyColumnRef(path));
+                out.add(PathResolution.resolved(legacyColumnRef(path)));
             } else if (resolution.unresolvedRelation()) {
                 processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
                         "path '" + path + "' traverses a relation whose target could not be resolved;"
                                 + " the predicate was left unqualified", method);
-                refs.add(legacyColumnRef(path));
+                out.add(PathResolution.resolved(legacyColumnRef(path)));
             } else if (resolution.ref() != null) {
-                refs.add(resolution.ref());
+                out.add(resolution);
             } else {
-                refs.add(legacyColumnRef(path));
+                out.add(PathResolution.resolved(legacyColumnRef(path)));
             }
         }
-        return refs;
+        return out;
     }
 
     /** The legacy fully-local ref: physical column via {@link Names#columnName}, no join, no table. */
@@ -3198,7 +3207,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             }
             JoinRef join = new JoinRef(elementList.childTable(), elementList.name(),
                     md.idColumn(), elementList.parentFkColumn());
-            return PathResolution.resolved(leaf.withPrefix(elementList.name(), join));
+            return PathResolution.existentialRef(leaf.withPrefix(elementList.name(), join));
         }
         String targetFqn = prop instanceof Prop.Reference reference
                 ? reference.targetTypeName() : ((Prop.EntityList) prop).targetTypeName();
@@ -3221,7 +3230,10 @@ public class RepositoryProcessor extends AbstractProcessor {
         if (join == null) {
             return PathResolution.relationUnresolved();
         }
-        return PathResolution.resolved(leaf.withPrefix(prop.name(), join));
+        ColumnRef traversed = leaf.withPrefix(prop.name(), join);
+        return prop instanceof Prop.EntityList
+                ? PathResolution.existentialRef(traversed)
+                : PathResolution.resolved(traversed);
     }
 
     /** The LEFT JOIN edge for a Reference / EntityList traversal; {@code null} when unbuildable. */
@@ -3332,8 +3344,22 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /**
-     * Builds a method-name SQL constant. When no predicate or ORDER BY property traverses a relation
-     * this delegates to {@link SqlBuilder}'s classic rendering, so every existing local constant stays
+     * The EXISTS conjunct an existential (to-many head) predicate renders instead of a joined WHERE
+     * term: the ref's single join edge supplies the child table, the relation-property alias and the
+     * child-side fk column; the root's id column closes the correlation. The leaf term is exactly
+     * {@link SqlBuilder#render(Predicate, ColumnRef)}'s alias-qualified rendering, so the named
+     * parameter - and the caller's binding - is unchanged.
+     */
+    private static String existsConjunct(DescriptorModel md, Predicate p, ColumnRef ref) {
+        JoinRef join = ref.joins().get(ref.joins().size() - 1);
+        return SqlBuilder.existsClause(md.tableName(), md.idColumn(), join.table(), join.alias(),
+                join.childColumn(), p, ref);
+    }
+
+    /**
+     * Builds a method-name SQL constant. When no predicate traverses a to-many (existential) head and
+     * no predicate or ORDER BY property traverses a to-one relation, this delegates to
+     * {@link SqlBuilder}'s classic rendering, so every existing local constant stays
      * byte-identical. When a traversal is present, the resolved refs contribute a deduplicated
      * {@link SqlBuilder#joinClause LEFT JOIN chain} spliced right after the {@code FROM} table, the WHERE
      * columns are alias-qualified through {@link SqlBuilder#render(Predicate, ColumnRef)}, and ORDER BY is
@@ -3342,9 +3368,24 @@ public class RepositoryProcessor extends AbstractProcessor {
      * count/delete; parameter binding is untouched (the caller binds the JAVA PARAMETER NAME).
      */
     private String methodSql(String action, DescriptorModel md, List<Predicate> predicates,
-                             List<ColumnRef> predicateRefs, List<SortSpec> sorts, List<ColumnRef> sortRefs,
+                             List<ColumnRef> predicateRefs, List<Boolean> existentialPredicates,
+                             List<SortSpec> sorts, List<ColumnRef> sortRefs,
                              int limit, String extraProjection) {
-        if (!hasJoins(predicateRefs) && !hasJoins(sortRefs)) {
+        // Task 5: an existential (to-many head) predicate ref renders as an EXISTS conjunct and
+        // contributes NO join; only to-one predicate refs and sort refs splice the LEFT JOIN chain.
+        // The legacy delegation fires exactly when nothing joins AND nothing needs an EXISTS, so
+        // every pre-Task-5 constant stays byte-identical.
+        List<ColumnRef> joinRefs = new ArrayList<>();
+        List<Integer> existentialIndices = new ArrayList<>();
+        for (int i = 0; i < predicateRefs.size(); i++) {
+            if (Boolean.TRUE.equals(existentialPredicates.get(i))) {
+                existentialIndices.add(i);
+            } else {
+                joinRefs.add(predicateRefs.get(i));
+            }
+        }
+        joinRefs.addAll(sortRefs);
+        if (existentialIndices.isEmpty() && !hasJoins(joinRefs)) {
             if ("count".equals(action) || "exists".equals(action)) {
                 return new SqlBuilder().countBy(md, predicates);
             }
@@ -3353,8 +3394,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             }
             return new SqlBuilder().selectBy(md, predicates, sorts, limit, null);
         }
-        List<ColumnRef> refs = new ArrayList<>(predicateRefs);
-        refs.addAll(sortRefs);
+        boolean spliceJoins = hasJoins(joinRefs);
         StringBuilder sb = new StringBuilder();
         if ("count".equals(action) || "exists".equals(action)) {
             sb.append("SELECT COUNT(*) FROM ").append(Names.quote(md.tableName()));
@@ -3365,8 +3405,12 @@ public class RepositoryProcessor extends AbstractProcessor {
             // become ambiguous the moment a join adds a table sharing a column name (e.g. the target's
             // own "id"), and a full-materialisation read joins exactly such a table. Qualifying keeps
             // each label = its physical column, so the generated row mapper still reads it by name.
+            // Task 5: an EXISTS-only statement splices NO join, so it keeps the unjoined (bare)
+            // projection - EXISTS contributes no columns.
             String cols = md.columns().stream()
-                    .map(c -> Names.quote(md.tableName()) + "." + Names.quote(c.column()))
+                    .map(c -> spliceJoins
+                            ? Names.quote(md.tableName()) + "." + Names.quote(c.column())
+                            : Names.quote(c.column()))
                     .collect(java.util.stream.Collectors.joining(", "));
             sb.append("SELECT ").append(cols);
             if (extraProjection != null && !extraProjection.isEmpty()) {
@@ -3374,10 +3418,18 @@ public class RepositoryProcessor extends AbstractProcessor {
             }
             sb.append(" FROM ").append(Names.quote(md.tableName()));
         }
-        sb.append(SqlBuilder.joinClause(md, refs));
+        sb.append(SqlBuilder.joinClause(md, joinRefs));
+        List<String> conjuncts = new ArrayList<>();
         for (int i = 0; i < predicates.size(); i++) {
-            sb.append(i == 0 ? " WHERE " : " AND ")
-                    .append(SqlBuilder.render(predicates.get(i), predicateRefs.get(i)));
+            if (!Boolean.TRUE.equals(existentialPredicates.get(i))) {
+                conjuncts.add(SqlBuilder.render(predicates.get(i), predicateRefs.get(i)));
+            }
+        }
+        for (int i : existentialIndices) {
+            conjuncts.add(existsConjunct(md, predicates.get(i), predicateRefs.get(i)));
+        }
+        if (!conjuncts.isEmpty()) {
+            sb.append(" WHERE ").append(String.join(" AND ", conjuncts));
         }
         if (!sorts.isEmpty()) {
             StringBuilder orderBy = new StringBuilder();

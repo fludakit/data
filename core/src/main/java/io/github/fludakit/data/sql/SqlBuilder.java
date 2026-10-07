@@ -180,6 +180,22 @@ public final class SqlBuilder {
         return renderOperator(p.operator(), col, p.param());
     }
 
+    /**
+     * The EXISTS semi-join conjunct for a predicate whose head is TO-MANY (one-to-many or element
+     * collection): instead of splicing a LEFT JOIN - which fans root rows out - the statement asks
+     * whether the child table holds a row correlated to the root by its fk and matching the leaf
+     * predicate. The leaf term is exactly {@link #render(Predicate, ColumnRef)}'s alias-qualified
+     * rendering, so the named parameter (and the caller's binding code) is unchanged. Every
+     * identifier is {@link Names#quote}d.
+     */
+    public static String existsClause(String rootTable, String rootIdColumn, String childTable,
+                                      String alias, String childFkColumn, Predicate p, ColumnRef leafRef) {
+        return "EXISTS (SELECT 1 FROM " + Names.quote(childTable) + " " + Names.quote(alias)
+                + " WHERE " + Names.quote(alias) + "." + Names.quote(childFkColumn)
+                + " = " + Names.quote(rootTable) + "." + Names.quote(rootIdColumn)
+                + " AND " + render(p, leafRef) + ")";
+    }
+
     private static String renderOperator(Operator op, String col, String param) {
         return switch (op) {
             case EQ -> col + " = :" + param;

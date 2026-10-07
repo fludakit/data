@@ -1109,7 +1109,8 @@ class RepositoryProcessorTest {
         // GeneratedKeyHolder/getKey roundtrip entirely — the old longValue() fallback was runtime-broken
         // for them (and did not compile at all in a repository impl: that compile failure IS the BASE
         // RED proof, surfaced by compileWithDiagnostics below). Long ids keep the keyholder shape
-        // BYTE-IDENTICAL, and save() on a non-keyholder id NOTE-degrades
+        // unchanged (this pin folds whitespace/escapes; exact byte parity is carried by the IT
+        // corpus gate), and save() on a non-keyholder id NOTE-degrades
         // ("id type <X> requires application-assigned identifiers") while the compile continues.
         Path sourceDir = Files.createDirectories(workspace.resolve("src/appkey"));
         Path classesDir = Files.createDirectories(workspace.resolve("classes-appkey"));
@@ -1180,11 +1181,32 @@ class RepositoryProcessorTest {
                 @Repository
                 public interface WidgetRepository extends CrudRepository<Widget, Long> { }
                 """);
+        Files.writeString(sourceDir.resolve("Segment.java"), """
+                package appkey;
+                import io.github.fludakit.data.annotation.Entity;
+                import io.github.fludakit.data.annotation.Identity;
+                @Entity
+                public class Segment {
+                    @Identity Short id;
+                    String code;
+                    public Short getId() { return id; }
+                    public void setId(Short id) { this.id = id; }
+                    public String getCode() { return code; }
+                    public void setCode(String code) { this.code = code; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("SegmentRepository.java"), """
+                package appkey;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface SegmentRepository extends CrudRepository<Segment, Short> { }
+                """);
 
         List<Diagnostic<? extends JavaFileObject>> diagnostics = compileWithDiagnostics(
                 sourceDir, classesDir, generatedDir,
                 "Ticket.java", "TicketRepository.java", "Badge.java", "BadgeRepository.java",
-                "Widget.java", "WidgetRepository.java");
+                "Widget.java", "WidgetRepository.java", "Segment.java", "SegmentRepository.java");
 
         String ticket = Files.readString(generatedDir.resolve("appkey/TicketRepositoryImpl.java"))
                 .replace("\\\"", "\"").replaceAll("\\s+", " ");
@@ -1223,12 +1245,25 @@ class RepositoryProcessorTest {
                         + "{ entity.setId(((Number) keys.getKey()).longValue()); }"),
                 "Long id keeps the keyholder roundtrip byte-identically:" + System.lineSeparator() + widget);
 
+        // Ruled narrowing: Short (with the other ex-allowlisted Number types) now takes the
+        // application-assigned shape — this leg names the ruling so the suite cannot mistake
+        // it for an accident.
+        String segment = Files.readString(generatedDir.resolve("appkey/SegmentRepositoryImpl.java"))
+                .replace("\\\"", "\"").replaceAll("\\s+", " ");
+        assertTrue(segment.contains(
+                        "jdbcClient.sql(SQL_INSERT).param(\"id\", entity.getId()).param(\"code\", entity.getCode()).update()"),
+                "Short id takes the application-assigned shape:" + System.lineSeparator() + segment);
+        assertTrue(!segment.contains("longValue") && !segment.contains("GeneratedKeyHolder"),
+                "Short id must not do the keyholder roundtrip:" + System.lineSeparator() + segment);
+
         // NOTE-degrade on save for app-assigned ids; the compile continued (no ERRORs above).
         String notes = notesOf(diagnostics);
         assertTrue(notes.contains("id type java.lang.String requires application-assigned identifiers"),
                 "String-id save must NOTE-degrade:" + System.lineSeparator() + notes);
         assertTrue(notes.contains("id type java.util.UUID requires application-assigned identifiers"),
                 "UUID-id save must NOTE-degrade:" + System.lineSeparator() + notes);
+        assertTrue(notes.contains("id type java.lang.Short requires application-assigned identifiers"),
+                "Short-id save must NOTE-degrade:" + System.lineSeparator() + notes);
         assertTrue(!notes.contains("id type java.lang.Long requires application-assigned identifiers"),
                 "Long-id save must stay silent:" + System.lineSeparator() + notes);
     }
@@ -2895,11 +2930,12 @@ class RepositoryProcessorTest {
                     public void setNotes(List<String> notes) { this.notes = notes; }
                 }
                 """);
-        // Tag is NOT writable through the generated-key machinery (String id → not generated-key
-        // coercible) and has no repository of its own (an unmanaged String-id entity must not get a
-        // repository impl here: the pre-existing longValue() fallback does not compile for String ids,
-        // which is exactly the id shape the WRITE blocker is there to degrade). Its cascade must
-        // skip with a write-honest NOTE, and the read gate independently leaves it unmapped.
+        // Tag is NOT cascadeable through the generated-key machinery (String id → not
+        // generated-key coercible) and has no repository of its own. (Since Task 3 a String-id
+        // repository impl DOES compile — app-assigned insert shape — but that is irrelevant here:
+        // the WRITE blocker degrades the CASCADE itself, which needs a Number key to backfill
+        // child ids.) Its cascade must skip with a write-honest NOTE, and the read gate
+        // independently leaves it unmapped.
         Files.writeString(sourceDir.resolve("Tag.java"), """
                 package cascgate;
                 import io.github.fludakit.data.annotation.Entity;

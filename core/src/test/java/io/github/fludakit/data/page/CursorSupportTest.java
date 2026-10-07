@@ -1,5 +1,6 @@
 package io.github.fludakit.data.page;
 
+import io.github.fludakit.data.Names;
 import jakarta.data.page.PageRequest;
 import org.junit.jupiter.api.Test;
 
@@ -18,6 +19,19 @@ class CursorSupportTest {
                 List.of("\"name\"", "\"id\""), List.of(true, false), cursor, true);
         assertThat(viaColumns)
                 .describedAs("seekWhere must render exactly what seekWhereTerms renders for pre-quoted names")
+                .isEqualTo(viaTerms);
+    }
+
+    @Test
+    void seekWhereQuotesWithNamesQuoteStylePin() {
+        // Task 8 pin: seekWhere must quote bare columns exactly as Names.quote renders them,
+        // single-sourcing the quote style (same output as hand-quoted Names.quote terms).
+        PageRequest.Cursor cursor = PageRequest.Cursor.forKey(new Object[]{"x", 5L});
+        String viaColumns = CursorSupport.seekWhere(List.of("name"), List.of(true), cursor, true);
+        String viaTerms = CursorSupport.seekWhereTerms(
+                List.of(Names.quote("name")), List.of(true), cursor, true);
+        assertThat(viaColumns)
+                .describedAs("seekWhere column render must match Names.quote style")
                 .isEqualTo(viaTerms);
     }
 }

@@ -1,9 +1,9 @@
 package io.github.fludakit.data.page;
 
+import io.github.fludakit.data.Names;
 import io.github.fludakit.data.metadata.EntityDescriptor;
 import jakarta.data.page.PageRequest;
 
-import java.lang.reflect.Field;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -14,7 +14,7 @@ public final class CursorSupport {
 
     /** Lexicographic seek WHERE clause over the given snake_case columns/directions. {@code forward} true = CURSOR_NEXT. */
     public static String seekWhere(List<String> columns, List<Boolean> ascending, PageRequest.Cursor cursor, boolean forward) {
-        return seekWhereTerms(columns.stream().map(c -> "\"" + c + "\"").toList(), ascending, cursor, forward);
+        return seekWhereTerms(columns.stream().map(Names::quote).toList(), ascending, cursor, forward);
     }
 
     /**
@@ -87,32 +87,5 @@ public final class CursorSupport {
             }
         }
         return edge;
-    }
-
-    /**
-     * Reflection-based cursor key, superseded by the descriptor-driven {@link
-     * #cursorFor(List, List, EntityDescriptor, Object)} overload that the generated paging code is
-     * migrating to. Kept (with its reflective helpers) until every generated call site moves.
-     */
-    @Deprecated
-    public static PageRequest.Cursor cursorFor(List<String> properties, Object entity) {
-        Object[] key = new Object[properties.size()];
-        for (int i = 0; i < properties.size(); i++) key[i] = fieldValue(entity, properties.get(i));
-        return PageRequest.Cursor.forKey(key);
-    }
-
-    private static Object fieldValue(Object entity, String property) {
-        Field f = findField(entity.getClass(), property);
-        if (f == null) throw new IllegalArgumentException("No field named '" + property + "' on " + entity.getClass().getName());
-        try { f.setAccessible(true); return f.get(entity); } catch (IllegalAccessException e) { throw new IllegalStateException(e); }
-    }
-
-    private static Field findField(Class<?> c, String name) {
-        Class<?> cur = c;
-        while (cur != null && cur != Object.class) {
-            try { return cur.getDeclaredField(name); } catch (NoSuchFieldException ignored) { }
-            cur = cur.getSuperclass();
-        }
-        return null;
     }
 }

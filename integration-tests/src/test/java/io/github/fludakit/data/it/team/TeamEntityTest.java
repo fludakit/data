@@ -1,0 +1,184 @@
+package io.github.fludakit.data.it.team;
+
+import io.github.fludakit.data.it.DataSourceProducer;
+
+import jakarta.data.Order;
+import jakarta.data.page.CursoredPage;
+import jakarta.data.page.Page;
+import jakarta.data.page.PageRequest;
+import jakarta.inject.Inject;
+import org.jboss.weld.junit5.auto.AddBeanClasses;
+import org.jboss.weld.junit5.auto.AddPackages;
+import org.jboss.weld.junit5.auto.EnableAutoWeld;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+/**
+ * Task 12: the team fixture is {@code @Entity} — pins the directive's read/write semantics for
+ * {@code @Entity} owners end-to-end:
+ *
+ * <ul>
+ *   <li>the bare entity field {@code Player.team} is a NON-composing Reference (association):
+ *       direct reads materialise it as an id-only partial (Task 9 {@code partial_<Target>} rule);</li>
+ *   <li>the entity collection {@code Team.players} keeps its stereotype-independent read loader —
+ *       pinned to the ACTUAL materialisation the framework returns;</li>
+ *   <li>{@code @Entity} owners get NO composition write cascade (I-1 gate): {@code teams.update} with
+ *       an empty in-memory collection must leave player rows untouched;</li>
+ *   <li>runtime {@code Order} through the collection ({@code _Team.players.name}) contributes the
+ *       LEFT JOIN (profiles-shape), a method-name finder predicate traverses the same relation, and
+ *       a CURSOR-mode paged read executes the join-QUALIFIED seek predicate (parked Task-7 M-1).</li>
+ * </ul>
+ */
+@EnableAutoWeld
+@AddPackages(Team.class)
+@AddBeanClasses({DataSourceProducer.class,
+                 io.github.fludakit.jdbc.cdi.JdbcClientProducer.class,
+                 io.github.fludakit.jdbc.cdi.ConverterRegistryProducer.class})
+class TeamEntityTest {
+
+    @Inject TeamRepository teams;
+    @Inject PlayerRepository players;
+
+    @Test
+    void bareReferenceInsideEntityMaterialisesIdOnlyPartial() {
+        Team saved = teams.save(team("Falcons"));
+        Player striker = players.save(player("Ramos", saved));
+
+        Player back = players.findById(striker.getId()).orElseThrow();
+        assertThat(back.getTeam()).isNotNull();
+        assertThat(back.getTeam().getId()).isEqualTo(saved.getId());
+        assertThat(back.getTeam().getName())
+                .as("bare entity reference inside @Entity materialises as an association (id-only)")
+                .isNull();
+    }
+
+    @Test
+    void entityCollectionOnEntityOwnerStillHydratesOnRead() {
+        Team saved = teams.save(team("Falcons"));
+        players.save(player("Ramos", saved));
+        players.save(player("Navas", saved));
+
+        Team back = teams.findById(saved.getId()).orElseThrow();
+        // Pin to ACTUAL behavior: the read loader is stereotype-independent and materialises each
+        // child through PlayerRowMapper — the child's OWN columns come back FULL (id, name), while
+        // its non-composing Reference (the @Entity-owner partial rule, Task 9) rides along as an
+        // id-only partial: non-null back-reference, name null, NO nested children (depth-1).
+        assertThat(back.getPlayers()).extracting(Player::getName)
+                .containsExactlyInAnyOrder("Ramos", "Navas");
+        assertThat(back.getPlayers()).allSatisfy(p -> {
+            assertThat(p.getTeam()).isNotNull();
+            assertThat(p.getTeam().getId()).isEqualTo(saved.getId());
+            assertThat(p.getTeam().getName()).isNull();
+            assertThat(p.getTeam().getPlayers()).isEmpty();
+        });
+    }
+
+    @Test
+    void updateOnEntityOwnerDoesNotCascadeEntityCollectionWrites() {
+        Team saved = teams.save(team("Falcons"));
+        Player striker = players.save(player("Ramos", saved));
+
+        // I-1 stereotype gate: an @Entity owner NEVER cascades its entity collection on write.
+        // Fresh root, same id, EMPTY in-memory collection → update must not delete player rows.
+        Team fresh = new Team();
+        fresh.setId(saved.getId());
+        fresh.setName("Falcons II");
+        teams.update(fresh);
+
+        assertThat(players.findById(striker.getId())).isPresent();
+        Team back = teams.findById(saved.getId()).orElseThrow();
+        assertThat(back.getName()).isEqualTo("Falcons II");
+        assertThat(back.getPlayers()).extracting(Player::getName).containsExactly("Ramos");
+    }
+
+    @Test
+    void runtimeOrderThroughEntityCollectionContributesJoin() {
+        Team borussia = teams.save(team("Borussia"));
+        Team ajax = teams.save(team("Ajax"));
+        Team empty = teams.save(team("Empty"));
+        players.save(player("Zeta", borussia));
+        players.save(player("Alpha", ajax));
+
+        Page<Team> page = teams.findAll(
+                PageRequest.ofPage(1).size(10), Order.by(_Team.players.name.asc()));
+
+        // LEFT JOIN semantics: the childless team survives; join owners come back ordered by the
+        // joined player's name ("Alpha" before "Zeta").
+        List<String> names = page.content().stream().map(Team::getName).toList();
+        assertThat(names).contains(empty.getName());
+        int ajaxAt = names.indexOf("Ajax");
+        int borussiaAt = names.indexOf("Borussia");
+        assertThat(ajaxAt).isNotNegative();
+        assertThat(borussiaAt).isNotNegative();
+        assertThat(ajaxAt).isLessThan(borussiaAt);
+    }
+
+    @Test
+    void methodNameFinderThroughEntityCollectionFiltersByJoinedPredicate() {
+        Team falcons = teams.save(team("Falcons"));
+        Team eagles = teams.save(team("Eagles"));
+        players.save(player("Ramos", falcons));
+        players.save(player("Silva", eagles));
+
+        List<Team> found = teams.findByPlayersName("Ramos");
+        assertThat(found).hasSize(1);
+        assertThat(found.get(0).getId()).isEqualTo(falcons.getId());
+        assertThat(found.get(0).getName()).isEqualTo("Falcons");
+    }
+
+    @Test
+    void cursorModeRelationSortSeeksOnJoinQualifiedPredicate() {
+        // Parked Task-7 finding M-1, end-to-end proof (commit eb03752): in CURSOR mode the seek
+        // predicate must follow the same qualification rule as the select list. Both team and
+        // player carry a "name" column, so a BARE seek term on the joined path would be an
+        // ambiguous-column SQL failure at parse time — the request below must EXECUTE.
+        Team falcons = teams.save(team("Falcons"));
+        Team eagles = teams.save(team("Eagles"));
+        players.save(player("Navas", falcons));
+        players.save(player("Ramos", eagles));
+
+        PageRequest beyond = PageRequest.ofPage(1).size(10)
+                .afterCursor(PageRequest.Cursor.forKey("Zzz"));
+        Page<Team> page = teams.findAll(beyond, Order.by(_Team.players.name.asc()));
+        assertThat(page).isInstanceOf(CursoredPage.class);
+        // Cursor beyond the whole keyset: the qualified ("player"."name" > :cursor0) predicate ran
+        // without the ambiguity error and matched nothing.
+        assertThat(page.content()).isEmpty();
+    }
+
+    @Test
+    void cursorModeRelationSortWalkGapPin() {
+        // GAP pin (documented for the controller): a cursor-mode page WITH content builds its next
+        // cursors via CursorSupport.cursorFor over the RAW sort property path ("players.name"),
+        // which reflects an exact declared field name — no dot-path navigation exists in core.
+        // The seek SQL itself executes first (proved by cursorModeRelationSortSeeksOnJoinQualified
+        // Predicate), so this failure is NOT the M-1 ambiguity; it is a pre-existing core
+        // cursorFor limitation, orthogonal to seek-term qualification.
+        Team falcons = teams.save(team("Falcons"));
+        players.save(player("Navas", falcons));
+        players.save(player("Ramos", falcons));
+
+        PageRequest mid = PageRequest.ofPage(1).size(10)
+                .afterCursor(PageRequest.Cursor.forKey("A"));
+        assertThatThrownBy(() -> teams.findAll(mid, Order.by(_Team.players.name.asc())))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("players.name");
+    }
+
+    private static Team team(String name) {
+        Team t = new Team();
+        t.setName(name);
+        return t;
+    }
+
+    private static Player player(String name, Team team) {
+        Player p = new Player();
+        p.setName(name);
+        p.setTeam(team);
+        return p;
+    }
+}

@@ -171,6 +171,49 @@ class ProfileCvTest {
                 .containsExactly("Aarau", "Zürich");
     }
 
+    @Test
+    void toManySortAndPredicateReturnEachRootOnce() {
+        // Task 7 (S-3 acceptance): Ada's two companies straddle Grace's single one — the MIN(company)
+        // aggregate sort keys are "alpha" (Ada) and "Beta" (Grace) — and the EXISTS predicate under
+        // the root list must return each profile exactly ONCE. Pre-Task-5/6 the LEFT JOIN fan-out
+        // gave three join rows ([Grace, Ada, Ada] ordered by joined row), duplicating the two-child
+        // root in both the sorted read and the child-matched finder.
+        Profile ada = profile("Ada", "London");
+        ada.getWorkHistory().add(new WorkExperience("alpha", 1842, 1843));
+        ada.getWorkHistory().add(new WorkExperience("zeta", 1843, 1844));
+        Profile grace = profile("Grace", "New York");
+        grace.getWorkHistory().add(new WorkExperience("Beta", 1952, 1952));
+        profiles.save(ada);
+        profiles.save(grace);
+
+        Page<Profile> page = profiles.findAll(
+                PageRequest.ofPage(1).size(10), Order.by(_Profile.workHistory.company.asc()));
+        assertThat(page.content()).extracting(Profile::getFullName)
+                .containsExactly("Grace", "Ada"); // "Beta" < "alpha"; each root once
+
+        List<Profile> zetaHolders = profiles.findByWorkHistoryCompany("zeta");
+        assertThat(zetaHolders).extracting(Profile::getFullName).containsExactly("Ada");
+    }
+
+    @Test
+    void countThroughToManyPredicateIsDistinctRootTotal() {
+        // Task 7 (S-2 acceptance, Task 5 unjoined COUNT): three matching CHILD rows across two
+        // roots ("alpha" twice on Ada, once on Grace) — the COUNT must stay 2 distinct ROOTS, not
+        // the row fan-out of 3 that the old joined WHERE produced.
+        Profile ada = profile("Ada", "London");
+        ada.getWorkHistory().add(new WorkExperience("alpha", 1842, 1843));
+        ada.getWorkHistory().add(new WorkExperience("alpha", 1843, 1844));
+        Profile grace = profile("Grace", "New York");
+        grace.getWorkHistory().add(new WorkExperience("alpha", 1952, 1952));
+        Profile rene = profile("Rene", "Paris");
+        rene.getWorkHistory().add(new WorkExperience("zeta", 1900, 1901));
+        profiles.save(ada);
+        profiles.save(grace);
+        profiles.save(rene);
+
+        assertThat(profiles.countByWorkHistoryCompany("alpha")).isEqualTo(2L);
+    }
+
     private static Profile profile(String fullName, String city) {
         Profile p = new Profile();
         p.setFullName(fullName);

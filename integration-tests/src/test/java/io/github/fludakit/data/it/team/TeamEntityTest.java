@@ -15,7 +15,6 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Task 12: the team fixture is {@code @Entity} — pins the directive's read/write semantics for
@@ -29,8 +28,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *   <li>{@code @Entity} owners get NO composition write cascade (I-1 gate): {@code teams.update} with
  *       an empty in-memory collection must leave player rows untouched;</li>
  *   <li>runtime {@code Order} through the collection ({@code _Team.players.name}) contributes the
- *       LEFT JOIN (profiles-shape), a method-name finder predicate traverses the same relation, and
- *       a CURSOR-mode paged read executes the join-QUALIFIED seek predicate (parked Task-7 M-1).</li>
+ *       aggregate-subquery sort (Task 6), a method-name finder predicate traverses the same relation
+ *       as an EXISTS semi-join (Task 5), a CURSOR-mode paged read executes the join-QUALIFIED seek
+ *       predicate (R-T12 M-1), and the cursor WALK completes: page 2 is requested from page 1's
+ *       {@code nextPageRequest()} over the MIN(player.name)+root-id keyset
+ *       (Task 7, closing R-T6a).</li>
  * </ul>
  */
 @EnableAutoWeld
@@ -151,22 +153,31 @@ class TeamEntityTest {
     }
 
     @Test
-    void cursorModeRelationSortWalkGapPin() {
-        // GAP pin (documented for the controller): a cursor-mode page WITH content builds its next
-        // cursors via CursorSupport.cursorFor over the RAW sort property path ("players.name"),
-        // which reflects an exact declared field name — no dot-path navigation exists in core.
-        // The seek SQL itself executes first (proved by cursorModeRelationSortSeeksOnJoinQualified
-        // Predicate), so this failure is NOT the M-1 ambiguity; it is a pre-existing core
-        // cursorFor limitation, orthogonal to seek-term qualification.
+    void cursorModeRelationSortWalksTwoPages() {
+        // R-T6a: the former cursorModeRelationSortWalkGapPin is replaced by the REAL walk the fix
+        // round (Tasks 4-6) unblocked — cursor-mode page 1 materialises, its cursor is built from
+        // the aggregate MIN(player.name) key plus the root-id tiebreak, and page 2 CONTINUES from
+        // that cursor (nextPageRequest is a CURSOR_NEXT request, not an offset).
         Team falcons = teams.save(team("Falcons"));
-        players.save(player("Navas", falcons));
-        players.save(player("Ramos", falcons));
+        players.save(player("zeta", falcons));
+        players.save(player("alpha", falcons));   // MIN = "alpha"
+        Team hawks = teams.save(team("Hawks"));
+        players.save(player("beta", hawks));      // MIN = "beta"
 
-        PageRequest mid = PageRequest.ofPage(1).size(10)
-                .afterCursor(PageRequest.Cursor.forKey("A"));
-        assertThatThrownBy(() -> teams.findAll(mid, Order.by(_Team.players.name.asc())))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("players.name");
+        // Jakarta Data 1.0.1 has no withCursor()/mode(CURSOR) setter — cursor mode is entered via
+        // afterCursor, mirroring cursorModeRelationSortSeeksOnJoinQualifiedPredicate. The key is
+        // the two-term [aggregate sort key, appended root-id tiebreak] shape, seeded below every
+        // MIN ("A" < "alpha", id > 0) so page 1 starts at the head of the keyset.
+        Page<Team> firstPage = teams.findAll(
+                PageRequest.ofPage(1).size(1).afterCursor(PageRequest.Cursor.forKey("A", 0L)),
+                Order.by(_Team.players.name.asc()));
+        assertThat(firstPage).isInstanceOf(CursoredPage.class);
+        CursoredPage<Team> first = (CursoredPage<Team>) firstPage;
+        assertThat(first.content()).extracting(Team::getName).containsExactly("Falcons");
+
+        Page<Team> second = teams.findAll(first.nextPageRequest(), Order.by(_Team.players.name.asc()));
+        assertThat(second).isInstanceOf(CursoredPage.class);
+        assertThat(second.content()).extracting(Team::getName).containsExactly("Hawks");
     }
 
     private static Team team(String name) {

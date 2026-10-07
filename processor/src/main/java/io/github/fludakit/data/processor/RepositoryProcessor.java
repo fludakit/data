@@ -2504,10 +2504,13 @@ public class RepositoryProcessor extends AbstractProcessor {
         String rootTable = entity.metadata().tableName();
 
         builder.addStatement("$T cols = new $T<>()", List.class, ArrayList.class);
-        builder.addStatement("$T dirs = new $T<>()", List.class, ArrayList.class);
+        builder.addStatement("$T<$T> dirs = new $T<>()", List.class, Boolean.class, ArrayList.class);
         builder.addStatement("$T props = new $T<>()", List.class, ArrayList.class);
         builder.addStatement("$T<$T> refs = new $T<>()", List.class, MD_COLUMN_REF, ArrayList.class);
         builder.addStatement("$T orderBy = new $T()", StringBuilder.class, StringBuilder.class);
+        if (joinCapable) {
+            builder.addStatement("boolean keyed = false");
+        }
         builder.beginControlFlow("for ($T<?> s : $L)", Sort.class, sortBy);
         builder.addStatement("$T r = resolveRef(s.property())", MD_COLUMN_REF);
         builder.addStatement("cols.add(r.column())");
@@ -2517,18 +2520,40 @@ public class RepositoryProcessor extends AbstractProcessor {
         builder.beginControlFlow("if (orderBy.length() > 0)");
         builder.addStatement("orderBy.append($S)", ", ");
         builder.endControlFlow();
-        builder.addStatement("orderBy.append($T.qualify(r, $S)).append(s.isAscending() ? $S : $S)",
-                SqlBuilder.class, rootTable, " ASC", " DESC");
-        builder.endControlFlow();
+        if (joinCapable) {
+            builder.beginControlFlow("if ($T.isToManyHead($T.INSTANCE, r))", SqlBuilder.class, metadataClass);
+            builder.addStatement("keyed = true");
+            builder.endControlFlow();
+            builder.addStatement("orderBy.append($T.isToManyHead($T.INSTANCE, r)"
+                            + " ? $T.aggregateSortTerm($T.INSTANCE, r, s.isAscending())"
+                            + " : $T.qualify(r, $S)).append(s.isAscending() ? $S : $S)",
+                    SqlBuilder.class, metadataClass, SqlBuilder.class, metadataClass,
+                    SqlBuilder.class, rootTable, " ASC", " DESC");
+            builder.endControlFlow();
+            builder.beginControlFlow("if (keyed && !(dirs.size() > 0"
+                            + " && Boolean.TRUE.equals(dirs.get(dirs.size() - 1))"
+                            + " && $S.equals(props.get(props.size() - 1))))", entity.id().name());
+            builder.addStatement("orderBy.append($S)", ", " + Names.quote(rootTable) + "."
+                    + Names.quote(entity.metadata().idColumn()) + " ASC");
+            builder.addStatement("cols.add($S)", entity.metadata().idColumn());
+            builder.addStatement("dirs.add(true)");
+            builder.addStatement("props.add($S)", entity.id().name());
+            builder.addStatement("refs.add(resolveRef($S))", entity.id().name());
+            builder.endControlFlow();
+        } else {
+            builder.addStatement("orderBy.append($T.qualify(r, $S)).append(s.isAscending() ? $S : $S)",
+                    SqlBuilder.class, rootTable, " ASC", " DESC");
+            builder.endControlFlow();
+        }
         builder.addStatement("$T joins = $T.joinClause($T.INSTANCE, refs)",
                 String.class, SqlBuilder.class, metadataClass);
 
         builder.beginControlFlow("if ($L.mode() == $T.Mode.OFFSET)", pageRequest, PageRequest.class);
         builder.addStatement("long offset = ($L.page() - 1) * $L.size()", pageRequest, pageRequest);
         if (joinCapable) {
-            builder.addStatement("$T<$T> content = jdbcClient.sql((joins.isEmpty() ? $L : $L) + joins"
+            builder.addStatement("$T<$T> content = jdbcClient.sql(((joins.isEmpty() && !keyed ? $L : $L) + joins"
                             + " + (orderBy.length() > 0 ? $S + orderBy : $S)"
-                            + " + $S + $L.size() + $S + offset).query($L).list()",
+                            + " + $S + $L.size() + $S + offset)).query($L).list()",
                     List.class, entity.typeName(), findConstant, joinedFindConstant, " ORDER BY ", "",
                     " LIMIT ", pageRequest, " OFFSET ", queryArg(entity, mapperType));
         } else {
@@ -2553,8 +2578,12 @@ public class RepositoryProcessor extends AbstractProcessor {
             // the new CursorSupport.seekWhereTerms; joins.isEmpty() keeps the bare-column shape, so a
             // join-free cursor read stays byte-identical to the old emission.
             builder.addStatement("$T<$T> terms = new $T<>()", List.class, String.class, ArrayList.class);
-            builder.beginControlFlow("for ($T r : refs)", MD_COLUMN_REF);
-            builder.beginControlFlow("if (joins.isEmpty())");
+            builder.beginControlFlow("for (int i = 0; i < refs.size(); i++)");
+            builder.addStatement("$T r = refs.get(i)", MD_COLUMN_REF);
+            builder.beginControlFlow("if ($T.isToManyHead($T.INSTANCE, r))", SqlBuilder.class, metadataClass);
+            builder.addStatement("terms.add($T.aggregateSortTerm($T.INSTANCE, r, dirs.get(i)))",
+                    SqlBuilder.class, metadataClass);
+            builder.nextControlFlow("else if (joins.isEmpty() && !keyed)");
             builder.addStatement("terms.add($T.quote(r.column()))", Names.class);
             builder.nextControlFlow("else");
             builder.addStatement("terms.add($T.qualify(r, $S))", SqlBuilder.class, rootTable);
@@ -2562,8 +2591,8 @@ public class RepositoryProcessor extends AbstractProcessor {
             builder.endControlFlow();
             builder.addStatement("$T where = $T.seekWhereTerms(terms, dirs, cursor, $L.mode() == $T.Mode.CURSOR_NEXT)",
                     String.class, CursorSupport.class, pageRequest, PageRequest.class);
-            builder.addStatement("$T<$T> content = jdbcClient.sql((joins.isEmpty() ? $L : $L) + joins + $S + where"
-                            + " + (orderBy.length() > 0 ? $S + orderBy : $S) + $S + $L.size() + $S)"
+            builder.addStatement("$T<$T> content = jdbcClient.sql(((joins.isEmpty() && !keyed ? $L : $L) + joins + $S + where"
+                            + " + (orderBy.length() > 0 ? $S + orderBy : $S) + $S + $L.size() + $S))"
                             + ".params($T.cursorParams(cursor)).query($L).list()",
                     List.class, entity.typeName(), findConstant, joinedFindConstant, " WHERE ", " ORDER BY ", "",
                     " LIMIT ", pageRequest, " + 1", CursorSupport.class, queryArg(entity, mapperType));
@@ -2581,7 +2610,8 @@ public class RepositoryProcessor extends AbstractProcessor {
         builder.endControlFlow();
         builder.addStatement("$T<$T.Cursor> cursors = new $T<>()", List.class, PageRequest.class, ArrayList.class);
         builder.beginControlFlow("for ($T e : content)", entity.typeName());
-        builder.addStatement("cursors.add($T.cursorFor(props, e))", CursorSupport.class);
+        builder.addStatement("cursors.add($T.cursorFor(props, dirs, $T.INSTANCE, e))",
+                CursorSupport.class, metadataClass);
         builder.endControlFlow();
         if (hydrate) {
             builder.addStatement("$L", hydrationCall(entity, "content"));
@@ -2609,18 +2639,68 @@ public class RepositoryProcessor extends AbstractProcessor {
         List<SortSpec> effective = sorts.isEmpty()
                 ? List.of(SortSpec.of(entity.id().name(), true, false))
                 : sorts;
+        String entityFqn = entity.typeName().toString();
+        ClassName metadataClass = metadataTypes.get(entityFqn);
+        if (metadataClass == null) {
+            metadataClass = embeddedMetadataName(entityFqn);
+        }
         List<String> columns = new ArrayList<>();
         List<String> properties = new ArrayList<>();
         List<String> directions = new ArrayList<>();
+        List<String> terms = new ArrayList<>();
+        boolean toManySort = false;
         for (SortSpec s : effective) {
-            columns.add(SqlBuilder.resolveColumn(entity.metadata(), s.property()));
+            String column;
+            ColumnRef aggregateRef = null;
+            try {
+                column = SqlBuilder.resolveColumn(entity.metadata(), s.property());
+            } catch (IllegalArgumentException unknown) {
+                // Task 6: a sort property the flat column view cannot answer may still resolve through
+                // the compile model to a TO-MANY head — that renders the aggregate subquery term (the
+                // same string the runtime isToManyHead/aggregateSortTerm pair produces). Anything else
+                // keeps the legacy rejection byte-for-byte.
+                PathResolution resolution = resolveCompilePath(entity.metadata(), s.property());
+                if (resolution.ref() == null || !resolution.existential()) {
+                    throw unknown;
+                }
+                aggregateRef = resolution.ref();
+                column = null;
+                toManySort = true;
+            }
+            columns.add(column != null ? column : aggregateRef.column());
             properties.add(s.property());
             directions.add(Boolean.toString(s.ascending()));
+            terms.add(column != null ? Names.quote(column)
+                    : SqlBuilder.aggregateSortTerm(entity.metadata(), aggregateRef, s.ascending()));
+        }
+        if (toManySort && !("true".equals(directions.get(directions.size() - 1))
+                && entity.id().name().equals(properties.get(properties.size() - 1)))) {
+            // Keyset uniqueness (note 4): the aggregate edge is not unique per root row — append the
+            // root-qualified id ASC term and grow props/dirs (and cols, index-aligned) with "id",
+            // skipped only when the last sort already IS the ascending id.
+            properties.add(entity.id().name());
+            directions.add("true");
+            columns.add(entity.metadata().idColumn());
+            terms.add(Names.quote(entity.metadata().tableName()) + "."
+                    + Names.quote(entity.metadata().idColumn()));
         }
         String colsExpr = "java.util.List.of(" + quoted(columns) + ")";
         String propsExpr = "java.util.List.of(" + quoted(properties) + ")";
         String dirsExpr = "java.util.List.of(" + String.join(", ", directions) + ")";
-        String orderBy = new SqlBuilder().orderBy(entity.metadata(), effective);
+        String termsExpr = "java.util.List.of(" + quotedPreRendered(terms) + ")";
+        String orderBy;
+        if (toManySort) {
+            StringBuilder ob = new StringBuilder(" ORDER BY ");
+            for (int i = 0; i < terms.size(); i++) {
+                if (i > 0) {
+                    ob.append(", ");
+                }
+                ob.append(terms.get(i)).append("true".equals(directions.get(i)) ? " ASC" : " DESC");
+            }
+            orderBy = ob.toString();
+        } else {
+            orderBy = new SqlBuilder().orderBy(entity.metadata(), effective);
+        }
         String wherePrefix = bindings.isEmpty() ? " WHERE " : " AND ";
 
         if (!cursored) {
@@ -2653,15 +2733,21 @@ public class RepositoryProcessor extends AbstractProcessor {
         builder.addStatement("$T<$T> content = $L", List.class, entity.typeName(), offsetCall.build());
         builder.addStatement("$T<$T.Cursor> cursors = new $T<>()", List.class, PageRequest.class, ArrayList.class);
         builder.beginControlFlow("for ($T e : content)", entity.typeName());
-        builder.addStatement("cursors.add($T.cursorFor($L, e))", CursorSupport.class, propsExpr);
+        builder.addStatement("cursors.add($T.cursorFor($L, $L, $T.INSTANCE, e))",
+                CursorSupport.class, propsExpr, dirsExpr, metadataClass);
         builder.endControlFlow();
         if (hydrate) {
             builder.addStatement("$L", hydrationCall(entity, "content"));
         }
         builder.addStatement("return new $T<>($L, content, cursors, -1L)", SimpleCursoredPage.class, pageRequest);
         builder.endControlFlow();
-        builder.addStatement("$T where = $T.seekWhere($L, $L, cursor, $L.mode() == $T.Mode.CURSOR_NEXT)",
-                String.class, CursorSupport.class, colsExpr, dirsExpr, pageRequest, PageRequest.class);
+        if (toManySort) {
+            builder.addStatement("$T where = $T.seekWhereTerms($L, $L, cursor, $L.mode() == $T.Mode.CURSOR_NEXT)",
+                    String.class, CursorSupport.class, termsExpr, dirsExpr, pageRequest, PageRequest.class);
+        } else {
+            builder.addStatement("$T where = $T.seekWhere($L, $L, cursor, $L.mode() == $T.Mode.CURSOR_NEXT)",
+                    String.class, CursorSupport.class, colsExpr, dirsExpr, pageRequest, PageRequest.class);
+        }
         CodeBlock.Builder seekCall = CodeBlock.builder()
                 .add("jdbcClient.sql($L + $S + where + $S + $S + $L.size() + $S)", findConstant, wherePrefix,
                         orderBy, " LIMIT ", pageRequest, " + 1");
@@ -2675,7 +2761,8 @@ public class RepositoryProcessor extends AbstractProcessor {
         builder.endControlFlow();
         builder.addStatement("$T<$T.Cursor> cursors = new $T<>()", List.class, PageRequest.class, ArrayList.class);
         builder.beginControlFlow("for ($T e : content)", entity.typeName());
-        builder.addStatement("cursors.add($T.cursorFor($L, e))", CursorSupport.class, propsExpr);
+        builder.addStatement("cursors.add($T.cursorFor($L, $L, $T.INSTANCE, e))",
+                CursorSupport.class, propsExpr, dirsExpr, metadataClass);
         builder.endControlFlow();
         if (hydrate) {
             builder.addStatement("$L", hydrationCall(entity, "content"));
@@ -2688,6 +2775,27 @@ public class RepositoryProcessor extends AbstractProcessor {
         for (String v : values) {
             if (sb.length() > 0) sb.append(", ");
             sb.append('"').append(v).append('"');
+        }
+        return sb.toString();
+    }
+
+    /** Like {@link #quoted} but for PRE-RENDERED terms whose text carries embedded double quotes
+     *  (aggregate sort terms, root-qualified id terms): each {@code "} is escaped for the emitted
+     *  Java string literal so the generated source round-trips the term verbatim. */
+    private static String quotedPreRendered(List<String> values) {
+        StringBuilder sb = new StringBuilder();
+        for (String v : values) {
+            if (sb.length() > 0) sb.append(", ");
+            sb.append('"');
+            for (int i = 0; i < v.length(); i++) {
+                char c = v.charAt(i);
+                if (c == '"' || c == '\\') {
+                    sb.append('\\').append(c);
+                } else {
+                    sb.append(c);
+                }
+            }
+            sb.append('"');
         }
         return sb.toString();
     }
@@ -2765,7 +2873,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         if ("count".equals(action) || "exists".equals(action)) {
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
                     methodSql(action, entity.metadata(), predicates, predicateRefs, existentialPredicates,
-                            List.of(), List.of(), 0, ""));
+                            List.of(), List.of(), List.of(), 0, ""));
             CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
             appendBoundParameters(call, bindings, parameters);
             call.add(".singleValue($T.class)", Long.class);
@@ -2802,7 +2910,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                     hasJoins(predicateRefs)
                             ? new SqlBuilder().deleteBy(entity.metadata(), predicates)
                             : methodSql("delete", entity.metadata(), predicates, predicateRefs,
-                                    existentialPredicates, List.of(), List.of(), 0, ""));
+                                    existentialPredicates, List.of(), List.of(), List.of(), 0, ""));
             CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
             appendBoundParameters(call, bindings, parameters);
             call.add(".update()");
@@ -2836,14 +2944,15 @@ public class RepositoryProcessor extends AbstractProcessor {
             // seek resolution in emitPaged stays local-only (deferred to Task 12), so no sort refs here.
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
                     methodSql("find", entity.metadata(), predicates, predicateRefs, existentialPredicates,
-                            List.of(), List.of(), 0, ""));
+                            List.of(), List.of(), List.of(), 0, ""));
             emitPaged(builder, entity, pageRequest, methodSorts, constant, constants, bindings, parameters,
                     kind == Kind.CURSORED_PAGE, mapperType, hydrate);
             return;
         }
-        List<ColumnRef> sortRefs = resolveCompilePaths(entity.metadata(),
-                methodSorts.stream().map(SortSpec::property).toList(), method)
-                .stream().map(PathResolution::ref).toList();
+        List<PathResolution> sortPaths = resolveCompilePaths(entity.metadata(),
+                methodSorts.stream().map(SortSpec::property).toList(), method);
+        List<ColumnRef> sortRefs = sortPaths.stream().map(PathResolution::ref).toList();
+        List<Boolean> existentialSorts = sortPaths.stream().map(PathResolution::existential).toList();
 
         // Task 9 (join-returns-all-fields): when a method-name predicate/sort path traversed a Reference,
         // the SELECT carries the target's aliased flattened columns and the read uses a generated
@@ -2860,7 +2969,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             queryArgForMethod = CodeBlock.of("(rs, rowNum) -> $L(rs, rowNum)", fullMapper);
         }
         String sql = methodSql(action, entity.metadata(), predicates, predicateRefs, existentialPredicates,
-                methodSorts, sortRefs, parsed != null ? parsed.limit() : 0, extraProjection);
+                methodSorts, sortRefs, existentialSorts, parsed != null ? parsed.limit() : 0, extraProjection);
         String constant = addConstant(constants, "SQL_" + upperSnake(name), sql);
         CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
         appendBoundParameters(call, bindings, parameters);
@@ -3369,12 +3478,14 @@ public class RepositoryProcessor extends AbstractProcessor {
      */
     private String methodSql(String action, DescriptorModel md, List<Predicate> predicates,
                              List<ColumnRef> predicateRefs, List<Boolean> existentialPredicates,
-                             List<SortSpec> sorts, List<ColumnRef> sortRefs,
+                             List<SortSpec> sorts, List<ColumnRef> sortRefs, List<Boolean> existentialSorts,
                              int limit, String extraProjection) {
         // Task 5: an existential (to-many head) predicate ref renders as an EXISTS conjunct and
-        // contributes NO join; only to-one predicate refs and sort refs splice the LEFT JOIN chain.
-        // The legacy delegation fires exactly when nothing joins AND nothing needs an EXISTS, so
-        // every pre-Task-5 constant stays byte-identical.
+        // contributes NO join. Task 6: the same rule now holds for SORTS — a to-many sort head
+        // renders the aggregate subquery ORDER BY term and contributes NO join; only to-one
+        // predicate refs and to-one sort refs splice the LEFT JOIN chain. The legacy delegation
+        // fires exactly when nothing joins AND nothing needs an EXISTS or an aggregate, so every
+        // pre-Task-5 constant stays byte-identical.
         List<ColumnRef> joinRefs = new ArrayList<>();
         List<Integer> existentialIndices = new ArrayList<>();
         for (int i = 0; i < predicateRefs.size(); i++) {
@@ -3384,8 +3495,13 @@ public class RepositoryProcessor extends AbstractProcessor {
                 joinRefs.add(predicateRefs.get(i));
             }
         }
-        joinRefs.addAll(sortRefs);
-        if (existentialIndices.isEmpty() && !hasJoins(joinRefs)) {
+        for (int i = 0; i < sortRefs.size(); i++) {
+            if (!Boolean.TRUE.equals(existentialSorts.get(i))) {
+                joinRefs.add(sortRefs.get(i));
+            }
+        }
+        if (existentialIndices.isEmpty() && !existentialSorts.contains(Boolean.TRUE)
+                && !hasJoins(joinRefs)) {
             if ("count".equals(action) || "exists".equals(action)) {
                 return new SqlBuilder().countBy(md, predicates);
             }
@@ -3436,9 +3552,11 @@ public class RepositoryProcessor extends AbstractProcessor {
             for (int i = 0; i < sorts.size(); i++) {
                 SortSpec sort = sorts.get(i);
                 ColumnRef ref = sortRefs.get(i);
-                String term = ref.joins().isEmpty() && ref.table() == null
-                        ? Names.quote(ref.column())
-                        : SqlBuilder.qualify(ref, md.tableName());
+                String term = Boolean.TRUE.equals(existentialSorts.get(i))
+                        ? SqlBuilder.aggregateSortTerm(md, ref, sort.ascending())
+                        : ref.joins().isEmpty() && ref.table() == null
+                                ? Names.quote(ref.column())
+                                : SqlBuilder.qualify(ref, md.tableName());
                 if (orderBy.length() > 0) {
                     orderBy.append(", ");
                 }

@@ -74,6 +74,13 @@ public final class CursorSupport {
             if (value == null) {
                 continue;
             }
+            if (!(value instanceof Comparable)) {
+                // Task 6 note-7: a value list whose elements carry no natural order (e.g.
+                // value("workHistory.profile") -> List<Profile>) cannot produce a cursor edge — fail
+                // fast at cursor-build time instead of casting blind and surfacing a CCE mid-page.
+                throw new IllegalArgumentException("cursor sort on non-comparable path element: "
+                        + value.getClass().getName());
+            }
             if (edge == null || (ascending ? ((Comparable) edge).compareTo(value) > 0
                     : ((Comparable) edge).compareTo(value) < 0)) {
                 edge = value;

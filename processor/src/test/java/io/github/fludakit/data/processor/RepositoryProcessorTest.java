@@ -2679,9 +2679,9 @@ class RepositoryProcessorTest {
         //     traversable prop (@Association author), so the emission now picks between the plain
         //     SQL_FIND_ALL and the root-table-QUALIFIED SQL_FIND_ALL_QUALIFIED at runtime — the join
         //     is spliced onto whichever constant matches, never onto an ambiguous bare select list.
-        assertTrue(impl.contains("jdbcClient.sql((joins.isEmpty() ? SQL_FIND_ALL : SQL_FIND_ALL_QUALIFIED) + joins + (orderBy.length() > 0"),
+        assertTrue(impl.contains("jdbcClient.sql(((joins.isEmpty() && !keyed ? SQL_FIND_ALL : SQL_FIND_ALL_QUALIFIED) + joins + (orderBy.length() > 0"),
                 "OFFSET statement must pick the qualified constant when joins are present:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("jdbcClient.sql((joins.isEmpty() ? SQL_FIND_ALL : SQL_FIND_ALL_QUALIFIED) + joins + \" WHERE \" + where"),
+        assertTrue(impl.contains("jdbcClient.sql(((joins.isEmpty() && !keyed ? SQL_FIND_ALL : SQL_FIND_ALL_QUALIFIED) + joins + \" WHERE \" + where"),
                 "CURSOR statement must pick the qualified constant too, before WHERE:" + System.lineSeparator() + impl);
         // The qualified constant exists and qualifies EVERY root column (labels stay bare, so the
         // existing row mapper reads both variants).
@@ -3048,6 +3048,285 @@ class RepositoryProcessorTest {
                 "relation-free cursor emission must keep the bare seekWhere call:" + System.lineSeparator() + impl);
         assertTrue(!impl.contains("seekWhereTerms"),
                 "no verbatim-terms loop for a join-impossible descriptor:" + System.lineSeparator() + impl);
+    }
+
+    @Test
+    void pagedSortThroughEntityListOrdersByAggregateSortTermAndIdTiebreak() throws Exception {
+        // Task 6 (S-2 part 2): the findAllPage runtime sort through a to-many head must NOT splice a
+        // fanning LEFT JOIN. Its ORDER BY term renders through the descriptor-driven aggregate
+        // subquery helper, the query picks the ROOT-QUALIFIED plain select (no join), and the keyset
+        // grows with the root-qualified "id" ASC tiebreak in ORDER BY, cols/dirs/props and the refs
+        // the seek-terms loop walks. Cursor keys move to the descriptor-driven cursorFor overload.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/t6rt"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-t6rt"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-t6rt"));
+        Files.writeString(sourceDir.resolve("WorkExperience.java"), """
+                package t6rt;
+                import io.github.fludakit.data.annotation.Entity;
+                import io.github.fludakit.data.annotation.Identity;
+                @Entity
+                public class WorkExperience {
+                    @Identity Long id;
+                    String company;
+                    Profile profile;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getCompany() { return company; }
+                    public void setCompany(String company) { this.company = company; }
+                    public Profile getProfile() { return profile; }
+                    public void setProfile(Profile profile) { this.profile = profile; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Profile.java"), """
+                package t6rt;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                import java.util.ArrayList;
+                import java.util.List;
+                @AggregateRoot
+                public class Profile {
+                    @Identity Long id;
+                    String fullName;
+                    List<WorkExperience> workHistory = new ArrayList<>();
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getFullName() { return fullName; }
+                    public void setFullName(String fullName) { this.fullName = fullName; }
+                    public List<WorkExperience> getWorkHistory() { return workHistory; }
+                    public void setWorkHistory(List<WorkExperience> workHistory) {
+                        this.workHistory = workHistory;
+                    }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Profiles.java"), """
+                package t6rt;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Profiles extends CrudRepository<Profile, Long> { }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir,
+                "WorkExperience.java", "Profile.java", "Profiles.java");
+
+        String impl = sqlFlat(generatedDir.resolve("t6rt/ProfilesImpl.java"));
+        assertTrue(impl.contains("orderBy.append(SqlBuilder.isToManyHead(ProfileMetadata.INSTANCE, r)"
+                        + " ? SqlBuilder.aggregateSortTerm(ProfileMetadata.INSTANCE, r, s.isAscending())"
+                        + " : SqlBuilder.qualify(r, \"profile\"))"),
+                "to-many sort heads must switch the ORDER BY term to the aggregate sort term:"
+                        + System.lineSeparator() + impl);
+        assertTrue(impl.contains("boolean keyed = false;"),
+                "the keyset growth flag must exist:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("if (keyed && !(dirs.size() > 0 && Boolean.TRUE.equals(dirs.get(dirs.size() - 1))"
+                        + " && \"id\".equals(props.get(props.size() - 1))))"),
+                "the id tiebreak must append unless the last ORDER BY term already IS the ascending id:"
+                        + System.lineSeparator() + impl);
+        assertTrue(impl.contains("orderBy.append(\", \"profile\".\"id\" ASC\")"),
+                "the ORDER BY must gain the root-qualified id ASC term:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("cols.add(\"id\")") && impl.contains("dirs.add(true)")
+                        && impl.contains("props.add(\"id\")") && impl.contains("refs.add(resolveRef(\"id\"))"),
+                "cols/dirs/props/refs must stay index-aligned while growing with the tiebreak:"
+                        + System.lineSeparator() + impl);
+        assertTrue(impl.contains("jdbcClient.sql(((joins.isEmpty() && !keyed ? SQL_FIND_ALL"
+                        + " : SQL_FIND_ALL_QUALIFIED) + joins + (orderBy.length() > 0"),
+                "OFFSET must take the qualified plain select when keyed even with empty joins:"
+                        + System.lineSeparator() + impl);
+        assertTrue(impl.contains("jdbcClient.sql(((joins.isEmpty() && !keyed ? SQL_FIND_ALL"
+                        + " : SQL_FIND_ALL_QUALIFIED) + joins + \" WHERE \" + where"),
+                "CURSOR must take the qualified plain select when keyed too:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("terms.add(SqlBuilder.aggregateSortTerm(ProfileMetadata.INSTANCE, r,"
+                        + " dirs.get(i)))"),
+                "seek terms must use the aggregate sort term verbatim for to-many refs:"
+                        + System.lineSeparator() + impl);
+        assertTrue(impl.contains("String joins = SqlBuilder.joinClause(ProfileMetadata.INSTANCE, refs)"),
+                "the joinClause call must stay as emitted (to-many refs are skipped by the clause itself):"
+                        + System.lineSeparator() + impl);
+        assertTrue(impl.contains("CursorSupport.cursorFor(props, dirs, ProfileMetadata.INSTANCE, e)"),
+                "the cursor keys must come from the descriptor-driven overload:"
+                        + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("LEFT JOIN \"work_experience\""),
+                "the generated file must not splice the to-many table as a join:"
+                        + System.lineSeparator() + impl);
+    }
+
+    @Test
+    void pagedFinderSortThroughElementListDescendsToMaxSubqueryWithIdTiebreak() throws Exception {
+        // Task 6: the compile-time sort side (a CursoredPage finder under @OrderBy) resolves a to-many
+        // head to the SAME pre-rendered aggregate term used verbatim in ORDER BY and seekWhereTerms,
+        // grows props/dirs/cols with the id tiebreak, and switches the cursor keys to the descriptor
+        // overload over the grown lists.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/t6el"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-t6el"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-t6el"));
+        Files.writeString(sourceDir.resolve("Contact.java"), """
+                package t6el;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class Contact {
+                    String kind;
+                    String value;
+                    public String getKind() { return kind; }
+                    public void setKind(String kind) { this.kind = kind; }
+                    public String getValue() { return value; }
+                    public void setValue(String value) { this.value = value; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Profile.java"), """
+                package t6el;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                import java.util.ArrayList;
+                import java.util.List;
+                @AggregateRoot
+                public class Profile {
+                    @Identity Long id;
+                    String fullName;
+                    List<Contact> contacts = new ArrayList<>();
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getFullName() { return fullName; }
+                    public void setFullName(String fullName) { this.fullName = fullName; }
+                    public List<Contact> getContacts() { return contacts; }
+                    public void setContacts(List<Contact> contacts) { this.contacts = contacts; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Profiles.java"), """
+                package t6el;
+                import jakarta.data.page.CursoredPage;
+                import jakarta.data.page.PageRequest;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.OrderBy;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Profiles extends CrudRepository<Profile, Long> {
+                    @OrderBy(value = "contacts.value", descending = true)
+                    CursoredPage<Profile> findBy(PageRequest pageRequest);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Contact.java", "Profile.java", "Profiles.java");
+
+        String impl = sqlFlat(generatedDir.resolve("t6el/ProfilesImpl.java"));
+        assertTrue(impl.contains("ORDER BY (SELECT MAX(\"contacts\".\"value\") FROM"
+                        + " \"profile_contacts\" \"contacts\" WHERE \"contacts\".\"profile_id\" ="
+                        + " \"profile\".\"id\") DESC, \"profile\".\"id\" ASC"),
+                "the paged finder ORDER BY must be the MAX subquery term plus the id tiebreak:"
+                        + System.lineSeparator() + impl);
+        assertTrue(impl.contains("CursorSupport.seekWhereTerms(java.util.List.of(\"(SELECT MAX("),
+                "the seek predicate must switch to the verbatim terms loop with the aggregate term:"
+                        + System.lineSeparator() + impl);
+        assertTrue(impl.contains("\", \"\"profile\".\"id\"\"), java.util.List.of(false, true), cursor"),
+                "the seek terms must end with the root-qualified id term and the grown dirs list:"
+                        + System.lineSeparator() + impl);
+        assertTrue(impl.contains("CursorSupport.cursorFor(java.util.List.of(\"contacts.value\", \"id\")"
+                        + ", java.util.List.of(false, true), ProfileMetadata.INSTANCE, e)"),
+                "cursor keys must ride the grown props/dirs lists through the descriptor overload:"
+                        + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("LEFT JOIN"),
+                "no to-many sort join may be spliced anywhere in this emission:" + System.lineSeparator() + impl);
+    }
+
+    @Test
+    void pagedSortThroughReferenceStillJoinsByteIdentical() throws Exception {
+        // Byte-parity pin (note 4): a to-one sort must NOT gain the aggregate switch or the id
+        // tiebreak at the compile-time paged emission - the legacy resolveColumn/orderBy/seekWhere
+        // strings stay exactly as Task 11 shipped them (the runtime to-one parity lives in
+        // dynamicSortResolvesThroughDescriptorAndContributesJoins, which this task must not break).
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/t6one"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-t6one"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-t6one"));
+        writeRelationFixture(sourceDir);
+        Files.writeString(sourceDir.resolve("ParityOrd.java"), """
+                package relpath;
+                import jakarta.data.page.CursoredPage;
+                import jakarta.data.page.PageRequest;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.OrderBy;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface ParityOrd extends CrudRepository<Order, Long> {
+                    @OrderBy(value = "customer")
+                    CursoredPage<Order> findBy(PageRequest pageRequest);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir,
+                "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java",
+                "ParityOrd.java");
+
+        String impl = sqlFlat(generatedDir.resolve("relpath/ParityOrdImpl.java"));
+        assertTrue(impl.contains("ORDER BY \"customer_id\" ASC"),
+                "the to-one fk sort must keep the legacy orderBy term:" + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("customer_id\" ASC, \"") && !impl.contains("customer_id\" ASC, "),
+                "no term may follow the legacy to-one ORDER BY (no tiebreak gained):"
+                        + System.lineSeparator() + impl);
+        assertTrue(impl.contains("CursorSupport.seekWhere(java.util.List.of(\"customer_id\"),"
+                        + " java.util.List.of(true), cursor"),
+                "the legacy bare-columns seekWhere call must stay:" + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("ORDER BY (SELECT"),
+                "no aggregate sort term may appear for a to-one sort:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("CursorSupport.cursorFor(java.util.List.of(\"customer\"),"
+                        + " java.util.List.of(true), OrderMetadata.INSTANCE, e)"),
+                "cursor keys keep the UNGROWN props list on the descriptor overload:"
+                        + System.lineSeparator() + impl);
+    }
+
+    @Test
+    void localSortStaysLegacyByteIdentical() throws Exception {
+        // Byte-parity pin (note 4): with NO traversable prop at all the whole paged findAll stays the
+        // single-constant legacy emission - no qualified constant, no keyed machinery, no terms.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/t6loc"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-t6loc"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-t6loc"));
+        Files.writeString(sourceDir.resolve("Memo.java"), """
+                package t6loc;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Memo {
+                    @Identity Long id;
+                    String text;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getText() { return text; }
+                    public void setText(String text) { this.text = text; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Memos.java"), """
+                package t6loc;
+                import jakarta.data.page.CursoredPage;
+                import jakarta.data.page.PageRequest;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.OrderBy;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Memos extends CrudRepository<Memo, Long> {
+                    @OrderBy(value = "text")
+                    CursoredPage<Memo> findBy(PageRequest pageRequest);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Memo.java", "Memos.java");
+
+        String impl = sqlFlat(generatedDir.resolve("t6loc/MemosImpl.java"));
+        assertTrue(!impl.contains("SQL_FIND_ALL_QUALIFIED") && !impl.contains("keyed"),
+                "a traversal-impossible descriptor must keep the single-constant legacy shape:"
+                        + System.lineSeparator() + impl);
+        assertTrue(impl.contains("jdbcClient.sql(SQL_FIND_ALL + joins + (orderBy.length() > 0"),
+                "the legacy OFFSET splice must stay:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("String where = CursorSupport.seekWhere(cols, dirs, cursor"),
+                "the legacy seekWhere delegation must stay:" + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("(SELECT") && !impl.contains("seekWhereTerms"),
+                "no aggregate term or verbatim-terms seek for local sorts:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("ORDER BY \"text\" ASC"),
+                "legacy orderBy term for a local sort:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("CursorSupport.seekWhere(java.util.List.of(\"text\"),"
+                        + " java.util.List.of(true), cursor"),
+                "legacy finder seekWhere:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("CursorSupport.cursorFor(java.util.List.of(\"text\"),"
+                        + " java.util.List.of(true), MemoMetadata.INSTANCE, e)")
+                        && impl.contains("CursorSupport.cursorFor(props, dirs, MemoMetadata.INSTANCE, e)"),
+                "all cursor emissions ride the descriptor overload:" + System.lineSeparator() + impl);
     }
 
     /**

@@ -5,7 +5,10 @@ import io.github.fludakit.data.metadata.EntityDescriptor;
 import io.github.fludakit.data.metadata.EntitySchema;
 import io.github.fludakit.data.metadata.JoinRef;
 import io.github.fludakit.data.metamodel.EmbeddedAttributeRecord;
+import io.github.fludakit.data.metamodel.ElementCollectionAttributeRecord;
+import io.github.fludakit.data.metamodel.ForeignKeyAttributeRecord;
 import io.github.fludakit.data.metamodel.IdAttributeRecord;
+import io.github.fludakit.data.metamodel.OneToManyAttributeRecord;
 import io.github.fludakit.data.metamodel.TextColumnAttributeRecord;
 import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.Predicate;
@@ -26,6 +29,10 @@ class SqlBuilderTest {
     static class Profile { }
 
     static class Address { }
+
+    static class Contact { }
+
+    static class WorkExperience { }
 
     static EntityDescriptor<Customer> customer() {
         return new EntityDescriptor<>() {
@@ -212,5 +219,95 @@ class SqlBuilderTest {
         ColumnRef local = new ColumnRef("total", "total");
         assertEquals("\"total\" = :total",
                 SqlBuilder.render(Predicate.of("total", Operator.EQ, "total"), local));
+    }
+
+    // ---- Task 6: aggregate sort terms replace to-many joined sorts ----
+
+    /** Profile descriptor carrying one element collection, one one-to-many and one to-one head. */
+    static EntityDescriptor<Profile> mixedProfile() {
+        return new EntityDescriptor<>() {
+            @Override public Class<Profile> entityClass() { return Profile.class; }
+            @Override public String tableName() { return "profile"; }
+            @Override public IdAttributeRecord<Profile> id() { return new IdAttributeRecord<>("id", "id"); }
+            @Override public List<Attribute<Profile>> attributes() {
+                return List.of(
+                        new ElementCollectionAttributeRecord<Profile, Contact>("contacts", Contact.class,
+                                "profile_contacts", "profile_id", () -> null),
+                        new OneToManyAttributeRecord<Profile, WorkExperience>("workHistory",
+                                WorkExperience.class, "profile", () -> null),
+                        new ForeignKeyAttributeRecord<Profile, Customer>("customer", "customer_id",
+                                Customer.class, SqlBuilderTest::customer));
+            }
+            @Override public List<ColumnRef> columns() {
+                return List.of(new ColumnRef("id", "id"),
+                        new ColumnRef("customer_id", "customer"),
+                        new ColumnRef("full_name", "fullName"));
+            }
+        };
+    }
+
+    @Test
+    void isToManyHeadDetectsOnlyToManyRelationHeadsOfJoinedRefs() {
+        EntityDescriptor<Profile> md = mixedProfile();
+        ColumnRef elementHead = new ColumnRef("value", "contacts.value", null,
+                List.of(new JoinRef("profile_contacts", "contacts", "id", "profile_id")));
+        ColumnRef entityHead = new ColumnRef("company", "workHistory.company", null,
+                List.of(new JoinRef("work_experience", "workHistory", "id", "profile_id")));
+        ColumnRef toOneHead = new ColumnRef("name", "customer.name", null,
+                List.of(new JoinRef("customer", "customer", "customer_id", "id")));
+        ColumnRef local = new ColumnRef("full_name", "fullName");
+        ColumnRef embedded = new ColumnRef("address_city", "address.city");
+
+        assertThat(SqlBuilder.isToManyHead(md, elementHead)).isTrue();
+        assertThat(SqlBuilder.isToManyHead(md, entityHead)).isTrue();
+        assertThat(SqlBuilder.isToManyHead(md, toOneHead)).isFalse();
+        // Join-free refs (local or embedded) never carry a relation head.
+        assertThat(SqlBuilder.isToManyHead(md, local)).isFalse();
+        assertThat(SqlBuilder.isToManyHead(md, embedded)).isFalse();
+    }
+
+    @Test
+    void aggregateSortTermRendersCorrelatedMinMaxSubquery() {
+        EntitySchema md = rootSchema("profile", List.of(new ColumnRef("id", "id")));
+        ColumnRef asc = new ColumnRef("company", "workHistory.company", null,
+                List.of(new JoinRef("work_experience", "workHistory", "id", "profile_id")));
+        assertEquals("(SELECT MIN(\"workHistory\".\"company\") FROM \"work_experience\" \"workHistory\""
+                        + " WHERE \"workHistory\".\"profile_id\" = \"profile\".\"id\")",
+                SqlBuilder.aggregateSortTerm(md, asc, true));
+        assertEquals("(SELECT MAX(\"workHistory\".\"company\") FROM \"work_experience\" \"workHistory\""
+                        + " WHERE \"workHistory\".\"profile_id\" = \"profile\".\"id\")",
+                SqlBuilder.aggregateSortTerm(md, asc, false));
+
+        // Deeper edges chain INSIDE the subquery (LEFT JOIN AS shape); correlation stays on the head.
+        ColumnRef deep = new ColumnRef("name", "workHistory.country.name", null, List.of(
+                new JoinRef("work_experience", "workHistory", "id", "profile_id"),
+                new JoinRef("country", "country", "country_id", "id")));
+        assertEquals("(SELECT MIN(\"country\".\"name\") FROM \"work_experience\" \"workHistory\""
+                        + " LEFT JOIN \"country\" AS \"country\" ON \"workHistory\".\"country_id\""
+                        + " = \"country\".\"id\" WHERE \"workHistory\".\"profile_id\" = \"profile\".\"id\")",
+                SqlBuilder.aggregateSortTerm(md, deep, true));
+
+        // A join-free ref has nothing to aggregate: fail fast rather than emit a correlated nothing.
+        assertThatThrownBy(() -> SqlBuilder.aggregateSortTerm(md, new ColumnRef("id", "id"), true))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("aggregate sort term requires a relation path");
+    }
+
+    @Test
+    void joinClauseSkipsToManyHeadRefsForRuntimeDescriptorsOnly() {
+        EntityDescriptor<Profile> md = mixedProfile();
+        ColumnRef toMany = new ColumnRef("company", "workHistory.company", null,
+                List.of(new JoinRef("work_experience", "workHistory", "id", "profile_id")));
+        ColumnRef toOne = new ColumnRef("name", "customer.name", null,
+                List.of(new JoinRef("customer", "customer", "customer_id", "id")));
+
+        String clause = SqlBuilder.joinClause(md, List.of(toMany, toOne));
+        assertThat(clause).doesNotContain("\"work_experience\"");
+        assertThat(clause).isEqualTo(" LEFT JOIN \"customer\" AS \"customer\""
+                + " ON \"profile\".\"customer_id\" = \"customer\".\"id\"");
+
+        // Compile-time schemas (non-descriptors) are untouched: the processor filters existentials itself.
+        EntitySchema schema = rootSchema("profile", List.of(toMany));
+        assertThat(SqlBuilder.joinClause(schema, List.of(toMany))).contains("LEFT JOIN \"work_experience\"");
     }
 }

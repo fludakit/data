@@ -108,6 +108,19 @@ class EntityDescriptorValueTest {
     }
 
     @Test
+    void cursorForFailsFastOnNonComparableListElements() {
+        // Task 6 note-7 guard: a cursor sort through e.g. "workHistory.profile" yields a
+        // List<Profile> from descriptor value extraction; Profile is not Comparable, and silently
+        // ClassCastException-ing at page-two seek time is worse than a named, immediate failure.
+        EntityDescriptor<Node> md = withValues(List.of(new Node(), new Node()));
+
+        assertThatThrownBy(() -> CursorSupport.cursorFor(
+                List.of("items.name"), List.of(true), md, new Object()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("cursor sort on non-comparable path element");
+    }
+
+    @Test
     void overriddenValueStillFailsFastForUnknownPath() {
         EntityDescriptor<Node> md = withValues(List.of("b"));
 

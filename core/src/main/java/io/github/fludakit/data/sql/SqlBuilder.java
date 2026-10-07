@@ -2,11 +2,15 @@ package io.github.fludakit.data.sql;
 
 import io.github.fludakit.data.Names;
 import io.github.fludakit.data.metadata.ColumnRef;
+import io.github.fludakit.data.metadata.EntityDescriptor;
 import io.github.fludakit.data.metadata.EntitySchema;
 import io.github.fludakit.data.metadata.JoinRef;
+import io.github.fludakit.data.metamodel.ElementCollectionAttribute;
+import io.github.fludakit.data.metamodel.OneToManyAttribute;
 import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.SortSpec;
+import jakarta.data.metamodel.Attribute;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -120,6 +124,12 @@ public final class SqlBuilder {
         Map<String, JoinRef> byAlias = new LinkedHashMap<>();
         StringBuilder sb = new StringBuilder();
         for (ColumnRef ref : refs) {
+            // Task 6 (R-T6): a sort/paging ref whose head is to-many renders as an aggregate
+            // subquery (see aggregateSortTerm), NEVER a fanning LEFT JOIN. Only runtime
+            // descriptors can answer that; compile-time callers already filter existentials.
+            if (md instanceof EntityDescriptor<?> descriptor && isToManyHead(descriptor, ref)) {
+                continue;
+            }
             String previous = null;
             for (JoinRef join : ref.joins()) {
                 if (byAlias.containsKey(join.alias())) {
@@ -194,6 +204,66 @@ public final class SqlBuilder {
                 + " WHERE " + Names.quote(alias) + "." + Names.quote(childFkColumn)
                 + " = " + Names.quote(rootTable) + "." + Names.quote(rootIdColumn)
                 + " AND " + render(p, leafRef) + ")";
+    }
+
+    /**
+     * True when {@code ref}'s relation head — the FIRST dot segment of its path, joins required — is a
+     * to-many attribute ({@link OneToManyAttribute} or {@link ElementCollectionAttribute}) on the
+     * descriptor. Sorts through such heads render {@link #aggregateSortTerm} instead of joining; a
+     * head the descriptor does not know is {@code false} (the join clause and callers keep their
+     * existing rejection behaviour).
+     */
+    public static boolean isToManyHead(EntityDescriptor<?> md, ColumnRef ref) {
+        if (ref.joins().isEmpty()) {
+            return false;
+        }
+        int dot = ref.path().indexOf('.');
+        if (dot < 0) {
+            return false;
+        }
+        String head = ref.path().substring(0, dot);
+        try {
+            Attribute<?> attribute = md.attribute(head);
+            return attribute instanceof OneToManyAttribute || attribute instanceof ElementCollectionAttribute;
+        } catch (IllegalArgumentException unknownProperty) {
+            return false;
+        }
+    }
+
+    /**
+     * The correlated scalar subquery a to-many sort orders by: {@code MIN} of the leaf column for an
+     * ascending key, {@code MAX} for a descending one — exactly the edge the descriptor-driven cursor
+     * key reduction (Task 4) collapses the value list to, so seek and sort agree. The head join opens
+     * the subquery {@code FROM} (alias WITHOUT {@code AS}, mirroring nothing else on the statement);
+     * deeper edges chain inside as the same {@code LEFT JOIN ... AS ... ON ...} fragments
+     * {@link #joinClause} emits, qualified per-path. Correlation is the head's
+     * {@code childFk = rootTable.rootId} pair taken from its {@link JoinRef}. Every identifier goes
+     * through {@link Names#quote}; the result is used VERBATIM as an ORDER BY / seek term.
+     */
+    public static String aggregateSortTerm(EntitySchema md, ColumnRef ref, boolean ascending) {
+        if (ref.joins().isEmpty()) {
+            throw new IllegalArgumentException(
+                    "aggregate sort term requires a relation path: " + ref.path());
+        }
+        JoinRef head = ref.joins().get(0);
+        StringBuilder sb = new StringBuilder("(SELECT ")
+                .append(ascending ? "MIN(" : "MAX(")
+                .append(qualify(ref, md.tableName()))
+                .append(") FROM ").append(Names.quote(head.table()))
+                .append(' ').append(Names.quote(head.alias()));
+        String previous = head.alias();
+        for (int i = 1; i < ref.joins().size(); i++) {
+            JoinRef join = ref.joins().get(i);
+            sb.append(" LEFT JOIN ").append(Names.quote(join.table()))
+                    .append(" AS ").append(Names.quote(join.alias()))
+                    .append(" ON ").append(Names.quote(previous)).append('.').append(Names.quote(join.parentColumn()))
+                    .append(" = ").append(Names.quote(join.alias())).append('.').append(Names.quote(join.childColumn()));
+            previous = join.alias();
+        }
+        sb.append(" WHERE ").append(Names.quote(head.alias())).append('.').append(Names.quote(head.childColumn()))
+                .append(" = ").append(Names.quote(md.tableName())).append('.').append(Names.quote(head.parentColumn()))
+                .append(')');
+        return sb.toString();
     }
 
     private static String renderOperator(Operator op, String col, String param) {

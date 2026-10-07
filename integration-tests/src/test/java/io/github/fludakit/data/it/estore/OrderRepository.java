@@ -12,4 +12,9 @@ import java.util.List;
 public interface OrderRepository extends CrudRepository<Order, Long> {
     @Find
     List<Order> findByAmount(@By("amount") BigDecimal amount);
+
+    // Task 10: predicate through the @Association customer -> target's name; the qbn-parsed camel
+    // path "CustomerName" descends the relation head and contributes one join (mapRow_full_ path).
+    @Find
+    List<Order> findByCustomerName(String name);
 }

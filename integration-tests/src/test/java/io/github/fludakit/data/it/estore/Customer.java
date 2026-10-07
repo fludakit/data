@@ -1,9 +1,9 @@
 package io.github.fludakit.data.it.estore;
 
-import io.github.fludakit.data.annotation.AggregateRoot;
+import io.github.fludakit.data.annotation.Entity;
 import io.github.fludakit.data.annotation.Identity;
 
-@AggregateRoot
+@Entity
 public class Customer {
     @Identity Long id;
     String name;

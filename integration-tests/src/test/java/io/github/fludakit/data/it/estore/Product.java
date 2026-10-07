@@ -1,11 +1,11 @@
 package io.github.fludakit.data.it.estore;
 
-import io.github.fludakit.data.annotation.AggregateRoot;
+import io.github.fludakit.data.annotation.Entity;
 import io.github.fludakit.data.annotation.Identity;
 
 import java.math.BigDecimal;
 
-@AggregateRoot
+@Entity
 public class Product {
     @Identity Long id;
     String name;

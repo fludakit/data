@@ -1,14 +1,14 @@
 package io.github.fludakit.data.it.estore;
 
-import io.github.fludakit.data.annotation.AggregateRoot;
 import io.github.fludakit.data.annotation.Association;
+import io.github.fludakit.data.annotation.Entity;
 import io.github.fludakit.data.annotation.Identity;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 
-@AggregateRoot
+@Entity
 public class Order {
     @Identity Long id;
     BigDecimal amount;

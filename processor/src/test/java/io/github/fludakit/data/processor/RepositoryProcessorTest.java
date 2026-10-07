@@ -3717,6 +3717,44 @@ class RepositoryProcessorTest {
     }
 
     @Test
+    void mixedToOneAndToManyPredicatesConjoinJoinAndExists() throws Exception {
+        // RB3 (plan "to-many + to-one mixed paths", final-review pin): ONE finder declaring BOTH a
+        // to-one predicate (Reference head "customer") and a to-many predicate (ElementList head
+        // "orderItems") must render the mixed shapes CONJUNCTED - the LEFT JOIN splice for the
+        // to-one traversal AND the EXISTS semi-join for the to-many traversal, AND-ed in one WHERE
+        // (methodSql emits the non-existential conjuncts first). Each shape alone is pinned above;
+        // this pins their conjunction.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-mix"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-rp-mix"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-rp-mix"));
+        writeRelationFixture(sourceDir);
+        Files.writeString(sourceDir.resolve("MixedOrd.java"), """
+                package relpath;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.stream.Stream;
+                @Repository
+                public interface MixedOrd extends CrudRepository<Order, Long> {
+                    Stream<Order> findByCustomerNameAndOrderItemsQuantityGreaterThan(String name, int quantity);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir,
+                "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "MixedOrd.java");
+
+        String impl = sqlFlat(generatedDir.resolve("relpath/MixedOrdImpl.java"));
+        assertTrue(impl.contains("FROM \"order\" LEFT JOIN \"customer\" AS \"customer\" ON \"order\".\"customer_id\" = \"customer\".\"id\" WHERE \"customer\".\"name\" = :name AND EXISTS (SELECT 1 FROM \"order_order_items\" \"orderItems\" WHERE \"orderItems\".\"order_id\" = \"order\".\"id\" AND \"orderItems\".\"quantity\" > :quantity)"),
+                "RB3: the to-one LEFT JOIN and the to-many EXISTS must BOTH appear, conjuncted with AND:"
+                        + System.lineSeparator() + impl);
+        assertTrue(impl.contains("SQL_FIND_BY_CUSTOMER_NAME_AND_ORDER_ITEMS_QUANTITY_GREATER_THAN"),
+                "constant name should follow the method name:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains(".param(\"name\", name)"),
+                "the to-one bound parameter must stay the JAVA PARAMETER NAME:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains(".param(\"quantity\", quantity)"),
+                "the to-many bound parameter must stay the JAVA PARAMETER NAME:" + System.lineSeparator() + impl);
+    }
+
+    @Test
     void countThroughEntityListUsesExistsAndStaysUnjoinedTotal() throws Exception {
         // Task 5: countByLinesProduct keeps the COUNT(*) projection, renders the same EXISTS conjunct
         // and carries NO LEFT JOIN anywhere - the total counts ROOT rows, not root-child pairs.

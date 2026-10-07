@@ -2998,8 +2998,9 @@ public class RepositoryProcessor extends AbstractProcessor {
                         name + ": full materialisation through joins is not supported for paged finders;"
                                 + " association fields materialize as id-only partials", method);
             }
-            // The base constant carries the compile-time predicates (join-aware); the runtime sort /
-            // seek resolution in emitPaged stays local-only (deferred to Task 12), so no sort refs here.
+            // The base constant carries the compile-time predicates (join-aware); method-name sort
+            // paths are resolved per-emit in emitPaged (local / to-one qualified / to-many
+            // aggregate — Task 6), so no sort refs are baked into this constant.
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
                     methodSql("find", entity.metadata(), predicates, predicateRefs, existentialPredicates,
                             List.of(), List.of(), List.of(), 0, ""));

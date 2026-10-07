@@ -3174,6 +3174,78 @@ class RepositoryProcessorTest {
     }
 
     @Test
+    void deleteByThroughRelationIsNoteDegradedToLegacyJoinFreeDelete() throws Exception {
+        // T8-I1 fix: `DELETE FROM "t" LEFT JOIN ...` is invalid SQL on H2/PostgreSQL/SQL Server. A
+        // deleteBy whose predicate traverses a relation is NOTE-degraded at compile time (the branch's
+        // NOTE-degrade contract): the traversed predicate is reported with a NOTE on the method and the
+        // DELETE constant keeps the legacy join-free SqlBuilder.deleteBy shape — byte-identical to the
+        // pre-Task-8 emission — which may not match the joined semantics. The compile SUCCEEDS. Guards:
+        // (d) find/count for the SAME traversal still emit the join (the fix did not over-apply), and a
+        // LOCAL-property deleteBy stays byte-identical legacy with NO NOTE.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-del"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-rp-del"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-rp-del"));
+        writeRelationFixture(sourceDir);
+        Files.writeString(sourceDir.resolve("DeleteOrders.java"), """
+                package relpath;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.stream.Stream;
+                @Repository
+                public interface DeleteOrders extends CrudRepository<Order, Long> {
+                    void deleteByCustomerName(String name);
+                    void deleteByStatus(String status);
+                    Stream<Order> findByCustomerName(String name);
+                    long countByCustomerName(String name);
+                }
+                """);
+
+        List<Diagnostic<? extends JavaFileObject>> diagnostics = compileWithDiagnostics(sourceDir, classesDir, generatedDir,
+                "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "DeleteOrders.java");
+        // compileWithDiagnostics throws on a failed round, so reaching here proves the delete NOTE
+        // degraded instead of aborting the compile.
+        Path implFile = generatedDir.resolve("relpath/DeleteOrdersImpl.java");
+        assertTrue(Files.exists(implFile), "the delete-through-relation NOTE must not abort the compile");
+
+        // (b) The verbatim NOTE on the traversing predicate.
+        String notes = notesOf(diagnostics);
+        assertTrue(notes.contains("path 'customerName' traverses a relation; DELETE through a relation is not yet"
+                        + " supported; falling back to the legacy join-free DELETE predicate on column 'customer_name',"
+                        + " which may not match the joined semantics"),
+                "deleteBy through a relation must be NOTE-degraded with the verbatim NOTE:"
+                        + System.lineSeparator() + notes);
+        // Exactly ONE delete NOTE — the local deleteByStatus path must not be reported.
+        long deleteNotes = diagnostics.stream()
+                .filter(d -> d.getKind() == Diagnostic.Kind.NOTE)
+                .filter(d -> d.getMessage(Locale.getDefault()).contains("DELETE through a relation"))
+                .count();
+        assertTrue(deleteNotes == 1,
+                "a local-property deleteBy must emit NO delete NOTE:" + System.lineSeparator() + notes);
+
+        // (c) The generated DELETE constants are the legacy join-free shape.
+        String impl = sqlFlat(implFile);
+        assertTrue(impl.contains("SQL_DELETE_BY_CUSTOMER_NAME = \"DELETE FROM \"order\" WHERE \"customer_name\" = :name\""),
+                "deleteBy through a relation must emit the legacy join-free DELETE (byte parity with pre-Task-8):"
+                        + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("DELETE FROM \"order\" LEFT JOIN"),
+                "a DELETE must NEVER carry a LEFT JOIN:" + System.lineSeparator() + impl);
+        // (d-part) local-property deleteBy: byte-identical legacy shape, no join, no NOTE.
+        assertTrue(impl.contains("SQL_DELETE_BY_STATUS = \"DELETE FROM \"order\" WHERE \"status\" = :status\""),
+                "local-property deleteBy must stay byte-identical legacy:" + System.lineSeparator() + impl);
+
+        // (d) find AND count for the SAME customerName traversal still emit the join (fix not over-applied).
+        String joinedFindWhere = "FROM \"order\" LEFT JOIN \"customer\" AS \"customer\" ON \"order\".\"customer_id\""
+                + " = \"customer\".\"id\" WHERE \"customer\".\"name\" = :name";
+        assertTrue(impl.contains("SELECT COUNT(*) " + joinedFindWhere),
+                "countByCustomerName must keep the joined rendering:" + System.lineSeparator() + impl);
+        int firstJoinFragment = impl.indexOf(joinedFindWhere);
+        int secondJoinFragment = impl.indexOf(joinedFindWhere, firstJoinFragment + 1);
+        assertTrue(firstJoinFragment >= 0 && secondJoinFragment > firstJoinFragment,
+                "findByCustomerName AND countByCustomerName must BOTH still carry the join fragment:"
+                        + System.lineSeparator() + impl);
+    }
+
+    @Test
     void associationFieldMaterializesIdOnlyPartialWhileCompositionKeepsLoader() throws Exception {
         // Task 9: an @Association field (composition=false) materializes at mapper-read time as an
         // ID-ONLY partial instance through a generated partial_<Target> helper, with NO two-phase

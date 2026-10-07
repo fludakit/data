@@ -2603,9 +2603,29 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
 
         if ("delete".equals(action)) {
+            // T8-I1 guard: `DELETE FROM "t" LEFT JOIN ...` is invalid SQL on H2/PostgreSQL/SQL Server and
+            // the proper `DELETE ... WHERE id IN (SELECT ...)` rewrite is a parked follow-up. A delete whose
+            // predicate traverses a relation is therefore NOTE-degraded at compile time (the branch's
+            // NOTE-degrade contract, same shape as the multi-hop rejection in resolveCompilePaths): each
+            // traversed predicate is reported on the method and the constant keeps the legacy join-free
+            // SqlBuilder.deleteBy rendering — byte-identical to the pre-Task-8 emission. The compile is
+            // never aborted and find/count rendering of the same traversal is untouched.
+            for (int i = 0; i < predicates.size(); i++) {
+                if (!predicateRefs.get(i).joins().isEmpty()) {
+                    String path = predicates.get(i).property();
+                    processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
+                            "path '" + path + "' traverses a relation; DELETE through a relation is not yet"
+                                    + " supported; falling back to the legacy join-free DELETE predicate on"
+                                    + " column '" + Names.columnName(path) + "', which may not match the"
+                                    + " joined semantics",
+                            method);
+                }
+            }
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
-                    methodSql("delete", entity.metadata(), predicates, predicateRefs,
-                            List.of(), List.of(), 0, ""));
+                    hasJoins(predicateRefs)
+                            ? new SqlBuilder().deleteBy(entity.metadata(), predicates)
+                            : methodSql("delete", entity.metadata(), predicates, predicateRefs,
+                                    List.of(), List.of(), 0, ""));
             CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
             appendBoundParameters(call, bindings, parameters);
             call.add(".update()");

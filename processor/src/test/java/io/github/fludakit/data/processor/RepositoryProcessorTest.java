@@ -3456,6 +3456,43 @@ class RepositoryProcessorTest {
                         + System.lineSeparator() + impl);
     }
 
+    @Test
+    void pagedFinderWithAssociationTraversalDegradesWithNote() throws Exception {
+        // Task 9 degrade: a Page-returning finder whose method-name predicate path traverses the
+        // @Association customer Reference at compile time CANNOT carry the full joined materialisation
+        // (the runtime sort/seek wiring appends its own join chain to the base constant), so it is
+        // degraded to the normal base row mapper — association fields stay id-only partials — and the
+        // processor records a NOTE naming the degrade. Pin the NOTE text and the absence of the
+        // per-method full mapper for the paged shape.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-pgfull"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-rp-pgfull"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-rp-pgfull"));
+        writeRelationFixture(sourceDir);
+        Files.writeString(sourceDir.resolve("PagedOrd.java"), """
+                package relpath;
+                import jakarta.data.page.Page;
+                import jakarta.data.page.PageRequest;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface PagedOrd extends CrudRepository<Order, Long> {
+                    Page<Order> findByCustomerName(PageRequest pageRequest, String name);
+                }
+                """);
+
+        List<Diagnostic<? extends JavaFileObject>> diagnostics = compileWithDiagnostics(sourceDir,
+                classesDir, generatedDir,
+                "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "PagedOrd.java");
+
+        String notes = notesOf(diagnostics);
+        assertTrue(notes.contains("full materialisation through joins is not supported for paged finders"),
+                "the paged joined-full degrade must record its NOTE:" + System.lineSeparator() + notes);
+
+        String impl = sqlFlat(generatedDir.resolve("relpath/PagedOrdImpl.java"));
+        assertTrue(!impl.contains("mapRow_full_find_by_customer_name"),
+                "the degraded paged finder must NOT carry a generated full mapper:" + System.lineSeparator() + impl);
+    }
+
     private void compile(Path sourceDir, Path classesDir, Path generatedDir, String... fileNames) throws Exception {
         compileWithDiagnostics(sourceDir, classesDir, generatedDir, fileNames);
     }

@@ -83,7 +83,7 @@ class CustomerRepositoryTest {
     }
 
     @Test
-    void associationIsNullOnRereadViaGeneratedMapper() {
+    void associationMaterializesAsIdOnlyPartialOnReread() {
         Customer ana = customers.save(customer("Ana", "ana@example.com"));
         Order order = new Order(ana);
         order.setAmount(new BigDecimal("79.98"));
@@ -91,7 +91,10 @@ class CustomerRepositoryTest {
         assertThat(saved.getId()).isNotNull();
 
         Order reloaded = orders.findById(saved.getId()).orElseThrow();
-        assertThat(reloaded.getCustomer()).isNull();
+        // Task 9: a @Association field materializes as an id-only partial in the row mapper.
+        assertThat(reloaded.getCustomer()).isNotNull();
+        assertThat(reloaded.getCustomer().getId()).isEqualTo(ana.getId());
+        assertThat(reloaded.getCustomer().getName()).isNull();
         assertThat(reloaded.getAmount()).isEqualByComparingTo("79.98");
     }
 

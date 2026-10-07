@@ -50,9 +50,14 @@ class OrderCollectionHydrationTest {
         Order found = orders.findById(saved.getId()).orElseThrow();
         assertThat(found.getOrderItems()).hasSize(2);
         assertThat(found.getOrderItems()).extracting(OrderItem::getQuantity).containsExactlyInAnyOrder(2, 5);
-        // Decision 8 — @Association targets are never hydrated in Task 3.
-        assertThat(found.getOrderItems()).allSatisfy(i -> assertThat(i.getProduct()).isNull());
-        assertThat(found.getCustomer()).isNull();
+        // Task 9: @Association targets materialize as id-only partials (never fully hydrated).
+        assertThat(found.getOrderItems()).allSatisfy(i -> {
+            assertThat(i.getProduct()).isNotNull();
+            assertThat(i.getProduct().getId()).isNotNull();
+            assertThat(i.getProduct().getName()).isNull();
+        });
+        assertThat(found.getCustomer()).isNotNull();
+        assertThat(found.getCustomer().getId()).isEqualTo(ana.getId());
 
         // replace-all update: drop the two children, add a single one back.
         found.getOrderItems().clear();

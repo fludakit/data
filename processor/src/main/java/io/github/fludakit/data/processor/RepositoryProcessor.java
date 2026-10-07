@@ -2626,10 +2626,68 @@ public class RepositoryProcessor extends AbstractProcessor {
      * column, so the generated row mapper reads either find constant unchanged.
      */
     private String joinedFindAllSelect(DescriptorModel md) {
-        String cols = md.columns().stream()
-                .map(c -> Names.quote(md.tableName()) + "." + Names.quote(c.column()))
-                .collect(java.util.stream.Collectors.joining(", "));
-        return "SELECT " + cols + " FROM " + Names.quote(md.tableName());
+        return qualifiedRootSelect(md, List.of(), true, "");
+    }
+
+    /**
+     * The ONE rendering of the root-table projection/join shell (S-1): a SELECT list of the root
+     * columns (comma-separated in descriptor order, optionally followed by a comma and
+     * extraProjection), FROM the quoted table, then the deduped
+     * {@link SqlBuilder#joinClause} chain for {@code traversedToOne}. {@code qualified} keeps the
+     * deliberate split intact: a statement that splices joins qualifies every leaf
+     * ({@code "root"."col"}, so a joined table sharing a column name cannot make the
+     * list ambiguous) while an EXISTS-only statement keeps the bare {@code "col"} projection
+     * (Task 5). {@code extraProjection} is {@code joinedProjection}'s payload, inserted between the
+     * root columns and FROM. Empty join refs render no chain, which is how the paged findAll
+     * constant stays compatible with the runtime splicing its own joins string.
+     */
+    private String qualifiedRootSelect(DescriptorModel md, List<ColumnRef> traversedToOne,
+                                       boolean qualified, String extraProjection) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("SELECT ").append(md.columns().stream()
+                .map(c -> qualified ? qualifiedColumn(md.tableName(), c.column()) : Names.quote(c.column()))
+                .collect(java.util.stream.Collectors.joining(", ")));
+        if (extraProjection != null && !extraProjection.isEmpty()) {
+            sb.append(", ").append(extraProjection);
+        }
+        sb.append(" FROM ").append(Names.quote(md.tableName()));
+        sb.append(SqlBuilder.joinClause(md, traversedToOne));
+        return sb.toString();
+    }
+
+    /** The single {@code "qualifier"."column"} rendering shared by every qualified projection emission (S-1). */
+    private static String qualifiedColumn(String qualifier, String column) {
+        return Names.quote(qualifier) + "." + Names.quote(column);
+    }
+
+    /**
+     * The single-source NOTE texts for relation-path resolution failures (S-1 vocabulary). The
+     * compile-side {@link #resolveCompilePaths} reporting and the runtime-mirror messages must render
+     * these strings verbatim; the diagnostics pins keep their own literal copies as the byte guard,
+     * so changing a constant here is a user-visible drift.
+     */
+    static final class ResolutionVocabulary {
+        /** Every resolution NOTE opens with the quoted property path. */
+        static final String PATH_PREFIX = "path '";
+
+        /** Multi-hop traversal rejection: the text after the path. */
+        static final String MULTI_HOP_SUFFIX =
+                "' traverses more than one relation; not supported";
+
+        /** Unresolvable relation target, predicate left unqualified: the text after the path. */
+        static final String UNRESOLVED_SUFFIX =
+                "' traverses a relation whose target could not be resolved; the predicate was left unqualified";
+
+        static String multiHop(String path) {
+            return PATH_PREFIX + path + MULTI_HOP_SUFFIX;
+        }
+
+        static String unresolved(String path) {
+            return PATH_PREFIX + path + UNRESOLVED_SUFFIX;
+        }
+
+        private ResolutionVocabulary() {
+        }
     }
 
     private void emitPaged(MethodSpec.Builder builder, EntityModel entity, String pageRequest, List<SortSpec> sorts,
@@ -3059,7 +3117,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                 if (propOrNull(targetModel.metadata(), head) instanceof Prop.Reference) {
                     continue; // nested association fk not selected — its target stays null (depth-1)
                 }
-                String alias = Names.quote(ref.name()) + "." + Names.quote(column.column());
+                String alias = qualifiedColumn(ref.name(), column.column());
                 String label = ref.name() + "_join_" + column.column();
                 if (sb.length() > 0) {
                     sb.append(", ");
@@ -3250,12 +3308,11 @@ public class RepositoryProcessor extends AbstractProcessor {
             PathResolution resolution = resolveCompilePath(md, path);
             if (resolution.multiHop()) {
                 processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
-                        "path '" + path + "' traverses more than one relation; not supported", method);
+                        ResolutionVocabulary.multiHop(path), method);
                 out.add(PathResolution.resolved(legacyColumnRef(path)));
             } else if (resolution.unresolvedRelation()) {
                 processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
-                        "path '" + path + "' traverses a relation whose target could not be resolved;"
-                                + " the predicate was left unqualified", method);
+                        ResolutionVocabulary.unresolved(path), method);
                 out.add(PathResolution.resolved(legacyColumnRef(path)));
             } else if (resolution.ref() != null) {
                 out.add(resolution);
@@ -3513,9 +3570,11 @@ public class RepositoryProcessor extends AbstractProcessor {
         boolean spliceJoins = hasJoins(joinRefs);
         StringBuilder sb = new StringBuilder();
         if ("count".equals(action) || "exists".equals(action)) {
-            sb.append("SELECT COUNT(*) FROM ").append(Names.quote(md.tableName()));
+            sb.append("SELECT COUNT(*) FROM ").append(Names.quote(md.tableName()))
+                    .append(SqlBuilder.joinClause(md, joinRefs));
         } else if ("delete".equals(action)) {
-            sb.append("DELETE FROM ").append(Names.quote(md.tableName()));
+            sb.append("DELETE FROM ").append(Names.quote(md.tableName()))
+                    .append(SqlBuilder.joinClause(md, joinRefs));
         } else {
             // Joined find: every root column is qualified by the root table. Unqualified bare names
             // become ambiguous the moment a join adds a table sharing a column name (e.g. the target's
@@ -3523,18 +3582,10 @@ public class RepositoryProcessor extends AbstractProcessor {
             // each label = its physical column, so the generated row mapper still reads it by name.
             // Task 5: an EXISTS-only statement splices NO join, so it keeps the unjoined (bare)
             // projection - EXISTS contributes no columns.
-            String cols = md.columns().stream()
-                    .map(c -> spliceJoins
-                            ? Names.quote(md.tableName()) + "." + Names.quote(c.column())
-                            : Names.quote(c.column()))
-                    .collect(java.util.stream.Collectors.joining(", "));
-            sb.append("SELECT ").append(cols);
-            if (extraProjection != null && !extraProjection.isEmpty()) {
-                sb.append(", ").append(extraProjection);
-            }
-            sb.append(" FROM ").append(Names.quote(md.tableName()));
+            // S-1: the projection/join shell is qualifiedRootSelect, the same rendering behind
+            // joinedFindAllSelect and the SQL_FIND_ALL_QUALIFIED constant.
+            sb.append(qualifiedRootSelect(md, joinRefs, spliceJoins, extraProjection));
         }
-        sb.append(SqlBuilder.joinClause(md, joinRefs));
         List<String> conjuncts = new ArrayList<>();
         for (int i = 0; i < predicates.size(); i++) {
             if (!Boolean.TRUE.equals(existentialPredicates.get(i))) {

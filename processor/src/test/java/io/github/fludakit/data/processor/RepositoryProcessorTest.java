@@ -3591,6 +3591,39 @@ class RepositoryProcessorTest {
         assertTrue(impl.contains(".param(\"product\", product)"),
                 "the bound parameter must stay the JAVA PARAMETER NAME:" + System.lineSeparator() + impl);
     }
+    @Test
+    void qualifiedRootSelectParityGuardPinsBothHelperCallShapes() throws Exception {
+        // S-1 parity guard. joinedFindAllSelect / SQL_FIND_ALL_QUALIFIED and methodSql's joined-find
+        // branch now render through ONE qualifiedRootSelect helper. The two intentional modes of that
+        // helper are both unpinned by the existing suite for THIS descriptor: the EXISTS-only find (no
+        // join spliced) keeps the BARE root projection, while the same descriptor's qualified findAll
+        // constant lists every root column as \"order\".\"col\". Locked byte-for-byte here.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-par"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-rp-par"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-rp-par"));
+        writeLinesFixture(sourceDir);
+        Files.writeString(sourceDir.resolve("Orders.java"), """
+                package exa;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.List;
+                @Repository
+                public interface Orders extends CrudRepository<Order, Long> {
+                    List<Order> findByLinesProduct(String product);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir,
+                "Line.java", "Order.java", "LineRepository.java", "Orders.java");
+
+        String impl = sqlFlat(generatedDir.resolve("exa/OrdersImpl.java"));
+        // Mode 1 (qualified == false, no join spliced): the bare root projection.
+        assertTrue(impl.contains("SELECT \"id\", \"status\" FROM \"order\" WHERE EXISTS (SELECT 1 FROM \"line\" \"lines\" WHERE \"lines\".\"order_id\" = \"order\".\"id\" AND \"lines\".\"product\" = :product)"),
+                "the no-join helper mode must keep the bare root projection:" + System.lineSeparator() + impl);
+        // Mode 2 (qualified == true, no join spliced by the constant itself): the findAll constant.
+        assertTrue(impl.contains("SELECT \"order\".\"id\", \"order\".\"status\" FROM \"order\""),
+                "the qualified helper mode must list every root column:" + System.lineSeparator() + impl);
+    }
 
     @Test
     void predicateThroughElementListRendersExistsNotJoin() throws Exception {

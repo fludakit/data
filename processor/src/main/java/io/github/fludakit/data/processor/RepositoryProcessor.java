@@ -1807,7 +1807,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                 return builder.build();
             }
             if (name.equals("save")) {
-                emitSave(builder, value, entity, crud, constants, cascades);
+                emitSave(builder, method, value, entity, crud, constants, cascades);
                 return builder.build();
             }
             if (name.equals("insert") && crud) {
@@ -1870,7 +1870,8 @@ public class RepositoryProcessor extends AbstractProcessor {
             return builder.build();
         }
         if (arity == 1 && method.getAnnotation(Save.class) != null) {
-            emitSave(builder, parameterName(parameters.get(0), "entity"), entity, crud, constants, cascades);
+            emitSave(builder, method, parameterName(parameters.get(0), "entity"), entity, crud, constants,
+                    cascades);
             return builder.build();
         }
         if (arity == 1 && method.getAnnotation(Delete.class) != null) {
@@ -1885,8 +1886,16 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     // ------------------------------------------------------------------- CRUD writes
 
-    private void emitSave(MethodSpec.Builder builder, String value, EntityModel entity, boolean crud,
-                          Map<String, String> constants, List<EntityRelationship> cascades) {
+    private void emitSave(MethodSpec.Builder builder, ExecutableElement method, String value,
+                          EntityModel entity, boolean crud, Map<String, String> constants,
+                          List<EntityRelationship> cascades) {
+        if (idKeyCoercion(entity.id().type()) == null) {
+            // The null-id discrimination routes an application-assigned entity with no id yet into an
+            // INSERT that would bind NULL into the identity column — warn and keep compiling.
+            processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
+                    "id type " + entity.id().type().box() + " requires application-assigned identifiers",
+                    method);
+        }
         String idAccess = value + "." + getter(entity.id().name()) + "()";
         if (crud) {
             builder.addStatement("return $L == null ? insert($L) : update($L)", idAccess, value, value);
@@ -1903,24 +1912,37 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     private void appendInsertStatements(MethodSpec.Builder builder, String value, EntityModel entity,
                                         Map<String, String> constants, List<EntityRelationship> cascades) {
-        // includeId=false: the generated key is read back through GeneratedKeyHolder, so the identity
-        // column must be omitted from the INSERT (H2 and most databases reject an explicit NULL).
-        String constant = addConstant(constants, "SQL_INSERT",
-                new SqlBuilder().insert(entity.metadata(), false));
-        builder.addStatement("$T keys = new $T()", GeneratedKeyHolder.class, GeneratedKeyHolder.class);
-        CodeBlock.Builder sql = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
-        appendColumnParams(sql, entity, value);
-        sql.add(".update(keys)");
-        builder.addStatement("$L", sql.build());
+        String coercion = idKeyCoercion(entity.id().type());
+        if (coercion == null) {
+            // Task 3 (S-4/T11 P1): an id type no GeneratedKeyHolder key can produce (String, UUID,
+            // ...) is application-assigned — the identity column joins the INSERT and binds from the
+            // entity; there is no keyholder roundtrip for a value known before the insert.
+            String appConstant = addConstant(constants, "SQL_INSERT",
+                    new SqlBuilder().insert(entity.metadata(), true));
+            CodeBlock.Builder appSql = CodeBlock.builder().add("jdbcClient.sql($L)", appConstant);
+            appSql.add(".param($S, $L.$L())", SqlBuilder.paramName(entity.metadata().id().name()),
+                    value, getter(entity.id().name()));
+            appendColumnParams(appSql, entity, value);
+            appSql.add(".update()");
+            builder.addStatement("$L", appSql.build());
+        } else {
+            // includeId=false: the generated key is read back through GeneratedKeyHolder, so the identity
+            // column must be omitted from the INSERT (H2 and most databases reject an explicit NULL).
+            // NEW-I: the coercion method follows the id type — Long renders longValue() byte-identically
+            // to the pre-Task-4 hardcoded emission, Integer renders intValue() so its impl compiles.
+            String constant = addConstant(constants, "SQL_INSERT",
+                    new SqlBuilder().insert(entity.metadata(), false));
+            builder.addStatement("$T keys = new $T()", GeneratedKeyHolder.class, GeneratedKeyHolder.class);
+            CodeBlock.Builder sql = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
+            appendColumnParams(sql, entity, value);
+            sql.add(".update(keys)");
+            builder.addStatement("$L", sql.build());
 
-        builder.beginControlFlow("if (keys.getKey() != null)");
-        // NEW-I: the generated-key coercion follows the id type instead of hardcoding longValue().
-        // A Long id renders `((Number) keys.getKey()).longValue())` — byte-identical to the previous
-        // hardcoded emission; an Integer id renders intValue(), so its generated impl compiles.
-        // Unsupported id types (String/UUID/...) keep the old longValue() emission, exactly as before.
-        builder.addStatement("$L.$L((($T) keys.getKey()).$L())",
-                value, setter(entity.id().name()), Number.class, generatedKeyCoercion(entity.id().type()));
-        builder.endControlFlow();
+            builder.beginControlFlow("if (keys.getKey() != null)");
+            builder.addStatement("$L.$L((($T) keys.getKey()).$L())",
+                    value, setter(entity.id().name()), Number.class, coercion);
+            builder.endControlFlow();
+        }
 
         for (ElementCollection collection : entity.collections()) {
             appendElementCollectionInsert(builder, value, entity, collection, constants);
@@ -1935,7 +1957,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     /**
      * NOTE-degrade writability check for the R-T11a entity-collection cascade: a child whose identity
      * cannot be written through the generated-key machinery (no id property, an id type {@link
-     * #generatedKeyCoercion} cannot produce from a {@code Number} key, unresolved table metadata) skips
+     * #idKeyCoercion} cannot produce from a {@code Number} key, unresolved table metadata) skips
      * ONLY its own collection's cascade — the repository still compiles, reads keep working. Consulted
      * by the {@link #generate} cascade scan on the WRITABILITY path only: like element collections,
      * the plain-SQL child INSERT/DELETE needs this weaker requirement and NOT a row mapper, so a
@@ -1948,17 +1970,10 @@ public class RepositoryProcessor extends AbstractProcessor {
         if (target.metadata().tableName() == null) {
             return "target table metadata is unresolved";
         }
-        switch (target.id().type().box().toString()) {
-            case "java.lang.Long":
-            case "java.lang.Integer":
-            case "java.lang.Short":
-            case "java.lang.Byte":
-            case "java.lang.Float":
-            case "java.lang.Double":
-                return null;
-            default:
-                return "target id type " + target.id().type().box() + " is not generated-key coercible";
+        if (idKeyCoercion(target.id().type()) == null) {
+            return "target id type " + target.id().type().box() + " is not generated-key coercible";
         }
+        return null;
     }
 
     /**
@@ -1997,7 +2012,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         builder.addStatement("$L", sql.build());
         builder.beginControlFlow("if (childKeys.getKey() != null)");
         builder.addStatement("item.$L((($T) childKeys.getKey()).$L())", setter(target.id().name()),
-                Number.class, generatedKeyCoercion(target.id().type()));
+                Number.class, idKeyCoercion(target.id().type()));
         builder.endControlFlow();
         builder.endControlFlow();
         builder.endControlFlow();
@@ -2025,21 +2040,18 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /**
-     * The {@code Number} → id coercion applied to a {@code GeneratedKeyHolder} key (NEW-I), derived
-     * from the entity's id type so the insert path compiles for every JDBC-safe integer id.
-     * {@code box()} normalizes a primitive id ({@code int} → {@code java.lang.Integer}); the Long
-     * corpus renders {@code longValue()} textually identical to the pre-Task-4 hardcoded coercion, and
-     * id types a {@code Number} cannot produce (String, UUID, ...) fall back to {@code longValue()} —
-     * the previous (non-working for them) emission, preserving existing behavior.
+     * The {@code Number} → id coercion method for a {@code GeneratedKeyHolder} key (NEW-I, Task 3):
+     * {@code box()} normalizes a primitive id ({@code int} → {@code java.lang.Integer}); Long renders
+     * {@code longValue()} textually identical to the pre-Task-4 hardcoded emission and Integer renders
+     * {@code intValue()}. {@code null} means no {@code Number} key can produce this id type (String,
+     * UUID, ...) — the insert path takes the application-assigned shape instead: the identity column
+     * is part of the INSERT and the keyholder roundtrip is skipped entirely.
      */
-    private static String generatedKeyCoercion(TypeName idType) {
+    private static String idKeyCoercion(TypeName idType) {
         return switch (idType.box().toString()) {
+            case "java.lang.Long" -> "longValue";
             case "java.lang.Integer" -> "intValue";
-            case "java.lang.Short" -> "shortValue";
-            case "java.lang.Byte" -> "byteValue";
-            case "java.lang.Float" -> "floatValue";
-            case "java.lang.Double" -> "doubleValue";
-            default -> "longValue";
+            default -> null;
         };
     }
 

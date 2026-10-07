@@ -1103,6 +1103,137 @@ class RepositoryProcessorTest {
     }
 
     @Test
+    void appAssignedIdInsertBindsIdParameterWithoutKeyholderRoundtrip() throws Exception {
+        // S-4 / T11 P1: generated-key coercion becomes type-driven. String/UUID ids are
+        // application-assigned, so the generated INSERT must BIND the id column parameter and skip the
+        // GeneratedKeyHolder/getKey roundtrip entirely — the old longValue() fallback was runtime-broken
+        // for them (and did not compile at all in a repository impl: that compile failure IS the BASE
+        // RED proof, surfaced by compileWithDiagnostics below). Long ids keep the keyholder shape
+        // BYTE-IDENTICAL, and save() on a non-keyholder id NOTE-degrades
+        // ("id type <X> requires application-assigned identifiers") while the compile continues.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/appkey"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-appkey"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-appkey"));
+
+        Files.writeString(sourceDir.resolve("Ticket.java"), """
+                package appkey;
+                import io.github.fludakit.data.annotation.Entity;
+                import io.github.fludakit.data.annotation.Identity;
+                @Entity
+                public class Ticket {
+                    @Identity String id;
+                    String label;
+                    public String getId() { return id; }
+                    public void setId(String id) { this.id = id; }
+                    public String getLabel() { return label; }
+                    public void setLabel(String label) { this.label = label; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("TicketRepository.java"), """
+                package appkey;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface TicketRepository extends CrudRepository<Ticket, String> { }
+                """);
+        Files.writeString(sourceDir.resolve("Badge.java"), """
+                package appkey;
+                import io.github.fludakit.data.annotation.Entity;
+                import io.github.fludakit.data.annotation.Identity;
+                import java.util.UUID;
+                @Entity
+                public class Badge {
+                    @Identity UUID id;
+                    String serial;
+                    public UUID getId() { return id; }
+                    public void setId(UUID id) { this.id = id; }
+                    public String getSerial() { return serial; }
+                    public void setSerial(String serial) { this.serial = serial; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("BadgeRepository.java"), """
+                package appkey;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.UUID;
+                @Repository
+                public interface BadgeRepository extends CrudRepository<Badge, UUID> { }
+                """);
+        Files.writeString(sourceDir.resolve("Widget.java"), """
+                package appkey;
+                import io.github.fludakit.data.annotation.Entity;
+                import io.github.fludakit.data.annotation.Identity;
+                @Entity
+                public class Widget {
+                    @Identity Long id;
+                    String name;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getName() { return name; }
+                    public void setName(String name) { this.name = name; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("WidgetRepository.java"), """
+                package appkey;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface WidgetRepository extends CrudRepository<Widget, Long> { }
+                """);
+
+        List<Diagnostic<? extends JavaFileObject>> diagnostics = compileWithDiagnostics(
+                sourceDir, classesDir, generatedDir,
+                "Ticket.java", "TicketRepository.java", "Badge.java", "BadgeRepository.java",
+                "Widget.java", "WidgetRepository.java");
+
+        String ticket = Files.readString(generatedDir.resolve("appkey/TicketRepositoryImpl.java"))
+                .replace("\\\"", "\"").replaceAll("\\s+", " ");
+        // No-keyholder shape: the identity column is part of the INSERT and bound from the entity.
+        assertTrue(ticket.contains("SQL_INSERT = \"INSERT INTO \"ticket\" (\"id\", \"label\") VALUES (:id, :label)\""),
+                "the app-assigned id must be an INSERT column:" + System.lineSeparator() + ticket);
+        assertTrue(ticket.contains(
+                        "jdbcClient.sql(SQL_INSERT).param(\"id\", entity.getId()).param(\"label\", entity.getLabel()).update()"),
+                "the pre-assigned id parameter must be bound and the update must skip the keyholder:"
+                        + System.lineSeparator() + ticket);
+        assertTrue(!ticket.contains("longValue"),
+                "String id must not use the Number coercion:" + System.lineSeparator() + ticket);
+        assertTrue(!ticket.contains("GeneratedKeyHolder") && !ticket.contains("keys.getKey()"),
+                "String id must not do the keyholder roundtrip:" + System.lineSeparator() + ticket);
+
+        String badge = Files.readString(generatedDir.resolve("appkey/BadgeRepositoryImpl.java"))
+                .replace("\\\"", "\"").replaceAll("\\s+", " ");
+        assertTrue(badge.contains("SQL_INSERT = \"INSERT INTO \"badge\" (\"id\", \"serial\") VALUES (:id, :serial)\""),
+                "the app-assigned UUID id must be an INSERT column:" + System.lineSeparator() + badge);
+        assertTrue(badge.contains(
+                        "jdbcClient.sql(SQL_INSERT).param(\"id\", entity.getId()).param(\"serial\", entity.getSerial()).update()"),
+                "the pre-assigned UUID id parameter must be bound:" + System.lineSeparator() + badge);
+        assertTrue(!badge.contains("longValue"),
+                "UUID id must not use the Number coercion:" + System.lineSeparator() + badge);
+        assertTrue(!badge.contains("GeneratedKeyHolder") && !badge.contains("keys.getKey()"),
+                "UUID id must not do the keyholder roundtrip:" + System.lineSeparator() + badge);
+
+        // Long-id byte parity: the keyholder emission is textually identical to the pre-Task-3 shape.
+        // (Integer byte parity is pinned by collectionLoaderKeyFollowsIntegerIdType above.)
+        String widget = Files.readString(generatedDir.resolve("appkey/WidgetRepositoryImpl.java"))
+                .replace("\\\"", "\"").replaceAll("\\s+", " ");
+        assertTrue(widget.contains("SQL_INSERT = \"INSERT INTO \"widget\" (\"name\") VALUES (:name)\""),
+                "Long id keeps the identity column omitted:" + System.lineSeparator() + widget);
+        assertTrue(widget.contains("GeneratedKeyHolder keys = new GeneratedKeyHolder(); jdbcClient.sql(SQL_INSERT)"
+                        + ".param(\"name\", entity.getName()).update(keys); if (keys.getKey() != null) "
+                        + "{ entity.setId(((Number) keys.getKey()).longValue()); }"),
+                "Long id keeps the keyholder roundtrip byte-identically:" + System.lineSeparator() + widget);
+
+        // NOTE-degrade on save for app-assigned ids; the compile continued (no ERRORs above).
+        String notes = notesOf(diagnostics);
+        assertTrue(notes.contains("id type java.lang.String requires application-assigned identifiers"),
+                "String-id save must NOTE-degrade:" + System.lineSeparator() + notes);
+        assertTrue(notes.contains("id type java.util.UUID requires application-assigned identifiers"),
+                "UUID-id save must NOTE-degrade:" + System.lineSeparator() + notes);
+        assertTrue(!notes.contains("id type java.lang.Long requires application-assigned identifiers"),
+                "Long-id save must stay silent:" + System.lineSeparator() + notes);
+    }
+
+    @Test
     void bareEntityFieldAndEntityListClassifyAsManyToOneAndOneToManyWithResolvedInverse() throws Exception {
         Path sourceDir = Files.createDirectories(workspace.resolve("src/rel"));
         Path classesDir = Files.createDirectories(workspace.resolve("classes-rel"));

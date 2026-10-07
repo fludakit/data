@@ -2508,12 +2508,163 @@ class RepositoryProcessorTest {
         assertTrue(impl.contains("String joins = SqlBuilder.joinClause(BookMetadata.INSTANCE, refs)"),
                 "the join clause must be computed from the descriptor and refs:" + System.lineSeparator() + impl);
 
-        // (4) joins is spliced immediately after the FROM-bound SQL_FIND_ALL constant in BOTH the
-        //     OFFSET and CURSOR statements — before WHERE / ORDER BY.
+        // (4) joins is spliced immediately after the FROM-bound find constant in BOTH the OFFSET and
+        //     CURSOR statements — before WHERE / ORDER BY. Task 11 fix (R-T11c): Book declares a
+        //     traversable prop (@Association author), so the emission now picks between the plain
+        //     SQL_FIND_ALL and the root-table-QUALIFIED SQL_FIND_ALL_QUALIFIED at runtime — the join
+        //     is spliced onto whichever constant matches, never onto an ambiguous bare select list.
+        assertTrue(impl.contains("jdbcClient.sql((joins.isEmpty() ? SQL_FIND_ALL : SQL_FIND_ALL_QUALIFIED) + joins + (orderBy.length() > 0"),
+                "OFFSET statement must pick the qualified constant when joins are present:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("jdbcClient.sql((joins.isEmpty() ? SQL_FIND_ALL : SQL_FIND_ALL_QUALIFIED) + joins + \" WHERE \" + where"),
+                "CURSOR statement must pick the qualified constant too, before WHERE:" + System.lineSeparator() + impl);
+        // The qualified constant exists and qualifies EVERY root column (labels stay bare, so the
+        // existing row mapper reads both variants).
+        assertTrue(impl.contains("SELECT \\\"book\\\".\\\"id\\\", \\\"book\\\".\\\"title\\\", \\\"book\\\".\\\"address_city\\\","
+                        + " \\\"book\\\".\\\"address_point_lat\\\", \\\"book\\\".\\\"address_point_lng\\\","
+                        + " \\\"book\\\".\\\"author_id\\\" FROM \\\"book\\\""),
+                "SQL_FIND_ALL_QUALIFIED must list root-table-qualified columns:" + System.lineSeparator() + impl);
+    }
+
+    @Test
+    void aggregateWritesCascadeEntityCollectionChildren() throws Exception {
+        // R-T11a: the composition lifecycle is bound to the aggregate root. An EntityList whose target
+        // clears the managed-target gate is now ALSO written: root insert runs the CHILD's own
+        // generated-key insert per member with the inverse fk bound from the root id and backfills the
+        // child id; root update replaces all (DELETE by inverse fk + re-insert); deleteById removes
+        // children from the child's own table before the root row. This mirrors the element-collection
+        // machinery (appendElementCollectionInsert / childDeleteConstant) on the child's OWN table.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/casc"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-casc"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-casc"));
+
+        Files.writeString(sourceDir.resolve("Machine.java"), """
+                package casc;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                import java.util.ArrayList;
+                import java.util.List;
+                @AggregateRoot
+                public class Machine {
+                    @Identity Long id;
+                    String name;
+                    List<Part> parts = new ArrayList<>();
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getName() { return name; }
+                    public void setName(String name) { this.name = name; }
+                    public List<Part> getParts() { return parts; }
+                    public void setParts(List<Part> parts) { this.parts = parts; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Part.java"), """
+                package casc;
+                import io.github.fludakit.data.annotation.Entity;
+                import io.github.fludakit.data.annotation.Identity;
+                @Entity
+                public class Part {
+                    @Identity Long id;
+                    String label;
+                    Machine owner;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getLabel() { return label; }
+                    public void setLabel(String label) { this.label = label; }
+                    public Machine getOwner() { return owner; }
+                    public void setOwner(Machine owner) { this.owner = owner; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("MachineRepository.java"), """
+                package casc;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface MachineRepository extends CrudRepository<Machine, Long> { }
+                """);
+        Files.writeString(sourceDir.resolve("PartRepository.java"), """
+                package casc;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface PartRepository extends CrudRepository<Part, Long> { }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir,
+                "Machine.java", "Part.java", "MachineRepository.java", "PartRepository.java");
+
+        String impl = Files.readString(generatedDir.resolve("casc/MachineRepositoryImpl.java"))
+                .replace("\\\"", "\"").replaceAll("\\s+", " ");
+
+        // Child INSERT constant: the child's OWN SqlBuilder insert (identity omitted, ALL child columns
+        // incl. the inverse fk), byte-equal to what PartRepository would emit for the same descriptor.
+        assertTrue(impl.contains("SQL_INSERT_PARTS = \"INSERT INTO \"part\" (\"label\", \"owner_id\") VALUES (:label, :owner)\""),
+                "the cascade must reuse the child's own insert over its full column set:" + System.lineSeparator() + impl);
+        // Child DELETE constant: child's own table keyed by the inverse fk (ElementList delete shape).
+        assertTrue(impl.contains("SQL_DELETE_PARTS = \"DELETE FROM \"part\" WHERE \"owner_id\" = :owner_id\""),
+                "the cascade needs a by-fk DELETE on the child table:" + System.lineSeparator() + impl);
+        // Insert cascade: per-member child insert binding the fk from the ROOT id (the bare inverse is
+        // never serialized), generated key backfilled onto the child.
+        assertTrue(impl.contains("for (Part item : entity.getParts()) { if (item != null) { GeneratedKeyHolder childKeys = new GeneratedKeyHolder();"),
+                "root insert must iterate the entity collection with a per-child key holder:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("jdbcClient.sql(SQL_INSERT_PARTS).param(\"label\", item.getLabel()).param(\"owner\", entity.getId()).update(childKeys)"),
+                "the inverse-fk parameter must bind the ROOT id, other columns the child's own values:"
+                        + System.lineSeparator() + impl);
+        assertTrue(impl.contains("if (childKeys.getKey() != null) { item.setId(((Number) childKeys.getKey()).longValue()); }"),
+                "the generated child id must be backfilled (flagship cross-check needs workable ids):"
+                        + System.lineSeparator() + impl);
+        // Update cascade: replace-all parity — DELETE by fk then re-insert the whole set, AFTER the
+        // root UPDATE. Child ids are REGENERATED (documented choice: mirrors the element-collection
+        // delete-whole-child-set + re-insert; no upsert-by-id machinery exists on either side).
+        assertTrue(impl.contains("jdbcClient.sql(SQL_DELETE_PARTS).param(\"owner_id\", entity.getId()).update(); for (Part item : entity.getParts())"),
+                "root update must delete the child set by fk then re-insert it (replace-all):" + System.lineSeparator() + impl);
+        // deleteById cascade: children first (id value bound directly), then the root row.
+        assertTrue(impl.contains("public void deleteById(Long id) { jdbcClient.sql(SQL_DELETE_PARTS).param(\"owner_id\", id).update(); jdbcClient.sql(SQL_DELETE).param(\"id\", id).update(); }"),
+                "deleteById must remove cascaded children before the root:" + System.lineSeparator() + impl);
+    }
+
+    @Test
+    void relationFreePagedFindAllKeepsSingleConstantShape() throws Exception {
+        // Legacy-parity guard for R-T11c: a descriptor WITHOUT traversable props can never produce a
+        // join, so its paged findAll keeps the byte-identical single-constant emission — no
+        // SQL_FIND_ALL_QUALIFIED field, no seekWhereTerms loop.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/navplain"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-navplain"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-navplain"));
+
+        Files.writeString(sourceDir.resolve("Note.java"), """
+                package navplain;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Note {
+                    @Identity Long id;
+                    String text;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getText() { return text; }
+                    public void setText(String text) { this.text = text; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("NoteRepository.java"), """
+                package navplain;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface NoteRepository extends CrudRepository<Note, Long> { }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Note.java", "NoteRepository.java");
+
+        String impl = Files.readString(generatedDir.resolve("navplain/NoteRepositoryImpl.java"))
+                .replace("\\\"", "\"").replaceAll("\\s+", " ");
+
         assertTrue(impl.contains("jdbcClient.sql(SQL_FIND_ALL + joins + (orderBy.length() > 0"),
-                "OFFSET statement must splice joins right after the FROM constant:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("jdbcClient.sql(SQL_FIND_ALL + joins + \" WHERE \" + where"),
-                "CURSOR statement must splice joins right after the FROM constant, before WHERE:" + System.lineSeparator() + impl);
+                "relation-free OFFSET emission must keep the single-constant splice:" + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("SQL_FIND_ALL_QUALIFIED"),
+                "no qualified constant for a join-impossible descriptor:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("String where = CursorSupport.seekWhere(cols, dirs, cursor"),
+                "relation-free cursor emission must keep the bare seekWhere call:" + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("seekWhereTerms"),
+                "no verbatim-terms loop for a join-impossible descriptor:" + System.lineSeparator() + impl);
     }
 
     /**

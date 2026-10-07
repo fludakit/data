@@ -13,14 +13,24 @@ public final class CursorSupport {
 
     /** Lexicographic seek WHERE clause over the given snake_case columns/directions. {@code forward} true = CURSOR_NEXT. */
     public static String seekWhere(List<String> columns, List<Boolean> ascending, PageRequest.Cursor cursor, boolean forward) {
+        return seekWhereTerms(columns.stream().map(c -> "\"" + c + "\"").toList(), ascending, cursor, forward);
+    }
+
+    /**
+     * Lexicographic seek WHERE clause over PRE-RENDERED terms (each used verbatim, already quoted and —
+     * for relation-sorted paged reads — table-qualified, e.g. {@code "profile"."id"}). {@code seekWhere}
+     * quotes bare column names itself, which cannot carry a table qualifier without double-quoting;
+     * generated paging code uses this variant when its refs may join (Task 11 fix, parked M-1).
+     */
+    public static String seekWhereTerms(List<String> terms, List<Boolean> ascending, PageRequest.Cursor cursor, boolean forward) {
         StringBuilder sb = new StringBuilder("(");
-        for (int i = 0; i < columns.size(); i++) {
+        for (int i = 0; i < terms.size(); i++) {
             if (i > 0) sb.append(" OR ");
             sb.append("(");
             for (int j = 0; j <= i; j++) {
                 if (j > 0) sb.append(" AND ");
                 String op = (ascending.get(j) == forward) ? ">" : "<";
-                sb.append('"').append(columns.get(j)).append("\" ").append(op).append(" :cursor").append(j);
+                sb.append(terms.get(j)).append(" ").append(op).append(" :cursor").append(j);
             }
             sb.append(")");
         }

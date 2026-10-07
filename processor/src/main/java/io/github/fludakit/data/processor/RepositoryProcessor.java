@@ -397,6 +397,27 @@ public class RepositoryProcessor extends AbstractProcessor {
             }
             hydratedRelationships.add(new EntityRelationship(a, targetModel, targetMapper));
         }
+        // Aggregate write cascade (Task 11 fix / ruling R-T11a): the composition lifecycle of an
+        // aggregate root is bound to the root, so save/insert/update/deleteById also WRITE the
+        // members of every cascading EntityList — the SAME gate as the read loader (managed target,
+        // generated row mapper, resolved inverse), plus a NOTE-degrade writability check: a child
+        // whose id cannot carry a generated key (missing @Identity, non-coercible id type, unresolved
+        // table) skips only its own collection's cascade rather than aborting the compile.
+        List<EntityRelationship> cascadeRelationships = new ArrayList<>();
+        for (EntityRelationship r : hydratedRelationships) {
+            if (!(r.attribute() instanceof Prop.EntityList)) {
+                continue;
+            }
+            String blocker = entityCollectionWriteBlocker(r.targetModel());
+            if (blocker != null) {
+                processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
+                        "entity collection '" + r.attribute().name() + "' on " + entityElement.getQualifiedName()
+                                + ": " + blocker + " — write cascade skipped for this collection",
+                        entityElement);
+                continue;
+            }
+            cascadeRelationships.add(r);
+        }
         boolean hydrate = hasGeneratedHydration(entity, mapperType, hydratedCollections, hydratedRelationships);
 
         DeclaredType repositoryType = (DeclaredType) repository.asType();
@@ -421,7 +442,8 @@ public class RepositoryProcessor extends AbstractProcessor {
             if (method.getSimpleName().contentEquals("findAll") && method.getParameters().size() == 2) {
                 paginatedFindAll = true;
             }
-            methods.add(generateMethod(method, repositoryType, entity, crud, constants, mapperType, hydrate, methods));
+            methods.add(generateMethod(method, repositoryType, entity, crud, constants, mapperType, hydrate,
+                    methods, cascadeRelationships));
         }
         // Registered before the field loop below so the loaders' SELECT constants render as fields.
         if (hydrate) {
@@ -1739,7 +1761,8 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     private MethodSpec generateMethod(ExecutableElement method, DeclaredType repositoryType, EntityModel entity,
                                       boolean crud, Map<String, String> constants, ClassName mapperType,
-                                      boolean hydrate, List<MethodSpec> auxMethods) {
+                                      boolean hydrate, List<MethodSpec> auxMethods,
+                                      List<EntityRelationship> cascades) {
         ExecutableType resolved = (ExecutableType) types.asMemberOf(repositoryType, method);
         TypeMirror returnMirror = resolved.getReturnType();
         List<? extends TypeMirror> parameterTypes = resolved.getParameterTypes();
@@ -1763,16 +1786,16 @@ public class RepositoryProcessor extends AbstractProcessor {
                 return builder.build();
             }
             if (name.equals("save")) {
-                emitSave(builder, value, entity, crud, constants);
+                emitSave(builder, value, entity, crud, constants, cascades);
                 return builder.build();
             }
             if (name.equals("insert") && crud) {
-                appendInsertStatements(builder, value, entity, constants);
+                appendInsertStatements(builder, value, entity, constants, cascades);
                 builder.addStatement("return $L", value);
                 return builder.build();
             }
             if (name.equals("update") && crud) {
-                appendUpdateStatements(builder, value, entity, constants);
+                appendUpdateStatements(builder, value, entity, constants, cascades);
                 builder.addStatement("return $L", value);
                 return builder.build();
             }
@@ -1801,7 +1824,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             return builder.build();
         }
         if (arity == 1 && name.equals("deleteById")) {
-            emitDeleteById(builder, parameterName(parameters.get(0), "id"), entity, constants);
+            emitDeleteById(builder, parameterName(parameters.get(0), "id"), entity, constants, cascades);
             return builder.build();
         }
         if (name.equals("findAll") && arity == 0) {
@@ -1815,18 +1838,18 @@ public class RepositoryProcessor extends AbstractProcessor {
 
         if (arity == 1 && method.getAnnotation(Insert.class) != null) {
             String value = parameterName(parameters.get(0), "entity");
-            appendInsertStatements(builder, value, entity, constants);
+            appendInsertStatements(builder, value, entity, constants, cascades);
             builder.addStatement("return $L", value);
             return builder.build();
         }
         if (arity == 1 && method.getAnnotation(Update.class) != null) {
             String value = parameterName(parameters.get(0), "entity");
-            appendUpdateStatements(builder, value, entity, constants);
+            appendUpdateStatements(builder, value, entity, constants, cascades);
             builder.addStatement("return $L", value);
             return builder.build();
         }
         if (arity == 1 && method.getAnnotation(Save.class) != null) {
-            emitSave(builder, parameterName(parameters.get(0), "entity"), entity, crud, constants);
+            emitSave(builder, parameterName(parameters.get(0), "entity"), entity, crud, constants, cascades);
             return builder.build();
         }
         if (arity == 1 && method.getAnnotation(Delete.class) != null) {
@@ -1842,23 +1865,23 @@ public class RepositoryProcessor extends AbstractProcessor {
     // ------------------------------------------------------------------- CRUD writes
 
     private void emitSave(MethodSpec.Builder builder, String value, EntityModel entity, boolean crud,
-                          Map<String, String> constants) {
+                          Map<String, String> constants, List<EntityRelationship> cascades) {
         String idAccess = value + "." + getter(entity.id().name()) + "()";
         if (crud) {
             builder.addStatement("return $L == null ? insert($L) : update($L)", idAccess, value, value);
             return;
         }
         builder.beginControlFlow("if ($L == null)", idAccess);
-        appendInsertStatements(builder, value, entity, constants);
+        appendInsertStatements(builder, value, entity, constants, cascades);
         builder.addStatement("return $L", value);
         builder.nextControlFlow("else");
-        appendUpdateStatements(builder, value, entity, constants);
+        appendUpdateStatements(builder, value, entity, constants, cascades);
         builder.addStatement("return $L", value);
         builder.endControlFlow();
     }
 
     private void appendInsertStatements(MethodSpec.Builder builder, String value, EntityModel entity,
-                                        Map<String, String> constants) {
+                                        Map<String, String> constants, List<EntityRelationship> cascades) {
         // includeId=false: the generated key is read back through GeneratedKeyHolder, so the identity
         // column must be omitted from the INSERT (H2 and most databases reject an explicit NULL).
         String constant = addConstant(constants, "SQL_INSERT",
@@ -1881,6 +1904,102 @@ public class RepositoryProcessor extends AbstractProcessor {
         for (ElementCollection collection : entity.collections()) {
             appendElementCollectionInsert(builder, value, entity, collection, constants);
         }
+        // R-T11a: the root INSERT cascades each composition entity collection — the child's own
+        // generated-key machinery assigns its id, the inverse fk is bound from the ROOT id.
+        for (EntityRelationship relationship : cascades) {
+            appendEntityCollectionInsert(builder, value, entity, relationship, constants);
+        }
+    }
+
+    /**
+     * NOTE-degrade writability check for the R-T11a entity-collection cascade: a child whose identity
+     * cannot be written through the generated-key machinery (no id property, an id type {@link
+     * #generatedKeyCoercion} cannot produce from a {@code Number} key, unresolved table metadata) skips
+     * ONLY its own collection's cascade — the repository still compiles, reads keep working. The
+     * hydrated EntityList gate has already guaranteed a resolved inverse and a generated target mapper
+     * before this is consulted.
+     */
+    private static String entityCollectionWriteBlocker(EntityModel target) {
+        if (target.id() == null) {
+            return "target has no identity property";
+        }
+        if (target.metadata().tableName() == null) {
+            return "target table metadata is unresolved";
+        }
+        switch (target.id().type().box().toString()) {
+            case "java.lang.Long":
+            case "java.lang.Integer":
+            case "java.lang.Short":
+            case "java.lang.Byte":
+            case "java.lang.Float":
+            case "java.lang.Double":
+                return null;
+            default:
+                return "target id type " + target.id().type().box() + " is not generated-key coercible";
+        }
+    }
+
+    /**
+     * Emits the R-T11a cascade INSERT for one entity collection: iterate the in-memory children, run
+     * the CHILD's own SqlBuilder insert (identity column omitted, generated key read back) with every
+     * column bound through {@link #boundValue} on the CHILD descriptor — EXCEPT the inverse-fk
+     * parameter, which is bound from the root's id (the parent context supplies the fk; the bare
+     * inverse field is never serialized, matching the existing {@code customer.getId()} fk-extraction
+     * shape) — then backfill the generated child id. Depth-1: a cascaded child's own collections are
+     * not written (mirrors the read-side depth-1 contract lock).
+     */
+    private void appendEntityCollectionInsert(MethodSpec.Builder builder, String value, EntityModel entity,
+                                              EntityRelationship relationship, Map<String, String> constants) {
+        Prop.EntityList list = (Prop.EntityList) relationship.attribute();
+        EntityModel target = relationship.targetModel();
+        DescriptorModel md = target.metadata();
+        String inverseFk = list.inverseFkColumn();
+        String constant = addConstant(constants, "SQL_INSERT_" + upperSnake(list.name()),
+                new SqlBuilder().insert(md, false));
+        builder.beginControlFlow("for ($T item : $L.$L())", target.typeName(), value, getter(list.name()));
+        builder.beginControlFlow("if (item != null)");
+        builder.addStatement("$T childKeys = new $T()", GeneratedKeyHolder.class, GeneratedKeyHolder.class);
+        CodeBlock.Builder sql = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
+        for (ColumnRef ref : md.columns()) {
+            if (md.id() != null && ref.column().equals(md.id().column())) {
+                continue;
+            }
+            if (ref.column().equals(inverseFk)) {
+                sql.add(".param($S, $L.$L())", SqlBuilder.paramName(ref.path()),
+                        value, getter(entity.id().name()));
+            } else {
+                sql.add(".param($S, $L)", SqlBuilder.paramName(ref.path()), boundValue(md, "item", ref));
+            }
+        }
+        sql.add(".update(childKeys)");
+        builder.addStatement("$L", sql.build());
+        builder.beginControlFlow("if (childKeys.getKey() != null)");
+        builder.addStatement("item.$L((($T) childKeys.getKey()).$L())", setter(target.id().name()),
+                Number.class, generatedKeyCoercion(target.id().type()));
+        builder.endControlFlow();
+        builder.endControlFlow();
+        builder.endControlFlow();
+    }
+
+    /**
+     * The {@code SQL_DELETE_<FIELD>} constant for one cascading entity collection: the CHILD's own
+     * table, keyed on the inverse fk column — the delete half of the R-T11a replace-all update and of
+     * deleteById (mirrors {@link #childDeleteConstant} for element collections). Routed through
+     * {@link #addConstant} so update and deleteById share one field.
+     */
+    private String entityChildDeleteConstant(Map<String, String> constants, Prop.EntityList list) {
+        return addConstant(constants, "SQL_DELETE_" + upperSnake(list.name()),
+                "DELETE FROM " + Names.quote(list.targetTable())
+                        + " WHERE " + Names.quote(list.inverseFkColumn()) + " = :" + list.inverseFkColumn());
+    }
+
+    /** Emits {@code jdbcClient.sql(SQL_DELETE_<FIELD>).param(<inverseFk>, entity.getId()).update()}. */
+    private void appendEntityCollectionDelete(MethodSpec.Builder builder, String value, EntityModel entity,
+                                              EntityRelationship relationship, Map<String, String> constants) {
+        Prop.EntityList list = (Prop.EntityList) relationship.attribute();
+        String constant = entityChildDeleteConstant(constants, list);
+        builder.addStatement("jdbcClient.sql($L).param($S, $L.$L()).update()", constant, list.inverseFkColumn(),
+                value, getter(entity.id().name()));
     }
 
     /**
@@ -1984,7 +2103,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     private void appendUpdateStatements(MethodSpec.Builder builder, String value, EntityModel entity,
-                                        Map<String, String> constants) {
+                                        Map<String, String> constants, List<EntityRelationship> cascades) {
         String constant = addConstant(constants, "SQL_UPDATE", new SqlBuilder().update(entity.metadata()));
 
         CodeBlock.Builder update = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
@@ -2002,6 +2121,14 @@ public class RepositoryProcessor extends AbstractProcessor {
         for (ElementCollection collection : entity.collections()) {
             appendElementCollectionDelete(builder, value, entity, collection, constants);
             appendElementCollectionInsert(builder, value, entity, collection, constants);
+        }
+        // R-T11a replace-all PARITY with element collections: delete the parent's whole child set by
+        // the inverse fk, then re-insert it from the entity's current collection. Child ids are
+        // REGENERATED (delete + identity re-insert is what replace-all means on the element side; no
+        // upsert-by-id machinery exists, and stale in-memory ids would diverge from that semantic).
+        for (EntityRelationship relationship : cascades) {
+            appendEntityCollectionDelete(builder, value, entity, relationship, constants);
+            appendEntityCollectionInsert(builder, value, entity, relationship, constants);
         }
     }
 
@@ -2107,7 +2234,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     private void emitDeleteById(MethodSpec.Builder builder, String value, EntityModel entity,
-                                Map<String, String> constants) {
+                                Map<String, String> constants, List<EntityRelationship> cascades) {
         // Children first, then the parent: the child table has no FK constraint to lean on, but the
         // order keeps the child rows from outliving their parent even for a single autocommit delete.
         // Fix I-1: cascade over EVERY collection (save inserts all of them), not just the gate-passed
@@ -2117,6 +2244,14 @@ public class RepositoryProcessor extends AbstractProcessor {
             String childConstant = childDeleteConstant(constants, collection);
             builder.addStatement("jdbcClient.sql($L).param($S, $L).update()", childConstant,
                     collection.parentFk(), value);
+        }
+        // R-T11a: the composition lifecycle is bound to the root — entity-collection children are
+        // deleted from the CHILD's own table by the inverse fk, same children-first order.
+        for (EntityRelationship relationship : cascades) {
+            Prop.EntityList list = (Prop.EntityList) relationship.attribute();
+            String childConstant = entityChildDeleteConstant(constants, list);
+            builder.addStatement("jdbcClient.sql($L).param($S, $L).update()", childConstant,
+                    list.inverseFkColumn(), value);
         }
         String constant = addConstant(constants, "SQL_DELETE", new SqlBuilder().deleteById(entity.metadata()));
         builder.addStatement("jdbcClient.sql($L).param($S, $L).update()", constant, "id", value);
@@ -2147,6 +2282,23 @@ public class RepositoryProcessor extends AbstractProcessor {
                 new SqlBuilder().selectBy(entity.metadata(), List.of(), List.of(), 0, null));
         String countConstant = addConstant(constants, "SQL_COUNT_ALL",
                 new SqlBuilder().countBy(entity.metadata(), List.of()));
+        // R-T11c: a runtime sort can traverse a relation and splice a LEFT JOIN onto this constant —
+        // if the joined table shares a column name (entity targets always share "id") the bare select
+        // list becomes ambiguous. When the descriptor has ANY traversable prop, register a second,
+        // ROOT-TABLE-QUALIFIED find constant (Task 9's joined method-find shape) and pick it at
+        // runtime when joins are non-empty; the labels are unchanged by qualification, so the same
+        // row mapper reads both. Relation-free descriptors keep the single-constant emission
+        // byte-identical (legacy parity).
+        boolean joinCapable = false;
+        for (Prop p : entity.metadata().props()) {
+            if (isTraversable(p)) {
+                joinCapable = true;
+                break;
+            }
+        }
+        String joinedFindConstant = joinCapable
+                ? addConstant(constants, "SQL_FIND_ALL_QUALIFIED", joinedFindAllSelect(entity.metadata()))
+                : null;
 
         String entityFqn = entity.typeName().toString();
         ClassName metadataClass = metadataTypes.get(entityFqn);
@@ -2177,10 +2329,18 @@ public class RepositoryProcessor extends AbstractProcessor {
 
         builder.beginControlFlow("if ($L.mode() == $T.Mode.OFFSET)", pageRequest, PageRequest.class);
         builder.addStatement("long offset = ($L.page() - 1) * $L.size()", pageRequest, pageRequest);
-        builder.addStatement("$T<$T> content = jdbcClient.sql($L + joins + (orderBy.length() > 0 ? $S + orderBy : $S)"
-                        + " + $S + $L.size() + $S + offset).query($L).list()",
-                List.class, entity.typeName(), findConstant, " ORDER BY ", "", " LIMIT ", pageRequest, " OFFSET ",
-                queryArg(entity, mapperType));
+        if (joinCapable) {
+            builder.addStatement("$T<$T> content = jdbcClient.sql((joins.isEmpty() ? $L : $L) + joins"
+                            + " + (orderBy.length() > 0 ? $S + orderBy : $S)"
+                            + " + $S + $L.size() + $S + offset).query($L).list()",
+                    List.class, entity.typeName(), findConstant, joinedFindConstant, " ORDER BY ", "",
+                    " LIMIT ", pageRequest, " OFFSET ", queryArg(entity, mapperType));
+        } else {
+            builder.addStatement("$T<$T> content = jdbcClient.sql($L + joins + (orderBy.length() > 0 ? $S + orderBy : $S)"
+                            + " + $S + $L.size() + $S + offset).query($L).list()",
+                    List.class, entity.typeName(), findConstant, " ORDER BY ", "", " LIMIT ", pageRequest,
+                    " OFFSET ", queryArg(entity, mapperType));
+        }
         builder.addStatement("long total = $L.requestTotal() ? jdbcClient.sql($L).singleValue($T.class) : -1L",
                 pageRequest, countConstant, Long.class);
         if (hydrate) {
@@ -2190,12 +2350,35 @@ public class RepositoryProcessor extends AbstractProcessor {
         builder.endControlFlow();
 
         builder.addStatement("$T.Cursor cursor = $L.cursor().orElseThrow()", PageRequest.class, pageRequest);
-        builder.addStatement("$T where = $T.seekWhere(cols, dirs, cursor, $L.mode() == $T.Mode.CURSOR_NEXT)",
-                String.class, CursorSupport.class, pageRequest, PageRequest.class);
-        builder.addStatement("$T<$T> content = jdbcClient.sql($L + joins + $S + where + (orderBy.length() > 0 ? $S + orderBy : $S)"
-                        + " + $S + $L.size() + $S).params($T.cursorParams(cursor)).query($L).list()",
-                List.class, entity.typeName(), findConstant, " WHERE ", " ORDER BY ", "", " LIMIT ", pageRequest,
-                " + 1", CursorSupport.class, queryArg(entity, mapperType));
+        if (joinCapable) {
+            // Parked Task-7 finding M-1: the seek predicate must follow the same qualification rule as
+            // the select list — an unqualified "id" in the WHERE is exactly as ambiguous as in the
+            // projection once a join is spliced. Terms are rendered verbatim (already quoted) through
+            // the new CursorSupport.seekWhereTerms; joins.isEmpty() keeps the bare-column shape, so a
+            // join-free cursor read stays byte-identical to the old emission.
+            builder.addStatement("$T<$T> terms = new $T<>()", List.class, String.class, ArrayList.class);
+            builder.beginControlFlow("for ($T r : refs)", MD_COLUMN_REF);
+            builder.beginControlFlow("if (joins.isEmpty())");
+            builder.addStatement("terms.add($T.quote(r.column()))", Names.class);
+            builder.nextControlFlow("else");
+            builder.addStatement("terms.add($T.qualify(r, $S))", SqlBuilder.class, rootTable);
+            builder.endControlFlow();
+            builder.endControlFlow();
+            builder.addStatement("$T where = $T.seekWhereTerms(terms, dirs, cursor, $L.mode() == $T.Mode.CURSOR_NEXT)",
+                    String.class, CursorSupport.class, pageRequest, PageRequest.class);
+            builder.addStatement("$T<$T> content = jdbcClient.sql((joins.isEmpty() ? $L : $L) + joins + $S + where"
+                            + " + (orderBy.length() > 0 ? $S + orderBy : $S) + $S + $L.size() + $S)"
+                            + ".params($T.cursorParams(cursor)).query($L).list()",
+                    List.class, entity.typeName(), findConstant, joinedFindConstant, " WHERE ", " ORDER BY ", "",
+                    " LIMIT ", pageRequest, " + 1", CursorSupport.class, queryArg(entity, mapperType));
+        } else {
+            builder.addStatement("$T where = $T.seekWhere(cols, dirs, cursor, $L.mode() == $T.Mode.CURSOR_NEXT)",
+                    String.class, CursorSupport.class, pageRequest, PageRequest.class);
+            builder.addStatement("$T<$T> content = jdbcClient.sql($L + joins + $S + where + (orderBy.length() > 0 ? $S + orderBy : $S)"
+                            + " + $S + $L.size() + $S).params($T.cursorParams(cursor)).query($L).list()",
+                    List.class, entity.typeName(), findConstant, " WHERE ", " ORDER BY ", "", " LIMIT ", pageRequest,
+                    " + 1", CursorSupport.class, queryArg(entity, mapperType));
+        }
         builder.addStatement("boolean hasMore = content.size() > $L.size()", pageRequest);
         builder.beginControlFlow("if (hasMore)");
         builder.addStatement("content = content.subList(0, $L.size())", pageRequest);
@@ -2208,6 +2391,19 @@ public class RepositoryProcessor extends AbstractProcessor {
             builder.addStatement("$L", hydrationCall(entity, "content"));
         }
         builder.addStatement("return new $T<>($L, content, cursors, -1L)", SimpleCursoredPage.class, pageRequest);
+    }
+
+    /**
+     * The join-safe paged findAll FROM constant (R-T11c): every root column qualified by the root
+     * table, exactly Task 9's joined method-find projection shape ({@code "profile"."id",
+     * "profile"."address_city", ...}). Qualification keeps each result-set label at the bare physical
+     * column, so the generated row mapper reads either find constant unchanged.
+     */
+    private String joinedFindAllSelect(DescriptorModel md) {
+        String cols = md.columns().stream()
+                .map(c -> Names.quote(md.tableName()) + "." + Names.quote(c.column()))
+                .collect(java.util.stream.Collectors.joining(", "));
+        return "SELECT " + cols + " FROM " + Names.quote(md.tableName());
     }
 
     private void emitPaged(MethodSpec.Builder builder, EntityModel entity, String pageRequest, List<SortSpec> sorts,

@@ -2,7 +2,6 @@ package io.github.fludakit.data.it.profile;
 
 import io.github.fludakit.data.it.DataSourceProducer;
 
-import io.github.fludakit.jdbc.JdbcClientException;
 import jakarta.data.Order;
 import jakarta.data.page.Page;
 import jakarta.data.page.PageRequest;
@@ -12,8 +11,9 @@ import org.jboss.weld.junit5.auto.AddPackages;
 import org.jboss.weld.junit5.auto.EnableAutoWeld;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Flagship end-to-end pin for the navigable-stereotype directive: the profile fixture is a CV
@@ -24,15 +24,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * both through an embedded VO ({@code _Profile.address.city}) and through an entity collection
  * ({@code _Profile.workHistory.company}).
  *
- * <p>Two framework gaps surfaced while writing this flagship IT and pinned in current-behaviour
- * form (Task 9 precedent {@code OrderCollectionHydrationTest}). GAP-1: aggregate {@code save}
- * cascades element collections only — {@code ProfileRepositoryImpl} emits {@code SQL_INSERT_CONTACTS}
- * but no {@code SQL_INSERT_WORK_HISTORY}/{@code SQL_INSERT_EDUCATION}, so entity-collection members
- * must be persisted through their own repository with the inverse field set (the supported write
- * path, same shape as the team corpus). GAP-2: the paged {@code findAll} join chain is spliced onto
- * the UNQUALIFIED {@code SQL_FIND_ALL} constant, so an entity-collection sort — whose target table
- * always shares the {@code id} column — fails with H2 "Ambiguous column name"; the join and the
- * qualified ORDER BY themselves ARE emitted correctly.</p>
+ * <p>The two framework gaps surfaced while writing this flagship IT are CLOSED in the fix round
+ * (R-T11a / R-T11c): aggregate {@code save}/{@code update}/{@code deleteById} now cascade composition
+ * entity collections (insert children with the inverse fk from the root id; update replaces all child
+ * rows like element collections), and the paged {@code findAll} join chain is spliced onto a
+ * root-table-QUALIFIED find constant so a joined target sharing the {@code id} column name is no
+ * longer ambiguous. The supported child-repo + inverse-fk write path stays covered by
+ * {@link #aggregateRoundTripsAllCollections}.</p>
  */
 @EnableAutoWeld
 @AddPackages(Profile.class)
@@ -55,7 +53,8 @@ class ProfileCvTest {
         p.setAddress(address);
         p.getContacts().add(new ContactPoint("EMAIL", "ada@example.com"));
         p.getContacts().add(new ContactPoint("PHONE", "+44-20-7946-0000"));
-        // GAP-1: workHistory/education are NOT cascaded by save; element collections (contacts) are.
+        // The child-repo + inverse-Reference write path stays supported alongside the new
+        // aggregate cascade: this root carries NO in-memory entity children, only contacts.
         Profile saved = profiles.save(p);
 
         // Supported entity-collection write path: child repo + inverse Reference (fk profile_id).
@@ -93,23 +92,50 @@ class ProfileCvTest {
     }
 
     @Test
-    void aggregateSaveDoesNotCascadeEntityCollectionsGapPin() {
-        // GAP-1 pin of CURRENT behaviour: save inserts the aggregate root + element-collection rows
-        // only; entity-collection members carried on the aggregate are silently dropped (no
-        // SQL_INSERT_WORK_HISTORY exists in ProfileRepositoryImpl). The read-side loader DOES walk
-        // profile_id — proven by aggregateRoundTripsAllCollections via the child-repo write path.
-        // Expected once aggregate writes cascade composition entity collections: hasSize(1).
+    void aggregateSaveCascadesCompositionEntityCollections() {
+        // R-T11a: @AggregateRoot composition lifecycle is bound to the root — save() cascades the
+        // entity collections (insert with the inverse fk filled from the root id), mirroring the
+        // element-collection machinery. update() replaces all child rows (delete by fk + re-insert,
+        // child ids regenerated), same replace-all parity as element collections.
         Profile p = new Profile();
         p.setFullName("Ada Lovelace");
         p.getWorkHistory().add(new WorkExperience("Analytical Engines", 1842, 1843));
+        p.getEducation().add(new Education("University of London", 1840));
         Profile saved = profiles.save(p);
 
         Profile back = profiles.findById(saved.getId()).orElseThrow();
-        assertThat(back.getWorkHistory()).isEmpty();
+        assertThat(back.getWorkHistory()).hasSize(1);
+        assertThat(back.getWorkHistory().get(0).getCompany()).isEqualTo("Analytical Engines");
+        assertThat(back.getWorkHistory().get(0).getYearStart()).isEqualTo(1842);
+        assertThat(back.getWorkHistory().get(0).getYearEnd()).isEqualTo(1843);
+        assertThat(back.getWorkHistory().get(0).getId()).isNotNull();
+        assertThat(back.getEducation()).hasSize(1);
+        assertThat(back.getEducation().get(0).getInstitution()).isEqualTo("University of London");
+        assertThat(back.getEducation().get(0).getYear()).isEqualTo(1840);
+        assertThat(back.getEducation().get(0).getId()).isNotNull();
+
+        // Cascaded children have workable ids: the flagship cross-check through their own repository.
+        Long weId = back.getWorkHistory().get(0).getId();
+        WorkExperience direct = workExperiences.findById(weId).orElseThrow();
+        assertThat(direct.getId()).isEqualTo(weId);
+        assertThat(direct.getCompany()).isEqualTo("Analytical Engines");
+
+        // Root UPDATE cascades replace-all: the saved aggregate's children are deleted by fk and
+        // re-inserted from the in-memory collection (fresh ids), never duplicated.
+        profiles.save(back);
+        Profile replaced = profiles.findById(saved.getId()).orElseThrow();
+        assertThat(replaced.getWorkHistory()).hasSize(1);
+        assertThat(replaced.getEducation()).hasSize(1);
     }
 
     @Test
     void sortThroughCollectionPathContributesJoin() {
+        // GAP-2 fixed (R-T11c): the paged findAll now keeps TWO find constants — the plain
+        // SQL_FIND_ALL and a root-table-QUALIFIED join variant — and picks the qualified one at
+        // runtime when the resolved sort refs contribute a LEFT JOIN, so the joined table's own
+        // "id" column can no longer make the root select list ambiguous.
+        // The children ride the aggregate: save() cascades them through the new entity-collection
+        // write path (R-T11a) — no explicit child-repo saves (that would double-insert).
         Profile ada = profile("Ada", "London");
         ada.getWorkHistory().add(new WorkExperience("Zeta Corp", 1842, 1843));
         Profile grace = profile("Grace", "New York");
@@ -118,20 +144,20 @@ class ProfileCvTest {
         profiles.save(ada);
         profiles.save(grace);
         profiles.save(rene);
-        workExperiences.save(withProfile(new WorkExperience("Zeta Corp", 1842, 1843), ada));
-        workExperiences.save(withProfile(new WorkExperience("Alpha Ltd", 1952, 1952), grace));
 
-        // GAP-2 pin of CURRENT behaviour: the runtime path DOES resolve "workHistory.company" to a
-        // LEFT JOIN plus a qualified ORDER BY, but the join is spliced onto the unqualified
-        // SQL_FIND_ALL select list, and "id" is then ambiguous between profile and work_experience:
-        //   SELECT "id", ... FROM "profile" LEFT JOIN "work_experience" AS "workHistory"
-        //     ON "profile"."id" = "workHistory"."profile_id" ORDER BY "workHistory"."company" ASC
-        // Expected once the joined branch qualifies root columns (Task 9 find-constant precedent):
-        // both work-history owners ordered Grace->Ada and the childless Rene still present (LEFT JOIN).
-        assertThatThrownBy(() -> profiles.findAll(
-                PageRequest.ofPage(1).size(10), Order.by(_Profile.workHistory.company.asc())))
-                .isInstanceOf(JdbcClientException.class)
-                .hasMessageContaining("Ambiguous column name");
+        Page<Profile> page = profiles.findAll(
+                PageRequest.ofPage(1).size(10), Order.by(_Profile.workHistory.company.asc()));
+
+        // LEFT JOIN semantics: both work-history owners come back ordered by company ASC
+        // ("Alpha Ltd" before "Zeta Corp") and the childless Rene is still present.
+        assertThat(page.content()).isNotEmpty();
+        List<String> names = page.content().stream().map(Profile::getFullName).toList();
+        assertThat(names).contains("Rene");
+        int graceAt = names.indexOf("Grace");
+        int adaAt = names.indexOf("Ada");
+        assertThat(graceAt).isNotNegative();
+        assertThat(adaAt).isNotNegative();
+        assertThat(graceAt).isLessThan(adaAt);
     }
 
     @Test

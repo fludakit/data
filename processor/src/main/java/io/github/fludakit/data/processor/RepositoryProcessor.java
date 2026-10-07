@@ -421,7 +421,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             if (method.getSimpleName().contentEquals("findAll") && method.getParameters().size() == 2) {
                 paginatedFindAll = true;
             }
-            methods.add(generateMethod(method, repositoryType, entity, crud, constants, mapperType, hydrate));
+            methods.add(generateMethod(method, repositoryType, entity, crud, constants, mapperType, hydrate, methods));
         }
         // Registered before the field loop below so the loaders' SELECT constants render as fields.
         if (hydrate) {
@@ -1351,9 +1351,18 @@ public class RepositoryProcessor extends AbstractProcessor {
             appendPropertyRead(mapRow, entity.id().type(), metadataType, entity.id().name(),
                     entity.id().column(), entityElement.getSimpleName().toString());
         }
+        // Task 9: a non-composing @Association (composition=false) materializes at read time as an
+        // id-only PARTIAL instance through a generated partial_<Target> helper. A composition
+        // Reference (root-owned many-to-one) stays loader-filled: it is deliberately NOT read here.
+        // One helper per distinct target simple name (deduped). A target that cannot back a partial
+        // (no no-arg ctor / setId / non-JDBC-safe id) degrades to a NOTE + null field (never abort).
+        Map<String, MethodSpec> partialHelpers = new LinkedHashMap<>();
         for (Property p : entity.properties()) {
-            if (p.prop() instanceof Prop.Reference) {
-                continue; // FK-only reference; left null on read (loaders fill it in Tasks 3-4)
+            if (p.prop() instanceof Prop.Reference ref) {
+                if (!ref.composition()) {
+                    appendAssociationPartial(mapRow, ref, metadataType, entityElement, partialHelpers);
+                }
+                continue; // composition reference: FK-only on the mapper, hydrated by the loader
             }
             if (p.prop() instanceof Prop.Embedded) {
                 appendEmbeddedRead(mapRow, metadataType, p, entityElement.getSimpleName().toString());
@@ -1364,14 +1373,113 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
         mapRow.addStatement("return entity");
 
-        TypeSpec type = TypeSpec.classBuilder(simpleName)
+        TypeSpec.Builder mapperBuilder = TypeSpec.classBuilder(simpleName)
                 .addModifiers(Modifier.PUBLIC, Modifier.FINAL)
                 .addSuperinterface(ParameterizedTypeName.get(rowMapperInterface, entityType))
-                .addMethod(mapRow.build())
-                .build();
+                .addMethod(mapRow.build());
+        partialHelpers.values().forEach(mapperBuilder::addMethod);
+        TypeSpec type = mapperBuilder.build();
         writeSourceFile(packageName + "." + simpleName, entityElement,
                 JavaFile.builder(packageName, type).skipJavaLangImports(true).build());
         return ClassName.get(packageName, simpleName);
+    }
+
+    /**
+     * Emits the id-only partial materialisation of one {@code @Association} field (Task 9): a read of
+     * the FK through the owner's metadata constant plus a {@code setter(fk == null ? null :
+     * partial_<Target>(fk))} call. The {@code partial_<Target>} helper (new + setId, reflection-free)
+     * is registered in {@code helpers} keyed by the target simple name so several associations to the
+     * same target share one helper. The target's own relationships are NOT touched (id-only). Any
+     * precondition failure (unresolvable target, no id, non-JDBC-safe id, missing no-arg ctor or
+     * {@code setId}) records a NOTE on {@code entityElement} and leaves the field unset (null) — the
+     * Requirements-Lock NOTE-degrade, never an abort.
+     */
+    private void appendAssociationPartial(MethodSpec.Builder mapRow, Prop.Reference ref,
+                                          ClassName metadataType, TypeElement entityElement,
+                                          Map<String, MethodSpec> helpers) {
+        String why = associationPartialBlocked(ref, entityElement);
+        if (why != null) {
+            processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
+                    "association '" + ref.name() + "' on " + entityElement.getQualifiedName() + ": " + why
+                            + " — the field is left null on read (no id-only partial materialisation)",
+                    entityElement);
+            return;
+        }
+        EntityModel targetModel = entityModel(elements.getTypeElement(ref.targetTypeName()));
+        TypeName idType = targetModel.id().type().box();
+        TypeName targetType = targetModel.typeName();
+        String targetSimple = targetSimpleName(targetModel);
+        // Read the FK into a local named after its physical column (customer_id), reusing the owner's
+        // metadata constant for the association property (CUSTOMER -> "customer_id").
+        String fkLocal = ref.fkColumn();
+        mapRow.addStatement("$T $L = $L", idType, fkLocal,
+                readExpression(idType, metadataType, ref.name()));
+        mapRow.addStatement("entity.$L($L == null ? null : partial_$L($L))",
+                setter(ref.name()), fkLocal, targetSimple, fkLocal);
+        helpers.computeIfAbsent(targetSimple, k -> MethodSpec.methodBuilder("partial_" + targetSimple)
+                .addModifiers(Modifier.PRIVATE, Modifier.STATIC)
+                .returns(targetType)
+                .addParameter(idType, "id")
+                .addStatement("$T c = new $T()", targetType, targetType)
+                .addStatement("c.$L(id)", setter(targetModel.id().name()))
+                .addStatement("return c")
+                .build());
+    }
+
+    /**
+     * The reason a {@code @Association} target cannot back an id-only partial, or {@code null} when it
+     * can. Checks (in order): the target element resolves, the target carries an id, the id is JDBC-safe
+     * (so the FK reads through {@code getObject}), and the target exposes a no-arg constructor and an
+     * id setter. Java 17 safety: driven by {@code elements}/{@code types}, never reflection in the
+     * generated code.
+     */
+    private String associationPartialBlocked(Prop.Reference ref, TypeElement entityElement) {
+        String fqn = ref.targetTypeName();
+        if (fqn == null) {
+            return "the target type could not be resolved";
+        }
+        TypeElement target = elements.getTypeElement(fqn);
+        if (target == null) {
+            return "the target " + fqn + " could not be resolved";
+        }
+        EntityModel targetModel = entityModel(target);
+        if (targetModel.id() == null) {
+            return "the target " + fqn + " has no identifier";
+        }
+        if (!isJdbcSafe(targetModel.id().type().box())) {
+            return "the target " + fqn + " id type " + targetModel.id().type() + " is not JDBC-safe";
+        }
+        if (!hasNoArgConstructor(target)) {
+            return "the target " + fqn + " has no accessible no-argument constructor";
+        }
+        if (!hasMethodNamed(target, setter(targetModel.id().name()))) {
+            return "the target " + fqn + " has no " + setter(targetModel.id().name()) + " setter";
+        }
+        return null;
+    }
+
+    /** True when {@code element} can be instantiated with {@code new X()} (an explicit or default ctor). */
+    private static boolean hasNoArgConstructor(TypeElement element) {
+        boolean hasExplicitCtor = false;
+        for (Element member : element.getEnclosedElements()) {
+            if (member.getKind() == ElementKind.CONSTRUCTOR) {
+                hasExplicitCtor = true;
+                if (((ExecutableElement) member).getParameters().isEmpty()) {
+                    return true;
+                }
+            }
+        }
+        return !hasExplicitCtor; // no explicit ctor → the compiler supplies a no-arg default
+    }
+
+    /** True when {@code element} has any member method named {@code name}. */
+    private boolean hasMethodNamed(TypeElement element, String name) {
+        for (Element member : elements.getAllMembers(element)) {
+            if (member.getKind() == ElementKind.METHOD && member.getSimpleName().contentEquals(name)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -1631,7 +1739,7 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     private MethodSpec generateMethod(ExecutableElement method, DeclaredType repositoryType, EntityModel entity,
                                       boolean crud, Map<String, String> constants, ClassName mapperType,
-                                      boolean hydrate) {
+                                      boolean hydrate, List<MethodSpec> auxMethods) {
         ExecutableType resolved = (ExecutableType) types.asMemberOf(repositoryType, method);
         TypeMirror returnMirror = resolved.getReturnType();
         List<? extends TypeMirror> parameterTypes = resolved.getParameterTypes();
@@ -1727,7 +1835,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             return builder.build();
         }
 
-        emitFind(builder, method, resolved, entity, constants, mapperType, hydrate);
+        emitFind(builder, method, resolved, entity, constants, mapperType, hydrate, auxMethods);
         return builder.build();
     }
 
@@ -2242,7 +2350,7 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     private void emitFind(MethodSpec.Builder builder, ExecutableElement method, ExecutableType resolved,
                           EntityModel entity, Map<String, String> constants, ClassName mapperType,
-                          boolean hydrate) {
+                          boolean hydrate, List<MethodSpec> auxMethods) {
         String name = method.getSimpleName().toString();
         ParsedMethodName parsed = tryParse(name);
         String action = parsed != null ? parsed.action() : "find";
@@ -2262,7 +2370,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         if ("count".equals(action) || "exists".equals(action)) {
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
                     methodSql(action, entity.metadata(), predicates, predicateRefs,
-                            List.of(), List.of(), 0));
+                            List.of(), List.of(), 0, ""));
             CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
             appendBoundParameters(call, bindings, parameters);
             call.add(".singleValue($T.class)", Long.class);
@@ -2279,7 +2387,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         if ("delete".equals(action)) {
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
                     methodSql("delete", entity.metadata(), predicates, predicateRefs,
-                            List.of(), List.of(), 0));
+                            List.of(), List.of(), 0, ""));
             CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
             appendBoundParameters(call, bindings, parameters);
             call.add(".update()");
@@ -2300,23 +2408,47 @@ public class RepositoryProcessor extends AbstractProcessor {
                                 + " requires a PageRequest parameter", method);
                 return;
             }
+            // Task 9: full materialisation through a joined read is not supported for paged finders —
+            // the runtime sort/seek wiring appends its own join chain to the base constant. A paged
+            // finder whose compile-time predicates traverse a Reference is degraded to the normal mapper
+            // (association fields stay id-only partials read by the base row mapper), with a NOTE.
+            if (!collectTraversedReferences(entity.metadata(), predicateRefs, List.of()).isEmpty()) {
+                processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
+                        name + ": full materialisation through joins is not supported for paged finders;"
+                                + " association fields materialize as id-only partials", method);
+            }
             // The base constant carries the compile-time predicates (join-aware); the runtime sort /
             // seek resolution in emitPaged stays local-only (deferred to Task 12), so no sort refs here.
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
-                    methodSql("find", entity.metadata(), predicates, predicateRefs, List.of(), List.of(), 0));
+                    methodSql("find", entity.metadata(), predicates, predicateRefs, List.of(), List.of(), 0, ""));
             emitPaged(builder, entity, pageRequest, methodSorts, constant, constants, bindings, parameters,
                     kind == Kind.CURSORED_PAGE, mapperType, hydrate);
             return;
         }
         List<ColumnRef> sortRefs = resolveCompilePaths(entity.metadata(),
                 methodSorts.stream().map(SortSpec::property).toList(), method);
+
+        // Task 9 (join-returns-all-fields): when a method-name predicate/sort path traversed a Reference,
+        // the SELECT carries the target's aliased flattened columns and the read uses a generated
+        // per-method full mapper. Only for non-paged entity-returning finders with a generated row
+        // mapper to delegate the root columns to; otherwise the projection stays root-only (partial).
+        List<Prop.Reference> traversed = collectTraversedReferences(entity.metadata(), predicateRefs, sortRefs);
+        boolean fullMaterialisation = !traversed.isEmpty() && mapperType != null
+                && "find".equals(action) && kind != Kind.VOID;
+        String extraProjection = fullMaterialisation ? joinedProjection(entity.metadata(), traversed) : "";
+        CodeBlock queryArgForMethod = queryArg(entity, mapperType);
+        if (fullMaterialisation) {
+            String fullMapper = "mapRow_full_" + Names.toSnakeCase(name);
+            auxMethods.add(buildFullMapper(fullMapper, entity, mapperType, traversed));
+            queryArgForMethod = CodeBlock.of("(rs, rowNum) -> $L(rs, rowNum)", fullMapper);
+        }
         String sql = methodSql(action, entity.metadata(), predicates, predicateRefs,
-                methodSorts, sortRefs, parsed != null ? parsed.limit() : 0);
+                methodSorts, sortRefs, parsed != null ? parsed.limit() : 0, extraProjection);
         String constant = addConstant(constants, "SQL_" + upperSnake(name), sql);
         CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
         appendBoundParameters(call, bindings, parameters);
         if (!hydrate || kind == Kind.VOID) {
-            terminal(call, kind, queryArg(entity, mapperType));
+            terminal(call, kind, queryArgForMethod);
             if (kind == Kind.VOID) {
                 builder.addStatement("$L", call.build());
             } else {
@@ -2327,26 +2459,236 @@ public class RepositoryProcessor extends AbstractProcessor {
         // Hydrated read shapes: land the query result in a local, run the umbrella loader, then return.
         switch (kind) {
             case LIST, STREAM -> {
-                call.add(".query($L).list()", queryArg(entity, mapperType));
+                call.add(".query($L).list()", queryArgForMethod);
                 builder.addStatement("$T<$T> results = $L", List.class, entity.typeName(), call.build());
                 builder.addStatement("$L", hydrationCall(entity, "results"));
                 builder.addStatement(kind == Kind.STREAM ? "return results.stream()" : "return results");
             }
             case OPTIONAL -> {
-                call.add(".query($L).optional()", queryArg(entity, mapperType));
+                call.add(".query($L).optional()", queryArgForMethod);
                 builder.addStatement("$T<$T> found = $L", java.util.Optional.class, entity.typeName(), call.build());
                 builder.addStatement("found.ifPresent(e -> $L)", hydrationCall(entity, "java.util.List.of(e)"));
                 builder.addStatement("return found");
             }
             case SINGLE -> {
-                call.add(".query($L).single()", queryArg(entity, mapperType));
+                call.add(".query($L).single()", queryArgForMethod);
                 builder.addStatement("$T found = $L", entity.typeName(), call.build());
                 builder.addStatement("$L", hydrationCall(entity, "java.util.List.of(found)"));
                 builder.addStatement("return found");
             }
             default -> {
-                terminal(call, kind, queryArg(entity, mapperType));
+                terminal(call, kind, queryArgForMethod);
                 builder.addStatement("$L", call.build());
+            }
+        }
+    }
+
+    /**
+     * The distinct {@link Prop.Reference} heads whose resolved predicate/sort refs carry a join (i.e. the
+     * path traversed a Reference rather than an {@code EntityList}/{@code ElementList}). A joined ref's
+     * path is {@code <head>.<leafPath>} (set by {@code withPrefix}); the head names the traversed
+     * property. Composition and association references both qualify — the field is filled from the join
+     * either way. Deduped by property name so one traversal of a shared head yields one projection.
+     */
+    private List<Prop.Reference> collectTraversedReferences(DescriptorModel md, List<ColumnRef> predicateRefs,
+                                                            List<ColumnRef> sortRefs) {
+        List<Prop.Reference> out = new ArrayList<>();
+        List<ColumnRef> all = new ArrayList<>(predicateRefs);
+        all.addAll(sortRefs);
+        for (ColumnRef ref : all) {
+            if (ref.joins().isEmpty()) {
+                continue;
+            }
+            String path = ref.path();
+            int dot = path.indexOf('.');
+            String head = dot < 0 ? path : path.substring(0, dot);
+            Prop prop = propOrNull(md, head);
+            if (prop instanceof Prop.Reference reference) {
+                boolean seen = out.stream().anyMatch(r -> r.name().equals(reference.name()));
+                if (!seen) {
+                    out.add(reference);
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * The extra SELECT fragments a joined full-materialisation read needs: every flattened column of
+     * each traversed target EXCEPT its own references (nested associations stay null, depth-1), qualified
+     * by the join alias and re-labelled {@code <alias>_join_<column>} so the read is unambiguous against
+     * the root's own columns. Emitted in the target's {@code columns()} declaration order.
+     */
+    private String joinedProjection(DescriptorModel md, List<Prop.Reference> traversed) {
+        StringBuilder sb = new StringBuilder();
+        for (Prop.Reference ref : traversed) {
+            TypeElement target = elements.getTypeElement(ref.targetTypeName());
+            if (target == null) {
+                continue;
+            }
+            EntityModel targetModel = entityModel(target);
+            for (ColumnRef column : targetModel.metadata().columns()) {
+                String head = column.path().contains(".")
+                        ? column.path().substring(0, column.path().indexOf('.')) : column.path();
+                if (propOrNull(targetModel.metadata(), head) instanceof Prop.Reference) {
+                    continue; // nested association fk not selected — its target stays null (depth-1)
+                }
+                String alias = Names.quote(ref.name()) + "." + Names.quote(column.column());
+                String label = ref.name() + "_join_" + column.column();
+                if (sb.length() > 0) {
+                    sb.append(", ");
+                }
+                sb.append(alias).append(" AS ").append(Names.quote(label));
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Generates the per-method full mapper {@code mapRow_full_<method>}: it delegates the root columns to
+     * the entity's generated row mapper (which already materialises non-traversed associations as
+     * id-only partials) and then OVERWRITES each traversed association with a fully-populated instance
+     * read from the {@code <alias>_join_<column>} labels. Primitive leaves use the temp+wasNull rule.
+     * Reflection-free (Java 17 instanceof-chain).
+     */
+    private MethodSpec buildFullMapper(String mapperName, EntityModel entity, ClassName mapperType,
+                                       List<Prop.Reference> traversed) {
+        TypeName entityType = entity.typeName();
+        MethodSpec.Builder m = MethodSpec.methodBuilder(mapperName)
+                .addModifiers(Modifier.PRIVATE, Modifier.STATIC)
+                .returns(entityType)
+                .addParameter(ClassName.get("java.sql", "ResultSet"), "rs")
+                .addParameter(int.class, "rowNum")
+                .addException(ClassName.get("java.sql", "SQLException"))
+                .addStatement("$T entity = new $T().mapRow(rs, rowNum)", entityType, mapperType);
+        for (Prop.Reference ref : traversed) {
+            TypeElement target = elements.getTypeElement(ref.targetTypeName());
+            if (target == null) {
+                continue;
+            }
+            EntityModel targetModel = entityModel(target);
+            if (targetModel.id() == null) {
+                continue;
+            }
+            TypeName idType = targetModel.id().type().box();
+            String idLabel = ref.name() + "_join_" + targetModel.id().column();
+            String idLocal = ref.name() + "_join_id";
+            m.addStatement("$T $L = rs.getObject($S, $T.class)", idType, idLocal, idLabel, idType);
+            m.beginControlFlow("if ($L != null)", idLocal);
+            String var = ref.name() + "Full";
+            m.addStatement("$T $L = new $T()", targetModel.typeName(), var, targetModel.typeName());
+            m.addStatement("$L.$L($L)", var, setter(targetModel.id().name()), idLocal);
+            appendJoinedTargetLeaves(m, targetModel, ref.name(), var, entity.typeName().toString());
+            m.addStatement("entity.$L($L)", setter(ref.name()), var);
+            m.endControlFlow();
+        }
+        m.addStatement("return entity");
+        return m.build();
+    }
+
+    /**
+     * Fills the scalar and embedded-leaf columns of a joined target (its id was already set by the
+     * caller). References in the target are skipped (nested associations stay null — depth-1) and the
+     * target's own id is skipped (already assigned). Reads use {@code <alias>_join_<column>} labels,
+     * exactly matching {@link #joinedProjection}; primitives follow the temp+wasNull rule.
+     */
+    private void appendJoinedTargetLeaves(MethodSpec.Builder m, EntityModel vo, String alias, String var,
+                                          String ownerName) {
+        for (Property p : vo.properties()) {
+            if (p.prop() instanceof Prop.Reference) {
+                continue;
+            }
+            if (p.prop() instanceof Prop.Embedded) {
+                appendJoinedEmbedded(m, p, alias, var, ownerName);
+                continue;
+            }
+            String label = alias + "_join_" + p.column();
+            if (!p.type().isPrimitive()) {
+                m.addStatement("$L.$L(rs.getObject($S, $T.class))", var, setter(p.name()), label, p.type().box());
+                continue;
+            }
+            String temp = alias + "_" + p.column() + "Value";
+            m.addStatement("$T $L = rs.$L($S)", p.type(), temp, primitiveGetter(p.type()), label);
+            m.beginControlFlow("if (rs.wasNull())");
+            m.addStatement("throw new $T($S)", ClassName.get("java.sql", "SQLException"),
+                    "NULL value in non-nullable primitive column \"" + label + "\" mapped to "
+                            + ownerName + "." + alias + "." + p.name());
+            m.endControlFlow();
+            m.addStatement("$L.$L($L)", var, setter(p.name()), temp);
+        }
+    }
+
+    /** Reconstructs one embedded value-object of a joined target from its aliased leaf labels (per-subtree presence). */
+    private void appendJoinedEmbedded(MethodSpec.Builder m, Property embedded, String alias, String var,
+                                      String ownerName) {
+        EntityModel vo = embedded.embeddedModel();
+        if (vo == null) {
+            return;
+        }
+        String childVar = var + capitalize(embedded.name());
+        List<String> presence = new ArrayList<>();
+        readJoinedEmbeddedLeaves(m, vo, alias + "_join_" + embedded.column(), childVar, presence,
+                ownerName + "." + alias + "." + embedded.name());
+        boolean guarded = !presence.isEmpty();
+        if (guarded) {
+            m.beginControlFlow("if ($L)", String.join(" || ", presence));
+        }
+        buildJoinedEmbeddedValue(m, vo, alias + "_join_" + embedded.column(), childVar);
+        m.addStatement("$L.$L($L)", var, setter(embedded.name()), childVar);
+        if (guarded) {
+            m.endControlFlow();
+        }
+    }
+
+    private void readJoinedEmbeddedLeaves(MethodSpec.Builder m, EntityModel vo, String prefix, String local,
+                                          List<String> presence, String path) {
+        for (Property p : vo.properties()) {
+            if (p.prop() instanceof Prop.Reference) {
+                continue;
+            }
+            if (p.prop() instanceof Prop.Embedded) {
+                readJoinedEmbeddedLeaves(m, p.embeddedModel(), prefix + "_" + p.column(),
+                        local + capitalize(p.name()), presence, path + "." + p.name());
+                continue;
+            }
+            String leafLocal = prefix + "_" + p.column();
+            if (!p.type().isPrimitive()) {
+                m.addStatement("$T $L = rs.getObject($S, $T.class)", p.type().box(), leafLocal, leafLocal,
+                        p.type().box());
+                presence.add(leafLocal + " != null");
+                continue;
+            }
+            m.addStatement("$T $L = rs.$L($S)", p.type(), leafLocal, primitiveGetter(p.type()), leafLocal);
+            m.beginControlFlow("if (rs.wasNull())");
+            m.addStatement("throw new $T($S)", ClassName.get("java.sql", "SQLException"),
+                    "NULL value in non-nullable primitive column \"" + leafLocal + "\" mapped to " + path);
+            m.endControlFlow();
+        }
+    }
+
+    private void buildJoinedEmbeddedValue(MethodSpec.Builder m, EntityModel vo, String prefix, String local) {
+        m.addStatement("$T $L = new $T()", vo.typeName(), local, vo.typeName());
+        for (Property p : vo.properties()) {
+            if (p.prop() instanceof Prop.Reference || p.prop() instanceof Prop.Embedded) {
+                continue;
+            }
+            m.addStatement("$L.$L($L)", local, setter(p.name()), prefix + "_" + p.column());
+        }
+        for (Property p : vo.properties()) {
+            if (!(p.prop() instanceof Prop.Embedded)) {
+                continue;
+            }
+            String childLocal = local + capitalize(p.name());
+            List<String> terms = new ArrayList<>();
+            collectPresenceTerms(p.embeddedModel(), prefix + "_" + p.column(), terms);
+            if (terms.isEmpty()) {
+                buildJoinedEmbeddedValue(m, p.embeddedModel(), prefix + "_" + p.column(), childLocal);
+                m.addStatement("$L.$L($L)", local, setter(p.name()), childLocal);
+            } else {
+                m.beginControlFlow("if ($L)", String.join(" || ", terms));
+                buildJoinedEmbeddedValue(m, p.embeddedModel(), prefix + "_" + p.column(), childLocal);
+                m.addStatement("$L.$L($L)", local, setter(p.name()), childLocal);
+                m.endControlFlow();
             }
         }
     }
@@ -2589,7 +2931,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      */
     private String methodSql(String action, DescriptorModel md, List<Predicate> predicates,
                              List<ColumnRef> predicateRefs, List<SortSpec> sorts, List<ColumnRef> sortRefs,
-                             int limit) {
+                             int limit, String extraProjection) {
         if (!hasJoins(predicateRefs) && !hasJoins(sortRefs)) {
             if ("count".equals(action) || "exists".equals(action)) {
                 return new SqlBuilder().countBy(md, predicates);
@@ -2607,10 +2949,18 @@ public class RepositoryProcessor extends AbstractProcessor {
         } else if ("delete".equals(action)) {
             sb.append("DELETE FROM ").append(Names.quote(md.tableName()));
         } else {
+            // Joined find: every root column is qualified by the root table. Unqualified bare names
+            // become ambiguous the moment a join adds a table sharing a column name (e.g. the target's
+            // own "id"), and a full-materialisation read joins exactly such a table. Qualifying keeps
+            // each label = its physical column, so the generated row mapper still reads it by name.
             String cols = md.columns().stream()
-                    .map(c -> Names.quote(c.column()))
+                    .map(c -> Names.quote(md.tableName()) + "." + Names.quote(c.column()))
                     .collect(java.util.stream.Collectors.joining(", "));
-            sb.append("SELECT ").append(cols).append(" FROM ").append(Names.quote(md.tableName()));
+            sb.append("SELECT ").append(cols);
+            if (extraProjection != null && !extraProjection.isEmpty()) {
+                sb.append(", ").append(extraProjection);
+            }
+            sb.append(" FROM ").append(Names.quote(md.tableName()));
         }
         sb.append(SqlBuilder.joinClause(md, refs));
         for (int i = 0; i < predicates.size(); i++) {

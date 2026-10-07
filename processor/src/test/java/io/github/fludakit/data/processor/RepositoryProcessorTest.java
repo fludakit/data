@@ -2806,6 +2806,217 @@ class RepositoryProcessorTest {
                 "countBy through a relation must splice the join after FROM:" + System.lineSeparator() + impl);
     }
 
+    @Test
+    void associationFieldMaterializesIdOnlyPartialWhileCompositionKeepsLoader() throws Exception {
+        // Task 9: an @Association field (composition=false) materializes at mapper-read time as an
+        // ID-ONLY partial instance through a generated partial_<Target> helper, with NO two-phase
+        // loader. A bare entity field on an @AggregateRoot (composition=true) keeps its two-phase
+        // hydrate_<field> loader exactly as before. The write path binds only the association id, so a
+        // partial (id set, other leaves null) round-trips without reading non-id leaves.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/assoc"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-assoc"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-assoc"));
+
+        Files.writeString(sourceDir.resolve("Customer.java"), """
+                package assoc;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Customer {
+                    @Identity Long id;
+                    String name;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getName() { return name; }
+                    public void setName(String name) { this.name = name; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Payment.java"), """
+                package assoc;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Payment {
+                    @Identity Long id;
+                    long amount;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public long getAmount() { return amount; }
+                    public void setAmount(long amount) { this.amount = amount; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Order.java"), """
+                package assoc;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Association;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Order {
+                    @Identity Long id;
+                    String status;
+                    @Association Customer customer;
+                    Payment payment;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getStatus() { return status; }
+                    public void setStatus(String status) { this.status = status; }
+                    public Customer getCustomer() { return customer; }
+                    public void setCustomer(Customer customer) { this.customer = customer; }
+                    public Payment getPayment() { return payment; }
+                    public void setPayment(Payment payment) { this.payment = payment; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Orders.java"), """
+                package assoc;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Orders extends CrudRepository<Order, Long> { }
+                """);
+        // Payment has its own repository → it is a MANAGED target, so the composition (Order.payment)
+        // keeps its two-phase hydrate loader. Customer has no repository, which is irrelevant to the
+        // association partial (it only needs a no-arg ctor + setId).
+        Files.writeString(sourceDir.resolve("Payments.java"), """
+                package assoc;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Payments extends CrudRepository<Payment, Long> { }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir,
+                "Customer.java", "Payment.java", "Order.java", "Orders.java", "Payments.java");
+
+        String mapper = Files.readString(generatedDir.resolve("assoc/OrderRowMapper.java"));
+        assertTrue(mapper.contains("Long customer_id = rs.getObject(OrderMetadata.CUSTOMER, Long.class);"),
+                "the association fk must be read into a local by the owner metadata constant:"
+                        + System.lineSeparator() + mapper);
+        assertTrue(mapper.contains("entity.setCustomer(customer_id == null ? null : partial_Customer(customer_id));"),
+                "the association must materialize as an id-only partial through the ternary:"
+                        + System.lineSeparator() + mapper);
+        assertTrue(mapper.contains("private static Customer partial_Customer(Long id)"),
+                "missing the generated partial_Customer helper:" + System.lineSeparator() + mapper);
+        assertTrue(mapper.contains("Customer c = new Customer();") && mapper.contains("c.setId(id);")
+                        && mapper.contains("return c;"),
+                "the partial helper must be new + setId(id) + return, reflection-free:" + System.lineSeparator() + mapper);
+        // The composition field (payment) is NOT read by the mapper — the loader fills it.
+        assertTrue(!mapper.contains("partial_Payment") && !mapper.contains("setPayment"),
+                "a composition reference is never read by the row mapper (loader-fills):" + System.lineSeparator() + mapper);
+
+        String impl = Files.readString(generatedDir.resolve("assoc/OrdersImpl.java")).replace("\\\"", "\"");
+        // Composition keeps its two-phase loader.
+        assertTrue(impl.contains("private void hydratePayment(Collection<Order> parents)"),
+                "the composition target must keep its many-to-one loader:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("hydrateAll") && impl.contains("hydratePayment(parents)"),
+                "the umbrella must dispatch the composition loader:" + System.lineSeparator() + impl);
+        // Association gets NO loader.
+        assertTrue(!impl.contains("hydrateCustomer"),
+                "an @Association must NOT get a two-phase loader:" + System.lineSeparator() + impl);
+        // Write path binds ONLY the association id (never a non-id leaf), so partials round-trip.
+        assertTrue(impl.contains(".param(\"customer\", entity.getCustomer() == null ? null : entity.getCustomer().getId())"),
+                "the write path must bind the association id through boundValue:" + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("entity.getCustomer().get") || impl.contains("entity.getCustomer().getId()"),
+                "the generated save path must bind only the association id, never a non-id leaf:"
+                        + System.lineSeparator() + impl);
+    }
+
+    @Test
+    void associationTargetWithoutPartialConstructorDegradesToNullWithNote() throws Exception {
+        // Requirements Lock NOTE-degrade: if the association target lacks a no-arg ctor or setId, the
+        // mapper leaves the field null (no partial, no loader) and a NOTE is recorded — never an abort.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/assocn"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-assocn"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-assocn"));
+
+        Files.writeString(sourceDir.resolve("Locked.java"), """
+                package assocn;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Locked {
+                    @Identity Long id;
+                    public Locked(Long id) { this.id = id; }
+                    public Long getId() { return id; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Holder.java"), """
+                package assocn;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Association;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Holder {
+                    @Identity Long id;
+                    @Association Locked locked;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public Locked getLocked() { return locked; }
+                    public void setLocked(Locked locked) { this.locked = locked; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Holders.java"), """
+                package assocn;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Holders extends CrudRepository<Holder, Long> { }
+                """);
+
+        List<Diagnostic<? extends JavaFileObject>> diagnostics = compileWithDiagnostics(
+                sourceDir, classesDir, generatedDir, "Locked.java", "Holder.java", "Holders.java");
+
+        String notes = notesOf(diagnostics);
+        assertTrue(notes.contains("association 'locked' on assocn.Holder"),
+                "the missing-partial-ctor NOTE must name the association:" + System.lineSeparator() + notes);
+        String mapper = Files.readString(generatedDir.resolve("assocn/HolderRowMapper.java"));
+        assertTrue(!mapper.contains("partial_Locked") && !mapper.contains("setLocked"),
+                "a NOTE-degraded association must stay null (no partial, no setter call):"
+                        + System.lineSeparator() + mapper);
+    }
+
+    @Test
+    void associationPredicateTraversalMaterializesFullJoinedInstance() throws Exception {
+        // Join-returns-all-fields: findByCustomerName traverses the @Association customer Reference at
+        // compile time (Task 8), so the SELECT carries the target's flattened columns aliased to
+        // customer_join_*, and the method uses a generated mapRow_full_<method> mapper that sets
+        // customer to a FULLY populated instance read from the aliased join columns.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-full"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-rp-full"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-rp-full"));
+        writeRelationFixture(sourceDir);
+        Files.writeString(sourceDir.resolve("FullOrd.java"), """
+                package relpath;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.List;
+                @Repository
+                public interface FullOrd extends CrudRepository<Order, Long> {
+                    List<Order> findByCustomerName(String name);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir,
+                "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "FullOrd.java");
+
+        String impl = sqlFlat(generatedDir.resolve("relpath/FullOrdImpl.java"));
+        // Root columns qualified by the root table, joined target columns qualified + aliased.
+        assertTrue(impl.contains("SELECT \"order\".\"id\", \"order\".\"status\", \"order\".\"customer_id\", "
+                        + "\"customer\".\"id\" AS \"customer_join_id\", \"customer\".\"name\" AS \"customer_join_name\" "
+                        + "FROM \"order\""),
+                "the joined find must project the target's columns under <alias>_join_<col>:"
+                        + System.lineSeparator() + impl);
+        assertTrue(impl.contains("mapRow_full_find_by_customer_name"),
+                "the method must carry a generated per-method full mapper:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains(".query((rs, rowNum) -> mapRow_full_find_by_customer_name(rs, rowNum))"),
+                "the query call-site must use the full mapper:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("Customer customerFull = new Customer();")
+                        && impl.contains("customerFull.setId(customer_join_id)")
+                        && impl.contains("customerFull.setName(rs.getObject(\"customer_join_name\", String.class))")
+                        && impl.contains("entity.setCustomer(customerFull)"),
+                "the full mapper must build a fully-populated target from the aliased labels:"
+                        + System.lineSeparator() + impl);
+    }
+
     private void compile(Path sourceDir, Path classesDir, Path generatedDir, String... fileNames) throws Exception {
         compileWithDiagnostics(sourceDir, classesDir, generatedDir, fileNames);
     }

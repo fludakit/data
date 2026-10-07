@@ -1,5 +1,6 @@
 package io.github.fludakit.data.page;
 
+import io.github.fludakit.data.metadata.EntityDescriptor;
 import jakarta.data.page.PageRequest;
 
 import java.lang.reflect.Field;
@@ -43,6 +44,50 @@ public final class CursorSupport {
         return out;
     }
 
+    /**
+     * Builds the cursor key for {@code entity} from its sorted property paths, reading every value
+     * through the descriptor's reflection-free {@link EntityDescriptor#value(String, Object)} — so a
+     * to-many sort key collapses to the same edge the joined SQL aggregate produces: the minimum for an
+     * ascending key, the maximum for a descending one (nulls ignored, as SQL {@code MIN}/{@code MAX}
+     * ignore them; an empty or all-null list yields a {@code null} key).
+     *
+     * @param properties the dot paths, in cursor-key order
+     * @param ascending  the sort direction of each key
+     * @param md         the entity's generated descriptor
+     * @param entity     the row the cursor continues from
+     */
+    public static PageRequest.Cursor cursorFor(List<String> properties, List<Boolean> ascending,
+                                               EntityDescriptor<?> md, Object entity) {
+        Object[] key = new Object[properties.size()];
+        for (int i = 0; i < properties.size(); i++) {
+            Object value = md.value(properties.get(i), entity);
+            key[i] = value instanceof List<?> values ? edgeOf(values, ascending.get(i)) : value;
+        }
+        return PageRequest.Cursor.forKey(key);
+    }
+
+    /** The {@code MIN} (ascending) or {@code MAX} edge of a to-many value list, nulls skipped. */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static Object edgeOf(List<?> values, boolean ascending) {
+        Object edge = null;
+        for (Object value : values) {
+            if (value == null) {
+                continue;
+            }
+            if (edge == null || (ascending ? ((Comparable) edge).compareTo(value) > 0
+                    : ((Comparable) edge).compareTo(value) < 0)) {
+                edge = value;
+            }
+        }
+        return edge;
+    }
+
+    /**
+     * Reflection-based cursor key, superseded by the descriptor-driven {@link
+     * #cursorFor(List, List, EntityDescriptor, Object)} overload that the generated paging code is
+     * migrating to. Kept (with its reflective helpers) until every generated call site moves.
+     */
+    @Deprecated
     public static PageRequest.Cursor cursorFor(List<String> properties, Object entity) {
         Object[] key = new Object[properties.size()];
         for (int i = 0; i < properties.size(); i++) key[i] = fieldValue(entity, properties.get(i));

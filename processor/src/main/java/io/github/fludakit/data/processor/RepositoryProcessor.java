@@ -677,9 +677,171 @@ public class RepositoryProcessor extends AbstractProcessor {
                 .returns(ParameterizedTypeName.get(ClassName.get(java.util.List.class), MD_COLUMN_REF))
                 .addStatement("return $L", columns.build()).build());
 
+        // Task 4 (S-3): the read-side twin of the column view. columns()/columnRef() answer WHERE a dot
+        // path lives; value() answers what it IS on a materialised row, so a paged read can build its own
+        // cursor key without reflection. Generation is NOTE-degraded: a descriptor that cannot carry the
+        // switch simply keeps the interface default (which fails fast) instead of failing the round.
+        MethodSpec valueMethod = valueExtractor(entityElement, entity);
+        if (valueMethod != null) {
+            builder.addMethod(valueMethod);
+        }
+
         writeSourceFile(packageName + "." + simpleName, entityElement,
                 JavaFile.builder(packageName, builder.build()).skipJavaLangImports(true).build());
         return self;
+    }
+
+    /**
+     * Emits the descriptor's reflection-free {@code value(String dotPath, Object entity)} override: a
+     * {@code switch} over exactly the dot paths {@code columnRef} resolves at the depth
+     * {@link #resolveCompilePath} walks — the flattened {@code columns()} view (identifier, scalars,
+     * to-one heads, embedded leaves), the one-hop leaves of every {@link Prop.Reference} target, and the
+     * mapped child values of every {@link Prop.EntityList}/{@link Prop.ElementList}. Bodies are JavaPoet
+     * getter chains, method references and stream lambdas only (never reflection), each hop null-guarded
+     * and each to-many container guarded to an EMPTY list. A path whose accessor cannot be resolved is
+     * left out with a NOTE and the round continues; an unknown path fails fast with
+     * {@link IllegalArgumentException}, exactly as {@code columnRef} does.
+     */
+    private MethodSpec valueExtractor(TypeElement entityElement, EntityModel entity) {
+        try {
+            return valueSwitch(entityElement, entity);
+        } catch (RuntimeException e) {
+            processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
+                    "descriptor value extraction could not be generated for " + entityElement.getSimpleName()
+                            + " (" + e + "); the value switch is omitted", entityElement);
+            return null;
+        }
+    }
+
+    private MethodSpec valueSwitch(TypeElement entityElement, EntityModel entity) {
+        DescriptorModel md = entity.metadata();
+        Map<String, CodeBlock> cases = new LinkedHashMap<>();
+
+        // (1) The flattened column view this descriptor publishes: identifier, scalars, to-one heads
+        // (whose path is the property name, mapping to the fk column) and embedded leaves.
+        for (ColumnRef column : md.columns()) {
+            putValueCase(cases, entityElement, column.path(),
+                    valueChain(entityElement, md, CodeBlock.of("e"), column.path()));
+        }
+
+        // (2) Depth 1 through every relationship the descriptor publishes. Anything deeper is
+        // multi-hop for resolveCompilePath too, so it stays out of the switch by construction.
+        for (Prop p : md.props()) {
+            if (!isTraversable(p)) {
+                continue;
+            }
+            String targetFqn = memberTargetFqn(p);
+            DescriptorModel target = descriptorByFqn(targetFqn);
+            TypeElement targetElement = target == null ? null
+                    : elements.getTypeElement(stripGenerics(target.typeName()));
+            String headGetter = getter(p.name());
+            if (targetElement == null || !hasMethodNamed(entityElement, headGetter)) {
+                continue; // an unmapped target or a bean-less head is unnavigable at runtime as well
+            }
+            CodeBlock head = CodeBlock.of("e.$L()", headGetter);
+            boolean toOne = p instanceof Prop.Reference;
+            List<ColumnRef> leaves = p instanceof Prop.ElementList elementList
+                    ? elementList.elementColumns()
+                    : target.columns();
+            for (ColumnRef leaf : leaves) {
+                String path = p.name() + "." + leaf.path();
+                CodeBlock body = toOne
+                        ? guardedValueChain(targetElement, target, head, leaf.path())
+                        : toManyValue(targetElement, target, head, leaf.path());
+                putValueCase(cases, entityElement, path, body);
+            }
+        }
+        if (cases.isEmpty()) {
+            return null;
+        }
+
+        TypeName entityType = entity.typeName();
+        MethodSpec.Builder value = MethodSpec.methodBuilder("value")
+                .addModifiers(Modifier.PUBLIC)
+                .addAnnotation(Override.class)
+                .returns(Object.class)
+                .addParameter(String.class, "dotPath")
+                .addParameter(Object.class, "entity")
+                .addStatement("$T e = ($T) entity", entityType, entityType);
+        value.beginControlFlow("switch (dotPath)");
+        for (Map.Entry<String, CodeBlock> entry : cases.entrySet()) {
+            value.addStatement("case $S: return $L", entry.getKey(), entry.getValue());
+        }
+        value.addStatement("default: throw new $T($S + dotPath + $S)", IllegalArgumentException.class,
+                "Unknown property path '", "' on " + entityElement.getSimpleName());
+        value.endControlFlow();
+        return value.build();
+    }
+
+    /** Records one generated case, NOTE-degrading the path when its expression could not be built. */
+    private void putValueCase(Map<String, CodeBlock> cases, TypeElement origin, String path, CodeBlock value) {
+        if (value == null) {
+            processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
+                    "descriptor value extraction is not available for path '" + path
+                            + "': its accessor could not be resolved; the path is left out of the"
+                            + " value switch", origin);
+            return;
+        }
+        cases.putIfAbsent(path, value);
+    }
+
+    /**
+     * The null-safe getter chain for one dot path walked from {@code recv} through {@code md} (declared
+     * on {@code element}), or {@code null} when a hop is unknown, is not an embedded value object, or
+     * has no accessor. Only {@link Prop.Embedded} may carry a further segment.
+     */
+    private CodeBlock valueChain(TypeElement element, DescriptorModel md, CodeBlock recv, String path) {
+        int dot = path.indexOf('.');
+        String head = dot < 0 ? path : path.substring(0, dot);
+        Prop p = propOrNull(md, head);
+        if (p == null || element == null || !hasMethodNamed(element, getter(head))) {
+            return null;
+        }
+        CodeBlock chain = CodeBlock.of("$L.$L()", recv, getter(head));
+        if (dot < 0) {
+            return chain;
+        }
+        if (!(p instanceof Prop.Embedded embedded) || embedded.target() == null) {
+            return null;
+        }
+        TypeElement voElement = elements.getTypeElement(stripGenerics(embedded.target().typeName()));
+        CodeBlock body = valueChain(voElement, embedded.target(), chain, path.substring(dot + 1));
+        return body == null ? null : CodeBlock.of("$L == null ? null : $L", chain, body);
+    }
+
+    /**
+     * A to-one leaf: the target's own chain, guarded on the reference itself —
+     * {@code e.getCustomer() == null ? null : e.getCustomer().getName()}.
+     */
+    private CodeBlock guardedValueChain(TypeElement targetElement, DescriptorModel target,
+                                        CodeBlock head, String leafPath) {
+        CodeBlock body = valueChain(targetElement, target, head, leafPath);
+        return body == null ? null : CodeBlock.of("$L == null ? null : $L", head, body);
+    }
+
+    /**
+     * A to-many leaf: the child values of the whole collection, mapped by a method reference (single
+     * segment) or a null-safe chain lambda (embedded leaf) and collected to a list. A null container
+     * reads as an empty list, never null, so the cursor reducer always gets a list.
+     */
+    private CodeBlock toManyValue(TypeElement childElement, DescriptorModel childModel,
+                                  CodeBlock collection, String leafPath) {
+        CodeBlock mapper;
+        if (leafPath.indexOf('.') < 0) {
+            if (!hasMethodNamed(childElement, getter(leafPath))) {
+                return null;
+            }
+            mapper = CodeBlock.of("$T::$L", ClassName.get(childElement), getter(leafPath));
+        } else {
+            CodeBlock body = valueChain(childElement, childModel, CodeBlock.of("child"), leafPath);
+            mapper = body == null ? null : CodeBlock.of("child -> $L", body);
+        }
+        if (mapper == null) {
+            return null;
+        }
+        return CodeBlock.of("$L == null ? $T.of() : $L.stream().map($L).collect($T.toList())",
+                collection, ClassName.get(java.util.List.class), collection, mapper,
+                ClassName.get("java.util.stream", "Collectors"));
     }
 
     /**

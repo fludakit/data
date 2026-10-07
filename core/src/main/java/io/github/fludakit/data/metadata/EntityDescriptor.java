@@ -66,6 +66,22 @@ public interface EntityDescriptor<T> extends EntitySchema {
                 + entityClass().getSimpleName());
     }
 
+    /**
+     * Extracts the runtime value of a dot path from {@code entity} WITHOUT reflection: generated
+     * descriptors override this with a {@code switch} over exactly the paths {@link #columnRef(String)}
+     * resolves. Contract for overrides — a local, flattened-embedded or to-one leaf path returns the
+     * single (possibly {@code null}) value; a path whose FIRST segment is a to-many (one-to-many or
+     * element collection) returns the {@code List} of child leaf values (an empty list, never
+     * {@code null}, when the collection is null/empty); an unknown path throws
+     * {@link IllegalArgumentException}. The interface default throws
+     * {@link UnsupportedOperationException} so a hand-rolled descriptor cannot be mistaken for a
+     * value-capable one.
+     */
+    default Object value(String dotPath, Object entity) {
+        throw new UnsupportedOperationException("descriptor " + getClass().getSimpleName()
+                + " does not support value extraction");
+    }
+
     /** Resolves a dot path — local, flattened embedded, or through a relation attribute — to its
      *  physical column plus contributed joins. Mirrored at compile time by the processor. */
     default ColumnRef columnRef(String path) {

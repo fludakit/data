@@ -3707,4 +3707,144 @@ class RepositoryProcessorTest {
                 .map(d -> d.getMessage(Locale.getDefault()))
                 .collect(Collectors.joining(System.lineSeparator()));
     }
+
+    @Test
+    void generatedMetadataValueSwitchReadsRelationAndCollectionPathsWithoutReflection() throws Exception {
+        // Task 4 (S-3): <Entity>Metadata.value(dotPath, entity) is the reflection-free cursor-key read,
+        // emitted as a switch over exactly the paths columnRef resolves. The estore Order fixture supplies
+        // the to-one head (customer.name) and the element collection (orderItems.sku); the profile-style
+        // fixture supplies the composition entity list (workHistory.company). compile() also compiles the
+        // GENERATED sources, so this run is itself the proof that
+        // OrderMetadata.value("customer.name", order) type-checks against the fixture.
+        Path orderSrc = Files.createDirectories(workspace.resolve("src/val-order"));
+        Path orderClasses = Files.createDirectories(workspace.resolve("classes-val-order"));
+        Path orderGen = Files.createDirectories(workspace.resolve("generated-val-order"));
+        writeRelationFixture(orderSrc);
+        Files.writeString(orderSrc.resolve("ValOrders.java"), """
+                package relpath;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface ValOrders extends CrudRepository<Order, Long> { }
+                """);
+        compile(orderSrc, orderClasses, orderGen,
+                "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java",
+                "ValOrders.java");
+
+        String order = sqlFlat(orderGen.resolve("relpath/OrderMetadata.java"));
+        assertTrue(order.contains("public Object value(String dotPath, Object entity)"),
+                "the descriptor must override value with the interface signature:"
+                        + System.lineSeparator() + order);
+        assertTrue(order.contains("case \"status\": return e.getStatus();"),
+                "a local scalar must read its own getter:" + System.lineSeparator() + order);
+        assertTrue(order.contains("case \"customer.name\": return e.getCustomer() == null ? null"
+                        + " : e.getCustomer().getName();"),
+                "a to-one leaf must read getCustomer() then getName() behind a null guard:"
+                        + System.lineSeparator() + order);
+        assertTrue(order.contains("case \"orderItems.sku\": return e.getOrderItems() == null ? List.of()"
+                        + " : e.getOrderItems().stream().map(OrderItem::getSku)"
+                        + ".collect(Collectors.toList());"),
+                "an element-collection leaf must map the child list behind a null-COLLECTION guard:"
+                        + System.lineSeparator() + order);
+        assertTrue(order.contains("default: throw new IllegalArgumentException(\"Unknown property path '\""
+                        + " + dotPath + \"' on Order\")"),
+                "an unknown path must fail fast naming the path and the entity:" + System.lineSeparator() + order);
+        assertTrue(!order.contains("getDeclaredField") && !order.contains("java.lang.reflect"),
+                "the value switch must stay reflection-free:" + System.lineSeparator() + order);
+
+        Path cvSrc = Files.createDirectories(workspace.resolve("src/val-cv"));
+        Path cvClasses = Files.createDirectories(workspace.resolve("classes-val-cv"));
+        Path cvGen = Files.createDirectories(workspace.resolve("generated-val-cv"));
+        Files.writeString(cvSrc.resolve("Period.java"), """
+                package valp;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class Period {
+                    int fromYear;
+                    String note;
+                    public int getFromYear() { return fromYear; }
+                    public void setFromYear(int fromYear) { this.fromYear = fromYear; }
+                    public String getNote() { return note; }
+                    public void setNote(String note) { this.note = note; }
+                }
+                """);
+        Files.writeString(cvSrc.resolve("WorkExperience.java"), """
+                package valp;
+                import io.github.fludakit.data.annotation.Entity;
+                import io.github.fludakit.data.annotation.Identity;
+                @Entity
+                public class WorkExperience {
+                    @Identity Long id;
+                    String company;
+                    Period period;
+                    Profile profile;
+                    public Long getId() { return id; }
+                    public Period getPeriod() { return period; }
+                    public void setPeriod(Period period) { this.period = period; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getCompany() { return company; }
+                    public void setCompany(String company) { this.company = company; }
+                    public Profile getProfile() { return profile; }
+                    public void setProfile(Profile profile) { this.profile = profile; }
+                }
+                """);
+        Files.writeString(cvSrc.resolve("Profile.java"), """
+                package valp;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                import java.util.ArrayList;
+                import java.util.List;
+                @AggregateRoot
+                public class Profile {
+                    @Identity Long id;
+                    String fullName;
+                    List<WorkExperience> workHistory = new ArrayList<>();
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getFullName() { return fullName; }
+                    public void setFullName(String fullName) { this.fullName = fullName; }
+                    public List<WorkExperience> getWorkHistory() { return workHistory; }
+                    public void setWorkHistory(List<WorkExperience> workHistory) {
+                        this.workHistory = workHistory;
+                    }
+                }
+                """);
+        Files.writeString(cvSrc.resolve("Profiles.java"), """
+                package valp;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Profiles extends CrudRepository<Profile, Long> { }
+                """);
+        Files.writeString(cvSrc.resolve("WorkExperiences.java"), """
+                package valp;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface WorkExperiences extends CrudRepository<WorkExperience, Long> { }
+                """);
+        compile(cvSrc, cvClasses, cvGen,
+                "Period.java", "WorkExperience.java", "Profile.java", "Profiles.java",
+                "WorkExperiences.java");
+
+        String cv = sqlFlat(cvGen.resolve("valp/ProfileMetadata.java"));
+        assertTrue(cv.contains("case \"workHistory.company\": return e.getWorkHistory() == null ? List.of()"
+                        + " : e.getWorkHistory().stream().map(WorkExperience::getCompany)"
+                        + ".collect(Collectors.toList());"),
+                "a composition entity-collection leaf must map the child list by method reference:"
+                        + System.lineSeparator() + cv);
+        // The child's own inverse reference is a column-bearing path of the child's descriptor, so the
+        // one-hop set carries it too (the cursor list maps to the child's referenced objects).
+        assertTrue(cv.contains("case \"workHistory.id\": return e.getWorkHistory() == null ? List.of()"
+                        + " : e.getWorkHistory().stream().map(WorkExperience::getId)"
+                        + ".collect(Collectors.toList());"),
+                "the child identifier must be readable through the collection:" + System.lineSeparator() + cv);
+        assertTrue(cv.contains("case \"workHistory.period.note\": return e.getWorkHistory() == null"
+                        + " ? List.of() : e.getWorkHistory().stream()"
+                        + ".map(child -> child.getPeriod() == null ? null : child.getPeriod().getNote())"
+                        + ".collect(Collectors.toList());"),
+                "an embedded leaf of a to-many child must map through a null-safe chain lambda:"
+                        + System.lineSeparator() + cv);
+
+    }
 }

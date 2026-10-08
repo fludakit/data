@@ -3967,6 +3967,46 @@ class RepositoryProcessorTest {
     }
 
     @Test
+    void deleteByThroughElementCollectionAndMixedPredicatesRenderExists() throws Exception {
+        // C-1 pins: a to-many delete renders the SAME EXISTS conjunct find/count use (delete now
+        // agrees with them — gap 1's promise); a mixed to-one + local delete conjoins the bare
+        // local term FIRST and the reversed-edge EXISTS second (methodSql's two-pass conjunct
+        // order); a multi-hop delete path stays NOTE-rejected by the resolver and renders neither
+        // EXISTS nor a join.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-del2"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-rp-del2"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-rp-del2"));
+        writeRelationFixture(sourceDir);
+        Files.writeString(sourceDir.resolve("Delete2Orders.java"), """
+                package relpath;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Delete2Orders extends CrudRepository<Order, Long> {
+                    void deleteByOrderItemsQuantityGreaterThan(int quantity);
+                    void deleteByCustomerNameAndStatus(String name, String status);
+                    void deleteByCustomerCountryCode(String code);
+                }
+                """);
+
+        List<Diagnostic<? extends JavaFileObject>> diagnostics = compileWithDiagnostics(sourceDir, classesDir, generatedDir,
+                "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "Delete2Orders.java");
+        String impl = sqlFlat(generatedDir.resolve("relpath/Delete2OrdersImpl.java"));
+
+        assertTrue(impl.contains("DELETE FROM \"order\" WHERE EXISTS (SELECT 1 FROM \"order_order_items\" \"orderItems\" WHERE \"orderItems\".\"order_id\" = \"order\".\"id\" AND \"orderItems\".\"quantity\" > :quantity)"),
+                "deleteBy through a to-many must render the to-many EXISTS conjunct:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("DELETE FROM \"order\" WHERE \"status\" = :status AND EXISTS (SELECT 1 FROM \"customer\" \"customer\" WHERE \"customer\".\"id\" = \"order\".\"customer_id\" AND \"customer\".\"name\" = :name)"),
+                "mixed delete: bare local conjunct first, reversed-edge EXISTS conjunct second:" + System.lineSeparator() + impl);
+        String notes = notesOf(diagnostics);
+        assertTrue(notes.contains("path 'customerCountryCode' traverses more than one relation; not supported"),
+                "the multi-hop delete path must keep the verbatim resolver NOTE:" + System.lineSeparator() + notes);
+        assertTrue(!impl.contains("EXISTS (SELECT 1 FROM \"country\"") && !impl.contains("LEFT JOIN"),
+                "a rejected multi-hop delete renders neither EXISTS nor a join:" + System.lineSeparator() + impl);
+        assertTrue(!notes.contains("DELETE through a relation"),
+                "the T8-I1 delete-degrade NOTE text is gone:" + System.lineSeparator() + notes);
+    }
+
+    @Test
     void associationFieldMaterializesIdOnlyPartialWhileCompositionKeepsLoader() throws Exception {
         // Task 9: an @Association field (composition=false) materializes at mapper-read time as an
         // ID-ONLY partial instance through a generated partial_<Target> helper, with NO two-phase

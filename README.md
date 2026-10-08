@@ -43,3 +43,9 @@ Apache License, Version 2.0. See [LICENSE](LICENSE).
   runtime `columnRef` used by `Order.by`/`Sort` is unbounded. The same dotted string can therefore
   be a working sort and a rejected finder name.
 - Cursors for relation-sorted paged reads now end with the root id key.
+- `deleteBy…` names whose predicate path traverses one relation now render correlated `EXISTS`
+  semi-joins — `deleteByCustomerName` emits `DELETE FROM "order" WHERE EXISTS (SELECT 1 FROM
+  "customer" "customer" WHERE "customer"."id" = "order"."customer_id" AND "customer"."name" = :name)`
+  — and delete exactly the roots the matching `findBy…` read returns. Before, they were NOTE-degraded
+  to a join-free predicate on the lower-snake column, which could match the wrong rows. Relation-free
+  delete rendering is unchanged; multi-hop paths stay NOTE-rejected (legacy fallback).

@@ -33,5 +33,12 @@ class CursorSupportTest {
         assertThat(viaColumns)
                 .describedAs("seekWhere column render must match Names.quote style")
                 .isEqualTo(viaTerms);
+
+        String twoCol = CursorSupport.seekWhere(List.of("name", "id"), List.of(true, false), cursor, true);
+        String twoTerms = CursorSupport.seekWhereTerms(
+                List.of(Names.quote("name"), Names.quote("id")), List.of(true, false), cursor, true);
+        assertThat(twoCol)
+                .describedAs("multi-column seekWhere must match Names.quote style on every term")
+                .isEqualTo(twoTerms);
     }
 }

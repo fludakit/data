@@ -22,10 +22,6 @@ See the [reference documentation site](https://fludakit.github.io/) for getting 
 
 Contributions are welcome — issues, pull requests, and feature suggestions are all encouraged. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build the project and submit changes.
 
-## License
-
-Apache License, Version 2.0. See [LICENSE](LICENSE).
-
 ## Breaking changes in 1.0.0-SNAPSHOT (navigable metamodel iteration)
 
 - `EntityDescriptor.columns()` no longer has a derived default implementation. Implementers must
@@ -53,3 +49,7 @@ Apache License, Version 2.0. See [LICENSE](LICENSE).
   — and delete exactly the roots the matching `findBy…` read returns. Before, they were NOTE-degraded
   to a join-free predicate on the lower-snake column, which could match the wrong rows. Relation-free
   delete rendering is unchanged; multi-hop paths stay NOTE-rejected (legacy fallback).
+
+## License
+
+Apache License, Version 2.0. See [LICENSE](LICENSE).

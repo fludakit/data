@@ -17,8 +17,12 @@ import io.github.fludakit.data.annotation.Association;
 import io.github.fludakit.data.annotation.Identity;
 import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.JoinRef;
-import io.github.fludakit.data.processor.DescriptorModel.Prop;
-import io.github.fludakit.data.processor.DescriptorModel.Stereotype;
+import io.github.fludakit.data.model.DataModel;
+import io.github.fludakit.data.model.DataModel.Prop;
+import io.github.fludakit.data.model.DataModel.Stereotype;
+import io.github.fludakit.data.model.EmbeddedValueObjectModel;
+import io.github.fludakit.data.model.EntityDataModel;
+import io.github.fludakit.data.model.ExternalValueObjectModel;
 import io.github.fludakit.data.page.CursorSupport;
 import io.github.fludakit.data.page.SimpleCursoredPage;
 import io.github.fludakit.data.page.SimplePage;
@@ -202,7 +206,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     private final Map<String, ClassName> metamodelTypes = new LinkedHashMap<>();
 
     /** Entity/value-object FQN → compile-time descriptor, memoized for {@link #descriptorFor}. */
-    private final Map<String, DescriptorModel> descriptorCache = new HashMap<>();
+    private final Map<String, DataModel> descriptorCache = new HashMap<>();
 
     /**
      * Every generated type FQN this processing session claims or emits: the {@code _Entity}
@@ -562,7 +566,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * field instances when a metamodel was generated (Decision 1); a value object has none, so its
      * members are emitted as fresh attribute-record literals with the same shapes. Embedded leaves
      * are NOT flat {@code attributes()} members: the navigable metamodel classes carry them, and the
-     * explicit {@code columns()} override (emitted from {@link DescriptorModel#columns()} in
+     * explicit {@code columns()} override (emitted from {@link DataModel#columns()} in
      * declaration order) answers flattened dot paths for the engine.
      */
     private ClassName generateMetadata(TypeElement entityElement, EntityModel entity,
@@ -714,7 +718,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     private MethodSpec valueSwitch(TypeElement entityElement, EntityModel entity) {
-        DescriptorModel md = entity.metadata();
+        DataModel md = entity.metadata();
         Map<String, CodeBlock> cases = new LinkedHashMap<>();
 
         // (1) The flattened column view this descriptor publishes: identifier, scalars, to-one heads
@@ -731,7 +735,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                 continue;
             }
             String targetFqn = memberTargetFqn(p);
-            DescriptorModel target = descriptorByFqn(targetFqn);
+            DataModel target = descriptorByFqn(targetFqn);
             TypeElement targetElement = target == null ? null
                     : elements.getTypeElement(stripGenerics(target.typeName()));
             String headGetter = getter(p.name());
@@ -790,7 +794,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * on {@code element}), or {@code null} when a hop is unknown, is not an embedded value object, or
      * has no accessor. Only {@link Prop.Embedded} may carry a further segment.
      */
-    private CodeBlock valueChain(TypeElement element, DescriptorModel md, CodeBlock recv, String path) {
+    private CodeBlock valueChain(TypeElement element, DataModel md, CodeBlock recv, String path) {
         int dot = path.indexOf('.');
         String head = dot < 0 ? path : path.substring(0, dot);
         Prop p = propOrNull(md, head);
@@ -813,7 +817,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * A to-one leaf: the target's own chain, guarded on the reference itself —
      * {@code e.getCustomer() == null ? null : e.getCustomer().getName()}.
      */
-    private CodeBlock guardedValueChain(TypeElement targetElement, DescriptorModel target,
+    private CodeBlock guardedValueChain(TypeElement targetElement, DataModel target,
                                         CodeBlock head, String leafPath) {
         CodeBlock body = valueChain(targetElement, target, head, leafPath);
         return body == null ? null : CodeBlock.of("$L == null ? null : $L", head, body);
@@ -824,7 +828,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * segment) or a null-safe chain lambda (embedded leaf) and collected to a list. A null container
      * reads as an empty list, never null, so the cursor reducer always gets a list.
      */
-    private CodeBlock toManyValue(TypeElement childElement, DescriptorModel childModel,
+    private CodeBlock toManyValue(TypeElement childElement, DataModel childModel,
                                   CodeBlock collection, String leafPath) {
         CodeBlock mapper;
         if (leafPath.indexOf('.') < 0) {
@@ -850,7 +854,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * {@code <VO>Metadata.INSTANCE} reference resolves to a generated class; the
      * {@link #metadataTypes} guard is set before recursing, which bounds cycles (A embeds B embeds A).
      */
-    private void generateEmbeddedDescriptors(DescriptorModel owner) {
+    private void generateEmbeddedDescriptors(DataModel owner) {
         for (Prop a : owner.props()) {
             if (!(a instanceof Prop.Embedded embedded) || embedded.target() == null) {
                 continue;
@@ -997,7 +1001,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * leaf/attribute names ({@code address.point.lat}). A VO cycle (unresolved target) degrades to a
      * container-only nav: no leaves and {@code embedded() { return null; }}. {@code columnPrefix} is
      * the flattened physical column chain from the owner root ({@code address_}, then
-     * {@code address_point_}), threading exactly as {@link DescriptorModel#columns()} flattens.
+     * {@code address_point_}), threading exactly as {@link DataModel#columns()} flattens.
      */
     private ClassName embeddedNav(TypeElement origin, String packageName, TypeName owner,
                                   String navSimple, String path, String columnPrefix,
@@ -1007,7 +1011,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             navCollision(origin, fqn, path);
             return null;
         }
-        DescriptorModel target = embedded.target();
+        EmbeddedValueObjectModel target = embedded.target();
         TypeName targetType = classArgOf(target == null ? null : target.typeName());
         TypeSpec.Builder builder = TypeSpec.classBuilder(navSimple)
                 .addModifiers(Modifier.PUBLIC, Modifier.FINAL)
@@ -1061,7 +1065,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         Set<String> taken = new HashSet<>();
         if (relationTargetResolved(targetFqn, false)) {
             TypeElement targetElement = elements.getTypeElement(stripGenerics(targetFqn));
-            DescriptorModel target = entityModel(targetElement).metadata();
+            DataModel target = entityModel(targetElement).metadata();
             if (target.id() != null) {
                 addRelationLeaf(builder, taken, origin, owner, m.path(), "", target.id());
             }
@@ -1111,7 +1115,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         if (relationTargetResolved(targetFqn, true)) {
             TypeElement elementElement = elements.getTypeElement(stripGenerics(targetFqn));
             if (elementElement != null) {
-                for (Prop ep : valueObjectMetadata(elementElement).props()) {
+                for (Prop ep : elementList.target().props()) {
                     addRelationLeaf(builder, taken, origin, owner, path, "", ep);
                 }
             }
@@ -1160,7 +1164,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     /**
      * One owner-typed leaf for a relation nav: name = {@code <relation>.<local path>}, column = the
      * target's LOCAL flattened column (threaded through {@code columnPrefix} exactly as
-     * {@link DescriptorModel#columns()} flattens). Embedded targets expand recursively; collections
+     * {@link DataModel#columns()} flattens). Embedded targets expand recursively; collections
      * inside the target carry no column and are skipped.
      */
     private void addRelationLeaf(TypeSpec.Builder builder, Set<String> taken, TypeElement origin,
@@ -1169,7 +1173,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         // Java 17 safety: instanceof chain, never a pattern switch.
         if (p instanceof Prop.Embedded embedded) {
             String prefix = columnPrefix + embedded.column() + "_";
-            DescriptorModel vo = embedded.target();
+            EmbeddedValueObjectModel vo = embedded.target();
             if (vo != null && vo.id() != null) {
                 addRelationLeaf(builder, taken, origin, owner, path, prefix, vo.id());
             }
@@ -1281,14 +1285,14 @@ public class RepositoryProcessor extends AbstractProcessor {
                             String column, Prop prop) { }
 
     /** The member list of one descriptor: id first, then properties in declaration order. */
-    private List<MmMember> collectMembers(Element origin, DescriptorModel model) {
+    private List<MmMember> collectMembers(Element origin, DataModel model) {
         List<MmMember> members = new ArrayList<>();
         addMembers(members, new HashSet<>(), origin, model, "", "");
         return members;
     }
 
     private void addMembers(List<MmMember> out, Set<String> taken, Element origin,
-                             DescriptorModel model, String pathPrefix, String columnPrefix) {
+                             DataModel model, String pathPrefix, String columnPrefix) {
         if (model.id() != null) {
             addMember(out, taken, origin, model.id(), pathPrefix, columnPrefix);
         }
@@ -2151,7 +2155,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                                               EntityRelationship relationship, Map<String, String> constants) {
         Prop.EntityList list = (Prop.EntityList) relationship.attribute();
         EntityModel target = relationship.targetModel();
-        DescriptorModel md = target.metadata();
+        DataModel md = target.metadata();
         String inverseFk = list.inverseFkColumn();
         String constant = addConstant(constants, "SQL_INSERT_" + upperSnake(list.name()),
                 new SqlBuilder().insert(md, false));
@@ -2356,7 +2360,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * would drift against the rendered placeholders.
      */
     private void appendColumnParams(CodeBlock.Builder sql, EntityModel entity, String var) {
-        DescriptorModel md = entity.metadata();
+        DataModel md = entity.metadata();
         for (ColumnRef ref : md.columns()) {
             if (md.id() != null && ref.column().equals(md.id().column())) {
                 continue;
@@ -2370,11 +2374,11 @@ public class RepositoryProcessor extends AbstractProcessor {
      * or a FK-bearing {@code primary}) rooted at {@code rootVar}. Every intermediate null short-
      * circuits to SQL NULL; a final ASSOCIATION/MANY_TO_ONE attribute binds its id.
      */
-    private static CodeBlock boundValue(DescriptorModel md, String rootVar, ColumnRef ref) {
+    private static CodeBlock boundValue(DataModel md, String rootVar, ColumnRef ref) {
         String[] segments = ref.path().split("\\.");
         StringBuilder chain = new StringBuilder(rootVar);
         List<String> nullChecks = new ArrayList<>();
-        DescriptorModel current = md;
+        DataModel current = md;
         for (int i = 0; i < segments.length; i++) {
             Prop attr = current.prop(segments[i]);
             chain.append('.').append(getter(segments[i])).append("()");
@@ -2625,7 +2629,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * "profile"."address_city", ...}). Qualification keeps each result-set label at the bare physical
      * column, so the generated row mapper reads either find constant unchanged.
      */
-    private String joinedFindAllSelect(DescriptorModel md) {
+    private String joinedFindAllSelect(DataModel md) {
         return qualifiedRootSelect(md, List.of(), true, "");
     }
 
@@ -2644,7 +2648,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * materialisation implies a to-one join, which implies qualified), so it is a precondition throw,
      * not new logic.
      */
-    static String qualifiedRootSelect(DescriptorModel md, List<ColumnRef> traversedToOne,
+    static String qualifiedRootSelect(DataModel md, List<ColumnRef> traversedToOne,
                                       boolean qualified, String extraProjection) {
         if (!qualified && extraProjection != null && !extraProjection.isEmpty()) {
             throw new IllegalStateException("bare projection cannot carry extraProjection");
@@ -3066,7 +3070,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * property. Composition and association references both qualify — the field is filled from the join
      * either way. Deduped by property name so one traversal of a shared head yields one projection.
      */
-    private List<Prop.Reference> collectTraversedReferences(DescriptorModel md, List<ColumnRef> predicateRefs,
+    private List<Prop.Reference> collectTraversedReferences(DataModel md, List<ColumnRef> predicateRefs,
                                                             List<ColumnRef> sortRefs) {
         List<Prop.Reference> out = new ArrayList<>();
         List<ColumnRef> all = new ArrayList<>(predicateRefs);
@@ -3095,7 +3099,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * by the join alias and re-labelled {@code <alias>_join_<column>} so the read is unambiguous against
      * the root's own columns. Emitted in the target's {@code columns()} declaration order.
      */
-    private String joinedProjection(DescriptorModel md, List<Prop.Reference> traversed) {
+    private String joinedProjection(DataModel md, List<Prop.Reference> traversed) {
         StringBuilder sb = new StringBuilder();
         for (Prop.Reference ref : traversed) {
             TypeElement target = elements.getTypeElement(ref.targetTypeName());
@@ -3270,7 +3274,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /**
-     * The outcome of resolving a method-name property path against a {@link DescriptorModel}. A
+     * The outcome of resolving a method-name property path against a {@link DataModel}. A
      * resolved {@code ref} is either a plain local column (empty {@code joins}) or a relation-traversing
      * column carrying exactly one {@link JoinRef}; {@code multiHop} flags a path that would need two or
      * more joins (rejected with a NOTE), and {@code unresolvedRelation} flags a path whose relation head
@@ -3294,7 +3298,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * (identical to {@code SqlBuilder}'s old {@code Names.columnName} rendering) whenever the descriptor
      * cannot resolve the path. The returned resolutions line up index-for-index with {@code paths}.
      */
-    private List<PathResolution> resolveCompilePaths(DescriptorModel md, List<String> paths, ExecutableElement method) {
+    private List<PathResolution> resolveCompilePaths(DataModel md, List<String> paths, ExecutableElement method) {
         List<PathResolution> out = new ArrayList<>();
         for (String path : paths) {
             PathResolution resolution = resolveCompilePath(md, path);
@@ -3335,7 +3339,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * A remainder that would itself need a relation yields {@link PathResolution#multiHop()}; a head whose
      * target cannot be resolved yields {@link PathResolution#relationUnresolved()}.
      */
-    private PathResolution resolveCompilePath(DescriptorModel md, String path) {
+    private PathResolution resolveCompilePath(DataModel md, String path) {
         ColumnRef local = localColumnRef(md.columns(), path);
         if (local != null) {
             return PathResolution.resolved(local);
@@ -3357,7 +3361,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * Resolves {@code remainder} as a leaf under a relation {@code prop} and attaches the join edge the
      * traversal contributes. The alias is exactly the property name.
      */
-    private PathResolution resolveRelationHead(DescriptorModel md, Prop prop, String remainder) {
+    private PathResolution resolveRelationHead(DataModel md, Prop prop, String remainder) {
         if (prop instanceof Prop.ElementList elementList) {
             ColumnRef leaf = localColumnRef(elementList.elementColumns(), remainder);
             if (leaf == null) {
@@ -3369,7 +3373,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
         String targetFqn = prop instanceof Prop.Reference reference
                 ? reference.targetTypeName() : ((Prop.EntityList) prop).targetTypeName();
-        DescriptorModel target = descriptorByFqn(targetFqn);
+        DataModel target = descriptorByFqn(targetFqn);
         if (target == null) {
             return PathResolution.relationUnresolved();
         }
@@ -3395,7 +3399,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /** The LEFT JOIN edge for a Reference / EntityList traversal; {@code null} when unbuildable. */
-    private static JoinRef referenceOrListJoin(DescriptorModel root, DescriptorModel target, Prop prop) {
+    private static JoinRef referenceOrListJoin(DataModel root, DataModel target, Prop prop) {
         if (prop instanceof Prop.Reference reference) {
             if (reference.targetTable() == null || target.idColumn() == null) {
                 return null;
@@ -3413,12 +3417,12 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /** The compile-time descriptor for a relationship target FQN, or {@code null} if unmapped. */
-    private DescriptorModel descriptorByFqn(String fqn) {
+    private DataModel descriptorByFqn(String fqn) {
         if (fqn == null) {
             return null;
         }
         String raw = stripGenerics(fqn);
-        DescriptorModel cached = descriptorCache.get(raw);
+        DataModel cached = descriptorCache.get(raw);
         if (cached != null) {
             return cached;
         }
@@ -3463,12 +3467,12 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /**
-     * {@link DescriptorModel#prop(String)} without the throw: {@code null} for an unknown name. A
+     * {@link DataModel#prop(String)} without the throw: {@code null} for an unknown name. A
      * mid-path camel segment keeps its leading capital (e.g. {@code "Country"} in
      * {@code "customerCountryCode"}), so the decapitalized form is matched as a fallback — mirroring how
      * the {@code qbn} parser only decapitalizes the FIRST hump of the concatenated property string.
      */
-    private static Prop propOrNull(DescriptorModel md, String name) {
+    private static Prop propOrNull(DataModel md, String name) {
         Prop exact = propByExactName(md, name);
         if (exact != null) {
             return exact;
@@ -3479,7 +3483,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         return propByExactName(md, Character.toLowerCase(name.charAt(0)) + name.substring(1));
     }
 
-    private static Prop propByExactName(DescriptorModel md, String name) {
+    private static Prop propByExactName(DataModel md, String name) {
         if (md.id() != null && md.id().name().equals(name)) {
             return md.id();
         }
@@ -3510,7 +3514,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * leaf term is exactly {@link SqlBuilder#render(Predicate, ColumnRef)}'s alias-qualified
      * rendering, so the named parameter - and the caller's binding - is unchanged.
      */
-    private static String existsConjunct(DescriptorModel md, Predicate p, ColumnRef ref) {
+    private static String existsConjunct(DataModel md, Predicate p, ColumnRef ref) {
         JoinRef join = ref.joins().get(ref.joins().size() - 1);
         return SqlBuilder.existsClause(md.tableName(), join.parentColumn(), join.table(), join.alias(),
                 join.childColumn(), p, ref);
@@ -3528,7 +3532,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * count/delete, and delete renders EXISTS conjuncts for every joined (relation-traversing) ref
      * (C-1); parameter binding is untouched (the caller binds the JAVA PARAMETER NAME).
      */
-    private String methodSql(String action, DescriptorModel md, List<Predicate> predicates,
+    private String methodSql(String action, DataModel md, List<Predicate> predicates,
                              List<ColumnRef> predicateRefs, List<Boolean> existentialPredicates,
                              List<SortSpec> sorts, List<ColumnRef> sortRefs, List<Boolean> existentialSorts,
                              int limit, String extraProjection) {
@@ -4303,7 +4307,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                 // Direct value object: flatten leaves into this table. The Property carries the VO's
                 // compile-time model so the mapper gate and the embedded read emitter can recurse.
                 TypeElement vo = embeddedTarget(field);
-                Prop.Embedded embedded = new Prop.Embedded(name, Names.columnName(name), descriptorFor(vo));
+                Prop.Embedded embedded = new Prop.Embedded(name, Names.columnName(name), embeddedOf(descriptorFor(vo)));
                 properties.add(new Property(name, embedded.column(), fieldTypeName, embedded, voModel(vo)));
                 props.add(embedded);
 
@@ -4331,8 +4335,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                 // List<@Entity>: one-to-many across the child's own table. The inverse is resolved
                 // in the second pass below, so the placeholder inverse stays null here.
                 TypeElement child = entityTypeElement(field);
-                props.add(new Prop.EntityList(name, child.getQualifiedName().toString(),
-                        Names.tableName(child.getSimpleName().toString()), null, null));
+                props.add(new Prop.EntityList(name, entityOf(descriptorFor(child)), null, null));
 
             } else {
                 Prop.Scalar scalar = new Prop.Scalar(name, Names.columnName(name), fieldType);
@@ -4345,20 +4348,22 @@ public class RepositoryProcessor extends AbstractProcessor {
             id = new Property("id", idProp.column(), ClassName.get(Long.class), idProp, null);
         }
         // Second pass: resolve ONE_TO_MANY inverses now that all parent properties are known.
-        DescriptorModel self = new DescriptorModel(ownerStereotype, typeNameString, table, idProp, props);
+        DataModel self = valueObject ? new EmbeddedValueObjectModel(typeNameString, props)
+                : new EntityDataModel(ownerStereotype, typeNameString, table, idProp, props);
         List<Prop> resolved = new ArrayList<>(props.size());
         for (Prop p : props) {
             if (p instanceof Prop.EntityList entityList && entityList.targetTypeName() != null) {
                 TypeElement childEl = elements.getTypeElement(entityList.targetTypeName());
-                DescriptorModel child = childEl != null ? descriptorFor(childEl) : null;
+                EntityDataModel child = childEl != null ? entityOf(descriptorFor(childEl)) : null;
                 String inverse = child != null ? findInverseName(self, child) : null;
-                resolved.add(new Prop.EntityList(entityList.name(), entityList.targetTypeName(),
-                        entityList.targetTable(), inverse, inverse == null ? null : Names.fkColumn(inverse)));
+                resolved.add(new Prop.EntityList(entityList.name(), entityList.target(),
+                        inverse, inverse == null ? null : Names.fkColumn(inverse)));
             } else {
                 resolved.add(p);
             }
         }
-        DescriptorModel metadata = new DescriptorModel(ownerStereotype, typeNameString, table, idProp, resolved);
+        DataModel metadata = valueObject ? new EmbeddedValueObjectModel(typeNameString, resolved)
+                : new EntityDataModel(ownerStereotype, typeNameString, table, idProp, resolved);
         return new EntityModel(typeMirror, typeName, id, properties, collections, metadata);
     }
 
@@ -4379,11 +4384,8 @@ public class RepositoryProcessor extends AbstractProcessor {
      */
     private Prop.Reference referenceProp(String name, String fkColumn, String targetTypeName,
                                          TypeElement target, boolean composition) {
-        DescriptorModel targetModel = target != null ? descriptorFor(target) : null;
-        return new Prop.Reference(name, fkColumn, targetTypeName,
-                targetModel != null ? targetModel.tableName() : null,
-                targetModel != null ? targetModel.idColumn() : null,
-                composition);
+        DataModel targetModel = target != null ? descriptorFor(target) : null;
+        return new Prop.Reference(name, fkColumn, targetTypeName, entityOf(targetModel), composition);
     }
 
     private ElementCollection buildCollection(String parentTable, String field, TypeElement valueObject) {
@@ -4393,9 +4395,8 @@ public class RepositoryProcessor extends AbstractProcessor {
         // and the param bindings; per the global contract an @Association field is a (non-composing)
         // Reference there, exactly as in buildEntity, and binds the target's id through boundValue.
         // The Prop.ElementList is the one source of truth for the child-table placement and columns.
-        DescriptorModel target = valueObjectMetadata(valueObject);
-        Prop.ElementList element = new Prop.ElementList(field, valueObject.getQualifiedName().toString(),
-                childTable, parentFk, target.columns());
+        ExternalValueObjectModel target = valueObjectMetadata(valueObject, childTable, parentFk);
+        Prop.ElementList element = new Prop.ElementList(field, target, target.columns());
         return new ElementCollection(field, TypeName.get(types.erasure(valueObject.asType())),
                 element, target);
     }
@@ -4420,7 +4421,8 @@ public class RepositoryProcessor extends AbstractProcessor {
      * follows the global contract: {@code @Association} → a non-composing {@link Prop.Reference} (never
      * composing); everything else is a {@link Prop.Scalar} column.
      */
-    private DescriptorModel valueObjectMetadata(TypeElement valueObject) {
+    private ExternalValueObjectModel valueObjectMetadata(TypeElement valueObject, String childTable,
+                                                       String parentFk) {
         List<Prop> props = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         for (Element member : elements.getAllMembers(valueObject)) {
@@ -4446,8 +4448,8 @@ public class RepositoryProcessor extends AbstractProcessor {
                 props.add(new Prop.Scalar(name, Names.columnName(name), fieldType));
             }
         }
-        return new DescriptorModel(Stereotype.VALUE_OBJECT, valueObject.getQualifiedName().toString(),
-                null, null, List.copyOf(props));
+        return new ExternalValueObjectModel(valueObject.getQualifiedName().toString(),
+                childTable, parentFk, List.copyOf(props));
     }
 
     private boolean isEntityType(TypeElement te) {
@@ -4509,24 +4511,38 @@ public class RepositoryProcessor extends AbstractProcessor {
      * a descriptor already being built returns a shallow property-less placeholder (only
      * {@code typeName} is consumed for a back-reference).
      */
-    private DescriptorModel descriptorFor(TypeElement te) {
+    private DataModel descriptorFor(TypeElement te) {
         String fqn = te.getQualifiedName().toString();
-        DescriptorModel cached = descriptorCache.get(fqn);
+        DataModel cached = descriptorCache.get(fqn);
         if (cached != null) return cached;
         if (inProgress.contains(fqn)) {
             // Cycle: return a shallow, property-less placeholder; only typeName is consumed
             // for a back-reference, and findInverseName tolerates an empty property list.
-            return new DescriptorModel(stereotypeOf(te), fqn,
-                    Names.tableName(te.getSimpleName().toString()), null, List.of());
+            return stereotypeOf(te) == Stereotype.VALUE_OBJECT
+                    ? new EmbeddedValueObjectModel(fqn, List.of())
+                    : new EntityDataModel(stereotypeOf(te), fqn,
+                            Names.tableName(te.getSimpleName().toString()), null, List.of());
         }
         inProgress.add(fqn);
         try {
-            DescriptorModel d = buildEntity(te).metadata();
+            DataModel d = buildEntity(te).metadata();
             descriptorCache.put(fqn, d);
             return d;
         } finally {
             inProgress.remove(fqn);
         }
+    }
+
+    /** The entity-kind view of a built model, or {@code null} when it is not an entity model.
+     *  Kind mismatches (e.g. an {@code @Association} at a value object) degrade exactly as the
+     *  old null-target snapshot did: no table, no id column, target left unresolved. */
+    private static EntityDataModel entityOf(DataModel m) {
+        return m instanceof EntityDataModel e ? e : null;
+    }
+
+    /** The embedded-kind view of a built model, or {@code null} when it is not one. */
+    private static EmbeddedValueObjectModel embeddedOf(DataModel m) {
+        return m instanceof EmbeddedValueObjectModel e ? e : null;
     }
 
     /**
@@ -4561,7 +4577,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * the composing many-to-one and the external {@code @Association} are {@link Prop.Reference}s, so
      * either matches the parent's type name.
      */
-    private String findInverseName(DescriptorModel parent, DescriptorModel child) {
+    private String findInverseName(DataModel parent, DataModel child) {
         for (Prop p : child.props()) {
             if (p instanceof Prop.Reference reference
                     && parent.typeName().equals(reference.targetTypeName())) {
@@ -4591,7 +4607,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * parent-entity paths.
      */
     private record ElementCollection(String field, TypeName valueObjectType,
-                                     Prop.ElementList element, DescriptorModel descriptor) {
+                                     Prop.ElementList element, ExternalValueObjectModel descriptor) {
         String childTable() {
             return element.childTable();
         }
@@ -4603,7 +4619,7 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     private record EntityModel(TypeMirror typeMirror, TypeName typeName, Property id,
                                List<Property> properties, List<ElementCollection> collections,
-                               DescriptorModel metadata) { }
+                               DataModel metadata) { }
 
     private record Binding(String property, Operator operator, int paramIndex) { }
 

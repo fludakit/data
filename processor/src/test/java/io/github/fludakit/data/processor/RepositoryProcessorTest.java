@@ -3906,14 +3906,13 @@ class RepositoryProcessorTest {
     }
 
     @Test
-    void deleteByThroughRelationIsNoteDegradedToLegacyJoinFreeDelete() throws Exception {
-        // T8-I1 fix: `DELETE FROM "t" LEFT JOIN ...` is invalid SQL on H2/PostgreSQL/SQL Server. A
-        // deleteBy whose predicate traverses a relation is NOTE-degraded at compile time (the branch's
-        // NOTE-degrade contract): the traversed predicate is reported with a NOTE on the method and the
-        // DELETE constant keeps the legacy join-free SqlBuilder.deleteBy shape — byte-identical to the
-        // pre-Task-8 emission — which may not match the joined semantics. The compile SUCCEEDS. Guards:
-        // (d) find/count for the SAME traversal still emit the join (the fix did not over-apply), and a
-        // LOCAL-property deleteBy stays byte-identical legacy with NO NOTE.
+    void deleteByThroughRelationRendersExistsSemiJoin() throws Exception {
+        // C-1: a deleteBy whose predicate traverses a relation renders a correlated EXISTS semi-join
+        // through methodSql's delete mode — a joined DELETE ... LEFT JOIN is invalid SQL on
+        // H2/PostgreSQL/SQL Server — and emits NO delete NOTE. The old T8-I1 NOTE-degrade to the
+        // join-free legacy predicate could match the wrong rows and is removed. Guards: a LOCAL-property
+        // deleteBy stays byte-identical legacy with no join, no DELETE ever carries a LEFT JOIN, and
+        // find/count for the SAME traversal still emit their join (the change is delete-scoped).
         Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-del"));
         Path classesDir = Files.createDirectories(workspace.resolve("classes-rp-del"));
         Path generatedDir = Files.createDirectories(workspace.resolve("generated-rp-del"));
@@ -3934,34 +3933,24 @@ class RepositoryProcessorTest {
 
         List<Diagnostic<? extends JavaFileObject>> diagnostics = compileWithDiagnostics(sourceDir, classesDir, generatedDir,
                 "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "DeleteOrders.java");
-        // compileWithDiagnostics throws on a failed round, so reaching here proves the delete NOTE
-        // degraded instead of aborting the compile.
+        // compileWithDiagnostics throws on a failed round, so reaching here proves the C-1 EXISTS
+        // semi-join rendering does not abort the compile.
         Path implFile = generatedDir.resolve("relpath/DeleteOrdersImpl.java");
-        assertTrue(Files.exists(implFile), "the delete-through-relation NOTE must not abort the compile");
+        assertTrue(Files.exists(implFile), "the delete-through-relation render must not abort the compile");
 
-        // (b) The verbatim NOTE on the traversing predicate.
         String notes = notesOf(diagnostics);
-        assertTrue(notes.contains("path 'customerName' traverses a relation; DELETE through a relation is not yet"
-                        + " supported; falling back to the legacy join-free DELETE predicate on column 'customer_name',"
-                        + " which may not match the joined semantics"),
-                "deleteBy through a relation must be NOTE-degraded with the verbatim NOTE:"
-                        + System.lineSeparator() + notes);
-        // Exactly ONE delete NOTE — the local deleteByStatus path must not be reported.
         long deleteNotes = diagnostics.stream()
                 .filter(d -> d.getKind() == Diagnostic.Kind.NOTE)
                 .filter(d -> d.getMessage(Locale.getDefault()).contains("DELETE through a relation"))
                 .count();
-        assertTrue(deleteNotes == 1,
-                "a local-property deleteBy must emit NO delete NOTE:" + System.lineSeparator() + notes);
+        assertTrue(deleteNotes == 0, "a single-hop deleteBy must emit NO delete NOTE:" + System.lineSeparator() + notes);
 
-        // (c) The generated DELETE constants are the legacy join-free shape.
         String impl = sqlFlat(implFile);
-        assertTrue(impl.contains("SQL_DELETE_BY_CUSTOMER_NAME = \"DELETE FROM \"order\" WHERE \"customer_name\" = :name\""),
-                "deleteBy through a relation must emit the legacy join-free DELETE (byte parity with pre-Task-8):"
+        assertTrue(impl.contains("SQL_DELETE_BY_CUSTOMER_NAME = \"DELETE FROM \"order\" WHERE EXISTS (SELECT 1 FROM \"customer\" \"customer\" WHERE \"customer\".\"id\" = \"order\".\"customer_id\" AND \"customer\".\"name\" = :name)\""),
+                "deleteBy through a relation must render the reversed-edge EXISTS semi-join:"
                         + System.lineSeparator() + impl);
         assertTrue(!impl.contains("DELETE FROM \"order\" LEFT JOIN"),
                 "a DELETE must NEVER carry a LEFT JOIN:" + System.lineSeparator() + impl);
-        // (d-part) local-property deleteBy: byte-identical legacy shape, no join, no NOTE.
         assertTrue(impl.contains("SQL_DELETE_BY_STATUS = \"DELETE FROM \"order\" WHERE \"status\" = :status\""),
                 "local-property deleteBy must stay byte-identical legacy:" + System.lineSeparator() + impl);
 

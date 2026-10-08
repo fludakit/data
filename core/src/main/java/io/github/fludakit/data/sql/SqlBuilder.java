@@ -191,9 +191,10 @@ public final class SqlBuilder {
     }
 
     /**
-     * The EXISTS semi-join conjunct for a predicate whose head is TO-MANY (one-to-many or element
-     * collection): instead of splicing a LEFT JOIN - which fans root rows out - the statement asks
-     * whether the child table holds a row whose alias-side column ({@code aliasColumn}) equals the
+     * The EXISTS semi-join conjunct for a predicate traversing a relation head - to-many (one-to-many
+     * or element collection) or to-one (a reference), the correlation edge being the (aliasColumn,
+     * rootColumn) pair from the JoinRef: instead of splicing a LEFT JOIN - which fans root rows out -
+     * the statement asks whether the child table holds a row whose alias-side column ({@code aliasColumn}) equals the
      * root-side column ({@code rootColumn}) - the root id for a to-many head, the owner-side FK for
      * a to-one head - and matching the leaf predicate. The leaf term is exactly
      * {@link #render(Predicate, ColumnRef)}'s alias-qualified rendering, so the named parameter (and

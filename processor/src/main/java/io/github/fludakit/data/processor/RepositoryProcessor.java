@@ -2946,29 +2946,14 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
 
         if ("delete".equals(action)) {
-            // T8-I1 guard: `DELETE FROM "t" LEFT JOIN ...` is invalid SQL on H2/PostgreSQL/SQL Server and
-            // the proper `DELETE ... WHERE id IN (SELECT ...)` rewrite is a parked follow-up. A delete whose
-            // predicate traverses a relation is therefore NOTE-degraded at compile time (the branch's
-            // NOTE-degrade contract, same shape as the multi-hop rejection in resolveCompilePaths): each
-            // traversed predicate is reported on the method and the constant keeps the legacy join-free
-            // SqlBuilder.deleteBy rendering — byte-identical to the pre-Task-8 emission. The compile is
-            // never aborted and find/count rendering of the same traversal is untouched.
-            for (int i = 0; i < predicates.size(); i++) {
-                if (!predicateRefs.get(i).joins().isEmpty()) {
-                    String path = predicates.get(i).property();
-                    processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
-                            "path '" + path + "' traverses a relation; DELETE through a relation is not yet"
-                                    + " supported; falling back to the legacy join-free DELETE predicate on"
-                                    + " column '" + Names.columnName(path) + "', which may not match the"
-                                    + " joined semantics",
-                            method);
-                }
-            }
+            // C-1: a delete whose predicate traverses a relation renders correlated EXISTS
+            // semi-joins through methodSql's delete mode — the old NOTE-degrade to the join-free
+            // legacy predicate could match the wrong rows, and a joined DELETE ... LEFT JOIN is
+            // invalid SQL. Multi-hop paths are NOTE-rejected by resolveCompilePaths BEFORE this
+            // point (their refs stay unjoined, so they render legacy and emit no delete NOTE).
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
-                    hasJoins(predicateRefs)
-                            ? new SqlBuilder().deleteBy(entity.metadata(), predicates)
-                            : methodSql("delete", entity.metadata(), predicates, predicateRefs,
-                                    existentialPredicates, List.of(), List.of(), List.of(), 0, ""));
+                    methodSql("delete", entity.metadata(), predicates, predicateRefs,
+                            existentialPredicates, List.of(), List.of(), List.of(), 0, ""));
             CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
             appendBoundParameters(call, bindings, parameters);
             call.add(".update()");
@@ -3534,7 +3519,8 @@ public class RepositoryProcessor extends AbstractProcessor {
      * columns are alias-qualified through {@link SqlBuilder#render(Predicate, ColumnRef)}, and ORDER BY is
      * built from the resolved refs with an explicit {@code ASC}/{@code DESC} (local refs unqualified for
      * legacy parity, joined refs qualified against the root table). Projection is unchanged for
-     * count/delete; parameter binding is untouched (the caller binds the JAVA PARAMETER NAME).
+     * count/delete, and delete renders EXISTS conjuncts for every joined (relation-traversing) ref
+     * (C-1); parameter binding is untouched (the caller binds the JAVA PARAMETER NAME).
      */
     private String methodSql(String action, DescriptorModel md, List<Predicate> predicates,
                              List<ColumnRef> predicateRefs, List<Boolean> existentialPredicates,
@@ -3545,11 +3531,16 @@ public class RepositoryProcessor extends AbstractProcessor {
         // renders the aggregate subquery ORDER BY term and contributes NO join; only to-one
         // predicate refs and to-one sort refs splice the LEFT JOIN chain. The legacy delegation
         // fires exactly when nothing joins AND nothing needs an EXISTS or an aggregate, so every
-        // pre-Task-5 constant stays byte-identical.
+        // pre-Task-5 constant stays byte-identical. C-1: in a DELETE every traversed predicate
+        // (to-one included) renders the EXISTS conjunct; a joined DELETE ... LEFT JOIN is invalid
+        // SQL on H2/PostgreSQL/SQL Server, so delete mode contributes no join refs and the
+        // else if ("delete") shell branch stays join-free by construction.
         List<ColumnRef> joinRefs = new ArrayList<>();
         List<Integer> existentialIndices = new ArrayList<>();
+        boolean deleteMode = "delete".equals(action);
         for (int i = 0; i < predicateRefs.size(); i++) {
-            if (Boolean.TRUE.equals(existentialPredicates.get(i))) {
+            if (Boolean.TRUE.equals(existentialPredicates.get(i))
+                    || (deleteMode && !predicateRefs.get(i).joins().isEmpty())) {
                 existentialIndices.add(i);
             } else {
                 joinRefs.add(predicateRefs.get(i));
@@ -3591,7 +3582,10 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
         List<String> conjuncts = new ArrayList<>();
         for (int i = 0; i < predicates.size(); i++) {
-            if (!Boolean.TRUE.equals(existentialPredicates.get(i))) {
+            // C-1: delete mode routes every traversed predicate ref into existentialIndices (even a
+            // to-one head whose existentialPredicates flag is FALSE), so the bare render must key on
+            // the same set or a delete predicate would double-render (bare qualified + EXISTS).
+            if (!existentialIndices.contains(i)) {
                 conjuncts.add(SqlBuilder.render(predicates.get(i), predicateRefs.get(i)));
             }
         }

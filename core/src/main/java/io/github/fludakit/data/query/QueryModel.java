@@ -2,23 +2,40 @@ package io.github.fludakit.data.query;
 
 import java.util.List;
 
-public record QueryModel(
-        Class<?> entityClass,
-        Operation operation,
-        List<Predicate> predicates,
-        List<SortSpec> sorts,
-        String sql,                    // explicit native SQL from @Query, or null
-        List<ParamRef> paramRefs,      // @Query/@Param: maps arg index -> named placeholder
-        ResultKind resultKind,
-        int pageParamIndex,            // -1 if none
-        int sortParamIndex,            // -1 if none (jakarta.data.Sort param)
-        int orderParamIndex,           // -1 if none (jakarta.data.Order param)
-        int limitParamIndex,           // -1 if none (jakarta.data.Limit param)
-        int staticLimit)               // @Limit / QBN First (0 = none)
-{
-    public record ParamRef(int argIndex, String name) {}
+/**
+ * The structural description of ONE repository query method: everything needed to render and drive
+ * it, resolved against the entity's compile-time model at generation time. Implemented by nested
+ * static classes of the generated {@code <Entity>RepositoryModel} (Plan E); the rendered SQL is NOT
+ * a member — the {@code SqlBuilder} produces it from this model plus the entity's
+ * {@code io.github.fludakit.data.model.DataModel}, and the literal is baked as a
+ * {@code static final String} in the generated {@code <Entity>RepositoryImpl}.
+ *
+ * @param <T> the entity type the query reads or writes
+ */
+public interface QueryModel<T> {
 
-    public static QueryModelBuilder builder(Class<?> entityClass, Operation operation) {
-        return new QueryModelBuilder(entityClass, operation);
-    }
+    /** The CRUD/query operation this model drives. */
+    Operation operation();
+
+    /** The declared return shape. */
+    ResultKind resultKind();
+
+    /** WHERE conjuncts, in emission order. */
+    List<ResolvedPredicate> predicates();
+
+    /** ORDER BY terms, in declaration order. */
+    List<ResolvedSort> sorts();
+
+    /** Paging strategy. */
+    PagingMode paging();
+
+    /** Static row cap ({@code @Limit} / query-by-names First); {@code 0} = none. Runtime-limit
+     *  parameters bind through {@link #paramBindings()}, not here. */
+    int limit();
+
+    /** Cursor seek terms (non-empty iff {@link #paging()} is {@link PagingMode#CURSOR}). */
+    List<SeekTerm> seekTerms();
+
+    /** Method-argument slot → named-parameter token. */
+    List<ParamBinding> paramBindings();
 }

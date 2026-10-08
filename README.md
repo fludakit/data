@@ -37,7 +37,9 @@ Apache License, Version 2.0. See [LICENSE](LICENSE).
 - Method-name finders whose predicate path traverses one relation (`findByCustomerName`) now
   generate join-aware SQL. `findByCustomerId`-style names traverse the relation's id instead of
   comparing the owner's FK column directly (Jakarta Data 1.0.1 traversal semantics); orphan FK
-  rows are consequently excluded from such results.
+  rows are consequently excluded from such results. There is deliberately no FK short-circuit:
+  comparing the owner's FK column directly (`"customer_id" = :id`) would newly include orphan-FK
+  rows and diverge from traversal semantics — the join cost is the spec's cost.
 - Path-depth asymmetry (known, documented): compile-side method-name resolution accepts at most
   ONE relation hop (multi-hop paths emit a NOTE and keep the legacy unqualified column); the
   runtime `columnRef` used by `Order.by`/`Sort` is unbounded. The same dotted string can therefore

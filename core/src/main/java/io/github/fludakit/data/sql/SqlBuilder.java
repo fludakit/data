@@ -193,16 +193,17 @@ public final class SqlBuilder {
     /**
      * The EXISTS semi-join conjunct for a predicate whose head is TO-MANY (one-to-many or element
      * collection): instead of splicing a LEFT JOIN - which fans root rows out - the statement asks
-     * whether the child table holds a row correlated to the root by its fk and matching the leaf
-     * predicate. The leaf term is exactly {@link #render(Predicate, ColumnRef)}'s alias-qualified
-     * rendering, so the named parameter (and the caller's binding code) is unchanged. Every
-     * identifier is {@link Names#quote}d.
+     * whether the child table holds a row whose alias-side column ({@code aliasColumn}) equals the
+     * root-side column ({@code rootColumn}) - the root id for a to-many head, the owner-side FK for
+     * a to-one head - and matching the leaf predicate. The leaf term is exactly
+     * {@link #render(Predicate, ColumnRef)}'s alias-qualified rendering, so the named parameter (and
+     * the caller's binding code) is unchanged. Every identifier is {@link Names#quote}d.
      */
-    public static String existsClause(String rootTable, String rootIdColumn, String childTable,
-                                      String alias, String childFkColumn, Predicate p, ColumnRef leafRef) {
+    public static String existsClause(String rootTable, String rootColumn, String childTable,
+                                      String alias, String aliasColumn, Predicate p, ColumnRef leafRef) {
         return "EXISTS (SELECT 1 FROM " + Names.quote(childTable) + " " + Names.quote(alias)
-                + " WHERE " + Names.quote(alias) + "." + Names.quote(childFkColumn)
-                + " = " + Names.quote(rootTable) + "." + Names.quote(rootIdColumn)
+                + " WHERE " + Names.quote(alias) + "." + Names.quote(aliasColumn)
+                + " = " + Names.quote(rootTable) + "." + Names.quote(rootColumn)
                 + " AND " + render(p, leafRef) + ")";
     }
 

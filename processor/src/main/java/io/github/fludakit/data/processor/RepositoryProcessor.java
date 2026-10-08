@@ -3512,14 +3512,16 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     /**
      * The EXISTS conjunct an existential (to-many head) predicate renders instead of a joined WHERE
-     * term: the ref's single join edge supplies the child table, the relation-property alias and the
-     * child-side fk column; the root's id column closes the correlation. The leaf term is exactly
-     * {@link SqlBuilder#render(Predicate, ColumnRef)}'s alias-qualified rendering, so the named
-     * parameter - and the caller's binding - is unchanged.
+     * term: the ref's last join edge supplies the child table, the relation-property alias and the
+     * alias-side column; the correlation is closed by the JoinRef's root-side column
+     * ({@code parentColumn}) - which the ElementList/EntityList construction sites set to the ROOT
+     * ID (so to-many bytes are unchanged) and the Reference site sets to the owner-side FK. The
+     * leaf term is exactly {@link SqlBuilder#render(Predicate, ColumnRef)}'s alias-qualified
+     * rendering, so the named parameter - and the caller's binding - is unchanged.
      */
     private static String existsConjunct(DescriptorModel md, Predicate p, ColumnRef ref) {
         JoinRef join = ref.joins().get(ref.joins().size() - 1);
-        return SqlBuilder.existsClause(md.tableName(), md.idColumn(), join.table(), join.alias(),
+        return SqlBuilder.existsClause(md.tableName(), join.parentColumn(), join.table(), join.alias(),
                 join.childColumn(), p, ref);
     }
 

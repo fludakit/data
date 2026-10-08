@@ -50,13 +50,13 @@ class EntityDescriptorValueTest {
 
     private static EntityDescriptor<Node> bare() {
         return new Bare<>(Node.class, "bare_node", null,
-                List.<Attribute<Node>>of(new TextColumnAttributeRecord<Node>("name", "name")),
+                List.<Attribute<Node>>of(new TextColumnAttributeRecord<Node>("name")),
                 List.of(new ColumnRef("name", "name")));
     }
 
     private static EntityDescriptor<Node> withValues(List<Object> itemsName) {
         return new WithValues<>(Node.class, "node", null,
-                List.<Attribute<Node>>of(new TextColumnAttributeRecord<Node>("name", "name")),
+                List.<Attribute<Node>>of(new TextColumnAttributeRecord<Node>("name")),
                 List.of(new ColumnRef("name", "name")),
                 itemsName, "z");
     }

@@ -3,7 +3,7 @@ package io.github.fludakit.data.metamodel;
 import jakarta.data.Sort;
 
 /** Record implementation of {@link TextColumnAttribute}. */
-public record TextColumnAttributeRecord<T>(String name, String column)
+public record TextColumnAttributeRecord<T>(String name)
         implements TextColumnAttribute<T> {
 
     @Override

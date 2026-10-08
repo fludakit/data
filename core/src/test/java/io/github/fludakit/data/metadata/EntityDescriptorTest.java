@@ -1,11 +1,12 @@
 package io.github.fludakit.data.metadata;
 
-import io.github.fludakit.data.metamodel.ElementCollectionAttributeRecord;
-import io.github.fludakit.data.metamodel.EmbeddedAttributeRecord;
-import io.github.fludakit.data.metamodel.ForeignKeyAttributeRecord;
+import io.github.fludakit.data.metamodel.EmbeddableAttribute;
+import io.github.fludakit.data.metamodel.EmbeddableAttributeRecord;
+import io.github.fludakit.data.metamodel.EntityAttributeRecord;
 import io.github.fludakit.data.metamodel.IdAttribute;
 import io.github.fludakit.data.metamodel.IdAttributeRecord;
-import io.github.fludakit.data.metamodel.OneToManyAttributeRecord;
+import io.github.fludakit.data.metamodel.ListAttribute;
+import io.github.fludakit.data.metamodel.ListAttributeRecord;
 import io.github.fludakit.data.metamodel.SortableColumnAttributeRecord;
 import io.github.fludakit.data.metamodel.TextColumnAttributeRecord;
 import jakarta.data.Sort;
@@ -13,11 +14,12 @@ import jakarta.data.metamodel.Attribute;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-/** Locks the subtype-based {@link EntityDescriptor} contract: flat leaf resolution, column view, relation accessors. */
+/** Locks the subtype-based {@link EntityDescriptor} contract: flat leaf resolution, column view, navigation refs. */
 class EntityDescriptorTest {
 
     static class Person { }
@@ -28,44 +30,45 @@ class EntityDescriptorTest {
 
     /**
      * The generated shape: attributes() holds the ROOT members once (embedded and relation
-     * containers included, flattened leaves NOT) and columns() is the explicit flattened view.
+     * containers included, flattened leaves NOT), columns() is the explicit flattened view and
+     * navigationRefs() the literal map of relation-traversing paths.
      */
     record Fixture<T>(Class<T> entityClass, String tableName, IdAttribute<T> id,
-                      List<Attribute<T>> attributes, List<ColumnRef> columns) implements EntityDescriptor<T> { }
+                      List<Attribute<T>> attributes, List<ColumnRef> columns,
+                      Map<String, ColumnRef> navigationRefs) implements EntityDescriptor<T> { }
 
     static EntityDescriptor<Address> address() {
         return new Fixture<>(Address.class, null, null,
                 List.of(
-                        new TextColumnAttributeRecord<Address>("street", "street"),
-                        new TextColumnAttributeRecord<Address>("city", "city")),
-                List.of(new ColumnRef("street", "street"), new ColumnRef("city", "city")));
+                        new TextColumnAttributeRecord<Address>("street"),
+                        new TextColumnAttributeRecord<Address>("city")),
+                List.of(new ColumnRef("street", "street"), new ColumnRef("city", "city")),
+                Map.of());
     }
 
     /** Person mirrors the generated shape: containers once, leaves only in the column view. */
     static EntityDescriptor<Person> person(EntityDescriptor<Address> embeddedAddress) {
         return new Fixture<>(Person.class, "person",
-                new IdAttributeRecord<>("id", "id"),
+                new IdAttributeRecord<>("id"),
                 List.of(
-                        new SortableColumnAttributeRecord<Person>("name", "name"),
-                        new EmbeddedAttributeRecord<Person, Address>("address", embeddedAddress),
-                        new OneToManyAttributeRecord<Person, Friend>("friends", Friend.class, "bestFriend",
-                                () -> null),
-                        new ElementCollectionAttributeRecord<Person, String>("nicknames", String.class,
-                                "person_nicknames", "person_id", () -> null)),
+                        new SortableColumnAttributeRecord<Person>("name"),
+                        new EmbeddableAttributeRecord<Person, Address>("address"),
+                        new ListAttributeRecord<Person, Friend>("friends"),
+                        new ListAttributeRecord<Person, String>("nicknames")),
                 List.of(new ColumnRef("id", "id"),
                         new ColumnRef("name", "name"),
                         new ColumnRef("address_street", "address.street"),
-                        new ColumnRef("address_zip", "address.zip")));
+                        new ColumnRef("address_zip", "address.zip")),
+                Map.of());
     }
 
     @Test
     void attributeResolvesIdentifierFirstThenByName() {
         EntityDescriptor<Person> descriptor = person(address());
 
-        assertThat(descriptor.attribute("id")).isEqualTo(new IdAttributeRecord<Person>("id", "id"));
+        assertThat(descriptor.attribute("id")).isEqualTo(new IdAttributeRecord<Person>("id"));
         assertThat(descriptor.attribute("name").name()).isEqualTo("name");
-        assertThat(descriptor.attribute("address")).isInstanceOf(
-                io.github.fludakit.data.metamodel.EmbeddedAttribute.class);
+        assertThat(descriptor.attribute("address")).isInstanceOf(EmbeddableAttribute.class);
     }
 
     @Test
@@ -116,15 +119,13 @@ class EntityDescriptorTest {
     }
 
     @Test
-    void relationAccessorsExposeTargetAndInverse() {
+    void relationAttributesExposeTheNavigableKindOnly() {
+        // Slim attributes carry NAME and nothing else: classification is the interface type itself.
         EntityDescriptor<Person> descriptor = person(address());
 
-        assertThat(descriptor.attribute("friends")).isInstanceOf(
-                io.github.fludakit.data.metamodel.OneToManyAttribute.class);
-        assertThat(descriptor.attribute("nicknames")).isInstanceOf(
-                io.github.fludakit.data.metamodel.ElementCollectionAttribute.class);
-        assertThat(descriptor.attribute("address")).isInstanceOf(
-                io.github.fludakit.data.metamodel.EmbeddedAttribute.class);
+        assertThat(descriptor.attribute("friends")).isInstanceOf(ListAttribute.class);
+        assertThat(descriptor.attribute("nicknames")).isInstanceOf(ListAttribute.class);
+        assertThat(descriptor.attribute("address")).isInstanceOf(EmbeddableAttribute.class);
     }
 
     @Test
@@ -142,41 +143,43 @@ class EntityDescriptorTest {
 
     static class Note { }
 
-    record WithColumns<T>(Class<T> entityClass, String tableName, IdAttribute<T> id,
-                          List<Attribute<T>> attributes, List<ColumnRef> columns)
-            implements EntityDescriptor<T> { }
-
     static EntityDescriptor<Child> childMetadata() {
-        return new WithColumns<>(Child.class, "rel.child",
-                new IdAttributeRecord<>("id", "id"),
-                List.of(new TextColumnAttributeRecord<Child>("label", "label")),
+        return new Fixture<>(Child.class, "rel.child",
+                new IdAttributeRecord<>("id"),
+                List.of(new TextColumnAttributeRecord<Child>("label")),
                 List.of(new ColumnRef("id", "id", "rel.child", List.of()),
                         new ColumnRef("label", "label", "rel.child", List.of()),
-                        new ColumnRef("seq", "seq", "rel.child", List.of())));
+                        new ColumnRef("seq", "seq", "rel.child", List.of())),
+                Map.of());
     }
 
     static EntityDescriptor<Note> noteMetadata() {
-        return new WithColumns<>(Note.class, null, null, List.of(),
-                List.of(new ColumnRef("text", "text")));
+        return new Fixture<>(Note.class, null, null, List.of(),
+                List.of(new ColumnRef("text", "text")), Map.of());
     }
 
     static EntityDescriptor<Parent> parentMetadata(EntityDescriptor<Child> child,
                                                    EntityDescriptor<Note> note) {
         return new Fixture<>(Parent.class, "rel.parent",
-                new IdAttributeRecord<>("id", "id"),
+                new IdAttributeRecord<>("id"),
                 List.of(
-                        new TextColumnAttributeRecord<Parent>("name", "name"),
-                        new TextColumnAttributeRecord<Parent>("address.city", "address_city"),
-                        new ForeignKeyAttributeRecord<Parent, Child>("primary", "primary_id", Child.class,
-                                () -> child),
-                        new OneToManyAttributeRecord<Parent, Child>("children", Child.class, "owner",
-                                () -> child),
-                        new ElementCollectionAttributeRecord<Parent, Note>("notes", Note.class,
-                                "parent_notes", "parent_id", () -> note)),
+                        new TextColumnAttributeRecord<Parent>("name"),
+                        new TextColumnAttributeRecord<Parent>("address.city"),
+                        new EntityAttributeRecord<Parent, Child>("primary"),
+                        new ListAttributeRecord<Parent, Child>("children"),
+                        new ListAttributeRecord<Parent, Note>("notes")),
                 List.of(new ColumnRef("id", "id"),
                         new ColumnRef("name", "name"),
                         new ColumnRef("address_city", "address.city"),
-                        new ColumnRef("primary_id", "primary")));
+                        new ColumnRef("primary_id", "primary")),
+                // The generated navigationRefs() literal: EXACTLY the paths the value() switch enumerates.
+                Map.of(
+                        "primary.label", new ColumnRef("label", "primary.label", "rel.child",
+                                List.of(new JoinRef("rel.child", "primary", "primary_id", "id"))),
+                        "children.seq", new ColumnRef("seq", "children.seq", "rel.child",
+                                List.of(new JoinRef("rel.child", "children", "id", "owner_id"))),
+                        "notes.text", new ColumnRef("text", "notes.text", null,
+                                List.of(new JoinRef("parent_notes", "notes", "id", "parent_id")))));
     }
 
     @Test
@@ -220,17 +223,14 @@ class EntityDescriptorTest {
     }
 
     @Test
-    void columnRefFailsFastForUnmappedRelationTargetSupplier() {
-        EntityDescriptor<Parent> descriptor = new Fixture<>(Parent.class, "rel.parent",
-                new IdAttributeRecord<>("id", "id"),
-                List.of(new ForeignKeyAttributeRecord<Parent, Child>(
-                        "primary", "primary_id", Child.class, () -> null)),
-                List.of(new ColumnRef("id", "id"), new ColumnRef("primary_id", "primary")));
+    void navigationRefsDefaultIsEmptyAndNavigatedPathFailsFast() {
+        // A hand-rolled descriptor without a navigationRefs override navigates only its columns view.
+        EntityDescriptor<Person> descriptor = person(address());
 
-        assertThatThrownBy(() -> descriptor.columnRef("primary.label"))
+        assertThat(descriptor.navigationRefs()).isEmpty();
+        assertThatThrownBy(() -> descriptor.columnRef("friends.name"))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("primary")
-                .hasMessageContaining("unmapped");
+                .hasMessage("Unknown property 'friends.name' on Person");
     }
 
     @Test
@@ -242,6 +242,9 @@ class EntityDescriptorTest {
                 .hasMessageContaining("Unknown property 'nope'");
         assertThatThrownBy(() -> descriptor.columnRef("name.x"))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("does not support path navigation");
+                .hasMessage("Unknown property 'name.x' on Parent");
+        assertThatThrownBy(() -> descriptor.columnRef("primary.nope"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Unknown property 'primary.nope' on Parent");
     }
 }

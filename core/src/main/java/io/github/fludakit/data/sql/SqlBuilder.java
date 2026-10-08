@@ -5,12 +5,10 @@ import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.EntityDescriptor;
 import io.github.fludakit.data.metadata.EntitySchema;
 import io.github.fludakit.data.metadata.JoinRef;
-import io.github.fludakit.data.metamodel.ElementCollectionAttribute;
-import io.github.fludakit.data.metamodel.OneToManyAttribute;
+import io.github.fludakit.data.metamodel.ListAttribute;
 import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.SortSpec;
-import jakarta.data.metamodel.Attribute;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -210,10 +208,10 @@ public final class SqlBuilder {
 
     /**
      * True when {@code ref}'s relation head — the FIRST dot segment of its path, joins required — is a
-     * to-many attribute ({@link OneToManyAttribute} or {@link ElementCollectionAttribute}) on the
-     * descriptor. Sorts through such heads render {@link #aggregateSortTerm} instead of joining; a
-     * head the descriptor does not know is {@code false} (the join clause and callers keep their
-     * existing rejection behaviour).
+     * to-many {@link ListAttribute} (one-to-many or element collection) on the descriptor. Sorts
+     * through such heads render {@link #aggregateSortTerm} instead of joining; a head the descriptor
+     * does not know is {@code false} (the join clause and callers keep their existing rejection
+     * behaviour).
      */
     public static boolean isToManyHead(EntityDescriptor<?> md, ColumnRef ref) {
         if (ref.joins().isEmpty()) {
@@ -225,8 +223,7 @@ public final class SqlBuilder {
         }
         String head = ref.path().substring(0, dot);
         try {
-            Attribute<?> attribute = md.attribute(head);
-            return attribute instanceof OneToManyAttribute || attribute instanceof ElementCollectionAttribute;
+            return md.attribute(head) instanceof ListAttribute;
         } catch (IllegalArgumentException unknownProperty) {
             return false;
         }

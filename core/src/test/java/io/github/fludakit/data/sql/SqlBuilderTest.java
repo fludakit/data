@@ -4,11 +4,10 @@ import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.EntityDescriptor;
 import io.github.fludakit.data.metadata.EntitySchema;
 import io.github.fludakit.data.metadata.JoinRef;
-import io.github.fludakit.data.metamodel.EmbeddedAttributeRecord;
-import io.github.fludakit.data.metamodel.ElementCollectionAttributeRecord;
-import io.github.fludakit.data.metamodel.ForeignKeyAttributeRecord;
+import io.github.fludakit.data.metamodel.EmbeddableAttributeRecord;
+import io.github.fludakit.data.metamodel.EntityAttributeRecord;
 import io.github.fludakit.data.metamodel.IdAttributeRecord;
-import io.github.fludakit.data.metamodel.OneToManyAttributeRecord;
+import io.github.fludakit.data.metamodel.ListAttributeRecord;
 import io.github.fludakit.data.metamodel.TextColumnAttributeRecord;
 import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.Predicate;
@@ -39,10 +38,10 @@ class SqlBuilderTest {
             @Override public Class<Customer> entityClass() { return Customer.class; }
             @Override public String tableName() { return "customer"; }
             @Override public IdAttributeRecord<Customer> id() {
-                return new IdAttributeRecord<>("id", "id");
+                return new IdAttributeRecord<>("id");
             }
             @Override public List<Attribute<Customer>> attributes() {
-                return List.of(new TextColumnAttributeRecord<>("name", "name"));
+                return List.of(new TextColumnAttributeRecord<>("name"));
             }
             @Override public List<ColumnRef> columns() {
                 return List.of(new ColumnRef("id", "id"), new ColumnRef("name", "name"));
@@ -52,24 +51,13 @@ class SqlBuilderTest {
 
     /** Profile with an embedded Address: the flattened leaves live in the explicit columns() view. */
     static EntityDescriptor<Profile> profile() {
-        EntityDescriptor<Address> address = new EntityDescriptor<>() {
-            @Override public Class<Address> entityClass() { return Address.class; }
-            @Override public String tableName() { return null; }
-            @Override public io.github.fludakit.data.metamodel.IdAttribute<Address> id() { return null; }
-            @Override public List<Attribute<Address>> attributes() {
-                return List.of(new TextColumnAttributeRecord<>("city", "city"));
-            }
-            @Override public List<ColumnRef> columns() {
-                return List.of(new ColumnRef("city", "city"));
-            }
-        };
         return new EntityDescriptor<>() {
             @Override public Class<Profile> entityClass() { return Profile.class; }
             @Override public String tableName() { return "profile"; }
-            @Override public IdAttributeRecord<Profile> id() { return new IdAttributeRecord<>("id", "id"); }
+            @Override public IdAttributeRecord<Profile> id() { return new IdAttributeRecord<>("id"); }
             @Override public List<Attribute<Profile>> attributes() {
                 return List.of(
-                        new EmbeddedAttributeRecord<Profile, Address>("address", address));
+                        new EmbeddableAttributeRecord<Profile, Address>("address"));
             }
             @Override public List<ColumnRef> columns() {
                 return List.of(new ColumnRef("id", "id"),
@@ -228,15 +216,12 @@ class SqlBuilderTest {
         return new EntityDescriptor<>() {
             @Override public Class<Profile> entityClass() { return Profile.class; }
             @Override public String tableName() { return "profile"; }
-            @Override public IdAttributeRecord<Profile> id() { return new IdAttributeRecord<>("id", "id"); }
+            @Override public IdAttributeRecord<Profile> id() { return new IdAttributeRecord<>("id"); }
             @Override public List<Attribute<Profile>> attributes() {
                 return List.of(
-                        new ElementCollectionAttributeRecord<Profile, Contact>("contacts", Contact.class,
-                                "profile_contacts", "profile_id", () -> null),
-                        new OneToManyAttributeRecord<Profile, WorkExperience>("workHistory",
-                                WorkExperience.class, "profile", () -> null),
-                        new ForeignKeyAttributeRecord<Profile, Customer>("customer", "customer_id",
-                                Customer.class, SqlBuilderTest::customer));
+                        new ListAttributeRecord<Profile, Contact>("contacts"),
+                        new ListAttributeRecord<Profile, WorkExperience>("workHistory"),
+                        new EntityAttributeRecord<Profile, Customer>("customer"));
             }
             @Override public List<ColumnRef> columns() {
                 return List.of(new ColumnRef("id", "id"),

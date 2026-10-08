@@ -17,4 +17,9 @@ public interface OrderRepository extends CrudRepository<Order, Long> {
     // path "CustomerName" descends the relation head and contributes one join (mapRow_full_ path).
     @Find
     List<Order> findByCustomerName(String name);
+
+    // Plan C C-1: method-name DELETE through a relation, rendered as correlated EXISTS semi-joins.
+    void deleteByCustomerName(String name);
+
+    void deleteByOrderItemsQuantityGreaterThan(int quantity);
 }

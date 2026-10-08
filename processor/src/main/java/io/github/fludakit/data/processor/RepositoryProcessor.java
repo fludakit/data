@@ -11,7 +11,6 @@ import com.squareup.javapoet.ParameterizedTypeName;
 import com.squareup.javapoet.TypeName;
 import com.squareup.javapoet.TypeSpec;
 import com.squareup.javapoet.TypeVariableName;
-import com.squareup.javapoet.WildcardTypeName;
 import io.github.fludakit.data.Names;
 import io.github.fludakit.data.annotation.Association;
 import io.github.fludakit.data.annotation.Identity;
@@ -118,10 +117,10 @@ public class RepositoryProcessor extends AbstractProcessor {
     private static final ClassName FM_ID = ClassName.get("io.github.fludakit.data.metamodel", "IdAttribute");
     private static final ClassName FM_SORTABLE = ClassName.get("io.github.fludakit.data.metamodel", "SortableColumnAttribute");
     private static final ClassName FM_TEXT = ClassName.get("io.github.fludakit.data.metamodel", "TextColumnAttribute");
-    private static final ClassName FM_EMBEDDED = ClassName.get("io.github.fludakit.data.metamodel", "EmbeddedAttribute");
-    private static final ClassName FM_FK = ClassName.get("io.github.fludakit.data.metamodel", "ForeignKeyAttribute");
-    private static final ClassName FM_OTM = ClassName.get("io.github.fludakit.data.metamodel", "OneToManyAttribute");
-    private static final ClassName FM_EC = ClassName.get("io.github.fludakit.data.metamodel", "ElementCollectionAttribute");
+    private static final ClassName FM_EMBEDDED = ClassName.get("io.github.fludakit.data.metamodel", "EmbeddableAttribute");
+    private static final ClassName FM_FK = ClassName.get("io.github.fludakit.data.metamodel", "EntityAttribute");
+    private static final ClassName FM_OTM = ClassName.get("io.github.fludakit.data.metamodel", "ListAttribute");
+    private static final ClassName FM_EC = ClassName.get("io.github.fludakit.data.metamodel", "ListAttribute");
     private static final ClassName FM_COLUMN_RECORD =
             ClassName.get("io.github.fludakit.data.metamodel", "ColumnAttributeRecord");
     private static final ClassName FM_ID_RECORD =
@@ -131,18 +130,17 @@ public class RepositoryProcessor extends AbstractProcessor {
     private static final ClassName FM_TEXT_RECORD =
             ClassName.get("io.github.fludakit.data.metamodel", "TextColumnAttributeRecord");
     private static final ClassName FM_EMBEDDED_RECORD =
-            ClassName.get("io.github.fludakit.data.metamodel", "EmbeddedAttributeRecord");
+            ClassName.get("io.github.fludakit.data.metamodel", "EmbeddableAttributeRecord");
     private static final ClassName FM_FK_RECORD =
-            ClassName.get("io.github.fludakit.data.metamodel", "ForeignKeyAttributeRecord");
+            ClassName.get("io.github.fludakit.data.metamodel", "EntityAttributeRecord");
     private static final ClassName FM_OTM_RECORD =
-            ClassName.get("io.github.fludakit.data.metamodel", "OneToManyAttributeRecord");
+            ClassName.get("io.github.fludakit.data.metamodel", "ListAttributeRecord");
     private static final ClassName FM_EC_RECORD =
-            ClassName.get("io.github.fludakit.data.metamodel", "ElementCollectionAttributeRecord");
-    private static final ClassName MD_ENTITY_DESCRIPTOR =
-            ClassName.get("io.github.fludakit.data.metadata", "EntityDescriptor");
+            ClassName.get("io.github.fludakit.data.metamodel", "ListAttributeRecord");
     private static final ClassName MD_COLUMN_REF =
             ClassName.get("io.github.fludakit.data.metadata", "ColumnRef");
-    private static final ClassName JAVA_SUPPLIER = ClassName.get("java.util.function", "Supplier");
+    private static final ClassName MD_JOIN_REF =
+            ClassName.get("io.github.fludakit.data.metadata", "JoinRef");
 
     /** Attribute-name types that get the spec's {@code TextAttribute} treatment. */
     private static final Set<String> METAMODEL_TEXT_TYPES = Set.of(
@@ -681,11 +679,51 @@ public class RepositoryProcessor extends AbstractProcessor {
                 .returns(ParameterizedTypeName.get(ClassName.get(java.util.List.class), MD_COLUMN_REF))
                 .addStatement("return $L", columns.build()).build());
 
+        // D3/D4: the navigated leaf cases — the EXACT path set both the value() switch below and
+        // the navigationRefs() map are generated from (shared compile-time enumeration; the
+        // mirror-drift risk is closed at generation time: navigationRefs() path set ==
+        // value()-switch relation-path set by construction). Map.ofEntries (not Map.of) so any
+        // cardinality compiles.
+        List<NavCase> navs = navCases(entityElement, entity);
+        if (!navs.isEmpty()) {
+            CodeBlock.Builder entries = CodeBlock.builder();
+            boolean firstNav = true;
+            for (NavCase nav : navs) {
+                if (!firstNav) {
+                    entries.add(", ");
+                }
+                firstNav = false;
+                ColumnRef ref = nav.ref();
+                CodeBlock.Builder joins = CodeBlock.builder()
+                        .add("$T.of(", ClassName.get(java.util.List.class));
+                boolean firstJoin = true;
+                for (JoinRef join : ref.joins()) {
+                    if (!firstJoin) {
+                        joins.add(", ");
+                    }
+                    firstJoin = false;
+                    joins.add("new $T($S, $S, $S, $S)", MD_JOIN_REF,
+                            join.table(), join.alias(), join.parentColumn(), join.childColumn());
+                }
+                joins.add(")");
+                entries.add("$T.entry($S, new $T($S, $S, $L, $L))", ClassName.get(java.util.Map.class),
+                        nav.path(), MD_COLUMN_REF, ref.column(), ref.path(),
+                        ref.table() == null ? CodeBlock.of("null") : CodeBlock.of("$S", ref.table()),
+                        joins.build());
+            }
+            builder.addMethod(MethodSpec.methodBuilder("navigationRefs").addModifiers(Modifier.PUBLIC)
+                    .addAnnotation(Override.class)
+                    .returns(ParameterizedTypeName.get(ClassName.get(java.util.Map.class),
+                            ClassName.get(String.class), MD_COLUMN_REF))
+                    .addStatement("return $T.ofEntries($L)", ClassName.get(java.util.Map.class),
+                            entries.build()).build());
+        }
+
         // Task 4 (S-3): the read-side twin of the column view. columns()/columnRef() answer WHERE a dot
         // path lives; value() answers what it IS on a materialised row, so a paged read can build its own
         // cursor key without reflection. Generation is NOTE-degraded: a descriptor that cannot carry the
         // switch simply keeps the interface default (which fails fast) instead of failing the round.
-        MethodSpec valueMethod = valueExtractor(entityElement, entity);
+        MethodSpec valueMethod = valueExtractor(entityElement, entity, navs);
         if (valueMethod != null) {
             builder.addMethod(valueMethod);
         }
@@ -706,9 +744,10 @@ public class RepositoryProcessor extends AbstractProcessor {
      * left out with a NOTE and the round continues; an unknown path fails fast with
      * {@link IllegalArgumentException}, exactly as {@code columnRef} does.
      */
-    private MethodSpec valueExtractor(TypeElement entityElement, EntityModel entity) {
+    private MethodSpec valueExtractor(TypeElement entityElement, EntityModel entity,
+                                        List<NavCase> navs) {
         try {
-            return valueSwitch(entityElement, entity);
+            return valueSwitch(entityElement, entity, navs);
         } catch (RuntimeException e) {
             processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
                     "descriptor value extraction could not be generated for " + entityElement.getSimpleName()
@@ -717,19 +756,17 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
     }
 
-    private MethodSpec valueSwitch(TypeElement entityElement, EntityModel entity) {
+    /** One navigated leaf: the full dot path, its resolved ColumnRef and what valueSwitch needs. */
+    private record NavCase(String path, ColumnRef ref, TypeElement targetElement, DataModel target,
+                           CodeBlock head, boolean toOne) { }
+
+    /** The relation-traversing leaf cases of one entity — the EXACT path set both the value()
+     *  switch and the navigationRefs() map are generated from (the loop moved verbatim out of
+     *  valueSwitch; head-level guards keep the historical NOTE-degrade semantics: an unmapped
+     *  target or accessor-less head drops the head from BOTH surfaces). */
+    private List<NavCase> navCases(TypeElement entityElement, EntityModel entity) {
         DataModel md = entity.metadata();
-        Map<String, CodeBlock> cases = new LinkedHashMap<>();
-
-        // (1) The flattened column view this descriptor publishes: identifier, scalars, to-one heads
-        // (whose path is the property name, mapping to the fk column) and embedded leaves.
-        for (ColumnRef column : md.columns()) {
-            putValueCase(cases, entityElement, column.path(),
-                    valueChain(entityElement, md, CodeBlock.of("e"), column.path()));
-        }
-
-        // (2) Depth 1 through every relationship the descriptor publishes. Anything deeper is
-        // multi-hop for resolveCompilePath too, so it stays out of the switch by construction.
+        List<NavCase> out = new ArrayList<>();
         for (Prop p : md.props()) {
             if (!isTraversable(p)) {
                 continue;
@@ -744,16 +781,49 @@ public class RepositoryProcessor extends AbstractProcessor {
             }
             CodeBlock head = CodeBlock.of("e.$L()", headGetter);
             boolean toOne = p instanceof Prop.Reference;
-            List<ColumnRef> leaves = p instanceof Prop.ElementList elementList
-                    ? elementList.elementColumns()
-                    : target.columns();
-            for (ColumnRef leaf : leaves) {
-                String path = p.name() + "." + leaf.path();
-                CodeBlock body = toOne
-                        ? guardedValueChain(targetElement, target, head, leaf.path())
-                        : toManyValue(targetElement, target, head, leaf.path());
-                putValueCase(cases, entityElement, path, body);
+            List<ColumnRef> leaves;
+            JoinRef join;
+            if (p instanceof Prop.ElementList elementList) {
+                leaves = elementList.elementColumns();
+                join = new JoinRef(elementList.childTable(), elementList.name(),
+                        md.idColumn(), elementList.parentFkColumn());
+            } else {
+                leaves = target.columns();
+                join = referenceOrListJoin(md, target, p);
+                if (join == null) {
+                    continue; // unbuildable join: the compile paths unresolvedRelation drop
+                }
             }
+            for (ColumnRef leaf : leaves) {
+                out.add(new NavCase(p.name() + "." + leaf.path(),
+                        leaf.withPrefix(p.name(), join), targetElement, target, head, toOne));
+            }
+        }
+        return out;
+    }
+
+    private MethodSpec valueSwitch(TypeElement entityElement, EntityModel entity,
+                                 List<NavCase> navs) {
+        DataModel md = entity.metadata();
+        Map<String, CodeBlock> cases = new LinkedHashMap<>();
+
+        // (1) The flattened column view this descriptor publishes: identifier, scalars, to-one heads
+        // (whose path is the property name, mapping to the fk column) and embedded leaves.
+        for (ColumnRef column : md.columns()) {
+            putValueCase(cases, entityElement, column.path(),
+                    valueChain(entityElement, md, CodeBlock.of("e"), column.path()));
+        }
+
+        // (2) Depth 1 through every relationship the descriptor publishes — the SHARED
+        // navCases() enumeration (the navigationRefs() map consumes the identical list, so the
+        // path sets agree by construction). Anything deeper is multi-hop for resolveCompilePath
+        // too, so it stays out of both surfaces by construction.
+        for (NavCase nav : navs) {
+            String leafPath = nav.path().substring(nav.path().indexOf(".") + 1);
+            CodeBlock body = nav.toOne()
+                    ? guardedValueChain(nav.targetElement(), nav.target(), nav.head(), leafPath)
+                    : toManyValue(nav.targetElement(), nav.target(), nav.head(), leafPath);
+            putValueCase(cases, entityElement, nav.path(), body);
         }
         if (cases.isEmpty()) {
             return null;
@@ -995,11 +1065,11 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     /**
      * The navigable class for an EMBEDDED member: implements
-     * {@code EmbeddedAttribute<owner, target>} with owner-typed leaf fields for the value object's
+     * {@code EmbeddableAttribute<owner, target>} with owner-typed leaf fields for the value object's
      * direct members (nested embeddeds recurse into their own {@code _Parent<Field>} nav class), the
      * flattened column chain as leaf columns ({@code address_point_lat}) and the full dot path as
      * leaf/attribute names ({@code address.point.lat}). A VO cycle (unresolved target) degrades to a
-     * container-only nav: no leaves and {@code embedded() { return null; }}. {@code columnPrefix} is
+     * container-only nav: no leaves. {@code columnPrefix} is
      * the flattened physical column chain from the owner root ({@code address_}, then
      * {@code address_point_}), threading exactly as {@link DataModel#columns()} flattens.
      */
@@ -1030,21 +1100,16 @@ public class RepositoryProcessor extends AbstractProcessor {
             }
         }
         builder.addMethod(overrideAccessor("name", String.class, CodeBlock.of("$S", path)));
-        builder.addMethod(overrideAccessor("embedded",
-                ParameterizedTypeName.get(MD_ENTITY_DESCRIPTOR, targetType),
-                target != null
-                        ? CodeBlock.of("$T.INSTANCE", embeddedMetadataName(target.typeName()))
-                        : CodeBlock.of("null")));
         units.add(new NavUnit(fqn, navFile(packageName, builder)));
         return ClassName.get(packageName, navSimple);
     }
 
     /**
-     * The navigable class for a MANY_TO_ONE ({@code ForeignKeyAttribute}) or ONE_TO_MANY
-     * ({@code OneToManyAttribute}) member: container contract methods plus owner-typed leaf fields
-     * for the managed target's flattened LOCAL paths ({@code primary.id} → column {@code id}). An
-     * unmanaged or gate-failed target keeps the container methods, no leaves and a {@code () -> null}
-     * supplier — the same degradation the attribute records already follow.
+     * The navigable class for a MANY_TO_ONE ({@code EntityAttribute}) or ONE_TO_MANY
+     * ({@code ListAttribute}) member: the attribute name plus owner-typed leaf fields
+     * for the managed target's flattened LOCAL paths ({@code primary.id} maps to column {@code id}).
+     * An unmanaged or gate-failed target keeps the name and no leaves — the same degradation the
+     * attribute records already follow.
      */
     private ClassName relationNav(TypeElement origin, String packageName, TypeName owner,
                                   String navSimple, MmMember m, Set<String> claimed, List<NavUnit> units) {
@@ -1074,27 +1139,15 @@ public class RepositoryProcessor extends AbstractProcessor {
             }
         }
         builder.addMethod(overrideAccessor("name", String.class, CodeBlock.of("$S", m.path())));
-        if (fk) {
-            builder.addMethod(overrideAccessor("column", String.class,
-                    CodeBlock.of("$S", ((Prop.Reference) p).fkColumn())));
-        } else {
-            builder.addMethod(overrideAccessor("inverseName", String.class,
-                    stringLiteral(((Prop.EntityList) p).inverseName())));
-        }
-        builder.addMethod(overrideAccessor("target",
-                ParameterizedTypeName.get(ClassName.get(Class.class), targetType),
-                CodeBlock.of("$T.class", targetType)));
-        builder.addMethod(overrideAccessor("targetDescriptor", supplierOf(targetType),
-                relationDescriptorSupplier(targetFqn, false)));
         units.add(new NavUnit(fqn, navFile(packageName, builder)));
         return ClassName.get(packageName, navSimple);
     }
 
     /**
      * The navigable class for an ELEMENT_COLLECTION member: implements
-     * {@code ElementCollectionAttribute<owner, element>} with owner-typed leaf fields for the element
-     * value object's columns (mirroring {@link Prop.ElementList#elementColumns()}) plus the
-     * {@code childTable()}/{@code parentFkColumn()} literals and the descriptor supplier.
+     * {@code ListAttribute<owner, element>} with owner-typed leaf fields for the element
+     * value object's columns (mirroring {@link Prop.ElementList#elementColumns()}). The child-table
+     * placement lives in the descriptor's {@code navigationRefs()} literal, not on the attribute.
      */
     private ClassName elementCollectionNav(TypeElement origin, String packageName, TypeName owner,
                                            String navSimple, String path, Prop.ElementList elementList,
@@ -1121,15 +1174,6 @@ public class RepositoryProcessor extends AbstractProcessor {
             }
         }
         builder.addMethod(overrideAccessor("name", String.class, CodeBlock.of("$S", path)));
-        builder.addMethod(overrideAccessor("elementType",
-                ParameterizedTypeName.get(ClassName.get(Class.class), targetType),
-                CodeBlock.of("$T.class", targetType)));
-        builder.addMethod(overrideAccessor("childTable", String.class,
-                CodeBlock.of("$S", elementList.childTable())));
-        builder.addMethod(overrideAccessor("parentFkColumn", String.class,
-                CodeBlock.of("$S", elementList.parentFkColumn())));
-        builder.addMethod(overrideAccessor("elementDescriptor", supplierOf(targetType),
-                relationDescriptorSupplier(targetFqn, true)));
         units.add(new NavUnit(fqn, navFile(packageName, builder)));
         return ClassName.get(packageName, navSimple);
     }
@@ -1228,7 +1272,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
         addNavField(builder, taken, origin, owner, navSimple, identifier,
                 ParameterizedTypeName.get(attrType, owner),
-                CodeBlock.of("new $T<>($S, $S)", recordType, path, column));
+                CodeBlock.of("new $T<>($S)", recordType, path));
     }
 
     private void addNavField(TypeSpec.Builder builder, Set<String> taken, TypeElement origin,
@@ -1252,11 +1296,6 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     private static JavaFile navFile(String packageName, TypeSpec.Builder builder) {
         return JavaFile.builder(packageName, builder.build()).skipJavaLangImports(true).build();
-    }
-
-    private static TypeName supplierOf(TypeName targetType) {
-        return ParameterizedTypeName.get(JAVA_SUPPLIER,
-                WildcardTypeName.subtypeOf(ParameterizedTypeName.get(MD_ENTITY_DESCRIPTOR, targetType)));
     }
 
     private static MethodSpec overrideAccessor(String name, TypeName returnType, CodeBlock body) {
@@ -1427,9 +1466,8 @@ public class RepositoryProcessor extends AbstractProcessor {
         CodeBlock name = constRef ? CodeBlock.of("$L", m.constant()) : CodeBlock.of("$S", m.path());
         CodeBlock typeArgs = constRef ? CodeBlock.of("<>") : explicitTypeArgs(owner, m);
         Prop p = m.prop();
-        String targetFqn = memberTargetFqn(p);
         if (p instanceof Prop.Id) {
-            return CodeBlock.of("new $T$L($L, $S)", FM_ID_RECORD, typeArgs, name, m.column());
+            return CodeBlock.of("new $T$L($L)", FM_ID_RECORD, typeArgs, name);
         }
         if (p instanceof Prop.Scalar scalar) {
             ClassName rec = switch (metamodelKind(scalar.typeFqn())) {
@@ -1437,52 +1475,22 @@ public class RepositoryProcessor extends AbstractProcessor {
                 case SORTABLE -> FM_SORTABLE_RECORD;
                 default -> FM_COLUMN_RECORD;
             };
-            return CodeBlock.of("new $T$L($L, $S)", rec, typeArgs, name, m.column());
+            return CodeBlock.of("new $T$L($L)", rec, typeArgs, name);
         }
-        if (p instanceof Prop.Embedded embedded) {
-            return embedded.target() != null
-                    ? CodeBlock.of("new $T$L($L, $T.INSTANCE)", FM_EMBEDDED_RECORD, typeArgs, name,
-                            embeddedMetadataName(embedded.target().typeName()))
-                    : CodeBlock.of("new $T<$T,$T>($L, null)", FM_EMBEDDED_RECORD, owner,
-                            classArgOf(targetFqn), name);
+        if (p instanceof Prop.Embedded) {
+            return CodeBlock.of("new $T$L($L)", FM_EMBEDDED_RECORD, typeArgs, name);
         }
         if (p instanceof Prop.Reference) {
-            return CodeBlock.of("new $T$L($L, $S, $T.class, $L)",
-                    FM_FK_RECORD, typeArgs, name, m.column(), classArgOf(targetFqn),
-                    relationDescriptorSupplier(targetFqn, false));
+            return CodeBlock.of("new $T$L($L)", FM_FK_RECORD, typeArgs, name);
         }
-        if (p instanceof Prop.EntityList entityList) {
-            return CodeBlock.of("new $T$L($L, $T.class, $L, $L)",
-                    FM_OTM_RECORD, typeArgs, name, classArgOf(targetFqn), stringLiteral(entityList.inverseName()),
-                    relationDescriptorSupplier(targetFqn, false));
+        if (p instanceof Prop.EntityList) {
+            return CodeBlock.of("new $T$L($L)", FM_OTM_RECORD, typeArgs, name);
         }
-        Prop.ElementList elementList = (Prop.ElementList) p;
-        return CodeBlock.of("new $T$L($L, $T.class, $S, $S, $L)",
-                FM_EC_RECORD, typeArgs, name, classArgOf(targetFqn),
-                elementList.childTable(), elementList.parentFkColumn(),
-                relationDescriptorSupplier(targetFqn, true));
+        return CodeBlock.of("new $T$L($L)", FM_EC_RECORD, typeArgs, name);
     }
 
     /**
-     * The descriptor supplier appended to a relation attribute record: {@code () -> <Target>Metadata.INSTANCE}
-     * when that metadata class is (or will be) emitted in this round, else {@code () -> null}. A managed
-     * relationship target's {@code <Target>Metadata} is emitted exactly when the target is a managed entity
-     * that clears the reflection-free mapper gate — the same predicate its own {@link #generate} pass and the
-     * loader gate ({@link #ensureEntityRowMapper}) guard on — so the reference below always resolves against a
-     * file the processor is committed to writing. An element-collection element VO's {@code <Vo>Metadata} is
-     * emitted exactly when the VO resolves and clears that gate, mirroring {@link #voRowMapperFor}. The
-     * referenced class name comes from {@link #metadataTypes} when already resolved, else the same
-     * {@code <SimpleName>Metadata} the emitter writes.
-     */
-    private CodeBlock relationDescriptorSupplier(String targetFqn, boolean elementCollection) {
-        if (!relationTargetResolved(targetFqn, elementCollection)) {
-            return CodeBlock.of("() -> null");
-        }
-        return CodeBlock.of("() -> $T.INSTANCE", embeddedMetadataName(stripGenerics(targetFqn)));
-    }
-
-    /**
-     * Whether {@link #relationDescriptorSupplier} resolves to a {@code <Target>Metadata.INSTANCE}: the
+     * Whether a relation target resolves to an emitted {@code <Target>Metadata} class: the
      * same managed-target / mapper-gate predicate the descriptor supplier and the navigable member
      * classes (Task 6) share, so a nav's leaf fields exist exactly when its supplier is non-null.
      */

@@ -24,6 +24,17 @@ Contributions are welcome — issues, pull requests, and feature suggestions are
 
 ## Breaking changes in 1.0.0-SNAPSHOT (navigable metamodel iteration)
 
+- `ColumnAttribute.column()` and the relation attributes' plumbing (`ForeignKeyAttribute.target()/
+  targetDescriptor()`, `OneToManyAttribute.inverseName()/childFkColumn()`,
+  `ElementCollectionAttribute.childTable()/parentFkColumn()/elementDescriptor()`,
+  `EmbeddedAttribute.embedded()`) removed — attributes navigate only; resolution moved to the
+  generated `EntityDescriptor.navigationRefs()`.
+- `ForeignKeyAttribute`/`EmbeddedAttribute`/`OneToManyAttribute`/`ElementCollectionAttribute` renamed
+  to the ported Jakarta Data 1.1 vocabulary: `EntityAttribute`, `EmbeddableAttribute`, `ListAttribute`
+  (covers one-to-many and element collections) under the new `NavigableAttribute` root; `*Record`
+  implementations shrink to `(name)`.
+- `EntityDescriptor.columnRef` failures for unknown/navigable-but-unknown-leaf paths now report a
+  single `Unknown property '<path>' on <Entity>` message.
 - `EntityDescriptor.columns()` no longer has a derived default implementation. Implementers must
   supply the explicit column view (the generated `<Entity>Metadata` does; hand-written test
   descriptors must too).
@@ -37,11 +48,12 @@ Contributions are welcome — issues, pull requests, and feature suggestions are
   comparing the owner's FK column directly (`"customer_id" = :id`) would newly include orphan-FK
   rows and diverge from traversal semantics — the join cost is the spec's cost.
 - Path-depth asymmetry (known, documented): compile-side method-name resolution accepts at most
-  ONE relation hop (multi-hop paths emit a NOTE and keep the legacy unqualified column); the
-  runtime `columnRef` used by `Order.by`/`Sort` is unbounded. The same dotted string can therefore
-  be a working sort and a rejected finder name. Cursor keys compound this: the generated
-  value-extraction switch answers one hop only, so a deeper path may sort under OFFSET paging but
-  throws `IllegalArgumentException` naming the exact path when a CURSOR page request builds its key.
+  ONE relation hop (multi-hop paths emit a NOTE and keep the legacy unqualified column). The
+  runtime `columnRef` used by `Order.by`/`Sort` is now bounded the same way: it resolves the
+  flattened `columns()` paths plus the generated `navigationRefs()` map — exactly the one-hop
+  relation leaves whose values the `value()` switch answers for CURSOR keys (both surfaces come
+  from one shared generation-time enumeration), so a sortable path always has a working cursor
+  key and anything deeper fails fast with `Unknown property '<path>' on <Entity>`.
 - Cursors for relation-sorted paged reads now end with the root id key.
 - `deleteBy…` names whose predicate path traverses one relation now render correlated `EXISTS`
   semi-joins — `deleteByCustomerName` emits `DELETE FROM "order" WHERE EXISTS (SELECT 1 FROM

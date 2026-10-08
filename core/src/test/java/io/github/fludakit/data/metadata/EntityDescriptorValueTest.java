@@ -129,4 +129,16 @@ class EntityDescriptorValueTest {
                 .hasMessageContaining("Unknown property path 'nope'")
                 .hasMessageContaining("Node");
     }
+
+    @Test
+    void depthTwoRelationPathFailsFastNamingTheExactPath() {
+        // C-2 honesty pin: the generated value switch answers ONE relation hop by construction, so a
+        // depth-2 path lands in the default branch and the IllegalArgumentException names the exact
+        // path — the failure surface the README path-depth bullet documents for CURSOR page keys.
+        EntityDescriptor<Node> md = withValues(List.of("b"));
+
+        assertThatThrownBy(() -> md.value("items.product.name", new Object()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Unknown property path 'items.product.name' on Node");
+    }
 }

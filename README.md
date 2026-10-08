@@ -41,7 +41,9 @@ Apache License, Version 2.0. See [LICENSE](LICENSE).
 - Path-depth asymmetry (known, documented): compile-side method-name resolution accepts at most
   ONE relation hop (multi-hop paths emit a NOTE and keep the legacy unqualified column); the
   runtime `columnRef` used by `Order.by`/`Sort` is unbounded. The same dotted string can therefore
-  be a working sort and a rejected finder name.
+  be a working sort and a rejected finder name. Cursor keys compound this: the generated
+  value-extraction switch answers one hop only, so a deeper path may sort under OFFSET paging but
+  throws `IllegalArgumentException` naming the exact path when a CURSOR page request builds its key.
 - Cursors for relation-sorted paged reads now end with the root id key.
 - `deleteBy…` names whose predicate path traverses one relation now render correlated `EXISTS`
   semi-joins — `deleteByCustomerName` emits `DELETE FROM "order" WHERE EXISTS (SELECT 1 FROM

@@ -2639,10 +2639,16 @@ public class RepositoryProcessor extends AbstractProcessor {
      * list ambiguous) while an EXISTS-only statement keeps the bare {@code "col"} projection
      * (Task 5). {@code extraProjection} is {@code joinedProjection}'s payload, inserted between the
      * root columns and FROM. Empty join refs render no chain, which is how the paged findAll
-     * constant stays compatible with the runtime splicing its own joins string.
+     * constant stays compatible with the runtime splicing its own joins string. A bare
+     * projection carrying a non-empty extraProjection is unreachable through emission today (full
+     * materialisation implies a to-one join, which implies qualified), so it is a precondition throw,
+     * not new logic.
      */
-    private String qualifiedRootSelect(DescriptorModel md, List<ColumnRef> traversedToOne,
-                                       boolean qualified, String extraProjection) {
+    static String qualifiedRootSelect(DescriptorModel md, List<ColumnRef> traversedToOne,
+                                      boolean qualified, String extraProjection) {
+        if (!qualified && extraProjection != null && !extraProjection.isEmpty()) {
+            throw new IllegalStateException("bare projection cannot carry extraProjection");
+        }
         StringBuilder sb = new StringBuilder();
         sb.append("SELECT ").append(md.columns().stream()
                 .map(c -> qualified ? qualifiedColumn(md.tableName(), c.column()) : Names.quote(c.column()))

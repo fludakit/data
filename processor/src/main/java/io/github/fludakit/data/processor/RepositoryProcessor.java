@@ -3595,6 +3595,8 @@ public class RepositoryProcessor extends AbstractProcessor {
         if (!conjuncts.isEmpty()) {
             sb.append(" WHERE ").append(String.join(" AND ", conjuncts));
         }
+        // C-4.2 policy: the root-id tiebreak is a paged-cursor concern only (seek keys need a total
+        // order); non-paged ORDER BY renders exactly the declared terms.
         if (!sorts.isEmpty()) {
             StringBuilder orderBy = new StringBuilder();
             for (int i = 0; i < sorts.size(); i++) {

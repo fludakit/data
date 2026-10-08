@@ -4441,4 +4441,41 @@ class RepositoryProcessorTest {
                         + System.lineSeparator() + cv);
 
     }
+
+    @Test
+    void nonPagedSortThroughElementListRendersAggregateAndNoTiebreak() throws Exception {
+        // C-4.1/C-4.2 (plan B parked minor): the NON-paged methodSql emission of a to-many sort head
+        // renders the same aggregate term verbatim in ORDER BY, splices NO LEFT JOIN for the
+        // collection, and gains NO root-id tiebreak — tiebreaking is a paged-cursor concern (seek
+        // keys need a total order); findTop… through a collection stays order-nondeterministic among
+        // ties like any non-paged ORDER BY.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/c4sort"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-c4sort"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-c4sort"));
+        writeRelationFixture(sourceDir);
+        Files.writeString(sourceDir.resolve("SortOrd.java"), """
+                package relpath;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.OrderBy;
+                import jakarta.data.repository.Repository;
+                import java.util.List;
+                @Repository
+                public interface SortOrd extends CrudRepository<Order, Long> {
+                    @OrderBy(value = "orderItems.quantity", descending = true)
+                    List<Order> findByStatus(String status);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir,
+                "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "SortOrd.java");
+
+        String impl = sqlFlat(generatedDir.resolve("relpath/SortOrdImpl.java"));
+        assertTrue(impl.contains("ORDER BY (SELECT MAX(\"orderItems\".\"quantity\") FROM \"order_order_items\" \"orderItems\" WHERE \"orderItems\".\"order_id\" = \"order\".\"id\") DESC"),
+                "the non-paged ORDER BY must carry the aggregate term verbatim:" + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("LEFT JOIN"),
+                "no to-many join may be spliced by the non-paged emission:" + System.lineSeparator() + impl);
+        assertTrue(!impl.contains(") DESC, \"order\".\"id\"") && !impl.contains(" DESC, \"order\".\"id\" ASC"),
+                "non-paged finders gain no root-id tiebreak (policy: tiebreaks exist for cursor seek keys only):"
+                        + System.lineSeparator() + impl);
+    }
 }

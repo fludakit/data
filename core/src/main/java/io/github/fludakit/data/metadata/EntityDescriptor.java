@@ -71,11 +71,11 @@ public interface EntityDescriptor<T> extends EntitySchema {
      * descriptors override this with a {@code switch} over the paths {@link #columnRef(String)}
      * resolves AT THE GENERATED DEPTH — one relation hop. Deeper paths are unknown to the switch and
      * throw {@link IllegalArgumentException}: a runtime deep path can sort under OFFSET paging yet
-     * cannot produce a cursor key. Contract for overrides — a local, flattened-embedded or to-one leaf path returns the
-     * single (possibly {@code null}) value; a path whose FIRST segment is a to-many (one-to-many or
-     * element collection) returns the {@code List} of child leaf values (an empty list, never
-     * {@code null}, when the collection is null/empty); an unknown path throws
-     * {@link IllegalArgumentException}. The interface default throws
+     * cannot produce a cursor key. Contract for overrides — a local, flattened-embedded or to-one
+     * leaf path returns the single (possibly {@code null}) value; a path whose FIRST segment is a
+     * to-many (one-to-many or element collection) returns the {@code List} of child leaf values
+     * (an empty list, never {@code null}, when the collection is null/empty); an unknown path
+     * throws {@link IllegalArgumentException}. The interface default throws
      * {@link UnsupportedOperationException} so a hand-rolled descriptor cannot be mistaken for a
      * value-capable one.
      */

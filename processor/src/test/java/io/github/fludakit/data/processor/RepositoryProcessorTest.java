@@ -3357,6 +3357,91 @@ class RepositoryProcessorTest {
                 "all cursor emissions ride the descriptor overload:" + System.lineSeparator() + impl);
     }
 
+    @Test
+    void generatesRepositoryModelWithNestedQueryModels() throws Exception {
+        // Plan E (E2): query-by-names methods publish their resolved structure as a generated
+        // <Repo>Model. Assert the shape, the resolved refs, the paging mode and the cursor
+        // tiebreak, plus the overload suffix. The <Repo>Impl bytes are unchanged in this task.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/qmd"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-qmd"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-qmd"));
+
+        Files.writeString(sourceDir.resolve("Widget.java"), """
+                package qmd;
+
+                public class Widget {
+                    public Long id;
+                    public String status;
+
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getStatus() { return status; }
+                    public void setStatus(String status) { this.status = status; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Widgets.java"), """
+                package qmd;
+
+                import jakarta.data.page.Page;
+                import jakarta.data.page.PageRequest;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.List;
+
+                @Repository
+                public interface Widgets extends CrudRepository<Widget, Long> {
+                    List<Widget> findByStatus(String status);
+                    long countByStatus(String status);
+                    Page<Widget> findByStatus(String status, PageRequest pageRequest);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Widget.java", "Widgets.java");
+
+        Path modelFile = generatedDir.resolve("qmd/WidgetsModel.java");
+        assertTrue(Files.exists(modelFile), "expected generated " + modelFile);
+        String model = Files.readString(modelFile).replaceAll("\\s+", " ");
+
+        assertTrue(model.contains("public final class WidgetsModel"), "holder:" + System.lineSeparator() + model);
+        // one nested model per query-by-names method, in declaration order, overload suffixed
+        assertTrue(model.contains("public static final class FindByStatusQueryModel"
+                        + " implements QueryModel<Widget>"),
+                "find query model:" + System.lineSeparator() + model);
+        assertTrue(model.contains("public static final class FindByStatusQueryModel2"
+                        + " implements QueryModel<Widget>"),
+                "paged overload must be suffixed:" + System.lineSeparator() + model);
+        assertTrue(model.contains("public static final class CountByStatusQueryModel"
+                        + " implements QueryModel<Widget>"),
+                "count query model:" + System.lineSeparator() + model);
+        assertTrue(model.contains("public static final FindByStatusQueryModel INSTANCE"
+                        + " = new FindByStatusQueryModel();"),
+                "INSTANCE constant:" + System.lineSeparator() + model);
+        // resolved structure serialised as literals
+        assertTrue(model.contains("new ResolvedPredicate("
+                        + "Predicate.of(\"status\", Operator.EQ, \"status\"),"
+                        + " new ColumnRef(\"status\", \"status\", null, List.of()), false)"),
+                "resolved predicate:" + System.lineSeparator() + model);
+        assertTrue(model.contains("return Operation.FIND;"), "operation:" + System.lineSeparator() + model);
+        assertTrue(model.contains("return Operation.COUNT;"), "count operation:"
+                + System.lineSeparator() + model);
+        assertTrue(model.contains("return ResultKind.PAGE;"), "paged result kind:"
+                + System.lineSeparator() + model);
+        assertTrue(model.contains("return PagingMode.OFFSET;"), "paged mode:"
+                + System.lineSeparator() + model);
+        assertTrue(model.contains("return PagingMode.NONE;"), "plain mode:" + System.lineSeparator() + model);
+        assertTrue(model.contains("new ParamBinding(0, \"status\")"), "param binding:"
+                + System.lineSeparator() + model);
+        // the paged model declares no ORDER BY sorts of its own here, and its seek terms are the
+        // id-ascending default the runtime cursor uses
+        assertTrue(model.contains("new SeekTerm(")
+                        && model.contains("new ColumnRef(\"id\", \"id\", null, List.of()), true)"),
+                "default cursor seek term:" + System.lineSeparator() + model);
+        // the impl must not have changed shape in this task
+        String impl = Files.readString(generatedDir.resolve("qmd/WidgetsImpl.java"));
+        assertTrue(impl.contains("SQL_FIND_BY_STATUS"), "impl constants survive:"
+                + System.lineSeparator() + impl);
+    }
+
     /**
      * Writes the shared {@code relpath} fixture: {@code Customer} / {@code OrderItem} / {@code Order}
      * (scalar {@code status}, {@code @Association Customer customer}, {@code List<OrderItem> orderItems}

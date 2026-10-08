@@ -150,6 +150,30 @@ public class RepositoryProcessor extends AbstractProcessor {
     private static final ClassName MD_JOIN_REF =
             ClassName.get("io.github.fludakit.data.metadata", "JoinRef");
 
+    // Plan E (E2): the query-metadata types the generated <Repository>Model serialises literals with.
+    private static final ClassName Q_QUERY_MODEL =
+            ClassName.get("io.github.fludakit.data.query", "QueryModel");
+    private static final ClassName Q_OPERATION =
+            ClassName.get("io.github.fludakit.data.query", "Operation");
+    private static final ClassName Q_RESULT_KIND =
+            ClassName.get("io.github.fludakit.data.query", "ResultKind");
+    private static final ClassName Q_PAGING_MODE =
+            ClassName.get("io.github.fludakit.data.query", "PagingMode");
+    private static final ClassName Q_PREDICATE =
+            ClassName.get("io.github.fludakit.data.query", "Predicate");
+    private static final ClassName Q_SORT_SPEC =
+            ClassName.get("io.github.fludakit.data.query", "SortSpec");
+    private static final ClassName Q_OPERATOR =
+            ClassName.get("io.github.fludakit.data.query", "Operator");
+    private static final ClassName Q_RESOLVED_PREDICATE =
+            ClassName.get("io.github.fludakit.data.query", "ResolvedPredicate");
+    private static final ClassName Q_RESOLVED_SORT =
+            ClassName.get("io.github.fludakit.data.query", "ResolvedSort");
+    private static final ClassName Q_SEEK_TERM =
+            ClassName.get("io.github.fludakit.data.query", "SeekTerm");
+    private static final ClassName Q_PARAM_BINDING =
+            ClassName.get("io.github.fludakit.data.query", "ParamBinding");
+
     /** Attribute-name types that get the spec's {@code TextAttribute} treatment. */
     private static final Set<String> METAMODEL_TEXT_TYPES = Set.of(
             "java.lang.String", "char", "java.lang.Character");
@@ -304,6 +328,10 @@ public class RepositoryProcessor extends AbstractProcessor {
                             + "._" + entityElement.getSimpleName());
                 }
             }
+            // Plan E (E2): the <Repository>Model holder name is claimed up-front, exactly like the
+            // _Entity metamodel, so a nav class can never win the race against it.
+            generatedTypeNames.add(elements.getPackageOf(repository).getQualifiedName()
+                    + "." + repository.getSimpleName() + "Model");
         }
         this.managedEntities = Set.copyOf(managed);
         boolean claimed = false;
@@ -458,6 +486,10 @@ public class RepositoryProcessor extends AbstractProcessor {
 
         Map<String, String> constants = new LinkedHashMap<>();
         List<MethodSpec> methods = new ArrayList<>();
+        // Plan E (E2): one resolved query model per query-by-names method, in declaration order;
+        // @Query methods and the CRUD built-ins carry no resolved structure and stay out.
+        List<ResolvedQueryModel> queryModels = new ArrayList<>();
+        Map<String, Integer> queryModelNames = new HashMap<>();
         boolean paginatedFindAll = false;
         for (Element member : elements.getAllMembers(repository)) {
             if (member.getKind() != ElementKind.METHOD) {
@@ -474,7 +506,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                 paginatedFindAll = true;
             }
             methods.add(generateMethod(method, repositoryType, entity, crud, constants, mapperType, hydrate,
-                    methods, cascadeRelationships));
+                    methods, queryModels, queryModelNames, cascadeRelationships));
         }
         // Registered before the field loop below so the loaders' SELECT constants render as fields.
         if (hydrate) {
@@ -511,6 +543,141 @@ public class RepositoryProcessor extends AbstractProcessor {
 
         writeSourceFile(packageName + "." + implementationName, repository,
                 JavaFile.builder(packageName, classBuilder.build()).skipJavaLangImports(true).build());
+        if (!queryModels.isEmpty()) {
+            generateRepositoryModel(repository, packageName,
+                    repository.getSimpleName() + "Model", entity.typeName(), queryModels);
+        }
+    }
+
+    /**
+     * Emits the generated query-metadata holder: {@code public final class <Repository>Model} with one
+     * nested {@code public static final class <Method>QueryModel implements QueryModel<Entity>} per
+     * query-by-names method. Every accessor returns a literal built over the {@code query} value
+     * records, so the published structure is exactly what rendered the SQL constant in
+     * {@code <Repository>Impl} — introspectable without reflection, and re-emitted per build so it
+     * can never drift. The holder is documentation and metadata: nothing at runtime reads it.
+     */
+    private void generateRepositoryModel(TypeElement repository, String packageName, String modelSimpleName,
+                                         TypeName entityType, List<ResolvedQueryModel> queryModels) {
+        TypeSpec.Builder holder = TypeSpec.classBuilder(modelSimpleName)
+                .addJavadoc("Generated query metadata for {@code $L}: one nested {@code QueryModel} per"
+                        + " query-by-names method. The rendered SQL literals live in {@code $LImpl};"
+                        + " this holder publishes the resolved structure they were rendered from."
+                        + " Generated — do not edit.\n",
+                        modelSimpleName, modelSimpleName.substring(0, modelSimpleName.length() - "Model".length()))
+                .addModifiers(Modifier.PUBLIC, Modifier.FINAL);
+        holder.addMethod(MethodSpec.constructorBuilder().addModifiers(Modifier.PRIVATE).build());
+        for (ResolvedQueryModel model : queryModels) {
+            holder.addType(queryModelType(model, entityType));
+        }
+        writeSourceFile(packageName + "." + modelSimpleName, repository,
+                JavaFile.builder(packageName, holder.build()).skipJavaLangImports(true).build());
+    }
+
+    /** One nested {@code <Method>QueryModel} class serialising {@code model}'s nine accessors. */
+    private TypeSpec queryModelType(ResolvedQueryModel model, TypeName entityType) {
+        ClassName self = ClassName.bestGuess(model.modelName());
+        TypeSpec.Builder query = TypeSpec.classBuilder(model.modelName())
+                .addModifiers(Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
+                .addSuperinterface(ParameterizedTypeName.get(Q_QUERY_MODEL, entityType));
+        query.addField(FieldSpec.builder(self, "INSTANCE", Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
+                .initializer("new $T()", self).build());
+        query.addMethod(MethodSpec.constructorBuilder().addModifiers(Modifier.PRIVATE).build());
+        query.addMethod(scalarAccessor("operation", Q_OPERATION,
+                CodeBlock.of("$T.$L", Q_OPERATION, model.operation().name())));
+        query.addMethod(scalarAccessor("resultKind", Q_RESULT_KIND,
+                CodeBlock.of("$T.$L", Q_RESULT_KIND, model.resultKind().name())));
+        CodeBlock.Builder preds = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
+        for (int i = 0; i < model.predicates().size(); i++) {
+            if (i > 0) {
+                preds.add(", ");
+            }
+            preds.add(resolvedPredicateLiteral(model.predicates().get(i)));
+        }
+        preds.add(")");
+        query.addMethod(scalarAccessor("predicates",
+                ParameterizedTypeName.get(ClassName.get(java.util.List.class), Q_RESOLVED_PREDICATE),
+                preds.build()));
+        CodeBlock.Builder sortLiterals = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
+        for (int i = 0; i < model.sorts().size(); i++) {
+            if (i > 0) {
+                sortLiterals.add(", ");
+            }
+            sortLiterals.add(resolvedSortLiteral(model.sorts().get(i)));
+        }
+        sortLiterals.add(")");
+        query.addMethod(scalarAccessor("sorts",
+                ParameterizedTypeName.get(ClassName.get(java.util.List.class), Q_RESOLVED_SORT),
+                sortLiterals.build()));
+        query.addMethod(scalarAccessor("paging", Q_PAGING_MODE,
+                CodeBlock.of("$T.$L", Q_PAGING_MODE, model.paging().name())));
+        query.addMethod(MethodSpec.methodBuilder("limit").addModifiers(Modifier.PUBLIC)
+                .addAnnotation(Override.class).returns(int.class)
+                .addStatement("return $L", model.limit()).build());
+        CodeBlock.Builder seeks = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
+        for (int i = 0; i < model.seekTerms().size(); i++) {
+            if (i > 0) {
+                seeks.add(", ");
+            }
+            SeekTerm term = model.seekTerms().get(i);
+            seeks.add("new $T($L, $L)", Q_SEEK_TERM, columnRefLiteral(term.ref()), term.ascending());
+        }
+        seeks.add(")");
+        query.addMethod(scalarAccessor("seekTerms",
+                ParameterizedTypeName.get(ClassName.get(java.util.List.class), Q_SEEK_TERM), seeks.build()));
+        CodeBlock.Builder params = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
+        for (int i = 0; i < model.paramBindings().size(); i++) {
+            if (i > 0) {
+                params.add(", ");
+            }
+            ParamBinding binding = model.paramBindings().get(i);
+            params.add("new $T($L, $S)", Q_PARAM_BINDING, binding.argIndex(), binding.paramName());
+        }
+        params.add(")");
+        query.addMethod(scalarAccessor("paramBindings",
+                ParameterizedTypeName.get(ClassName.get(java.util.List.class), Q_PARAM_BINDING),
+                params.build()));
+        return query.build();
+    }
+
+    /** {@code @Override public X name() { return <literal>; }}. */
+    private static MethodSpec scalarAccessor(String name, TypeName returnType, CodeBlock value) {
+        return MethodSpec.methodBuilder(name).addModifiers(Modifier.PUBLIC)
+                .addAnnotation(Override.class).returns(returnType)
+                .addStatement("return $L", value).build();
+    }
+
+    /**
+     * The 4-arg {@code ColumnRef} literal — the same shape {@code generateMetadata} emits for
+     * {@code navigationRefs()}, so a navigated ref serialises identically in both surfaces.
+     */
+    private static CodeBlock columnRefLiteral(ColumnRef ref) {
+        CodeBlock.Builder joins = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
+        for (int i = 0; i < ref.joins().size(); i++) {
+            if (i > 0) {
+                joins.add(", ");
+            }
+            JoinRef join = ref.joins().get(i);
+            joins.add("new $T($S, $S, $S, $S)", MD_JOIN_REF, join.table(), join.alias(),
+                    join.parentColumn(), join.childColumn());
+        }
+        joins.add(")");
+        return CodeBlock.of("new $T($S, $S, $L, $L)", MD_COLUMN_REF, ref.column(), ref.path(),
+                ref.table() == null ? CodeBlock.of("null") : CodeBlock.of("$S", ref.table()), joins.build());
+    }
+
+    private static CodeBlock resolvedPredicateLiteral(ResolvedPredicate resolved) {
+        Predicate p = resolved.predicate();
+        return CodeBlock.of("new $T($T.of($S, $T.$L, $S), $L, $L)", Q_RESOLVED_PREDICATE, Q_PREDICATE,
+                p.property(), Q_OPERATOR, p.operator().name(), p.param(),
+                columnRefLiteral(resolved.ref()), resolved.existential());
+    }
+
+    private static CodeBlock resolvedSortLiteral(ResolvedSort resolved) {
+        SortSpec s = resolved.sort();
+        return CodeBlock.of("new $T(new $T($S, $L, $L), $L, $L)", Q_RESOLVED_SORT, Q_SORT_SPEC,
+                s.property(), s.ascending(), s.ignoreCase(),
+                columnRefLiteral(resolved.ref()), resolved.existential());
     }
 
     // ------------------------------------------- static metamodel + row mapper generation
@@ -1965,6 +2132,8 @@ public class RepositoryProcessor extends AbstractProcessor {
     private MethodSpec generateMethod(ExecutableElement method, DeclaredType repositoryType, EntityModel entity,
                                       boolean crud, Map<String, String> constants, ClassName mapperType,
                                       boolean hydrate, List<MethodSpec> auxMethods,
+                                      List<ResolvedQueryModel> queryModels,
+                                      Map<String, Integer> queryModelNames,
                                       List<EntityRelationship> cascades) {
         ExecutableType resolved = (ExecutableType) types.asMemberOf(repositoryType, method);
         TypeMirror returnMirror = resolved.getReturnType();
@@ -2062,7 +2231,8 @@ public class RepositoryProcessor extends AbstractProcessor {
             return builder.build();
         }
 
-        emitFind(builder, method, resolved, entity, constants, mapperType, hydrate, auxMethods);
+        emitFind(builder, method, resolved, entity, constants, mapperType, hydrate, auxMethods,
+                queryModels, queryModelNames);
         return builder.build();
     }
 
@@ -2902,7 +3072,8 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     private void emitFind(MethodSpec.Builder builder, ExecutableElement method, ExecutableType resolved,
                           EntityModel entity, Map<String, String> constants, ClassName mapperType,
-                          boolean hydrate, List<MethodSpec> auxMethods) {
+                          boolean hydrate, List<MethodSpec> auxMethods,
+                          List<ResolvedQueryModel> queryModels, Map<String, Integer> queryModelNames) {
         String name = method.getSimpleName().toString();
         ParsedMethodName parsed = tryParse(name);
         String action = parsed != null ? parsed.action() : "find";
@@ -2911,6 +3082,11 @@ public class RepositoryProcessor extends AbstractProcessor {
         List<Binding> bindings = bindings(parameters, parameterTypes, parsed);
         TypeMirror returnMirror = resolved.getReturnType();
         Kind kind = kindOf(returnMirror);
+        String queryModelName = capitalize(name) + "QueryModel";
+        int nameClash = queryModelNames.merge(queryModelName, 1, Integer::sum);
+        if (nameClash > 1) {
+            queryModelName = queryModelName + nameClash; // overload collision: declaration-order suffix
+        }
 
         List<Predicate> predicates = predicates(bindings, parameters);
         // Task 8: resolve every method-name predicate property through the compile model, so a path
@@ -2923,6 +3099,10 @@ public class RepositoryProcessor extends AbstractProcessor {
         List<Boolean> existentialPredicates = predicatePaths.stream().map(PathResolution::existential).toList();
 
         if ("count".equals(action) || "exists".equals(action)) {
+            Operation countOperation = "exists".equals(action) ? Operation.EXISTS : Operation.COUNT;
+            queryModels.add(queryModelOf(queryModelName, countOperation, kind, entity.metadata(),
+                    predicates, predicateRefs, existentialPredicates, List.of(), List.of(), List.of(),
+                    0, bindings, parameters));
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
                     methodSql(action, entity.metadata(), predicates, predicateRefs, existentialPredicates,
                             List.of(), List.of(), List.of(), 0, ""));
@@ -2945,6 +3125,9 @@ public class RepositoryProcessor extends AbstractProcessor {
             // legacy predicate could match the wrong rows, and a joined DELETE ... LEFT JOIN is
             // invalid SQL. Multi-hop paths are NOTE-rejected by resolveCompilePaths BEFORE this
             // point (their refs stay unjoined, so they render legacy and emit no delete NOTE).
+            queryModels.add(queryModelOf(queryModelName, Operation.DELETE, kind, entity.metadata(),
+                    predicates, predicateRefs, existentialPredicates, List.of(), List.of(), List.of(),
+                    0, bindings, parameters));
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
                     methodSql("delete", entity.metadata(), predicates, predicateRefs,
                             existentialPredicates, List.of(), List.of(), List.of(), 0, ""));
@@ -2980,6 +3163,22 @@ public class RepositoryProcessor extends AbstractProcessor {
             // The base constant carries the compile-time predicates (join-aware); method-name sort
             // paths are resolved per-emit in emitPaged (local / to-one qualified / to-many
             // aggregate — Task 6), so no sort refs are baked into this constant.
+            List<PathResolution> pagedSortPaths = methodSorts.stream()
+                    .map(s -> resolveCompilePath(entity.metadata(), s.property()))
+                    .toList();
+            List<ColumnRef> pagedSortRefs = new ArrayList<>();
+            List<Boolean> pagedExistentialSorts = new ArrayList<>();
+            for (int i = 0; i < pagedSortPaths.size(); i++) {
+                // NOTE-free resolution: emitPaged rejects a multi-hop sort path right after this point,
+                // so the model degrades a ref-less rejection to the legacy local ref instead of
+                // pre-emitting a second diagnostic (and never serialises a null ref).
+                ColumnRef ref = pagedSortPaths.get(i).ref();
+                pagedSortRefs.add(ref == null ? legacyColumnRef(methodSorts.get(i).property()) : ref);
+                pagedExistentialSorts.add(ref != null && pagedSortPaths.get(i).existential());
+            }
+            queryModels.add(queryModelOf(queryModelName, Operation.FIND, kind, entity.metadata(),
+                    predicates, predicateRefs, existentialPredicates, methodSorts,
+                    pagedSortRefs, pagedExistentialSorts, 0, bindings, parameters));
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
                     methodSql("find", entity.metadata(), predicates, predicateRefs, existentialPredicates,
                             List.of(), List.of(), List.of(), 0, ""));
@@ -3006,6 +3205,10 @@ public class RepositoryProcessor extends AbstractProcessor {
             auxMethods.add(buildFullMapper(fullMapper, entity, mapperType, traversed));
             queryArgForMethod = CodeBlock.of("(rs, rowNum) -> $L(rs, rowNum)", fullMapper);
         }
+        queryModels.add(queryModelOf(queryModelName, Operation.FIND, kind, entity.metadata(),
+                predicates, predicateRefs, existentialPredicates,
+                methodSorts, sortRefs, existentialSorts, parsed != null ? parsed.limit() : 0,
+                bindings, parameters));
         String sql = methodSql(action, entity.metadata(), predicates, predicateRefs, existentialPredicates,
                 methodSorts, sortRefs, existentialSorts, parsed != null ? parsed.limit() : 0, extraProjection);
         String constant = addConstant(constants, "SQL_" + upperSnake(name), sql);
@@ -3265,7 +3468,8 @@ public class RepositoryProcessor extends AbstractProcessor {
      * names a target that could not be resolved (degraded with a NOTE). Both degrade the caller back to
      * the legacy unqualified rendering; neither aborts the compile. {@code existential} marks a ref
      * whose single head is a to-many {@link Prop.EntityList}/{@link Prop.ElementList}: the caller
-     * renders it as an {@link SqlBuilder#existsClause EXISTS semi-join} conjunct and splices NO join.
+     * renders it as an {@link SqlBuilder#existsConjunct(EntitySchema, Predicate, ColumnRef) EXISTS
+     * semi-join} conjunct and splices NO join.
      */
     private record PathResolution(ColumnRef ref, boolean multiHop, boolean unresolvedRelation,
                                   boolean existential) {
@@ -4472,6 +4676,101 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     // --------------------------------------------------------------- nested types
+
+    /**
+     * The processor's resolved view of ONE query-by-names method: the single source feeding both the
+     * rendered SQL constant (E3) and the generated {@code <Repository>Model}. {@code modelName} is
+     * the nested class's simple name (overload-suffixed); {@code QueryModel<T>}'s {@code Object}
+     * parameter is irrelevant to rendering — the generated class re-types it to the entity.
+     */
+    private record ResolvedQueryModel(String modelName, Operation operation, ResultKind resultKind,
+                                      List<ResolvedPredicate> predicates, List<ResolvedSort> sorts,
+                                      PagingMode paging, int limit, List<SeekTerm> seekTerms,
+                                      List<ParamBinding> paramBindings) implements QueryModel<Object> {
+    }
+
+    /**
+     * Fold one query-by-names method's resolved lists into a {@link ResolvedQueryModel}. The paging
+     * mode and result kind come from the return {@link Kind} plus the parsed action; seek terms mirror
+     * the runtime cursor key exactly (E1's base constant drops sorts/limit at render time, so the
+     * declared sorts stay in the model for introspection). {@code paramBindings} are exactly the
+     * {@code .param($S, ...)} tokens {@link #appendBoundParameters} emits, keyed by argument slot.
+     */
+    private static ResolvedQueryModel queryModelOf(String modelName, Operation operation, Kind kind,
+                                                   DataModel md, List<Predicate> predicates,
+                                                   List<ColumnRef> predicateRefs,
+                                                   List<Boolean> existentialPredicates,
+                                                   List<SortSpec> sorts, List<ColumnRef> sortRefs,
+                                                   List<Boolean> existentialSorts, int limit,
+                                                   List<Binding> bindings,
+                                                   List<? extends VariableElement> parameters) {
+        List<ResolvedPredicate> resolvedPredicates = new ArrayList<>();
+        for (int i = 0; i < predicates.size(); i++) {
+            resolvedPredicates.add(new ResolvedPredicate(predicates.get(i), predicateRefs.get(i),
+                    Boolean.TRUE.equals(existentialPredicates.get(i))));
+        }
+        List<ResolvedSort> resolvedSorts = new ArrayList<>();
+        for (int i = 0; i < sorts.size(); i++) {
+            resolvedSorts.add(new ResolvedSort(sorts.get(i), sortRefs.get(i),
+                    Boolean.TRUE.equals(existentialSorts.get(i))));
+        }
+        PagingMode paging = kind == Kind.PAGE ? PagingMode.OFFSET
+                : kind == Kind.CURSORED_PAGE ? PagingMode.CURSOR : PagingMode.NONE;
+        ResultKind resultKind = switch (operation) {
+            case COUNT -> ResultKind.COUNT;
+            case EXISTS -> ResultKind.EXISTS;
+            default -> switch (kind) {
+                case LIST -> ResultKind.LIST;
+                case STREAM -> ResultKind.STREAM;
+                case OPTIONAL -> ResultKind.OPTIONAL;
+                case SINGLE -> ResultKind.SINGLE;
+                case VOID -> ResultKind.VOID;
+                case PAGE -> ResultKind.PAGE;
+                case CURSORED_PAGE -> ResultKind.CURSORED_PAGE;
+            };
+        };
+        // Every paged shape (OFFSET as well as CURSOR) publishes the keyset key: the runtime emitPaged
+        // wiring computes the same props/dirs lists for both, and SqlBuilder.build ignores seek terms
+        // (paging != NONE renders the base constant), so this changes no rendered SQL.
+        List<SeekTerm> seekTerms = paging == PagingMode.NONE ? List.of() : seekTerms(md, resolvedSorts);
+        List<ParamBinding> paramBindings = new ArrayList<>();
+        for (Binding binding : bindings) {
+            Operator operator = binding.operator();
+            if (operator == Operator.IS_NULL || operator == Operator.IS_NOT_NULL
+                    || operator == Operator.TRUE || operator == Operator.FALSE) {
+                continue; // rendered without a token, so not bound
+            }
+            paramBindings.add(new ParamBinding(binding.paramIndex(),
+                    parameters.get(binding.paramIndex()).getSimpleName().toString()));
+        }
+        return new ResolvedQueryModel(modelName, operation, resultKind,
+                List.copyOf(resolvedPredicates), List.copyOf(resolvedSorts), paging, limit,
+                List.copyOf(seekTerms), List.copyOf(paramBindings));
+    }
+
+    /**
+     * The keyset seek terms a cursor uses: the declared sorts (or the {@code id ASC} default when the
+     * method declares none), plus the root-id tiebreak exactly when a to-many sort is present and the
+     * last term is not already an ascending id — the same rule {@link #emitPaged} applies to the
+     * runtime {@code props}/{@code dirs} lists, kept here so the published model matches the wiring.
+     */
+    private static List<SeekTerm> seekTerms(DataModel md, List<ResolvedSort> sorts) {
+        ColumnRef idRef = new ColumnRef(md.idColumn(), md.id().name());
+        if (sorts.isEmpty()) {
+            return List.of(new SeekTerm(idRef, true));
+        }
+        List<SeekTerm> out = new ArrayList<>();
+        for (ResolvedSort sort : sorts) {
+            out.add(new SeekTerm(sort.ref(), sort.sort().ascending()));
+        }
+        boolean toManySort = sorts.stream().anyMatch(ResolvedSort::existential);
+        ResolvedSort last = sorts.get(sorts.size() - 1);
+        boolean lastIsIdAsc = md.id().name().equals(last.sort().property()) && last.sort().ascending();
+        if (toManySort && !lastIsIdAsc) {
+            out.add(new SeekTerm(idRef, true));
+        }
+        return out;
+    }
 
     /**
      * A mapped non-id property. {@code prop} is the descriptor property whose sealed shape drives the

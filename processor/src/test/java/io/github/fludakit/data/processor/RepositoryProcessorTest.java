@@ -4507,14 +4507,4 @@ class RepositoryProcessorTest {
                         + System.lineSeparator() + impl);
     }
 
-    @Test
-    void qualifiedRootSelectRejectsBareProjectionCarryingExtraColumns() {
-        // C-4.5: extraProjection only rides a full-materialisation read, which always qualifies —
-        // the bare-projection + extra combination is unreachable, so it is a precondition throw.
-        // md is never dereferenced (guard precedes the body), hence null.
-        IllegalStateException failure = assertThrows(IllegalStateException.class,
-                () -> RepositoryProcessor.qualifiedRootSelect(null, List.of(), false, "\"customer\".\"name\""));
-        assertTrue("bare projection cannot carry extraProjection".equals(failure.getMessage()),
-                "the precondition message is pinned: " + failure.getMessage());
-    }
 }

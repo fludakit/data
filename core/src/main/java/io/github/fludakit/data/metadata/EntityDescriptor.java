@@ -66,6 +66,16 @@ public interface EntityDescriptor<T> extends EntitySchema {
                 + entityClass().getSimpleName());
     }
 
+    /** A relation head whose attribute is a {@link ListAttribute} fans root rows: never a join. */
+    @Override
+    default boolean isToManyHead(String head) {
+        try {
+            return attribute(head) instanceof io.github.fludakit.data.metamodel.ListAttribute;
+        } catch (IllegalArgumentException unknownProperty) {
+            return false;
+        }
+    }
+
     /**
      * Extracts the runtime value of a dot path from {@code entity} WITHOUT reflection: generated
      * descriptors override this with a {@code switch} over the paths {@link #columnRef(String)}

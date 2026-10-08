@@ -27,8 +27,16 @@ import io.github.fludakit.data.page.SimpleCursoredPage;
 import io.github.fludakit.data.page.SimplePage;
 import io.github.fludakit.data.qbn.ParsedMethodName;
 import io.github.fludakit.data.qbn.QueryByMethodNameParser;
+import io.github.fludakit.data.query.Operation;
 import io.github.fludakit.data.query.Operator;
+import io.github.fludakit.data.query.PagingMode;
+import io.github.fludakit.data.query.ParamBinding;
 import io.github.fludakit.data.query.Predicate;
+import io.github.fludakit.data.query.QueryModel;
+import io.github.fludakit.data.query.ResolvedPredicate;
+import io.github.fludakit.data.query.ResolvedSort;
+import io.github.fludakit.data.query.ResultKind;
+import io.github.fludakit.data.query.SeekTerm;
 import io.github.fludakit.data.query.SortSpec;
 import io.github.fludakit.data.sql.SqlBuilder;
 import io.github.fludakit.jdbc.JdbcClient;
@@ -2638,39 +2646,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * column, so the generated row mapper reads either find constant unchanged.
      */
     private String joinedFindAllSelect(DataModel md) {
-        return qualifiedRootSelect(md, List.of(), true, "");
-    }
-
-    /**
-     * The ONE rendering of the root-table projection/join shell (S-1): a SELECT list of the root
-     * columns (comma-separated in descriptor order, optionally followed by a comma and
-     * extraProjection), FROM the quoted table, then the deduped
-     * {@link SqlBuilder#joinClause} chain for {@code traversedToOne}. {@code qualified} keeps the
-     * deliberate split intact: a statement that splices joins qualifies every leaf
-     * ({@code "root"."col"}, so a joined table sharing a column name cannot make the
-     * list ambiguous) while an EXISTS-only statement keeps the bare {@code "col"} projection
-     * (Task 5). {@code extraProjection} is {@code joinedProjection}'s payload, inserted between the
-     * root columns and FROM. Empty join refs render no chain, which is how the paged findAll
-     * constant stays compatible with the runtime splicing its own joins string. A bare
-     * projection carrying a non-empty extraProjection is unreachable through emission today (full
-     * materialisation implies a to-one join, which implies qualified), so it is a precondition throw,
-     * not new logic.
-     */
-    static String qualifiedRootSelect(DataModel md, List<ColumnRef> traversedToOne,
-                                      boolean qualified, String extraProjection) {
-        if (!qualified && extraProjection != null && !extraProjection.isEmpty()) {
-            throw new IllegalStateException("bare projection cannot carry extraProjection");
-        }
-        StringBuilder sb = new StringBuilder();
-        sb.append("SELECT ").append(md.columns().stream()
-                .map(c -> qualified ? qualifiedColumn(md.tableName(), c.column()) : Names.quote(c.column()))
-                .collect(java.util.stream.Collectors.joining(", ")));
-        if (extraProjection != null && !extraProjection.isEmpty()) {
-            sb.append(", ").append(extraProjection);
-        }
-        sb.append(" FROM ").append(Names.quote(md.tableName()));
-        sb.append(SqlBuilder.joinClause(md, traversedToOne));
-        return sb.toString();
+        return SqlBuilder.qualifiedRootSelect(md, java.util.List.of(), true, "");
     }
 
     /** The single {@code "qualifier"."column"} rendering shared by every qualified projection emission (S-1). */
@@ -3503,139 +3479,39 @@ public class RepositoryProcessor extends AbstractProcessor {
         return null;
     }
 
-    /** True when any resolved ref carries a join, i.e. the statement must splice a LEFT JOIN chain. */
-    private static boolean hasJoins(List<ColumnRef> refs) {
-        for (ColumnRef r : refs) {
-            if (!r.joins().isEmpty()) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     /**
-     * The EXISTS conjunct an existential (to-many head) predicate renders instead of a joined WHERE
-     * term: the ref's last join edge supplies the child table, the relation-property alias and the
-     * alias-side column; the correlation is closed by the JoinRef's root-side column
-     * ({@code parentColumn}) - which the ElementList/EntityList construction sites set to the ROOT
-     * ID (so to-many bytes are unchanged) and the Reference site sets to the owner-side FK. The
-     * leaf term is exactly {@link SqlBuilder#render(Predicate, ColumnRef)}'s alias-qualified
-     * rendering, so the named parameter - and the caller's binding - is unchanged.
-     */
-    private static String existsConjunct(DataModel md, Predicate p, ColumnRef ref) {
-        JoinRef join = ref.joins().get(ref.joins().size() - 1);
-        return SqlBuilder.existsClause(md.tableName(), join.parentColumn(), join.table(), join.alias(),
-                join.childColumn(), p, ref);
-    }
-
-    /**
-     * Builds a method-name SQL constant. When no predicate traverses a to-many (existential) head and
-     * no predicate or ORDER BY property traverses a to-one relation, this delegates to
-     * {@link SqlBuilder}'s classic rendering, so every existing local constant stays
-     * byte-identical. When a traversal is present, the resolved refs contribute a deduplicated
-     * {@link SqlBuilder#joinClause LEFT JOIN chain} spliced right after the {@code FROM} table, the WHERE
-     * columns are alias-qualified through {@link SqlBuilder#render(Predicate, ColumnRef)}, and ORDER BY is
-     * built from the resolved refs with an explicit {@code ASC}/{@code DESC} (local refs unqualified for
-     * legacy parity, joined refs qualified against the root table). Projection is unchanged for
-     * count/delete, and delete renders EXISTS conjuncts for every joined (relation-traversing) ref
-     * (C-1); parameter binding is untouched (the caller binds the JAVA PARAMETER NAME).
+     * E1 transitional adapter: the loose per-call lists folded into a {@link QueryModel} view and
+     * rendered by {@link SqlBuilder#build(EntitySchema, QueryModel, String)} — the layout lives in
+     * exactly one place now. Deleted in E3 once every emitter site feeds a real model.
      */
     private String methodSql(String action, DataModel md, List<Predicate> predicates,
                              List<ColumnRef> predicateRefs, List<Boolean> existentialPredicates,
                              List<SortSpec> sorts, List<ColumnRef> sortRefs, List<Boolean> existentialSorts,
                              int limit, String extraProjection) {
-        // Task 5: an existential (to-many head) predicate ref renders as an EXISTS conjunct and
-        // contributes NO join. Task 6: the same rule now holds for SORTS — a to-many sort head
-        // renders the aggregate subquery ORDER BY term and contributes NO join; only to-one
-        // predicate refs and to-one sort refs splice the LEFT JOIN chain. The legacy delegation
-        // fires exactly when nothing joins AND nothing needs an EXISTS or an aggregate, so every
-        // pre-Task-5 constant stays byte-identical. C-1: in a DELETE every traversed predicate
-        // (to-one included) renders the EXISTS conjunct; a joined DELETE ... LEFT JOIN is invalid
-        // SQL on H2/PostgreSQL/SQL Server, so delete mode contributes no join refs and the
-        // else if ("delete") shell branch stays join-free by construction.
-        List<ColumnRef> joinRefs = new ArrayList<>();
-        List<Integer> existentialIndices = new ArrayList<>();
-        boolean deleteMode = "delete".equals(action);
-        for (int i = 0; i < predicateRefs.size(); i++) {
-            if (Boolean.TRUE.equals(existentialPredicates.get(i))
-                    || (deleteMode && !predicateRefs.get(i).joins().isEmpty())) {
-                existentialIndices.add(i);
-            } else {
-                joinRefs.add(predicateRefs.get(i));
-            }
-        }
-        for (int i = 0; i < sortRefs.size(); i++) {
-            if (!Boolean.TRUE.equals(existentialSorts.get(i))) {
-                joinRefs.add(sortRefs.get(i));
-            }
-        }
-        if (existentialIndices.isEmpty() && !existentialSorts.contains(Boolean.TRUE)
-                && !hasJoins(joinRefs)) {
-            if ("count".equals(action) || "exists".equals(action)) {
-                return new SqlBuilder().countBy(md, predicates);
-            }
-            if ("delete".equals(action)) {
-                return new SqlBuilder().deleteBy(md, predicates);
-            }
-            return new SqlBuilder().selectBy(md, predicates, sorts, limit, null);
-        }
-        boolean spliceJoins = hasJoins(joinRefs);
-        StringBuilder sb = new StringBuilder();
-        if ("count".equals(action) || "exists".equals(action)) {
-            sb.append("SELECT COUNT(*) FROM ").append(Names.quote(md.tableName()))
-                    .append(SqlBuilder.joinClause(md, joinRefs));
-        } else if ("delete".equals(action)) {
-            sb.append("DELETE FROM ").append(Names.quote(md.tableName()))
-                    .append(SqlBuilder.joinClause(md, joinRefs));
-        } else {
-            // Joined find: every root column is qualified by the root table. Unqualified bare names
-            // become ambiguous the moment a join adds a table sharing a column name (e.g. the target's
-            // own "id"), and a full-materialisation read joins exactly such a table. Qualifying keeps
-            // each label = its physical column, so the generated row mapper still reads it by name.
-            // Task 5: an EXISTS-only statement splices NO join, so it keeps the unjoined (bare)
-            // projection - EXISTS contributes no columns.
-            // S-1: the projection/join shell is qualifiedRootSelect, the same rendering behind
-            // joinedFindAllSelect and the SQL_FIND_ALL_QUALIFIED constant.
-            sb.append(qualifiedRootSelect(md, joinRefs, spliceJoins, extraProjection));
-        }
-        List<String> conjuncts = new ArrayList<>();
+        Operation operation = "count".equals(action) ? Operation.COUNT
+                : "exists".equals(action) ? Operation.EXISTS
+                : "delete".equals(action) ? Operation.DELETE : Operation.FIND;
+        List<ResolvedPredicate> resolvedPredicates = new ArrayList<>();
         for (int i = 0; i < predicates.size(); i++) {
-            // C-1: delete mode routes every traversed predicate ref into existentialIndices (even a
-            // to-one head whose existentialPredicates flag is FALSE), so the bare render must key on
-            // the same set or a delete predicate would double-render (bare qualified + EXISTS).
-            if (!existentialIndices.contains(i)) {
-                conjuncts.add(SqlBuilder.render(predicates.get(i), predicateRefs.get(i)));
-            }
+            resolvedPredicates.add(new ResolvedPredicate(predicates.get(i), predicateRefs.get(i),
+                    Boolean.TRUE.equals(existentialPredicates.get(i))));
         }
-        for (int i : existentialIndices) {
-            conjuncts.add(existsConjunct(md, predicates.get(i), predicateRefs.get(i)));
+        List<ResolvedSort> resolvedSorts = new ArrayList<>();
+        for (int i = 0; i < sorts.size(); i++) {
+            resolvedSorts.add(new ResolvedSort(sorts.get(i), sortRefs.get(i),
+                    Boolean.TRUE.equals(existentialSorts.get(i))));
         }
-        if (!conjuncts.isEmpty()) {
-            sb.append(" WHERE ").append(String.join(" AND ", conjuncts));
-        }
-        // C-4.2 policy: the root-id tiebreak is a paged-cursor concern only (seek keys need a total
-        // order); non-paged ORDER BY renders exactly the declared terms.
-        if (!sorts.isEmpty()) {
-            StringBuilder orderBy = new StringBuilder();
-            for (int i = 0; i < sorts.size(); i++) {
-                SortSpec sort = sorts.get(i);
-                ColumnRef ref = sortRefs.get(i);
-                String term = Boolean.TRUE.equals(existentialSorts.get(i))
-                        ? SqlBuilder.aggregateSortTerm(md, ref, sort.ascending())
-                        : ref.joins().isEmpty() && ref.table() == null
-                                ? Names.quote(ref.column())
-                                : SqlBuilder.qualify(ref, md.tableName());
-                if (orderBy.length() > 0) {
-                    orderBy.append(", ");
-                }
-                orderBy.append(term).append(sort.ascending() ? " ASC" : " DESC");
-            }
-            sb.append(" ORDER BY ").append(orderBy);
-        }
-        if (limit > 0) {
-            sb.append(" LIMIT ").append(limit);
-        }
-        return sb.toString();
+        return new SqlBuilder().build(md, new LegacyQueryModel(operation,
+                List.copyOf(resolvedPredicates), List.copyOf(resolvedSorts), limit), extraProjection);
+    }
+
+    /** The E1 render-only view the transitional {@link #methodSql} adapter hands to {@code SqlBuilder}. */
+    private record LegacyQueryModel(Operation operation, List<ResolvedPredicate> predicates,
+                                    List<ResolvedSort> sorts, int limit) implements QueryModel<Object> {
+        @Override public ResultKind resultKind() { return ResultKind.LIST; }
+        @Override public PagingMode paging() { return PagingMode.NONE; }
+        @Override public List<SeekTerm> seekTerms() { return List.of(); }
+        @Override public List<ParamBinding> paramBindings() { return List.of(); }
     }
 
     private String specialParameter(List<? extends VariableElement> parameters,

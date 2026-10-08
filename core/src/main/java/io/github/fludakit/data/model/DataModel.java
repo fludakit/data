@@ -58,7 +58,13 @@ public sealed interface DataModel extends EntitySchema
         throw new IllegalArgumentException("Unknown property '" + name + "' on " + typeName());
     }
 
-    /** True when the named root property is a to-many container (one-to-many / element collection). */
+    /**
+     * True when the named root property is a to-many container (one-to-many / element collection).
+     * Consumed by {@link io.github.fludakit.data.sql.SqlBuilder#joinClause}, which asks the schema it
+     * is rendering for rather than testing {@code instanceof EntityDescriptor} — this is the one
+     * production consumer of the method.
+     */
+    @Override
     default boolean isToManyHead(String propName) {
         for (Prop p : props()) {
             if (p.name().equals(propName)) {

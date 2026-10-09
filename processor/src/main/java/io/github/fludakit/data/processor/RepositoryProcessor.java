@@ -12,16 +12,13 @@ import com.squareup.javapoet.TypeName;
 import com.squareup.javapoet.TypeSpec;
 import com.squareup.javapoet.TypeVariableName;
 import io.github.fludakit.data.Names;
-import io.github.fludakit.data.annotation.Association;
-import io.github.fludakit.data.annotation.Identity;
 import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.JoinRef;
-import io.github.fludakit.data.model.DataModel;
-import io.github.fludakit.data.model.DataModel.Prop;
-import io.github.fludakit.data.model.DataModel.Stereotype;
-import io.github.fludakit.data.model.EmbeddedValueObjectModel;
-import io.github.fludakit.data.model.EntityDataModel;
-import io.github.fludakit.data.model.ExternalValueObjectModel;
+import io.github.fludakit.data.processor.model.TypeMapping;
+import io.github.fludakit.data.processor.model.TypeMapping.Prop;
+import io.github.fludakit.data.processor.model.TypeMapping.Stereotype;
+import io.github.fludakit.data.processor.model.EmbeddedValueObjectMapping;
+import io.github.fludakit.data.processor.model.ElementCollectionValueObjectMapping;
 import io.github.fludakit.data.page.CursorSupport;
 import io.github.fludakit.data.page.SimpleCursoredPage;
 import io.github.fludakit.data.page.SimplePage;
@@ -32,19 +29,20 @@ import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.PagingMode;
 import io.github.fludakit.data.query.ParamBinding;
 import io.github.fludakit.data.query.Predicate;
-import io.github.fludakit.data.query.QueryModel;
-import io.github.fludakit.data.query.ResolvedPredicate;
-import io.github.fludakit.data.query.ResolvedSort;
+import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
 import io.github.fludakit.data.query.SeekTerm;
 import io.github.fludakit.data.query.SortSpec;
+import io.github.fludakit.data.sql.H2Dialect;
 import io.github.fludakit.data.sql.SqlBuilder;
+import io.github.fludakit.data.sql.SqlDialect;
 import io.github.fludakit.jdbc.JdbcClient;
 import io.github.fludakit.jdbc.support.GeneratedKeyHolder;
 import jakarta.data.Sort;
 import jakarta.data.page.PageRequest;
 import jakarta.data.repository.By;
 import jakarta.data.repository.Delete;
+import jakarta.data.repository.Find;
 import jakarta.data.repository.Insert;
 import jakarta.data.repository.OrderBy;
 import jakarta.data.repository.Param;
@@ -73,9 +71,6 @@ import javax.lang.model.type.TypeMirror;
 import javax.lang.model.util.Elements;
 import javax.lang.model.util.Types;
 import javax.tools.Diagnostic;
-import javax.tools.JavaFileObject;
-import java.io.IOException;
-import java.io.Writer;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -87,12 +82,12 @@ import java.util.Set;
 /**
  * Generates five artifacts at compile time: a {@code <Repository>Impl} class for every
  * {@link Repository @Repository} interface, a reflection-free {@code <Entity>Metadata} class
- * implementing {@link io.github.fludakit.data.metadata.EntityDescriptor} (the compile-time descriptor model behind all SQL), a
+ * implementing {@link io.github.fludakit.data.metadata.EntityMetadata} (the runtime metamodel for the entity), a
  * {@code <Entity>RowMapper} for entities whose fields are all JDBC-safe or embeddable value objects,
  * a Jakarta Data 1.0 {@code _Entity} static metamodel interface per aggregate root
  * (see {@link #generateStaticMetamodel}), and — only when the repository declares at least one
- * query-by-names or {@code @Find} finder — a {@code <Repository>Model} holder publishing one
- * nested {@link QueryModel} per query-by-names method (see {@link #generateRepositoryModel}).
+ * query-by-names or {@code @Find} finder — a {@code <Repository>Queries} holder publishing one
+ * nested {@link QueryDefinition} per query-by-names method (see {@link #generateRepositoryQueries}).
  *
  * <p>The generated implementation class is {@link ApplicationScoped} and carries a single injected
  * collaborator, a {@link JdbcClient}. Every query's SQL is emitted as a {@code private static final
@@ -102,10 +97,6 @@ import java.util.Set;
  */
 @SupportedAnnotationTypes("jakarta.data.repository.Repository")
 public class RepositoryProcessor extends AbstractProcessor {
-
-    private static final String CRUD_REPOSITORY = "jakarta.data.repository.CrudRepository";
-    private static final String BASIC_REPOSITORY = "jakarta.data.repository.BasicRepository";
-    private static final String DATA_REPOSITORY = "jakarta.data.repository.DataRepository";
 
     private static final String PAGE_REQUEST = "jakarta.data.page.PageRequest";
     private static final String ORDER = "jakarta.data.Order";
@@ -123,22 +114,26 @@ public class RepositoryProcessor extends AbstractProcessor {
      * 1.0 attribute subtypes the generated metamodel fields instantiate, so one field instance is
      * both the user-facing sort anchor and the runtime descriptor attribute.
      */
-    private static final ClassName FM_COLUMN = ClassName.get("io.github.fludakit.data.metamodel", "ColumnAttribute");
+    private static final ClassName FM_COLUMN = ClassName.get("io.github.fludakit.data.metamodel", "ScalarAttribute");
     private static final ClassName FM_ID = ClassName.get("io.github.fludakit.data.metamodel", "IdAttribute");
-    private static final ClassName FM_SORTABLE = ClassName.get("io.github.fludakit.data.metamodel", "SortableColumnAttribute");
-    private static final ClassName FM_TEXT = ClassName.get("io.github.fludakit.data.metamodel", "TextColumnAttribute");
+    private static final ClassName FM_SORTABLE = ClassName.get("io.github.fludakit.data.metamodel", "SortableScalarAttribute");
+    private static final ClassName FM_TEXT = ClassName.get("io.github.fludakit.data.metamodel", "TextScalarAttribute");
+    private static final ClassName FM_PATH_ATTRIBUTE =
+            ClassName.get("io.github.fludakit.data.metamodel", "PathAttribute");
+    private static final ClassName FM_PATH_ATTRIBUTE_RECORD =
+            ClassName.get("io.github.fludakit.data.metamodel", "PathAttributeRecord");
     private static final ClassName FM_EMBEDDED = ClassName.get("io.github.fludakit.data.metamodel", "EmbeddableAttribute");
     private static final ClassName FM_FK = ClassName.get("io.github.fludakit.data.metamodel", "EntityAttribute");
     private static final ClassName FM_OTM = ClassName.get("io.github.fludakit.data.metamodel", "ListAttribute");
     private static final ClassName FM_EC = ClassName.get("io.github.fludakit.data.metamodel", "ListAttribute");
     private static final ClassName FM_COLUMN_RECORD =
-            ClassName.get("io.github.fludakit.data.metamodel", "ColumnAttributeRecord");
+            ClassName.get("io.github.fludakit.data.metamodel", "ScalarAttributeRecord");
     private static final ClassName FM_ID_RECORD =
             ClassName.get("io.github.fludakit.data.metamodel", "IdAttributeRecord");
     private static final ClassName FM_SORTABLE_RECORD =
-            ClassName.get("io.github.fludakit.data.metamodel", "SortableColumnAttributeRecord");
+            ClassName.get("io.github.fludakit.data.metamodel", "SortableScalarAttributeRecord");
     private static final ClassName FM_TEXT_RECORD =
-            ClassName.get("io.github.fludakit.data.metamodel", "TextColumnAttributeRecord");
+            ClassName.get("io.github.fludakit.data.metamodel", "TextScalarAttributeRecord");
     private static final ClassName FM_EMBEDDED_RECORD =
             ClassName.get("io.github.fludakit.data.metamodel", "EmbeddableAttributeRecord");
     private static final ClassName FM_FK_RECORD =
@@ -149,12 +144,12 @@ public class RepositoryProcessor extends AbstractProcessor {
             ClassName.get("io.github.fludakit.data.metamodel", "ListAttributeRecord");
     private static final ClassName MD_COLUMN_REF =
             ClassName.get("io.github.fludakit.data.metadata", "ColumnRef");
-    private static final ClassName MD_JOIN_REF =
+    private static final ClassName MD_JOIN_EDGE =
             ClassName.get("io.github.fludakit.data.metadata", "JoinRef");
 
-    // Plan E (E2): the query-metadata types the generated <Repository>Model serialises literals with.
-    private static final ClassName Q_QUERY_MODEL =
-            ClassName.get("io.github.fludakit.data.query", "QueryModel");
+    // Plan E (E2): the query-metadata types the generated <Repository>Queries serialises literals with.
+    private static final ClassName Q_QUERY_DEFINITION =
+            ClassName.get("io.github.fludakit.data.query", "QueryDefinition");
     private static final ClassName Q_OPERATION =
             ClassName.get("io.github.fludakit.data.query", "Operation");
     private static final ClassName Q_RESULT_KIND =
@@ -167,10 +162,6 @@ public class RepositoryProcessor extends AbstractProcessor {
             ClassName.get("io.github.fludakit.data.query", "SortSpec");
     private static final ClassName Q_OPERATOR =
             ClassName.get("io.github.fludakit.data.query", "Operator");
-    private static final ClassName Q_RESOLVED_PREDICATE =
-            ClassName.get("io.github.fludakit.data.query", "ResolvedPredicate");
-    private static final ClassName Q_RESOLVED_SORT =
-            ClassName.get("io.github.fludakit.data.query", "ResolvedSort");
     private static final ClassName Q_SEEK_TERM =
             ClassName.get("io.github.fludakit.data.query", "SeekTerm");
     private static final ClassName Q_PARAM_BINDING =
@@ -220,6 +211,11 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     private Types types;
     private Elements elements;
+    private RepositoryTypeResolver repositoryTypeResolver;
+    private RepositoryTypeMappingBuilder typeMappingBuilder;
+    private RepositoryMethodValidator repositoryMethodValidator;
+    private RepositorySourceWriter sourceWriter;
+    private final SqlDialect sqlDialect = H2Dialect.INSTANCE;
 
     /** Entity FQN → generated {@code <Entity>RowMapper} type, deduped across processing rounds. */
     private final Map<String, ClassName> rowMappers = new LinkedHashMap<>();
@@ -236,9 +232,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * "already emitted" guard so several repositories over the same entity produce one metamodel.
      */
     private final Map<String, ClassName> metamodelTypes = new LinkedHashMap<>();
-
-    /** Entity/value-object FQN → compile-time descriptor, memoized for {@link #descriptorFor}. */
-    private final Map<String, DataModel> descriptorCache = new HashMap<>();
+    private final Set<String> generatedNavigationTypes = new HashSet<>();
 
     /**
      * Every generated type FQN this processing session claims or emits: the {@code _Entity}
@@ -256,15 +250,6 @@ public class RepositoryProcessor extends AbstractProcessor {
      */
     private final Set<String> generatedTypeNames = new HashSet<>();
 
-    /** FQNs whose descriptor is currently being built; the cycle guard for {@link #descriptorFor}. */
-    private final Set<String> inProgress = new HashSet<>();
-
-    /** Embedded value-object FQN → compile-time model, memoized for {@link #voModel}. */
-    private final Map<String, EntityModel> voModels = new HashMap<>();
-
-    /** FQNs whose embedded model is currently on the build stack; the cycle guard for {@link #voModel}. */
-    private final Set<String> voModelsInProgress = new HashSet<>();
-
     /**
      * Value-object FQN → generated {@code <VO>RowMapper} type, deduped across processing rounds.
      * Populated for {@code List<@ValueObject>} element-collection children (Task 3) so a VO reused by
@@ -272,13 +257,6 @@ public class RepositoryProcessor extends AbstractProcessor {
      * for many-to-one/one-to-many child hydration.
      */
     private final Map<String, ClassName> voRowMappers = new LinkedHashMap<>();
-
-    /**
-     * Entity FQN → compile-time {@link EntityModel} for a relationship TARGET resolved by the
-     * managed-target gate (Task 4). Like {@link #voModels}, {@link #buildEntity} is idempotent, so this
-     * is a pure memo; a target reused by several repositories is walked once.
-     */
-    private final Map<String, EntityModel> entityModels = new HashMap<>();
 
     /**
      * FQNs of every entity with a {@code @Repository} in the CURRENT round, computed in {@link #process}
@@ -302,6 +280,16 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
         this.types = processingEnv.getTypeUtils();
         this.elements = processingEnv.getElementUtils();
+        this.repositoryTypeResolver = new RepositoryTypeResolver(types, elements);
+        if (typeMappingBuilder == null) {
+            typeMappingBuilder = new RepositoryTypeMappingBuilder(
+                    types, elements, processingEnv.getMessager());
+        }
+        this.repositoryMethodValidator = new RepositoryMethodValidator(processingEnv.getMessager());
+        if (sourceWriter == null) {
+            sourceWriter = new RepositorySourceWriter(
+                    processingEnv.getFiler(), processingEnv.getMessager(), generatedTypeNames);
+        }
         // Round pre-scan (Task 4 / Decision 7): the set of managed entity FQNs (every entity that some
         // @Repository in THIS round resolves to) must be known BEFORE generate() dispatch, so a
         // repository processed early in the round can already see targets that only get their own
@@ -315,7 +303,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             }
             TypeElement repository = (TypeElement) element;
             repositories.add(repository);
-            TypeMirror entityMirror = resolveEntityType(repository, new HashSet<>());
+            TypeMirror entityMirror = repositoryTypeResolver.entityType(repository);
             if (entityMirror != null && entityMirror.getKind() != TypeKind.TYPEVAR
                     && entityMirror.getKind() != TypeKind.WILDCARD
                     && types.erasure(entityMirror) instanceof DeclaredType declared
@@ -330,10 +318,10 @@ public class RepositoryProcessor extends AbstractProcessor {
                             + "._" + entityElement.getSimpleName());
                 }
             }
-            // Plan E (E2): the <Repository>Model holder name is claimed up-front, exactly like the
+            // Plan E (E2): the <Repository>Queries holder name is claimed up-front, exactly like the
             // _Entity metamodel, so a nav class can never win the race against it.
             generatedTypeNames.add(elements.getPackageOf(repository).getQualifiedName()
-                    + "." + repository.getSimpleName() + "Model");
+                    + "." + repository.getSimpleName() + "Queries");
         }
         this.managedEntities = Set.copyOf(managed);
         boolean claimed = false;
@@ -347,7 +335,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     // --------------------------------------------------------------- generation
 
     private void generate(TypeElement repository) {
-        TypeMirror entityMirror = resolveEntityType(repository, new HashSet<>());
+        TypeMirror entityMirror = repositoryTypeResolver.entityType(repository);
         if (entityMirror == null || entityMirror.getKind() == TypeKind.TYPEVAR
                 || entityMirror.getKind() == TypeKind.WILDCARD
                 || !(types.erasure(entityMirror) instanceof DeclaredType)) {
@@ -482,16 +470,17 @@ public class RepositoryProcessor extends AbstractProcessor {
         boolean hydrate = hasGeneratedHydration(entity, mapperType, hydratedCollections, hydratedRelationships);
 
         DeclaredType repositoryType = (DeclaredType) repository.asType();
-        boolean crud = extendsCrud(repository, new HashSet<>());
+        boolean crud = repositoryTypeResolver.extendsCrud(repository);
+        boolean dataRepository = repositoryTypeResolver.extendsDataRepository(repository);
         String packageName = elements.getPackageOf(repository).getQualifiedName().toString();
         String implementationName = repository.getSimpleName() + "Impl";
 
         Map<String, String> constants = new LinkedHashMap<>();
         List<MethodSpec> methods = new ArrayList<>();
-        // Plan E (E2): one resolved query model per query-by-names method, in declaration order;
-        // @Query methods and the CRUD built-ins carry no resolved structure and stay out.
-        List<ResolvedQueryModel> queryModels = new ArrayList<>();
-        Map<String, Integer> queryModelNames = new HashMap<>();
+        // Plan E (E2): one logical query model per query-by-names method, in declaration order;
+        // @Query methods and the CRUD built-ins carry no structured query metadata and stay out.
+        List<QueryDefinitionSpec> queryDefinitions = new ArrayList<>();
+        Map<String, Integer> queryDefinitionNames = new HashMap<>();
         boolean paginatedFindAll = false;
         for (Element member : elements.getAllMembers(repository)) {
             if (member.getKind() != ElementKind.METHOD) {
@@ -507,8 +496,11 @@ public class RepositoryProcessor extends AbstractProcessor {
             if (method.getSimpleName().contentEquals("findAll") && method.getParameters().size() == 2) {
                 paginatedFindAll = true;
             }
+            if (!repositoryMethodValidator.validate(method, dataRepository)) {
+                continue;
+            }
             methods.add(generateMethod(method, repositoryType, entity, crud, constants, mapperType, hydrate,
-                    methods, queryModels, queryModelNames, cascadeRelationships));
+                    methods, queryDefinitions, queryDefinitionNames, cascadeRelationships));
         }
         // Registered before the field loop below so the loaders' SELECT constants render as fields.
         if (hydrate) {
@@ -529,6 +521,10 @@ public class RepositoryProcessor extends AbstractProcessor {
                 .addModifiers(Modifier.PUBLIC)
                 .addAnnotation(ApplicationScoped.class)
                 .addSuperinterface(TypeName.get(repository.asType()));
+        classBuilder.addField(FieldSpec.builder(SqlDialect.class, "SQL_DIALECT",
+                        Modifier.PRIVATE, Modifier.STATIC, Modifier.FINAL)
+                .initializer("$T.INSTANCE", H2Dialect.class)
+                .build());
         for (Map.Entry<String, String> constant : constants.entrySet()) {
             classBuilder.addField(FieldSpec.builder(String.class, constant.getKey(),
                             Modifier.PRIVATE, Modifier.STATIC, Modifier.FINAL)
@@ -545,96 +541,97 @@ public class RepositoryProcessor extends AbstractProcessor {
 
         writeSourceFile(packageName + "." + implementationName, repository,
                 JavaFile.builder(packageName, classBuilder.build()).skipJavaLangImports(true).build());
-        if (!queryModels.isEmpty()) {
-            generateRepositoryModel(repository, packageName,
-                    repository.getSimpleName() + "Model", entity.typeName(), queryModels);
+        if (!queryDefinitions.isEmpty()) {
+            generateRepositoryQueries(repository, packageName,
+                    repository.getSimpleName() + "Queries", queryDefinitions);
         }
     }
 
     /**
-     * Emits the generated query-metadata holder: {@code public final class <Repository>Model} with one
-     * nested {@code public static final class <Method>QueryModel implements QueryModel<Entity>} per
-     * query-by-names method. Every accessor returns a literal built over the {@code query} value
-     * records, so the published structure is exactly what rendered the SQL constant in
+     * Emits the generated query-metadata holder: {@code public final class <Repository>Queries} with one
+     * nested {@code public static final class <Method>Query implements QueryDefinition} per
+     * query-by-names method. Every accessor returns a literal built over logical query records,
+     * so the published structure describes the plan rendered into the SQL constant in
      * {@code <Repository>Impl} — introspectable without reflection, and re-emitted per build so it
      * can never drift. The holder is documentation and metadata: nothing at runtime reads it.
      */
-    private void generateRepositoryModel(TypeElement repository, String packageName, String modelSimpleName,
-                                         TypeName entityType, List<ResolvedQueryModel> queryModels) {
-        TypeSpec.Builder holder = TypeSpec.classBuilder(modelSimpleName)
-                .addJavadoc("Generated query metadata for {@code $L}: one nested {@code QueryModel} per"
+    private void generateRepositoryQueries(TypeElement repository, String packageName, String queriesSimpleName,
+                                           List<QueryDefinitionSpec> queryDefinitions) {
+        TypeSpec.Builder holder = TypeSpec.classBuilder(queriesSimpleName)
+                .addJavadoc("Generated query definitions for {@code $L}: one nested {@code <Method>Query} per"
                         + " query-by-names method. The rendered SQL literals live in {@code $LImpl};"
-                        + " this holder publishes the resolved structure they were rendered from."
+                        + " this holder publishes logical paths and query semantics used to render them."
                         + " Generated — do not edit.\n",
-                        modelSimpleName, modelSimpleName.substring(0, modelSimpleName.length() - "Model".length()))
+                        queriesSimpleName, queriesSimpleName.substring(0,
+                                queriesSimpleName.length() - "Queries".length()))
                 .addModifiers(Modifier.PUBLIC, Modifier.FINAL);
         holder.addMethod(MethodSpec.constructorBuilder().addModifiers(Modifier.PRIVATE).build());
-        for (ResolvedQueryModel model : queryModels) {
-            holder.addType(queryModelType(model, entityType));
+        for (QueryDefinitionSpec definition : queryDefinitions) {
+            holder.addType(queryDefinitionType(definition));
         }
-        writeSourceFile(packageName + "." + modelSimpleName, repository,
+        writeSourceFile(packageName + "." + queriesSimpleName, repository,
                 JavaFile.builder(packageName, holder.build()).skipJavaLangImports(true).build());
     }
 
-    /** One nested {@code <Method>QueryModel} class serialising the eight {@link QueryModel}
-     *  accessors of {@code model}; its {@code modelName} names the nested class — it is not an
+    /** One nested {@code <Method>Query} class serialising the {@link QueryDefinition}
+     *  accessors of {@code definition}; its {@code typeName} names the nested class — it is not an
      *  accessor. */
-    private TypeSpec queryModelType(ResolvedQueryModel model, TypeName entityType) {
-        ClassName self = ClassName.bestGuess(model.modelName());
-        TypeSpec.Builder query = TypeSpec.classBuilder(model.modelName())
+    private TypeSpec queryDefinitionType(QueryDefinitionSpec definition) {
+        ClassName self = ClassName.bestGuess(definition.typeName());
+        TypeSpec.Builder query = TypeSpec.classBuilder(definition.typeName())
                 .addModifiers(Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
-                .addSuperinterface(ParameterizedTypeName.get(Q_QUERY_MODEL, entityType));
+                .addSuperinterface(Q_QUERY_DEFINITION);
         query.addField(FieldSpec.builder(self, "INSTANCE", Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
                 .initializer("new $T()", self).build());
         query.addMethod(MethodSpec.constructorBuilder().addModifiers(Modifier.PRIVATE).build());
         query.addMethod(scalarAccessor("operation", Q_OPERATION,
-                CodeBlock.of("$T.$L", Q_OPERATION, model.operation().name())));
+                CodeBlock.of("$T.$L", Q_OPERATION, definition.operation().name())));
         query.addMethod(scalarAccessor("resultKind", Q_RESULT_KIND,
-                CodeBlock.of("$T.$L", Q_RESULT_KIND, model.resultKind().name())));
+                CodeBlock.of("$T.$L", Q_RESULT_KIND, definition.resultKind().name())));
         CodeBlock.Builder preds = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
-        for (int i = 0; i < model.predicates().size(); i++) {
+        for (int i = 0; i < definition.predicates().size(); i++) {
             if (i > 0) {
                 preds.add(", ");
             }
-            preds.add(resolvedPredicateLiteral(model.predicates().get(i)));
+            preds.add(predicateLiteral(definition.predicates().get(i)));
         }
         preds.add(")");
         query.addMethod(scalarAccessor("predicates",
-                ParameterizedTypeName.get(ClassName.get(java.util.List.class), Q_RESOLVED_PREDICATE),
+                ParameterizedTypeName.get(ClassName.get(java.util.List.class), Q_PREDICATE),
                 preds.build()));
         CodeBlock.Builder sortLiterals = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
-        for (int i = 0; i < model.sorts().size(); i++) {
+        for (int i = 0; i < definition.sorts().size(); i++) {
             if (i > 0) {
                 sortLiterals.add(", ");
             }
-            sortLiterals.add(resolvedSortLiteral(model.sorts().get(i)));
+            sortLiterals.add(sortLiteral(definition.sorts().get(i)));
         }
         sortLiterals.add(")");
         query.addMethod(scalarAccessor("sorts",
-                ParameterizedTypeName.get(ClassName.get(java.util.List.class), Q_RESOLVED_SORT),
+                ParameterizedTypeName.get(ClassName.get(java.util.List.class), Q_SORT_SPEC),
                 sortLiterals.build()));
         query.addMethod(scalarAccessor("paging", Q_PAGING_MODE,
-                CodeBlock.of("$T.$L", Q_PAGING_MODE, model.paging().name())));
+                CodeBlock.of("$T.$L", Q_PAGING_MODE, definition.paging().name())));
         query.addMethod(MethodSpec.methodBuilder("limit").addModifiers(Modifier.PUBLIC)
                 .addAnnotation(Override.class).returns(int.class)
-                .addStatement("return $L", model.limit()).build());
+                .addStatement("return $L", definition.limit()).build());
         CodeBlock.Builder seeks = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
-        for (int i = 0; i < model.seekTerms().size(); i++) {
+        for (int i = 0; i < definition.seekTerms().size(); i++) {
             if (i > 0) {
                 seeks.add(", ");
             }
-            SeekTerm term = model.seekTerms().get(i);
+            SeekTerm term = definition.seekTerms().get(i);
             seeks.add("new $T($L, $L)", Q_SEEK_TERM, columnRefLiteral(term.ref()), term.ascending());
         }
         seeks.add(")");
         query.addMethod(scalarAccessor("seekTerms",
                 ParameterizedTypeName.get(ClassName.get(java.util.List.class), Q_SEEK_TERM), seeks.build()));
         CodeBlock.Builder params = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
-        for (int i = 0; i < model.paramBindings().size(); i++) {
+        for (int i = 0; i < definition.paramBindings().size(); i++) {
             if (i > 0) {
                 params.add(", ");
             }
-            ParamBinding binding = model.paramBindings().get(i);
+            ParamBinding binding = definition.paramBindings().get(i);
             params.add("new $T($L, $S)", Q_PARAM_BINDING, binding.argIndex(), binding.paramName());
         }
         params.add(")");
@@ -652,8 +649,8 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /**
-     * The 4-arg {@code ColumnRef} literal — the same shape {@code generateMetadata} emits for
-     * {@code navigationRefs()}, so a navigated ref serialises identically in both surfaces.
+     * The {@code ColumnRef} literal — the same shape {@code generateMetadata} emits for
+     * {@code columnRefs()}, so a navigated ref serialises identically in both surfaces.
      */
     private static CodeBlock columnRefLiteral(ColumnRef ref) {
         CodeBlock.Builder joins = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
@@ -662,26 +659,26 @@ public class RepositoryProcessor extends AbstractProcessor {
                 joins.add(", ");
             }
             JoinRef join = ref.joins().get(i);
-            joins.add("new $T($S, $S, $S, $S)", MD_JOIN_REF, join.table(), join.alias(),
-                    join.parentColumn(), join.childColumn());
+            joins.add("new $T($L, $L, $S, $S, $S, $S)", MD_JOIN_EDGE,
+                    join.ownerTableName() == null ? CodeBlock.of("null") : CodeBlock.of("$S", join.ownerTableName()),
+                    join.ownerAlias() == null ? CodeBlock.of("null") : CodeBlock.of("$S", join.ownerAlias()),
+                    join.ownerColumn(), join.childTableName(), join.childAlias(), join.childColumn());
         }
         joins.add(")");
-        return CodeBlock.of("new $T($S, $S, $L, $L)", MD_COLUMN_REF, ref.column(), ref.path(),
-                ref.table() == null ? CodeBlock.of("null") : CodeBlock.of("$S", ref.table()), joins.build());
+        return CodeBlock.of("new $T($S, $L, $L, $L)", MD_COLUMN_REF, ref.column(),
+                ref.ownerTableName() == null ? CodeBlock.of("null") : CodeBlock.of("$S", ref.ownerTableName()),
+                ref.ownerAlias() == null ? CodeBlock.of("null") : CodeBlock.of("$S", ref.ownerAlias()),
+                joins.build());
     }
 
-    private static CodeBlock resolvedPredicateLiteral(ResolvedPredicate resolved) {
-        Predicate p = resolved.predicate();
-        return CodeBlock.of("new $T($T.of($S, $T.$L, $S), $L, $L)", Q_RESOLVED_PREDICATE, Q_PREDICATE,
-                p.property(), Q_OPERATOR, p.operator().name(), p.param(),
-                columnRefLiteral(resolved.ref()), resolved.existential());
+    private static CodeBlock predicateLiteral(Predicate predicate) {
+        return CodeBlock.of("$T.of($S, $T.$L, $S)", Q_PREDICATE, predicate.property(), Q_OPERATOR,
+                predicate.operator().name(), predicate.param());
     }
 
-    private static CodeBlock resolvedSortLiteral(ResolvedSort resolved) {
-        SortSpec s = resolved.sort();
-        return CodeBlock.of("new $T(new $T($S, $L, $L), $L, $L)", Q_RESOLVED_SORT, Q_SORT_SPEC,
-                s.property(), s.ascending(), s.ignoreCase(),
-                columnRefLiteral(resolved.ref()), resolved.existential());
+    private static CodeBlock sortLiteral(SortSpec sort) {
+        return CodeBlock.of("$T.of($S, $L, $L)", Q_SORT_SPEC, sort.property(),
+                sort.ascending(), sort.ignoreCase());
     }
 
     // ------------------------------------------- static metamodel + row mapper generation
@@ -730,10 +727,10 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /**
-     * Emits {@code <Entity>Metadata implements EntityDescriptor<Entity>}: Plan A's column-name
+     * Emits {@code <Entity>Metadata implements EntityMetadata<Entity>}: Plan A's column-name
      * constants (one per mapped property plus the table name) alongside the descriptor view —
      * {@code INSTANCE}, {@code entityClass()}, {@code tableName()}, {@code id()} and
-     * {@code attributes()}. A value object (EMBEDDED target) has no table and no id, so its
+     * {@code attributes()} and {@code columnRefs()}. A value object (EMBEDDED target) has no table and no id, so its
      * TABLE_NAME constant is omitted and the matching accessors return {@code null}. An EMBEDDED
      * property contributes no constant of its own — its {@code column} slot holds a leaf prefix,
      * so no physical column named after the property exists — but each flattened leaf of its
@@ -742,9 +739,9 @@ public class RepositoryProcessor extends AbstractProcessor {
      * per embedded attribute suffices). The accessor bodies return the {@code _Entity} metamodel
      * field instances when a metamodel was generated (Decision 1); a value object has none, so its
      * members are emitted as fresh attribute-record literals with the same shapes. Embedded leaves
-     * are NOT flat {@code attributes()} members: the navigable metamodel classes carry them, and the
-     * explicit {@code columns()} override (emitted from {@link DataModel#columns()} in
-     * declaration order) answers flattened dot paths for the engine.
+     * are NOT flat {@code attributes()} members: the navigable metamodel classes carry them, and
+     * {@code columnRefs()} indexes their generated {@code PathAttribute} instances. The ordered
+     * mapping index also supplies the inherited root-table {@code columns()} view.
      */
     private ClassName generateMetadata(TypeElement entityElement, EntityModel entity,
                                        List<MmMember> members, ClassName metamodelType) {
@@ -752,7 +749,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         String simpleName = entityElement.getSimpleName() + "Metadata";
         ClassName self = ClassName.get(packageName, simpleName);
         TypeName entityType = entity.typeName();
-        ClassName descriptor = ClassName.get("io.github.fludakit.data.metadata", "EntityDescriptor");
+        ClassName descriptor = ClassName.get("io.github.fludakit.data.metadata", "EntityMetadata");
 
         TypeSpec.Builder builder = TypeSpec.classBuilder(simpleName)
                 .addModifiers(Modifier.PUBLIC, Modifier.FINAL)
@@ -818,7 +815,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
         builder.addMethod(id.build());
 
-        TypeName attribute = ParameterizedTypeName.get(MM_ATTRIBUTE, entityType);
+        TypeName attribute = ParameterizedTypeName.get(FM_PATH_ATTRIBUTE, entityType);
         CodeBlock.Builder list = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
         boolean first = true;
         for (MmMember m : members) {
@@ -839,64 +836,35 @@ public class RepositoryProcessor extends AbstractProcessor {
                 .returns(ParameterizedTypeName.get(ClassName.get(java.util.List.class), attribute))
                 .addStatement("return $L", list.build()).build());
 
-        // Task 6: the flattened column view is generated EXPLICITLY from the compile-time model in
-        // declaration order (the derived EntityDescriptor.columns() default is gone), in BOTH the
-        // reference and the literal (value-object) mode. Two-arg ColumnRef literals: the root table
-        // is implicit, so no per-entry table/join overrides are emitted.
-        CodeBlock.Builder columns = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
-        boolean firstColumn = true;
-        for (ColumnRef column : entity.metadata().columns()) {
-            if (!firstColumn) {
-                columns.add(", ");
-            }
-            firstColumn = false;
-            columns.add("new $T($S, $S)", MD_COLUMN_REF, column.column(), column.path());
-        }
-        columns.add(")");
-        builder.addMethod(MethodSpec.methodBuilder("columns").addModifiers(Modifier.PUBLIC)
-                .addAnnotation(Override.class)
-                .returns(ParameterizedTypeName.get(ClassName.get(java.util.List.class), MD_COLUMN_REF))
-                .addStatement("return $L", columns.build()).build());
-
-        // D3/D4: the navigated leaf cases — ONE shared compile-time enumeration feeds both the
-        // value() switch below and the navigationRefs() map; the mirror-drift risk is closed at
-        // generation time: the navigationRefs() path set is a SUPERSET of the value()-switch
-        // relation-path set (head-level guards drop from both; putValueCase may NOTE-drop a path
-        // from the value switch only). Map.ofEntries (not Map.of) so any cardinality compiles.
+        // One shared path enumeration feeds the runtime attribute index and navigate() switch.
         List<NavCase> navs = navCases(entityElement, entity);
-        if (!navs.isEmpty()) {
-            CodeBlock.Builder entries = CodeBlock.builder();
-            boolean firstNav = true;
-            for (NavCase nav : navs) {
-                if (!firstNav) {
-                    entries.add(", ");
-                }
-                firstNav = false;
-                ColumnRef ref = nav.ref();
-                CodeBlock.Builder joins = CodeBlock.builder()
-                        .add("$T.of(", ClassName.get(java.util.List.class));
-                boolean firstJoin = true;
-                for (JoinRef join : ref.joins()) {
-                    if (!firstJoin) {
-                        joins.add(", ");
-                    }
-                    firstJoin = false;
-                    joins.add("new $T($S, $S, $S, $S)", MD_JOIN_REF,
-                            join.table(), join.alias(), join.parentColumn(), join.childColumn());
-                }
-                joins.add(")");
-                entries.add("$T.entry($S, new $T($S, $S, $L, $L))", ClassName.get(java.util.Map.class),
-                        nav.path(), MD_COLUMN_REF, ref.column(), ref.path(),
-                        ref.table() == null ? CodeBlock.of("null") : CodeBlock.of("$S", ref.table()),
-                        joins.build());
-            }
-            builder.addMethod(MethodSpec.methodBuilder("navigationRefs").addModifiers(Modifier.PUBLIC)
-                    .addAnnotation(Override.class)
-                    .returns(ParameterizedTypeName.get(ClassName.get(java.util.Map.class),
-                            ClassName.get(String.class), MD_COLUMN_REF))
-                    .addStatement("return $T.ofEntries($L)", ClassName.get(java.util.Map.class),
-                            entries.build()).build());
+        Map<String, CodeBlock> mappedAttributes = new LinkedHashMap<>();
+        Map<String, ColumnRef> pathMappings = new LinkedHashMap<>();
+        for (Map.Entry<String, ColumnRef> mapping : entity.metadata().localAttributeRefs().entrySet()) {
+            mappedAttributes.put(mapping.getKey(), pathAttributeReference(
+                    entityElement, entity, metamodelType, mapping.getKey()));
+            pathMappings.put(mapping.getKey(), mapping.getValue());
         }
+        for (NavCase nav : navs) {
+            mappedAttributes.putIfAbsent(nav.path(), pathAttributeReference(
+                    entityElement, entity, metamodelType, nav.path()));
+            pathMappings.putIfAbsent(nav.path(), nav.ref());
+        }
+        TypeName attributeType = ParameterizedTypeName.get(FM_PATH_ATTRIBUTE, entityType);
+        MethodSpec.Builder columnRefs = MethodSpec.methodBuilder("columnRefs").addModifiers(Modifier.PUBLIC)
+                .addAnnotation(Override.class)
+                .returns(ParameterizedTypeName.get(ClassName.get(java.util.Map.class),
+                        attributeType, MD_COLUMN_REF))
+                .addStatement("$T<$T, $T> mappings = new $T<>()",
+                        ClassName.get(java.util.Map.class), attributeType, MD_COLUMN_REF,
+                        ClassName.get(java.util.LinkedHashMap.class));
+        for (Map.Entry<String, CodeBlock> entry : mappedAttributes.entrySet()) {
+            columnRefs.addStatement("mappings.put($L, $L)", entry.getValue(),
+                    columnRefLiteral(pathMappings.get(entry.getKey())));
+        }
+        columnRefs.addStatement("return $T.unmodifiableMap(mappings)",
+                ClassName.get(java.util.Collections.class));
+        builder.addMethod(columnRefs.build());
 
         // Task 4 (S-3): the read-side twin of the column view. columns()/columnRef() answer WHERE a dot
         // path lives; value() answers what it IS on a materialised row, so a paged read can build its own
@@ -912,8 +880,52 @@ public class RepositoryProcessor extends AbstractProcessor {
         return self;
     }
 
+    private CodeBlock pathAttributeReference(TypeElement entityElement, EntityModel entity,
+                                             ClassName metamodelType, String path) {
+        if (metamodelType == null) {
+            return CodeBlock.of("new $T<>($S, $S)", FM_PATH_ATTRIBUTE_RECORD,
+                    lastPathSegment(path), path);
+        }
+        String[] segments = path.split("\\.");
+        if (segments.length == 1) {
+            return CodeBlock.of("$T.$L", metamodelType, segments[0]);
+        }
+        String packageName = elements.getPackageOf(entityElement).getQualifiedName().toString();
+        Prop head = entity.metadata().props().stream()
+                .filter(prop -> prop.name().equals(segments[0]))
+                .findFirst().orElse(null);
+        if (head instanceof Prop.Reference || head instanceof Prop.EntityList
+                || head instanceof Prop.ElementList) {
+            boolean elementCollection = head instanceof Prop.ElementList;
+            String navSimple = "_" + entityElement.getSimpleName() + capitalize(segments[0]);
+            if (!relationTargetResolved(memberTargetFqn(head), elementCollection)
+                    || !generatedNavigationTypes.contains(packageName + "." + navSimple)) {
+                return pathAttributeRecord(path);
+            }
+            return CodeBlock.of("$T.$L.$L", metamodelType, segments[0],
+                    segments[segments.length - 1]);
+        }
+        String navSimple = "_" + entityElement.getSimpleName() + capitalize(segments[0]);
+        if (!generatedNavigationTypes.contains(packageName + "." + navSimple)) {
+            return pathAttributeRecord(path);
+        }
+        for (int i = 1; i < segments.length - 1; i++) {
+            String nestedNav = navSimple + capitalize(segments[i]);
+            if (!generatedNavigationTypes.contains(packageName + "." + nestedNav)) {
+                return pathAttributeRecord(path);
+            }
+            navSimple = nestedNav;
+        }
+        return CodeBlock.of("$T.$L", metamodelType, String.join(".", segments));
+    }
+
+    private CodeBlock pathAttributeRecord(String path) {
+        return CodeBlock.of("new $T<>($S, $S)", FM_PATH_ATTRIBUTE_RECORD,
+                lastPathSegment(path), path);
+    }
+
     /**
-     * Emits the descriptor's reflection-free {@code value(String dotPath, Object entity)} override: a
+     * Emits the metadata's reflection-free {@code navigate(String path, T root)} override: a
      * {@code switch} over exactly the dot paths {@code columnRef} resolves at the depth
      * {@link #resolveCompilePath} walks — the flattened {@code columns()} view (identifier, scalars,
      * to-one heads, embedded leaves), the one-hop leaves of every {@link Prop.Reference} target, and the
@@ -929,32 +941,32 @@ public class RepositoryProcessor extends AbstractProcessor {
             return valueSwitch(entityElement, entity, navs);
         } catch (RuntimeException e) {
             processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
-                    "descriptor value extraction could not be generated for " + entityElement.getSimpleName()
-                            + " (" + e + "); the value switch is omitted", entityElement);
+                    "runtime path navigation could not be generated for " + entityElement.getSimpleName()
+                            + " (" + e + "); the navigation switch is omitted", entityElement);
             return null;
         }
     }
 
     /** One navigated leaf: the full dot path, its resolved ColumnRef and what valueSwitch needs. */
-    private record NavCase(String path, ColumnRef ref, TypeElement targetElement, DataModel target,
+    private record NavCase(String path, ColumnRef ref, TypeElement targetElement, TypeMapping target,
                            CodeBlock head, boolean toOne) { }
 
     /** The relation-traversing leaf cases of one entity — the ONE enumeration both the value()
-     *  switch and the navigationRefs() map are generated from (the loop moved verbatim out of
-     *  valueSwitch; navigationRefs() consumes the full list, so its path set is a SUPERSET of
+     *  switch and the columnRefs() map are generated from (the loop moved verbatim out of
+     *  valueSwitch; columnRefs() consumes the full list, so its path set is a SUPERSET of
      *  the value()-switch relation-path set: putValueCase may NOTE-drop a path from the switch
      *  only, and valueExtractor may omit the whole switch). Head-level guards keep the
      *  historical NOTE-degrade semantics: an unmapped target or accessor-less head drops the
      *  head from BOTH surfaces). */
     private List<NavCase> navCases(TypeElement entityElement, EntityModel entity) {
-        DataModel md = entity.metadata();
+        TypeMapping md = entity.metadata();
         List<NavCase> out = new ArrayList<>();
         for (Prop p : md.props()) {
             if (!isTraversable(p)) {
                 continue;
             }
             String targetFqn = memberTargetFqn(p);
-            DataModel target = descriptorByFqn(targetFqn);
+            TypeMapping target = descriptorByFqn(targetFqn);
             TypeElement targetElement = target == null ? null
                     : elements.getTypeElement(stripGenerics(target.typeName()));
             String headGetter = getter(p.name());
@@ -963,22 +975,23 @@ public class RepositoryProcessor extends AbstractProcessor {
             }
             CodeBlock head = CodeBlock.of("e.$L()", headGetter);
             boolean toOne = p instanceof Prop.Reference;
-            List<ColumnRef> leaves;
+            TypeMapping localTarget;
             JoinRef join;
             if (p instanceof Prop.ElementList elementList) {
-                leaves = elementList.elementColumns();
-                join = new JoinRef(elementList.childTable(), elementList.name(),
-                        md.idColumn(), elementList.parentFkColumn());
+                localTarget = elementList.target();
+                join = new JoinRef(md.tableName(), null, md.idColumn(),
+                        elementList.childTable(), elementList.name(), elementList.parentFkColumn());
             } else {
-                leaves = target.columns();
+                localTarget = target;
                 join = referenceOrListJoin(md, target, p);
                 if (join == null) {
                     continue; // unbuildable join: the compile paths unresolvedRelation drop
                 }
             }
-            for (ColumnRef leaf : leaves) {
-                out.add(new NavCase(p.name() + "." + leaf.path(),
-                        leaf.withPrefix(p.name(), join), targetElement, target, head, toOne));
+            for (Map.Entry<String, ColumnRef> leaf : localTarget.localAttributeRefs().entrySet()) {
+                if (!leaf.getValue().joins().isEmpty()) continue;
+                out.add(new NavCase(p.name() + "." + leaf.getKey(),
+                        leaf.getValue().through(join), targetElement, localTarget, head, toOne));
             }
         }
         return out;
@@ -986,18 +999,20 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     private MethodSpec valueSwitch(TypeElement entityElement, EntityModel entity,
                                  List<NavCase> navs) {
-        DataModel md = entity.metadata();
+        TypeMapping md = entity.metadata();
         Map<String, CodeBlock> cases = new LinkedHashMap<>();
 
         // (1) The flattened column view this descriptor publishes: identifier, scalars, to-one heads
         // (whose path is the property name, mapping to the fk column) and embedded leaves.
-        for (ColumnRef column : md.columns()) {
-            putValueCase(cases, entityElement, column.path(),
-                    valueChain(entityElement, md, CodeBlock.of("e"), column.path()));
+        for (Map.Entry<String, ColumnRef> entry : md.columnRefs().entrySet()) {
+            if (entry.getValue().joins().isEmpty()) {
+                putValueCase(cases, entityElement, entry.getKey(),
+                        valueChain(entityElement, md, CodeBlock.of("e"), entry.getKey()));
+            }
         }
 
         // (2) Depth 1 through every relationship the descriptor publishes — the SHARED
-        // navCases() enumeration (the navigationRefs() map consumes the identical list; its
+        // navCases() enumeration (the columnRefs() map consumes the identical list; its
         // path set is a SUPERSET of these value()-switch cases, since putValueCase may
         // NOTE-drop a path from the switch only). Anything deeper is multi-hop for
         // resolveCompilePath too, so it stays out of both surfaces by construction.
@@ -1013,28 +1028,28 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
 
         TypeName entityType = entity.typeName();
-        MethodSpec.Builder value = MethodSpec.methodBuilder("value")
+        MethodSpec.Builder navigateMethod = MethodSpec.methodBuilder("navigate")
                 .addModifiers(Modifier.PUBLIC)
                 .addAnnotation(Override.class)
                 .returns(Object.class)
-                .addParameter(String.class, "dotPath")
-                .addParameter(Object.class, "entity")
-                .addStatement("$T e = ($T) entity", entityType, entityType);
-        value.beginControlFlow("switch (dotPath)");
+                .addParameter(String.class, "path")
+                .addParameter(entityType, "root")
+                .addStatement("$T e = ($T) root", entityType, entityType);
+        navigateMethod.beginControlFlow("switch (path)");
         for (Map.Entry<String, CodeBlock> entry : cases.entrySet()) {
-            value.addStatement("case $S: return $L", entry.getKey(), entry.getValue());
+            navigateMethod.addStatement("case $S: return $L", entry.getKey(), entry.getValue());
         }
-        value.addStatement("default: throw new $T($S + dotPath + $S)", IllegalArgumentException.class,
+        navigateMethod.addStatement("default: throw new $T($S + path + $S)", IllegalArgumentException.class,
                 "Unknown property path '", "' on " + entityElement.getSimpleName());
-        value.endControlFlow();
-        return value.build();
+        navigateMethod.endControlFlow();
+        return navigateMethod.build();
     }
 
     /** Records one generated case, NOTE-degrading the path when its expression could not be built. */
     private void putValueCase(Map<String, CodeBlock> cases, TypeElement origin, String path, CodeBlock value) {
         if (value == null) {
             processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
-                    "descriptor value extraction is not available for path '" + path
+                    "runtime path navigation is not available for path '" + path
                             + "': its accessor could not be resolved; the path is left out of the"
                             + " value switch", origin);
             return;
@@ -1047,7 +1062,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * on {@code element}), or {@code null} when a hop is unknown, is not an embedded value object, or
      * has no accessor. Only {@link Prop.Embedded} may carry a further segment.
      */
-    private CodeBlock valueChain(TypeElement element, DataModel md, CodeBlock recv, String path) {
+    private CodeBlock valueChain(TypeElement element, TypeMapping md, CodeBlock recv, String path) {
         int dot = path.indexOf('.');
         String head = dot < 0 ? path : path.substring(0, dot);
         Prop p = propOrNull(md, head);
@@ -1070,7 +1085,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * A to-one leaf: the target's own chain, guarded on the reference itself —
      * {@code e.getCustomer() == null ? null : e.getCustomer().getName()}.
      */
-    private CodeBlock guardedValueChain(TypeElement targetElement, DataModel target,
+    private CodeBlock guardedValueChain(TypeElement targetElement, TypeMapping target,
                                         CodeBlock head, String leafPath) {
         CodeBlock body = valueChain(targetElement, target, head, leafPath);
         return body == null ? null : CodeBlock.of("$L == null ? null : $L", head, body);
@@ -1081,7 +1096,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * segment) or a null-safe chain lambda (embedded leaf) and collected to a list. A null container
      * reads as an empty list, never null, so the cursor reducer always gets a list.
      */
-    private CodeBlock toManyValue(TypeElement childElement, DataModel childModel,
+    private CodeBlock toManyValue(TypeElement childElement, TypeMapping childModel,
                                   CodeBlock collection, String leafPath) {
         CodeBlock mapper;
         if (leafPath.indexOf('.') < 0) {
@@ -1107,7 +1122,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * {@code <VO>Metadata.INSTANCE} reference resolves to a generated class; the
      * {@link #metadataTypes} guard is set before recursing, which bounds cycles (A embeds B embeds A).
      */
-    private void generateEmbeddedDescriptors(DataModel owner) {
+    private void generateEmbeddedDescriptors(TypeMapping owner) {
         for (Prop a : owner.props()) {
             if (!(a instanceof Prop.Embedded embedded) || embedded.target() == null) {
                 continue;
@@ -1120,7 +1135,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             if (voElement == null) {
                 continue;
             }
-            EntityModel voModel = buildEntity(voElement);
+            EntityModel voModel = typeMappingBuilder.valueObjectModel(voElement);
             String voPackage = elements.getPackageOf(voElement).getQualifiedName().toString();
             metadataTypes.put(voFqn, ClassName.get(voPackage, voElement.getSimpleName() + "Metadata"));
             generateEmbeddedDescriptors(voModel.metadata());
@@ -1219,6 +1234,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         writeSourceFile(packageName + "." + simpleName, entityElement,
                 JavaFile.builder(packageName, builder.build()).skipJavaLangImports(true).build());
         for (NavUnit unit : units) {
+            generatedNavigationTypes.add(unit.fqn());
             writeSourceFile(unit.fqn(), entityElement, unit.file());
         }
     }
@@ -1254,7 +1270,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * leaf/attribute names ({@code address.point.lat}). A VO cycle (unresolved target) degrades to a
      * container-only nav: no leaves. {@code columnPrefix} is
      * the flattened physical column chain from the owner root ({@code address_}, then
-     * {@code address_point_}), threading exactly as {@link DataModel#columns()} flattens.
+     * {@code address_point_}), threading exactly as {@link TypeMapping#columns()} flattens.
      */
     private ClassName embeddedNav(TypeElement origin, String packageName, TypeName owner,
                                   String navSimple, String path, String columnPrefix,
@@ -1264,7 +1280,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             navCollision(origin, fqn, path);
             return null;
         }
-        EmbeddedValueObjectModel target = embedded.target();
+        EmbeddedValueObjectMapping target = embedded.target();
         TypeName targetType = classArgOf(target == null ? null : target.typeName());
         TypeSpec.Builder builder = TypeSpec.classBuilder(navSimple)
                 .addModifiers(Modifier.PUBLIC, Modifier.FINAL)
@@ -1282,7 +1298,8 @@ public class RepositoryProcessor extends AbstractProcessor {
                         columnPrefix, p, claimed, units);
             }
         }
-        builder.addMethod(overrideAccessor("name", String.class, CodeBlock.of("$S", path)));
+        builder.addMethod(overrideAccessor("name", String.class, CodeBlock.of("$S", lastPathSegment(path))));
+        builder.addMethod(overrideAccessor("path", String.class, CodeBlock.of("$S", path)));
         units.add(new NavUnit(fqn, navFile(packageName, builder)));
         return ClassName.get(packageName, navSimple);
     }
@@ -1313,7 +1330,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         Set<String> taken = new HashSet<>();
         if (relationTargetResolved(targetFqn, false)) {
             TypeElement targetElement = elements.getTypeElement(stripGenerics(targetFqn));
-            DataModel target = entityModel(targetElement).metadata();
+            TypeMapping target = entityModel(targetElement).metadata();
             if (target.id() != null) {
                 addRelationLeaf(builder, taken, origin, owner, m.path(), "", target.id());
             }
@@ -1321,7 +1338,9 @@ public class RepositoryProcessor extends AbstractProcessor {
                 addRelationLeaf(builder, taken, origin, owner, m.path(), "", tp);
             }
         }
-        builder.addMethod(overrideAccessor("name", String.class, CodeBlock.of("$S", m.path())));
+        builder.addMethod(overrideAccessor("name", String.class,
+                CodeBlock.of("$S", m.prop().name())));
+        builder.addMethod(overrideAccessor("path", String.class, CodeBlock.of("$S", m.path())));
         units.add(new NavUnit(fqn, navFile(packageName, builder)));
         return ClassName.get(packageName, navSimple);
     }
@@ -1330,7 +1349,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * The navigable class for an ELEMENT_COLLECTION member: implements
      * {@code ListAttribute<owner, element>} with owner-typed leaf fields for the element
      * value object's columns (mirroring {@link Prop.ElementList#elementColumns()}). The child-table
-     * placement lives in the descriptor's {@code navigationRefs()} literal, not on the attribute.
+     * placement lives in the descriptor's {@code columnRefs()} literal, not on the attribute.
      */
     private ClassName elementCollectionNav(TypeElement origin, String packageName, TypeName owner,
                                            String navSimple, String path, Prop.ElementList elementList,
@@ -1356,7 +1375,8 @@ public class RepositoryProcessor extends AbstractProcessor {
                 }
             }
         }
-        builder.addMethod(overrideAccessor("name", String.class, CodeBlock.of("$S", path)));
+        builder.addMethod(overrideAccessor("name", String.class, CodeBlock.of("$S", lastPathSegment(path))));
+        builder.addMethod(overrideAccessor("path", String.class, CodeBlock.of("$S", path)));
         units.add(new NavUnit(fqn, navFile(packageName, builder)));
         return ClassName.get(packageName, navSimple);
     }
@@ -1391,7 +1411,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     /**
      * One owner-typed leaf for a relation nav: name = {@code <relation>.<local path>}, column = the
      * target's LOCAL flattened column (threaded through {@code columnPrefix} exactly as
-     * {@link DataModel#columns()} flattens). Embedded targets expand recursively; collections
+     * {@link TypeMapping#columns()} flattens). Embedded targets expand recursively; collections
      * inside the target carry no column and are skipped.
      */
     private void addRelationLeaf(TypeSpec.Builder builder, Set<String> taken, TypeElement origin,
@@ -1400,7 +1420,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         // Java 17 safety: instanceof chain, never a pattern switch.
         if (p instanceof Prop.Embedded embedded) {
             String prefix = columnPrefix + embedded.column() + "_";
-            EmbeddedValueObjectModel vo = embedded.target();
+            EmbeddedValueObjectMapping vo = embedded.target();
             if (vo != null && vo.id() != null) {
                 addRelationLeaf(builder, taken, origin, owner, path, prefix, vo.id());
             }
@@ -1455,7 +1475,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
         addNavField(builder, taken, origin, owner, navSimple, identifier,
                 ParameterizedTypeName.get(attrType, owner),
-                CodeBlock.of("new $T<>($S)", recordType, path));
+                CodeBlock.of("new $T<>($S, $S)", recordType, p.name(), path));
     }
 
     private void addNavField(TypeSpec.Builder builder, Set<String> taken, TypeElement origin,
@@ -1507,14 +1527,14 @@ public class RepositoryProcessor extends AbstractProcessor {
                             String column, Prop prop) { }
 
     /** The member list of one descriptor: id first, then properties in declaration order. */
-    private List<MmMember> collectMembers(Element origin, DataModel model) {
+    private List<MmMember> collectMembers(Element origin, TypeMapping model) {
         List<MmMember> members = new ArrayList<>();
         addMembers(members, new HashSet<>(), origin, model, "", "");
         return members;
     }
 
     private void addMembers(List<MmMember> out, Set<String> taken, Element origin,
-                             DataModel model, String pathPrefix, String columnPrefix) {
+                             TypeMapping model, String pathPrefix, String columnPrefix) {
         if (model.id() != null) {
             addMember(out, taken, origin, model.id(), pathPrefix, columnPrefix);
         }
@@ -1646,11 +1666,12 @@ public class RepositoryProcessor extends AbstractProcessor {
      * because {@code List.of(...)} targets do not reliably push inference into record constructors.
      */
     private CodeBlock memberInitializer(TypeName owner, MmMember m, boolean constRef) {
-        CodeBlock name = constRef ? CodeBlock.of("$L", m.constant()) : CodeBlock.of("$S", m.path());
+        CodeBlock name = CodeBlock.of("$S", m.prop().name());
+        CodeBlock path = constRef ? CodeBlock.of("$L", m.constant()) : CodeBlock.of("$S", m.path());
         CodeBlock typeArgs = constRef ? CodeBlock.of("<>") : explicitTypeArgs(owner, m);
         Prop p = m.prop();
         if (p instanceof Prop.Id) {
-            return CodeBlock.of("new $T$L($L)", FM_ID_RECORD, typeArgs, name);
+            return CodeBlock.of("new $T$L($L, $L)", FM_ID_RECORD, typeArgs, name, path);
         }
         if (p instanceof Prop.Scalar scalar) {
             ClassName rec = switch (metamodelKind(scalar.typeFqn())) {
@@ -1658,18 +1679,18 @@ public class RepositoryProcessor extends AbstractProcessor {
                 case SORTABLE -> FM_SORTABLE_RECORD;
                 default -> FM_COLUMN_RECORD;
             };
-            return CodeBlock.of("new $T$L($L)", rec, typeArgs, name);
+            return CodeBlock.of("new $T$L($L, $L)", rec, typeArgs, name, path);
         }
         if (p instanceof Prop.Embedded) {
-            return CodeBlock.of("new $T$L($L)", FM_EMBEDDED_RECORD, typeArgs, name);
+            return CodeBlock.of("new $T$L($L, $L)", FM_EMBEDDED_RECORD, typeArgs, name, path);
         }
         if (p instanceof Prop.Reference) {
-            return CodeBlock.of("new $T$L($L)", FM_FK_RECORD, typeArgs, name);
+            return CodeBlock.of("new $T$L($L, $L)", FM_FK_RECORD, typeArgs, name, path);
         }
         if (p instanceof Prop.EntityList) {
-            return CodeBlock.of("new $T$L($L)", FM_OTM_RECORD, typeArgs, name);
+            return CodeBlock.of("new $T$L($L, $L)", FM_OTM_RECORD, typeArgs, name, path);
         }
-        return CodeBlock.of("new $T$L($L)", FM_EC_RECORD, typeArgs, name);
+        return CodeBlock.of("new $T$L($L, $L)", FM_EC_RECORD, typeArgs, name, path);
     }
 
     /**
@@ -1902,7 +1923,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                             + "'; its children will not be hydrated.", origin);
             return null;
         }
-        EntityModel voModel = buildEntity(voElement);
+        EntityModel voModel = typeMappingBuilder.valueObjectModel(voElement);
         if (!canGenerateRowMapper(voModel)) {
             processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
                     "Value object '" + voFqn + "' is not reflection-free mappable; its element collection"
@@ -2120,19 +2141,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     private void writeSourceFile(String fqn, Element origin, JavaFile javaFile) {
-        // Register the emitted type name in the session-global collision registry so every later
-        // claim (nav classes especially) sees it — this is the audit point covering ALL emissions
-        // (_Entity metamodels, navs, metadata, row mappers, repository impls) through one funnel.
-        generatedTypeNames.add(fqn);
-        try {
-            JavaFileObject sourceFile = processingEnv.getFiler().createSourceFile(fqn, origin);
-            try (Writer writer = sourceFile.openWriter()) {
-                javaFile.writeTo(writer);
-            }
-        } catch (IOException e) {
-            processingEnv.getMessager().printMessage(Diagnostic.Kind.ERROR,
-                    "Failed to write " + fqn + ": " + e.getMessage(), origin);
-        }
+        sourceWriter.write(fqn, origin, javaFile);
     }
 
     // ------------------------------------------------------------- method dispatch
@@ -2140,8 +2149,8 @@ public class RepositoryProcessor extends AbstractProcessor {
     private MethodSpec generateMethod(ExecutableElement method, DeclaredType repositoryType, EntityModel entity,
                                       boolean crud, Map<String, String> constants, ClassName mapperType,
                                       boolean hydrate, List<MethodSpec> auxMethods,
-                                      List<ResolvedQueryModel> queryModels,
-                                      Map<String, Integer> queryModelNames,
+                                      List<QueryDefinitionSpec> queryDefinitions,
+                                      Map<String, Integer> queryDefinitionNames,
                                       List<EntityRelationship> cascades) {
         ExecutableType resolved = (ExecutableType) types.asMemberOf(repositoryType, method);
         TypeMirror returnMirror = resolved.getReturnType();
@@ -2159,6 +2168,29 @@ public class RepositoryProcessor extends AbstractProcessor {
             return builder.build();
         }
 
+        // Jakarta Data's built-in paged findAll is itself annotated with @Find, but it needs
+        // runtime sort/join generation rather than the ordinary property-based @Find path.
+        if (name.equals("findAll") && arity == 2) {
+            emitFindAllPage(builder, parameters, entity, constants, mapperType, hydrate);
+            return builder.build();
+        }
+
+        if (method.getAnnotation(Find.class) != null) {
+            emitFind(builder, method, resolved, entity, constants, mapperType, hydrate, auxMethods,
+                    queryDefinitions, queryDefinitionNames, true, false);
+            return builder.build();
+        }
+
+        if (arity == 1 && isEntitySequenceParameter(parameterTypes.get(0), entity)
+                && (method.getAnnotation(Insert.class) != null
+                || method.getAnnotation(Update.class) != null
+                || method.getAnnotation(Save.class) != null
+                || method.getAnnotation(Delete.class) != null)) {
+            emitLifecycleBatch(builder, method, parameters.get(0), parameterTypes.get(0), entity,
+                    constants, cascades);
+            return builder.build();
+        }
+
         if (arity == 1 && isEntityParameter(parameterTypes.get(0), entity)) {
             String value = parameterName(parameters.get(0), "entity");
             if (name.equals("delete")) {
@@ -2171,12 +2203,16 @@ public class RepositoryProcessor extends AbstractProcessor {
             }
             if (name.equals("insert") && crud) {
                 appendInsertStatements(builder, value, entity, constants, cascades);
-                builder.addStatement("return $L", value);
+                if (method.getReturnType().getKind() != TypeKind.VOID) {
+                    builder.addStatement("return $L", value);
+                }
                 return builder.build();
             }
             if (name.equals("update") && crud) {
                 appendUpdateStatements(builder, value, entity, constants, cascades);
-                builder.addStatement("return $L", value);
+                if (method.getReturnType().getKind() != TypeKind.VOID) {
+                    builder.addStatement("return $L", value);
+                }
                 return builder.build();
             }
         }
@@ -2211,21 +2247,20 @@ public class RepositoryProcessor extends AbstractProcessor {
             emitFindAll(builder, entity, constants, mapperType, hydrate);
             return builder.build();
         }
-        if (name.equals("findAll") && arity == 2) {
-            emitFindAllPage(builder, parameters, entity, constants, mapperType, hydrate);
-            return builder.build();
-        }
-
         if (arity == 1 && method.getAnnotation(Insert.class) != null) {
             String value = parameterName(parameters.get(0), "entity");
             appendInsertStatements(builder, value, entity, constants, cascades);
-            builder.addStatement("return $L", value);
+            if (returnMirror.getKind() != TypeKind.VOID) {
+                builder.addStatement("return $L", value);
+            }
             return builder.build();
         }
         if (arity == 1 && method.getAnnotation(Update.class) != null) {
             String value = parameterName(parameters.get(0), "entity");
             appendUpdateStatements(builder, value, entity, constants, cascades);
-            builder.addStatement("return $L", value);
+            if (returnMirror.getKind() != TypeKind.VOID) {
+                builder.addStatement("return $L", value);
+            }
             return builder.build();
         }
         if (arity == 1 && method.getAnnotation(Save.class) != null) {
@@ -2233,14 +2268,15 @@ public class RepositoryProcessor extends AbstractProcessor {
                     cascades);
             return builder.build();
         }
-        if (arity == 1 && method.getAnnotation(Delete.class) != null) {
+        if (arity == 1 && method.getAnnotation(Delete.class) != null
+                && isEntityParameter(parameterTypes.get(0), entity)) {
             String value = parameterName(parameters.get(0), "entity");
             builder.addStatement("deleteById($L.$L())", value, getter(entity.id().name()));
             return builder.build();
         }
 
         emitFind(builder, method, resolved, entity, constants, mapperType, hydrate, auxMethods,
-                queryModels, queryModelNames);
+                queryDefinitions, queryDefinitionNames, false, method.getAnnotation(Delete.class) != null);
         return builder.build();
     }
 
@@ -2257,17 +2293,75 @@ public class RepositoryProcessor extends AbstractProcessor {
                     method);
         }
         String idAccess = value + "." + getter(entity.id().name()) + "()";
+        boolean returnsValue = method.getReturnType().getKind() != TypeKind.VOID;
         if (crud) {
-            builder.addStatement("return $L == null ? insert($L) : update($L)", idAccess, value, value);
+            if (returnsValue) {
+                builder.addStatement("return $L == null ? insert($L) : update($L)", idAccess, value, value);
+            } else {
+                builder.beginControlFlow("if ($L == null)", idAccess);
+                builder.addStatement("insert($L)", value);
+                builder.nextControlFlow("else");
+                builder.addStatement("update($L)", value);
+                builder.endControlFlow();
+            }
+
             return;
         }
         builder.beginControlFlow("if ($L == null)", idAccess);
         appendInsertStatements(builder, value, entity, constants, cascades);
-        builder.addStatement("return $L", value);
+        if (returnsValue) {
+            builder.addStatement("return $L", value);
+        }
         builder.nextControlFlow("else");
         appendUpdateStatements(builder, value, entity, constants, cascades);
-        builder.addStatement("return $L", value);
+        if (returnsValue) {
+            builder.addStatement("return $L", value);
+        }
         builder.endControlFlow();
+    }
+
+    private void emitLifecycleBatch(MethodSpec.Builder builder, ExecutableElement method,
+                                    VariableElement parameter, TypeMirror parameterType,
+                                    EntityModel entity, Map<String, String> constants,
+                                    List<EntityRelationship> cascades) {
+        String values = parameterName(parameter, "entities");
+        TypeMirror valueType = sequenceElementType(parameterType);
+        TypeName entityType = TypeName.get(types.erasure(valueType));
+        builder.beginControlFlow("for ($T entity : $L)", entityType, values);
+        if (method.getAnnotation(Insert.class) != null) {
+            appendInsertStatements(builder, "entity", entity, constants, cascades);
+        } else if (method.getAnnotation(Update.class) != null) {
+            appendUpdateStatements(builder, "entity", entity, constants, cascades);
+        } else if (method.getAnnotation(Save.class) != null) {
+            builder.beginControlFlow("if (entity.$L() == null)", getter(entity.id().name()));
+            appendInsertStatements(builder, "entity", entity, constants, cascades);
+            builder.nextControlFlow("else");
+            appendUpdateStatements(builder, "entity", entity, constants, cascades);
+            builder.endControlFlow();
+        } else {
+            emitDeleteById(builder, "entity." + getter(entity.id().name()) + "()", entity, constants, cascades);
+        }
+        builder.endControlFlow();
+        if (method.getReturnType().getKind() != TypeKind.VOID) {
+            builder.addStatement("return $L", values);
+        }
+    }
+
+    private boolean isEntitySequenceParameter(TypeMirror parameterType, EntityModel entity) {
+        TypeMirror elementType = sequenceElementType(parameterType);
+        return elementType != null && isEntityParameter(elementType, entity);
+    }
+
+    private TypeMirror sequenceElementType(TypeMirror parameterType) {
+        if (parameterType.getKind() == TypeKind.ARRAY) {
+            return ((ArrayType) parameterType).getComponentType();
+        }
+        if (parameterType instanceof DeclaredType declared
+                && "java.util.List".equals(types.erasure(parameterType).toString())
+                && declared.getTypeArguments().size() == 1) {
+            return declared.getTypeArguments().get(0);
+        }
+        return null;
     }
 
     private void appendInsertStatements(MethodSpec.Builder builder, String value, EntityModel entity,
@@ -2278,7 +2372,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             // ...) is application-assigned — the identity column joins the INSERT and binds from the
             // entity; there is no keyholder roundtrip for a value known before the insert.
             String appConstant = addConstant(constants, "SQL_INSERT",
-                    new SqlBuilder().insert(entity.metadata(), true));
+                    new SqlBuilder(sqlDialect).insert(entity.metadata(), entity.metadata(), true));
             CodeBlock.Builder appSql = CodeBlock.builder().add("jdbcClient.sql($L)", appConstant);
             appSql.add(".param($S, $L.$L())", SqlBuilder.paramName(entity.metadata().id().name()),
                     value, getter(entity.id().name()));
@@ -2291,7 +2385,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             // NEW-I: the coercion method follows the id type — Long renders longValue() byte-identically
             // to the pre-Task-4 hardcoded emission, Integer renders intValue() so its impl compiles.
             String constant = addConstant(constants, "SQL_INSERT",
-                    new SqlBuilder().insert(entity.metadata(), false));
+                    new SqlBuilder(sqlDialect).insert(entity.metadata(), entity.metadata(), false));
             builder.addStatement("$T keys = new $T()", GeneratedKeyHolder.class, GeneratedKeyHolder.class);
             CodeBlock.Builder sql = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
             appendColumnParams(sql, entity, value);
@@ -2349,23 +2443,26 @@ public class RepositoryProcessor extends AbstractProcessor {
                                               EntityRelationship relationship, Map<String, String> constants) {
         Prop.EntityList list = (Prop.EntityList) relationship.attribute();
         EntityModel target = relationship.targetModel();
-        DataModel md = target.metadata();
+        TypeMapping md = target.metadata();
         String inverseFk = list.inverseFkColumn();
         String constant = addConstant(constants, "SQL_INSERT_" + upperSnake(list.name()),
-                new SqlBuilder().insert(md, false));
+                new SqlBuilder(sqlDialect).insert(md, md, false));
         builder.beginControlFlow("for ($T item : $L.$L())", target.typeName(), value, getter(list.name()));
         builder.beginControlFlow("if (item != null)");
         builder.addStatement("$T childKeys = new $T()", GeneratedKeyHolder.class, GeneratedKeyHolder.class);
         CodeBlock.Builder sql = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
-        for (ColumnRef ref : md.columns()) {
+        for (Map.Entry<String, ColumnRef> entry : md.columnRefs().entrySet()) {
+            ColumnRef ref = entry.getValue();
+            if (!ref.joins().isEmpty()) continue;
             if (md.id() != null && ref.column().equals(md.id().column())) {
                 continue;
             }
             if (ref.column().equals(inverseFk)) {
-                sql.add(".param($S, $L.$L())", SqlBuilder.paramName(ref.path()),
+                sql.add(".param($S, $L.$L())", SqlBuilder.paramName(entry.getKey()),
                         value, getter(entity.id().name()));
             } else {
-                sql.add(".param($S, $L)", SqlBuilder.paramName(ref.path()), boundValue(md, "item", ref));
+                sql.add(".param($S, $L)", SqlBuilder.paramName(entry.getKey()),
+                        boundValue(md, "item", entry.getKey(), ref));
             }
         }
         sql.add(".update(childKeys)");
@@ -2386,8 +2483,8 @@ public class RepositoryProcessor extends AbstractProcessor {
      */
     private String entityChildDeleteConstant(Map<String, String> constants, Prop.EntityList list) {
         return addConstant(constants, "SQL_DELETE_" + upperSnake(list.name()),
-                "DELETE FROM " + Names.quote(list.targetTable())
-                        + " WHERE " + Names.quote(list.inverseFkColumn()) + " = :" + list.inverseFkColumn());
+                "DELETE FROM " + sqlDialect.quoteIdentifier(list.targetTable())
+                        + " WHERE " + sqlDialect.quoteIdentifier(list.inverseFkColumn()) + " = :" + list.inverseFkColumn());
     }
 
     /** Emits {@code jdbcClient.sql(SQL_DELETE_<FIELD>).param(<inverseFk>, entity.getId()).update()}. */
@@ -2423,10 +2520,11 @@ public class RepositoryProcessor extends AbstractProcessor {
         // another VO (one column per property vs one per flattened leaf). Iterating the descriptor
         // here keeps columns and params aligned. Byte-stable for a flat VO (no nested embedded).
         List<String> columns = childColumnNames(collection);
-        StringBuilder sql = new StringBuilder("INSERT INTO ").append(Names.quote(collection.childTable())).append(" (");
+        StringBuilder sql = new StringBuilder("INSERT INTO ").append(sqlDialect.quoteIdentifier(collection.childTable()))
+                .append(" (");
         for (int i = 0; i < columns.size(); i++) {
             if (i > 0) sql.append(", ");
-            sql.append(Names.quote(columns.get(i)));
+            sql.append(sqlDialect.quoteIdentifier(columns.get(i)));
         }
         sql.append(") VALUES (");
         for (int i = 0; i < columns.size(); i++) {
@@ -2446,8 +2544,9 @@ public class RepositoryProcessor extends AbstractProcessor {
         // authoritative flat child-column list is {@link Prop.ElementList#elementColumns()} — one
         // source of truth — while the value still walks the descriptor path through boundValue so
         // fk-bearing children bind their id exactly like the previous property-driven loop did.
-        for (ColumnRef ref : collection.element().elementColumns()) {
-            insert.add(".param($S, $L)", ref.column(), boundValue(collection.descriptor(), "item", ref));
+        for (Map.Entry<String, ColumnRef> entry : collection.descriptor().localAttributeRefs().entrySet()) {
+            insert.add(".param($S, $L)", entry.getValue().column(),
+                    boundValue(collection.descriptor(), "item", entry.getKey(), entry.getValue()));
         }
         insert.add(".update()");
         builder.addStatement("$L", insert.build());
@@ -2477,18 +2576,18 @@ public class RepositoryProcessor extends AbstractProcessor {
      * {@code properties()} loop, which skips the same kinds.
      */
     private String quotedColumnList(ElementCollection collection) {
-        StringBuilder sb = new StringBuilder(Names.quote(collection.parentFk()));
+        StringBuilder sb = new StringBuilder(sqlDialect.quoteIdentifier(collection.parentFk()));
         for (Prop a : collection.descriptor().props()) {
             if (a instanceof Prop.Id id) {
-                sb.append(", ").append(Names.quote(id.column()));
+                sb.append(", ").append(sqlDialect.quoteIdentifier(id.column()));
             } else if (a instanceof Prop.Scalar scalar) {
-                sb.append(", ").append(Names.quote(scalar.column()));
+                sb.append(", ").append(sqlDialect.quoteIdentifier(scalar.column()));
             } else if (a instanceof Prop.Embedded embedded) {
                 if (embedded.target() == null) {
                     continue;
                 }
                 for (ColumnRef leaf : embedded.target().columns()) {
-                    sb.append(", ").append(Names.quote(embedded.column() + "_" + leaf.column()));
+                    sb.append(", ").append(sqlDialect.quoteIdentifier(embedded.column() + "_" + leaf.column()));
                 }
             }
             // Reference / EntityList / ElementList: no read column on this child table.
@@ -2498,7 +2597,8 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     private void appendUpdateStatements(MethodSpec.Builder builder, String value, EntityModel entity,
                                         Map<String, String> constants, List<EntityRelationship> cascades) {
-        String constant = addConstant(constants, "SQL_UPDATE", new SqlBuilder().update(entity.metadata()));
+        String constant = addConstant(constants, "SQL_UPDATE",
+                new SqlBuilder(sqlDialect).update(entity.metadata(), entity.metadata()));
 
         CodeBlock.Builder update = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
         appendColumnParams(update, entity, value);
@@ -2534,8 +2634,9 @@ public class RepositoryProcessor extends AbstractProcessor {
      */
     private String childDeleteConstant(Map<String, String> constants, ElementCollection collection) {
         return addConstant(constants, "SQL_DELETE_" + upperSnake(collection.field()),
-                "DELETE FROM " + Names.quote(collection.childTable())
-                        + " WHERE " + Names.quote(collection.parentFk()) + " = :" + collection.parentFk());
+                "DELETE FROM " + sqlDialect.quoteIdentifier(collection.childTable())
+                        + " WHERE " + sqlDialect.quoteIdentifier(collection.parentFk()) + " = :"
+                        + collection.parentFk());
     }
 
     /** Emits {@code jdbcClient.sql(SQL_DELETE_<FIELD>).param(<parentFk>, entity.getId()).update()}. */
@@ -2554,12 +2655,15 @@ public class RepositoryProcessor extends AbstractProcessor {
      * would drift against the rendered placeholders.
      */
     private void appendColumnParams(CodeBlock.Builder sql, EntityModel entity, String var) {
-        DataModel md = entity.metadata();
-        for (ColumnRef ref : md.columns()) {
+        TypeMapping md = entity.metadata();
+        for (Map.Entry<String, ColumnRef> entry : md.columnRefs().entrySet()) {
+            ColumnRef ref = entry.getValue();
+            if (!ref.joins().isEmpty()) continue;
             if (md.id() != null && ref.column().equals(md.id().column())) {
                 continue;
             }
-            sql.add(".param($S, $L)", SqlBuilder.paramName(ref.path()), boundValue(md, var, ref));
+            sql.add(".param($S, $L)", SqlBuilder.paramName(entry.getKey()),
+                    boundValue(md, var, entry.getKey(), ref));
         }
     }
 
@@ -2568,11 +2672,11 @@ public class RepositoryProcessor extends AbstractProcessor {
      * or a FK-bearing {@code primary}) rooted at {@code rootVar}. Every intermediate null short-
      * circuits to SQL NULL; a final ASSOCIATION/MANY_TO_ONE attribute binds its id.
      */
-    private static CodeBlock boundValue(DataModel md, String rootVar, ColumnRef ref) {
-        String[] segments = ref.path().split("\\.");
+    private static CodeBlock boundValue(TypeMapping md, String rootVar, String attributePath, ColumnRef ref) {
+        String[] segments = attributePath.split("\\.");
         StringBuilder chain = new StringBuilder(rootVar);
         List<String> nullChecks = new ArrayList<>();
-        DataModel current = md;
+        TypeMapping current = md;
         for (int i = 0; i < segments.length; i++) {
             Prop attr = current.prop(segments[i]);
             chain.append('.').append(getter(segments[i])).append("()");
@@ -2614,7 +2718,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     private void emitFindById(MethodSpec.Builder builder, String value, EntityModel entity,
                               Map<String, String> constants, ClassName mapperType, boolean hydrate) {
         String constant = addConstant(constants, "SQL_FIND_BY_ID",
-                new SqlBuilder().selectBy(entity.metadata(),
+                new SqlBuilder(sqlDialect).selectBy(entity.metadata(),
                         List.of(Predicate.of(entity.id().name(), Operator.EQ, "id")), List.of(), 0, null));
         if (!hydrate) {
             builder.addStatement("return jdbcClient.sql($L).param($S, $L).query($L).optional()",
@@ -2647,14 +2751,15 @@ public class RepositoryProcessor extends AbstractProcessor {
             builder.addStatement("jdbcClient.sql($L).param($S, $L).update()", childConstant,
                     list.inverseFkColumn(), value);
         }
-        String constant = addConstant(constants, "SQL_DELETE", new SqlBuilder().deleteById(entity.metadata()));
+        String constant = addConstant(constants, "SQL_DELETE",
+                new SqlBuilder(sqlDialect).deleteById(entity.metadata()));
         builder.addStatement("jdbcClient.sql($L).param($S, $L).update()", constant, "id", value);
     }
 
     private void emitFindAll(MethodSpec.Builder builder, EntityModel entity, Map<String, String> constants,
                              ClassName mapperType, boolean hydrate) {
         String constant = addConstant(constants, "SQL_FIND_ALL",
-                new SqlBuilder().selectBy(entity.metadata(), List.of(), List.of(), 0, null));
+                new SqlBuilder(sqlDialect).selectBy(entity.metadata(), List.of(), List.of(), 0, null));
         if (!hydrate) {
             builder.addStatement("return jdbcClient.sql($L).query($L).stream()",
                     constant, queryArg(entity, mapperType));
@@ -2673,9 +2778,9 @@ public class RepositoryProcessor extends AbstractProcessor {
         String pageRequest = parameterName(parameters.get(0), "pageRequest");
         String sortBy = parameterName(parameters.get(1), "sortBy");
         String findConstant = addConstant(constants, "SQL_FIND_ALL",
-                new SqlBuilder().selectBy(entity.metadata(), List.of(), List.of(), 0, null));
+                new SqlBuilder(sqlDialect).selectBy(entity.metadata(), List.of(), List.of(), 0, null));
         String countConstant = addConstant(constants, "SQL_COUNT_ALL",
-                new SqlBuilder().countBy(entity.metadata(), List.of()));
+                new SqlBuilder(sqlDialect).countBy(entity.metadata(), List.of()));
         // R-T11c: a runtime sort can traverse a relation and splice a LEFT JOIN onto this constant —
         // if the joined table shares a column name (entity targets always share "id") the bare select
         // list becomes ambiguous. When the descriptor has ANY traversable prop, register a second,
@@ -2704,8 +2809,9 @@ public class RepositoryProcessor extends AbstractProcessor {
 
         builder.addStatement("$T cols = new $T<>()", List.class, ArrayList.class);
         builder.addStatement("$T<$T> dirs = new $T<>()", List.class, Boolean.class, ArrayList.class);
-        builder.addStatement("$T props = new $T<>()", List.class, ArrayList.class);
+        builder.addStatement("$T<$T> props = new $T<>()", List.class, String.class, ArrayList.class);
         builder.addStatement("$T<$T> refs = new $T<>()", List.class, MD_COLUMN_REF, ArrayList.class);
+        builder.addStatement("$T<$T> joinRefs = new $T<>()", List.class, MD_COLUMN_REF, ArrayList.class);
         builder.addStatement("$T orderBy = new $T()", StringBuilder.class, StringBuilder.class);
         if (joinCapable) {
             builder.addStatement("boolean keyed = false");
@@ -2720,32 +2826,37 @@ public class RepositoryProcessor extends AbstractProcessor {
         builder.addStatement("orderBy.append($S)", ", ");
         builder.endControlFlow();
         if (joinCapable) {
-            builder.beginControlFlow("if ($T.isToManyHead($T.INSTANCE, r))", SqlBuilder.class, metadataClass);
+            builder.beginControlFlow("if ($T.isToManyPath($T.INSTANCE, s.property()))",
+                    SqlBuilder.class, metadataClass);
             builder.addStatement("keyed = true");
+            builder.nextControlFlow("else");
+            builder.addStatement("joinRefs.add(r)");
             builder.endControlFlow();
-            builder.addStatement("orderBy.append($T.isToManyHead($T.INSTANCE, r)"
-                            + " ? $T.aggregateSortTerm($T.INSTANCE, r, s.isAscending())"
-                            + " : $T.qualify(r, $S)).append(s.isAscending() ? $S : $S)",
+            builder.addStatement("orderBy.append($T.isToManyPath($T.INSTANCE, s.property())"
+                            + " ? $T.aggregateSortTerm(SQL_DIALECT, $T.INSTANCE, r, s.isAscending())"
+                            + " : $T.qualify(SQL_DIALECT, r, $S)).append(s.isAscending() ? $S : $S)",
                     SqlBuilder.class, metadataClass, SqlBuilder.class, metadataClass,
                     SqlBuilder.class, rootTable, " ASC", " DESC");
             builder.endControlFlow();
             builder.beginControlFlow("if (keyed && !(dirs.size() > 0"
                             + " && Boolean.TRUE.equals(dirs.get(dirs.size() - 1))"
                             + " && $S.equals(props.get(props.size() - 1))))", entity.id().name());
-            builder.addStatement("orderBy.append($S)", ", " + Names.quote(rootTable) + "."
-                    + Names.quote(entity.metadata().idColumn()) + " ASC");
+            builder.addStatement("orderBy.append($S)", ", " + sqlDialect.quoteIdentifier(rootTable) + "."
+                    + sqlDialect.quoteIdentifier(entity.metadata().idColumn()) + " ASC");
             builder.addStatement("cols.add($S)", entity.metadata().idColumn());
             builder.addStatement("dirs.add(true)");
             builder.addStatement("props.add($S)", entity.id().name());
             builder.addStatement("refs.add(resolveRef($S))", entity.id().name());
+            builder.addStatement("joinRefs.add(resolveRef($S))", entity.id().name());
             builder.endControlFlow();
         } else {
-            builder.addStatement("orderBy.append($T.qualify(r, $S)).append(s.isAscending() ? $S : $S)",
+            builder.addStatement("orderBy.append($T.qualify(SQL_DIALECT, r, $S))"
+                            + ".append(s.isAscending() ? $S : $S)",
                     SqlBuilder.class, rootTable, " ASC", " DESC");
             builder.endControlFlow();
         }
-        builder.addStatement("$T joins = $T.joinClause($T.INSTANCE, refs)",
-                String.class, SqlBuilder.class, metadataClass);
+        builder.addStatement("$T joins = $T.joinClause(SQL_DIALECT, $T.INSTANCE, joinRefs)",
+            String.class, SqlBuilder.class, metadataClass);
 
         builder.beginControlFlow("if ($L.mode() == $T.Mode.OFFSET)", pageRequest, PageRequest.class);
         builder.addStatement("long offset = ($L.page() - 1) * $L.size()", pageRequest, pageRequest);
@@ -2754,12 +2865,14 @@ public class RepositoryProcessor extends AbstractProcessor {
                             + " + (orderBy.length() > 0 ? $S + orderBy : $S)"
                             + " + $S + $L.size() + $S + offset)).query($L).list()",
                     List.class, entity.typeName(), findConstant, joinedFindConstant, " ORDER BY ", "",
-                    " LIMIT ", pageRequest, " OFFSET ", queryArg(entity, mapperType));
+                    sqlDialect.limitClause(""), pageRequest, sqlDialect.offsetClause(""),
+                    queryArg(entity, mapperType));
         } else {
             builder.addStatement("$T<$T> content = jdbcClient.sql($L + joins + (orderBy.length() > 0 ? $S + orderBy : $S)"
                             + " + $S + $L.size() + $S + offset).query($L).list()",
-                    List.class, entity.typeName(), findConstant, " ORDER BY ", "", " LIMIT ", pageRequest,
-                    " OFFSET ", queryArg(entity, mapperType));
+                    List.class, entity.typeName(), findConstant, " ORDER BY ", "",
+                    sqlDialect.limitClause(""), pageRequest, sqlDialect.offsetClause(""),
+                    queryArg(entity, mapperType));
         }
         builder.addStatement("long total = $L.requestTotal() ? jdbcClient.sql($L).singleValue($T.class) : -1L",
                 pageRequest, countConstant, Long.class);
@@ -2779,13 +2892,15 @@ public class RepositoryProcessor extends AbstractProcessor {
             builder.addStatement("$T<$T> terms = new $T<>()", List.class, String.class, ArrayList.class);
             builder.beginControlFlow("for (int i = 0; i < refs.size(); i++)");
             builder.addStatement("$T r = refs.get(i)", MD_COLUMN_REF);
-            builder.beginControlFlow("if ($T.isToManyHead($T.INSTANCE, r))", SqlBuilder.class, metadataClass);
-            builder.addStatement("terms.add($T.aggregateSortTerm($T.INSTANCE, r, dirs.get(i)))",
+            builder.beginControlFlow("if ($T.isToManyPath($T.INSTANCE, props.get(i)))",
+                    SqlBuilder.class, metadataClass);
+            builder.addStatement("terms.add($T.aggregateSortTerm(SQL_DIALECT, $T.INSTANCE, r, dirs.get(i)))",
                     SqlBuilder.class, metadataClass);
             builder.nextControlFlow("else if (joins.isEmpty() && !keyed)");
-            builder.addStatement("terms.add($T.quote(r.column()))", Names.class);
+            builder.addStatement("terms.add(SQL_DIALECT.quoteIdentifier(r.column()))");
             builder.nextControlFlow("else");
-            builder.addStatement("terms.add($T.qualify(r, $S))", SqlBuilder.class, rootTable);
+            builder.addStatement("terms.add($T.qualify(SQL_DIALECT, r, $S))",
+                    SqlBuilder.class, rootTable);
             builder.endControlFlow();
             builder.endControlFlow();
             builder.addStatement("$T where = $T.seekWhereTerms(terms, dirs, cursor, $L.mode() == $T.Mode.CURSOR_NEXT)",
@@ -2794,13 +2909,14 @@ public class RepositoryProcessor extends AbstractProcessor {
                             + " + (orderBy.length() > 0 ? $S + orderBy : $S) + $S + $L.size() + $S))"
                             + ".params($T.cursorParams(cursor)).query($L).list()",
                     List.class, entity.typeName(), findConstant, joinedFindConstant, " WHERE ", " ORDER BY ", "",
-                    " LIMIT ", pageRequest, " + 1", CursorSupport.class, queryArg(entity, mapperType));
+                    sqlDialect.limitClause(""), pageRequest, " + 1", CursorSupport.class, queryArg(entity, mapperType));
         } else {
             builder.addStatement("$T where = $T.seekWhere(cols, dirs, cursor, $L.mode() == $T.Mode.CURSOR_NEXT)",
                     String.class, CursorSupport.class, pageRequest, PageRequest.class);
             builder.addStatement("$T<$T> content = jdbcClient.sql($L + joins + $S + where + (orderBy.length() > 0 ? $S + orderBy : $S)"
                             + " + $S + $L.size() + $S).params($T.cursorParams(cursor)).query($L).list()",
-                    List.class, entity.typeName(), findConstant, " WHERE ", " ORDER BY ", "", " LIMIT ", pageRequest,
+                    List.class, entity.typeName(), findConstant, " WHERE ", " ORDER BY ", "",
+                    sqlDialect.limitClause(""), pageRequest,
                     " + 1", CursorSupport.class, queryArg(entity, mapperType));
         }
         builder.addStatement("boolean hasMore = content.size() > $L.size()", pageRequest);
@@ -2819,8 +2935,8 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /** The single {@code "qualifier"."column"} rendering shared by every qualified projection emission (S-1). */
-    private static String qualifiedColumn(String qualifier, String column) {
-        return Names.quote(qualifier) + "." + Names.quote(column);
+    private String qualifiedColumn(String qualifier, String column) {
+        return sqlDialect.quoteIdentifier(qualifier) + "." + sqlDialect.quoteIdentifier(column);
     }
 
     /**
@@ -2878,7 +2994,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             } catch (IllegalArgumentException unknown) {
                 // Task 6: a sort property the flat column view cannot answer may still resolve through
                 // the compile model to a TO-MANY head — that renders the aggregate subquery term (the
-                // same string the runtime isToManyHead/aggregateSortTerm pair produces). Anything else
+                // same string the runtime isToManyPath/aggregateSortTerm pair produces). Anything else
                 // keeps the legacy rejection byte-for-byte.
                 PathResolution resolution = resolveCompilePath(entity.metadata(), s.property());
                 if (resolution.ref() == null || !resolution.existential()) {
@@ -2891,8 +3007,8 @@ public class RepositoryProcessor extends AbstractProcessor {
             columns.add(column != null ? column : aggregateRef.column());
             properties.add(s.property());
             directions.add(Boolean.toString(s.ascending()));
-            terms.add(column != null ? Names.quote(column)
-                    : SqlBuilder.aggregateSortTerm(entity.metadata(), aggregateRef, s.ascending()));
+            terms.add(column != null ? sqlDialect.quoteIdentifier(column)
+                    : SqlBuilder.aggregateSortTerm(sqlDialect, entity.metadata(), aggregateRef, s.ascending()));
         }
         if (toManySort && !("true".equals(directions.get(directions.size() - 1))
                 && entity.id().name().equals(properties.get(properties.size() - 1)))) {
@@ -2902,8 +3018,8 @@ public class RepositoryProcessor extends AbstractProcessor {
             properties.add(entity.id().name());
             directions.add("true");
             columns.add(entity.metadata().idColumn());
-            terms.add(Names.quote(entity.metadata().tableName()) + "."
-                    + Names.quote(entity.metadata().idColumn()));
+            terms.add(sqlDialect.quoteIdentifier(entity.metadata().tableName()) + "."
+                    + sqlDialect.quoteIdentifier(entity.metadata().idColumn()));
         }
         String colsExpr = "java.util.List.of(" + quoted(columns) + ")";
         String propsExpr = "java.util.List.of(" + quoted(properties) + ")";
@@ -2920,17 +3036,17 @@ public class RepositoryProcessor extends AbstractProcessor {
             }
             orderBy = ob.toString();
         } else {
-            orderBy = new SqlBuilder().orderBy(entity.metadata(), effective);
+            orderBy = new SqlBuilder(sqlDialect).orderBy(entity.metadata(), effective);
         }
         String wherePrefix = bindings.isEmpty() ? " WHERE " : " AND ";
 
         if (!cursored) {
             String countConstant = addConstant(constants, "SQL_COUNT_ALL",
-                    new SqlBuilder().countBy(entity.metadata(), List.of()));
+                    new SqlBuilder(sqlDialect).countBy(entity.metadata(), List.of()));
             builder.addStatement("long offset = ($L.page() - 1) * $L.size()", pageRequest, pageRequest);
             CodeBlock.Builder call = CodeBlock.builder()
                     .add("jdbcClient.sql($L + $S + $S + $L.size() + $S + offset)", findConstant, orderBy,
-                            " LIMIT ", pageRequest, " OFFSET ");
+                            sqlDialect.limitClause(""), pageRequest, sqlDialect.offsetClause(""));
             appendBoundParameters(call, bindings, parameters);
             call.add(".query($L).list()", queryArg(entity, mapperType));
             builder.addStatement("$T<$T> content = $L", List.class, entity.typeName(), call.build());
@@ -2948,7 +3064,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         builder.addStatement("long offset = ($L.page() - 1) * $L.size()", pageRequest, pageRequest);
         CodeBlock.Builder offsetCall = CodeBlock.builder()
                 .add("jdbcClient.sql($L + $S + $S + $L.size() + $S + offset)", findConstant, orderBy,
-                        " LIMIT ", pageRequest, " OFFSET ");
+                        sqlDialect.limitClause(""), pageRequest, sqlDialect.offsetClause(""));
         appendBoundParameters(offsetCall, bindings, parameters);
         offsetCall.add(".query($L).list()", queryArg(entity, mapperType));
         builder.addStatement("$T<$T> content = $L", List.class, entity.typeName(), offsetCall.build());
@@ -2971,7 +3087,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
         CodeBlock.Builder seekCall = CodeBlock.builder()
                 .add("jdbcClient.sql($L + $S + where + $S + $S + $L.size() + $S)", findConstant, wherePrefix,
-                        orderBy, " LIMIT ", pageRequest, " + 1");
+                        orderBy, sqlDialect.limitClause(""), pageRequest, " + 1");
         appendBoundParameters(seekCall, bindings, parameters);
         seekCall.add(".params($T.cursorParams(cursor)).query($L).list()", CursorSupport.class,
                 queryArg(entity, mapperType));
@@ -3051,20 +3167,86 @@ public class RepositoryProcessor extends AbstractProcessor {
         String constant = addConstant(constants, "SQL_" + upperSnake(name), query.value());
         CodeBlock.Builder sql = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
         List<? extends VariableElement> parameters = method.getParameters();
+        boolean positional = hasPositionalParameter(query.value());
         for (int i = 0; i < parameters.size(); i++) {
-            Param param = parameters.get(i).getAnnotation(Param.class);
-            if (param != null) {
-                sql.add(".param($S, $L)", param.value(), parameterName(parameters.get(i), "arg" + i));
+            VariableElement parameter = parameters.get(i);
+            if (isSpecial(parameter.asType())) {
+                continue;
+            }
+            if (positional) {
+                sql.add(".param($L)", parameterName(parameter, "arg" + i));
+            } else {
+                Param param = parameter.getAnnotation(Param.class);
+                String bindingName = param != null ? param.value() : parameterName(parameter, "arg" + i);
+                sql.add(".param($S, $L)", bindingName, parameterName(parameter, "arg" + i));
             }
         }
         Kind kind = kindOf(returnMirror);
         TypeName queryType = queryResultType(returnMirror, entity.typeName());
-        terminal(sql, kind, CodeBlock.of("$T.class", queryType));
-        if (kind == Kind.VOID) {
+        if (returnMirror.getKind() == TypeKind.ARRAY) {
+            sql.add(".query($T.class).list().toArray($T[]::new)", queryType, queryType);
+            builder.addStatement("return $L", sql.build());
+        } else if (kind == Kind.VOID) {
+            terminal(sql, kind, CodeBlock.of("$T.class", queryType));
             builder.addStatement("$L", sql.build());
         } else {
+            terminal(sql, kind, CodeBlock.of("$T.class", queryType));
             builder.addStatement("return $L", sql.build());
         }
+    }
+
+    private static boolean hasPositionalParameter(String sql) {
+        boolean singleQuoted = false;
+        boolean doubleQuoted = false;
+        boolean lineComment = false;
+        boolean blockComment = false;
+        for (int i = 0; i < sql.length(); i++) {
+            char current = sql.charAt(i);
+            char next = i + 1 < sql.length() ? sql.charAt(i + 1) : '\0';
+            if (lineComment) {
+                if (current == '\n' || current == '\r') {
+                    lineComment = false;
+                }
+                continue;
+            }
+            if (blockComment) {
+                if (current == '*' && next == '/') {
+                    blockComment = false;
+                    i++;
+                }
+                continue;
+            }
+            if (singleQuoted) {
+                if (current == '\'' && next == '\'') {
+                    i++;
+                } else if (current == '\'') {
+                    singleQuoted = false;
+                }
+                continue;
+            }
+            if (doubleQuoted) {
+                if (current == '"' && next == '"') {
+                    i++;
+                } else if (current == '"') {
+                    doubleQuoted = false;
+                }
+                continue;
+            }
+            if (current == '-' && next == '-') {
+                lineComment = true;
+                i++;
+            } else if (current == '/' && next == '*') {
+                blockComment = true;
+                i++;
+            } else if (current == '\'') {
+                singleQuoted = true;
+            } else if (current == '"') {
+                doubleQuoted = true;
+            } else if (current == '?' && Character.isDigit(next)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ------------------------------------------------------------- find / by-method-name
@@ -3072,19 +3254,21 @@ public class RepositoryProcessor extends AbstractProcessor {
     private void emitFind(MethodSpec.Builder builder, ExecutableElement method, ExecutableType resolved,
                           EntityModel entity, Map<String, String> constants, ClassName mapperType,
                           boolean hydrate, List<MethodSpec> auxMethods,
-                          List<ResolvedQueryModel> queryModels, Map<String, Integer> queryModelNames) {
+                          List<QueryDefinitionSpec> queryDefinitions, Map<String, Integer> queryDefinitionNames,
+                          boolean explicitFind, boolean explicitDelete) {
         String name = method.getSimpleName().toString();
-        ParsedMethodName parsed = tryParse(name);
-        String action = parsed != null ? parsed.action() : "find";
         List<? extends VariableElement> parameters = method.getParameters();
+        ParsedMethodName parsed = explicitDelete ? null : tryParse(name);
+        String action = explicitDelete ? "delete"
+                : explicitFind ? "find" : parsed != null ? parsed.action() : "find";
         List<? extends TypeMirror> parameterTypes = resolved.getParameterTypes();
-        List<Binding> bindings = bindings(parameters, parameterTypes, parsed);
+        List<Binding> bindings = bindings(parameters, parameterTypes, parsed, explicitFind || explicitDelete);
         TypeMirror returnMirror = resolved.getReturnType();
         Kind kind = kindOf(returnMirror);
-        String queryModelName = capitalize(name) + "QueryModel";
-        int nameClash = queryModelNames.merge(queryModelName, 1, Integer::sum);
+        String queryDefinitionName = capitalize(name) + "Query";
+        int nameClash = queryDefinitionNames.merge(queryDefinitionName, 1, Integer::sum);
         if (nameClash > 1) {
-            queryModelName = queryModelName + nameClash; // overload collision: declaration-order suffix
+            queryDefinitionName = queryDefinitionName + nameClash; // overload collision: declaration-order suffix
         }
 
         List<Predicate> predicates = predicates(bindings, parameters);
@@ -3099,12 +3283,12 @@ public class RepositoryProcessor extends AbstractProcessor {
 
         if ("count".equals(action) || "exists".equals(action)) {
             Operation countOperation = "exists".equals(action) ? Operation.EXISTS : Operation.COUNT;
-            queryModels.add(queryModelOf(queryModelName, countOperation, kind, entity.metadata(),
-                    predicates, predicateRefs, existentialPredicates, List.of(), List.of(), List.of(),
+            queryDefinitions.add(queryDefinitionOf(queryDefinitionName, countOperation, kind, entity.metadata(),
+                    predicates, predicateRefs, List.of(), List.of(), List.of(),
                     0, bindings, parameters));
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
-                    new SqlBuilder().build(entity.metadata(),
-                            queryModels.get(queryModels.size() - 1)));
+                    new SqlBuilder(sqlDialect).build(entity.metadata(), entity.metadata(),
+                            queryDefinitions.get(queryDefinitions.size() - 1)));
             CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
             appendBoundParameters(call, bindings, parameters);
             call.add(".singleValue($T.class)", Long.class);
@@ -3124,12 +3308,12 @@ public class RepositoryProcessor extends AbstractProcessor {
             // legacy predicate could match the wrong rows, and a joined DELETE ... LEFT JOIN is
             // invalid SQL. Multi-hop paths are NOTE-rejected by resolveCompilePaths BEFORE this
             // point (their refs stay unjoined, so they render legacy and emit no delete NOTE).
-            queryModels.add(queryModelOf(queryModelName, Operation.DELETE, kind, entity.metadata(),
-                    predicates, predicateRefs, existentialPredicates, List.of(), List.of(), List.of(),
+            queryDefinitions.add(queryDefinitionOf(queryDefinitionName, Operation.DELETE, kind, entity.metadata(),
+                    predicates, predicateRefs, List.of(), List.of(), List.of(),
                     0, bindings, parameters));
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
-                    new SqlBuilder().build(entity.metadata(),
-                            queryModels.get(queryModels.size() - 1)));
+                    new SqlBuilder(sqlDialect).build(entity.metadata(), entity.metadata(),
+                            queryDefinitions.get(queryDefinitions.size() - 1)));
             CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
             appendBoundParameters(call, bindings, parameters);
             call.add(".update()");
@@ -3175,12 +3359,12 @@ public class RepositoryProcessor extends AbstractProcessor {
                 pagedSortRefs.add(ref == null ? legacyColumnRef(methodSorts.get(i).property()) : ref);
                 pagedExistentialSorts.add(ref != null && pagedSortPaths.get(i).existential());
             }
-            queryModels.add(queryModelOf(queryModelName, Operation.FIND, kind, entity.metadata(),
-                    predicates, predicateRefs, existentialPredicates, methodSorts,
+            queryDefinitions.add(queryDefinitionOf(queryDefinitionName, Operation.FIND, kind, entity.metadata(),
+                    predicates, predicateRefs, methodSorts,
                     pagedSortRefs, pagedExistentialSorts, 0, bindings, parameters));
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
-                    new SqlBuilder().build(entity.metadata(),
-                            queryModels.get(queryModels.size() - 1)));
+                    new SqlBuilder(sqlDialect).build(entity.metadata(), entity.metadata(),
+                            queryDefinitions.get(queryDefinitions.size() - 1)));
             emitPaged(builder, entity, pageRequest, methodSorts, constant, constants, bindings, parameters,
                     kind == Kind.CURSORED_PAGE, mapperType, hydrate);
             return;
@@ -3204,15 +3388,30 @@ public class RepositoryProcessor extends AbstractProcessor {
             auxMethods.add(buildFullMapper(fullMapper, entity, mapperType, traversed));
             queryArgForMethod = CodeBlock.of("(rs, rowNum) -> $L(rs, rowNum)", fullMapper);
         }
-        queryModels.add(queryModelOf(queryModelName, Operation.FIND, kind, entity.metadata(),
-                predicates, predicateRefs, existentialPredicates,
-                methodSorts, sortRefs, existentialSorts, parsed != null ? parsed.limit() : 0,
+        queryDefinitions.add(queryDefinitionOf(queryDefinitionName, Operation.FIND, kind, entity.metadata(),
+                predicates, predicateRefs, methodSorts, sortRefs, existentialSorts,
+                parsed != null ? parsed.limit() : 0,
                 bindings, parameters));
-        ResolvedQueryModel queryModel = queryModels.get(queryModels.size() - 1);
-        String sql = new SqlBuilder().build(entity.metadata(), queryModel, extraProjection);
+        QueryDefinitionSpec queryDefinition = queryDefinitions.get(queryDefinitions.size() - 1);
+        String sql = new SqlBuilder(sqlDialect).build(entity.metadata(), entity.metadata(),
+                queryDefinition, extraProjection);
         String constant = addConstant(constants, "SQL_" + upperSnake(name), sql);
         CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
         appendBoundParameters(call, bindings, parameters);
+        if (returnMirror.getKind() == TypeKind.ARRAY) {
+            call.add(".query($L).list()", queryArgForMethod);
+            if (!hydrate) {
+                builder.addStatement("return $L.toArray($T[]::new)", call.build(), queryResultType(returnMirror,
+                        entity.typeName()));
+            } else {
+                builder.addStatement("$T<$T> results = $L",
+                        List.class, entity.typeName(), call.build());
+                builder.addStatement("$L", hydrationCall(entity, "results"));
+                builder.addStatement("return results.toArray($T[]::new)",
+                        queryResultType(returnMirror, entity.typeName()));
+            }
+            return;
+        }
         if (!hydrate || kind == Kind.VOID) {
             terminal(call, kind, queryArgForMethod);
             if (kind == Kind.VOID) {
@@ -3256,7 +3455,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * property. Composition and association references both qualify — the field is filled from the join
      * either way. Deduped by property name so one traversal of a shared head yields one projection.
      */
-    private List<Prop.Reference> collectTraversedReferences(DataModel md, List<ColumnRef> predicateRefs,
+    private List<Prop.Reference> collectTraversedReferences(TypeMapping md, List<ColumnRef> predicateRefs,
                                                             List<ColumnRef> sortRefs) {
         List<Prop.Reference> out = new ArrayList<>();
         List<ColumnRef> all = new ArrayList<>(predicateRefs);
@@ -3265,9 +3464,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             if (ref.joins().isEmpty()) {
                 continue;
             }
-            String path = ref.path();
-            int dot = path.indexOf('.');
-            String head = dot < 0 ? path : path.substring(0, dot);
+            String head = ref.joins().get(0).childAlias();
             Prop prop = propOrNull(md, head);
             if (prop instanceof Prop.Reference reference) {
                 boolean seen = out.stream().anyMatch(r -> r.name().equals(reference.name()));
@@ -3285,7 +3482,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * by the join alias and re-labelled {@code <alias>_join_<column>} so the read is unambiguous against
      * the root's own columns. Emitted in the target's {@code columns()} declaration order.
      */
-    private String joinedProjection(DataModel md, List<Prop.Reference> traversed) {
+    private String joinedProjection(TypeMapping md, List<Prop.Reference> traversed) {
         StringBuilder sb = new StringBuilder();
         for (Prop.Reference ref : traversed) {
             TypeElement target = elements.getTypeElement(ref.targetTypeName());
@@ -3293,9 +3490,11 @@ public class RepositoryProcessor extends AbstractProcessor {
                 continue;
             }
             EntityModel targetModel = entityModel(target);
-            for (ColumnRef column : targetModel.metadata().columns()) {
-                String head = column.path().contains(".")
-                        ? column.path().substring(0, column.path().indexOf('.')) : column.path();
+            for (Map.Entry<String, ColumnRef> entry : targetModel.metadata().localAttributeRefs().entrySet()) {
+                ColumnRef column = entry.getValue();
+                if (!column.joins().isEmpty()) continue;
+                String head = entry.getKey().contains(".")
+                        ? entry.getKey().substring(0, entry.getKey().indexOf('.')) : entry.getKey();
                 if (propOrNull(targetModel.metadata(), head) instanceof Prop.Reference) {
                     continue; // nested association fk not selected — its target stays null (depth-1)
                 }
@@ -3304,7 +3503,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                 if (sb.length() > 0) {
                     sb.append(", ");
                 }
-                sb.append(alias).append(" AS ").append(Names.quote(label));
+                sb.append(alias).append(" AS ").append(sqlDialect.quoteIdentifier(label));
             }
         }
         return sb.toString();
@@ -3460,14 +3659,14 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /**
-     * The outcome of resolving a method-name property path against a {@link DataModel}. A
+     * The outcome of resolving a method-name property path against a {@link TypeMapping}. A
      * resolved {@code ref} is either a plain local column (empty {@code joins}) or a relation-traversing
      * column carrying exactly one {@link JoinRef}; {@code multiHop} flags a path that would need two or
      * more joins (rejected with a NOTE), and {@code unresolvedRelation} flags a path whose relation head
      * names a target that could not be resolved (degraded with a NOTE). Both degrade the caller back to
      * the legacy unqualified rendering; neither aborts the compile. {@code existential} marks a ref
      * whose single head is a to-many {@link Prop.EntityList}/{@link Prop.ElementList}: the caller
-     * renders it as an {@link SqlBuilder#existsConjunct(EntitySchema, Predicate, ColumnRef) EXISTS
+     * renders it as an {@link SqlBuilder#existsConjunct(io.github.fludakit.data.metadata.TableSchema, Predicate, ColumnRef) EXISTS
      * semi-join} conjunct and splices NO join.
      */
     private record PathResolution(ColumnRef ref, boolean multiHop, boolean unresolvedRelation,
@@ -3485,7 +3684,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * (identical to {@code SqlBuilder}'s old {@code Names.columnName} rendering) whenever the descriptor
      * cannot resolve the path. The returned resolutions line up index-for-index with {@code paths}.
      */
-    private List<PathResolution> resolveCompilePaths(DataModel md, List<String> paths, ExecutableElement method) {
+    private List<PathResolution> resolveCompilePaths(TypeMapping md, List<String> paths, ExecutableElement method) {
         List<PathResolution> out = new ArrayList<>();
         for (String path : paths) {
             PathResolution resolution = resolveCompilePath(md, path);
@@ -3508,16 +3707,16 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     /** The legacy fully-local ref: physical column via {@link Names#columnName}, no join, no table. */
     private static ColumnRef legacyColumnRef(String property) {
-        return new ColumnRef(Names.columnName(property), property);
+        return new ColumnRef(Names.columnName(property));
     }
 
     /**
      * Resolves a single method-name property to a {@link ColumnRef} through the compile model, using the
-     * same algorithm as the runtime {@code EntityDescriptor.columnRef} but driven by the concatenated
+     * same algorithm as the runtime {@code EntityMetadata.columnRef} but driven by the concatenated
      * camel path the {@code qbn} parser emits (which carries NO dots). So a head/remainder split happens
      * at camel-hump (and any literal {@code '.'}) boundaries rather than at a single dot. Order:
      * <ol>
-     *   <li>local scan — a dots-stripped, case-insensitive match against each {@link ColumnRef#path()}
+     *   <li>local scan — a dots-stripped, case-insensitive match against each entity-rooted mapping key
      *       (this keeps flat scalars and flattened embedded leaves byte-identical to today);</li>
      *   <li>relation descent — the shortest head that is a {@link Prop.Reference}/
      *       {@link Prop.EntityList}/{@link Prop.ElementList}, with the remainder resolved as a LEAF in the
@@ -3526,8 +3725,8 @@ public class RepositoryProcessor extends AbstractProcessor {
      * A remainder that would itself need a relation yields {@link PathResolution#multiHop()}; a head whose
      * target cannot be resolved yields {@link PathResolution#relationUnresolved()}.
      */
-    private PathResolution resolveCompilePath(DataModel md, String path) {
-        ColumnRef local = localColumnRef(md.columns(), path);
+    private PathResolution resolveCompilePath(TypeMapping md, String path) {
+        ColumnRef local = localColumnRef(md.columnRefs(), path);
         if (local != null) {
             return PathResolution.resolved(local);
         }
@@ -3548,23 +3747,23 @@ public class RepositoryProcessor extends AbstractProcessor {
      * Resolves {@code remainder} as a leaf under a relation {@code prop} and attaches the join edge the
      * traversal contributes. The alias is exactly the property name.
      */
-    private PathResolution resolveRelationHead(DataModel md, Prop prop, String remainder) {
+    private PathResolution resolveRelationHead(TypeMapping md, Prop prop, String remainder) {
         if (prop instanceof Prop.ElementList elementList) {
-            ColumnRef leaf = localColumnRef(elementList.elementColumns(), remainder);
+            ColumnRef leaf = localColumnRef(elementList.target().localAttributeRefs(), remainder);
             if (leaf == null) {
                 return PathResolution.unresolved();
             }
-            JoinRef join = new JoinRef(elementList.childTable(), elementList.name(),
-                    md.idColumn(), elementList.parentFkColumn());
-            return PathResolution.existentialRef(leaf.withPrefix(elementList.name(), join));
+            JoinRef join = new JoinRef(md.tableName(), null, md.idColumn(),
+                    elementList.childTable(), elementList.name(), elementList.parentFkColumn());
+            return PathResolution.existentialRef(leaf.through(join));
         }
         String targetFqn = prop instanceof Prop.Reference reference
                 ? reference.targetTypeName() : ((Prop.EntityList) prop).targetTypeName();
-        DataModel target = descriptorByFqn(targetFqn);
+        TypeMapping target = descriptorByFqn(targetFqn);
         if (target == null) {
             return PathResolution.relationUnresolved();
         }
-        ColumnRef leaf = localColumnRef(target.columns(), remainder);
+        ColumnRef leaf = localColumnRef(target.localAttributeRefs(), remainder);
         if (leaf == null) {
             // Not a local leaf of the target — if the remainder names ANOTHER relation the path is
             // multi-hop; otherwise this head is simply not the right split, so keep searching.
@@ -3579,40 +3778,37 @@ public class RepositoryProcessor extends AbstractProcessor {
         if (join == null) {
             return PathResolution.relationUnresolved();
         }
-        ColumnRef traversed = leaf.withPrefix(prop.name(), join);
+        ColumnRef traversed = leaf.through(join);
         return prop instanceof Prop.EntityList
                 ? PathResolution.existentialRef(traversed)
                 : PathResolution.resolved(traversed);
     }
 
     /** The LEFT JOIN edge for a Reference / EntityList traversal; {@code null} when unbuildable. */
-    private static JoinRef referenceOrListJoin(DataModel root, DataModel target, Prop prop) {
+    private static JoinRef referenceOrListJoin(TypeMapping root, TypeMapping target, Prop prop) {
         if (prop instanceof Prop.Reference reference) {
             if (reference.targetTable() == null || target.idColumn() == null) {
                 return null;
             }
-            return new JoinRef(reference.targetTable(), reference.name(),
-                    reference.fkColumn(), target.idColumn());
+            return new JoinRef(root.tableName(), null, reference.fkColumn(),
+                    reference.targetTable(), reference.name(), target.idColumn());
         }
         if (prop instanceof Prop.EntityList list) {
             if (list.targetTable() == null || list.inverseFkColumn() == null) {
                 return null;
             }
-            return new JoinRef(list.targetTable(), list.name(), root.idColumn(), list.inverseFkColumn());
+            return new JoinRef(root.tableName(), null, root.idColumn(),
+                    list.targetTable(), list.name(), list.inverseFkColumn());
         }
         return null;
     }
 
     /** The compile-time descriptor for a relationship target FQN, or {@code null} if unmapped. */
-    private DataModel descriptorByFqn(String fqn) {
+    private TypeMapping descriptorByFqn(String fqn) {
         if (fqn == null) {
             return null;
         }
         String raw = stripGenerics(fqn);
-        DataModel cached = descriptorCache.get(raw);
-        if (cached != null) {
-            return cached;
-        }
         try {
             TypeElement te = elements.getTypeElement(raw);
             return te == null ? null : descriptorFor(te);
@@ -3622,11 +3818,12 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /** First column whose dot-path (dots removed, case-insensitive) equals {@code path} (dots removed). */
-    private static ColumnRef localColumnRef(List<ColumnRef> columns, String path) {
+    private static ColumnRef localColumnRef(Map<String, ColumnRef> mappings, String path) {
         String flat = path.replace(".", "");
-        for (ColumnRef c : columns) {
-            if (c.path().replace(".", "").equalsIgnoreCase(flat)) {
-                return c;
+        for (Map.Entry<String, ColumnRef> entry : mappings.entrySet()) {
+            if (entry.getValue().joins().isEmpty()
+                    && entry.getKey().replace(".", "").equalsIgnoreCase(flat)) {
+                return entry.getValue();
             }
         }
         return null;
@@ -3654,12 +3851,12 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /**
-     * {@link DataModel#prop(String)} without the throw: {@code null} for an unknown name. A
+     * {@link TypeMapping#prop(String)} without the throw: {@code null} for an unknown name. A
      * mid-path camel segment keeps its leading capital (e.g. {@code "Country"} in
      * {@code "customerCountryCode"}), so the decapitalized form is matched as a fallback — mirroring how
      * the {@code qbn} parser only decapitalizes the FIRST hump of the concatenated property string.
      */
-    private static Prop propOrNull(DataModel md, String name) {
+    private static Prop propOrNull(TypeMapping md, String name) {
         Prop exact = propByExactName(md, name);
         if (exact != null) {
             return exact;
@@ -3670,7 +3867,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         return propByExactName(md, Character.toLowerCase(name.charAt(0)) + name.substring(1));
     }
 
-    private static Prop propByExactName(DataModel md, String name) {
+    private static Prop propByExactName(TypeMapping md, String name) {
         if (md.id() != null && md.id().name().equals(name)) {
             return md.id();
         }
@@ -3693,18 +3890,33 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     private List<Binding> bindings(List<? extends VariableElement> parameters, List<? extends TypeMirror> parameterTypes,
-                                   ParsedMethodName parsed) {
+                                   ParsedMethodName parsed, boolean explicitFind) {
         List<Integer> indices = nonSpecialIndices(parameterTypes);
         List<Binding> result = new ArrayList<>();
         boolean annotated = parameters.stream().anyMatch(p -> p.getAnnotation(By.class) != null);
         if (annotated) {
             for (int index : indices) {
                 By by = parameters.get(index).getAnnotation(By.class);
-                if (by == null) {
+                if (by == null && !explicitFind) {
                     continue;
                 }
-                String property = By.ID.equals(by.value()) ? "id" : by.value();
+                String property = by == null ? parameters.get(index).getSimpleName().toString()
+                        : By.ID.equals(by.value()) ? "id" : by.value();
                 result.add(new Binding(property, operatorFor(parsed, property), index));
+            }
+        } else if (explicitFind) {
+            if (parsed != null) {
+                List<Predicate> predicates = parsed.predicates();
+                for (int i = 0; i < predicates.size(); i++) {
+                    int index = i < indices.size() ? indices.get(i) : i;
+                    Predicate predicate = predicates.get(i);
+                    result.add(new Binding(predicate.property(), predicate.operator(), index));
+                }
+            } else {
+                for (int index : indices) {
+                    String property = parameters.get(index).getSimpleName().toString();
+                    result.add(new Binding(property, Operator.EQ, index));
+                }
             }
         } else if (parsed != null) {
             List<Predicate> predicates = parsed.predicates();
@@ -3836,8 +4048,9 @@ public class RepositoryProcessor extends AbstractProcessor {
     private MethodSpec appendCollectionHydration(Map<String, String> constants,
                                            EntityModel entity, ElementCollection collection, ClassName voMapper) {
         String selectConst = addConstant(constants, "SQL_SELECT_" + upperSnake(collection.field()),
-                "SELECT " + quotedColumnList(collection) + " FROM " + Names.quote(collection.childTable())
-                        + " WHERE " + Names.quote(collection.parentFk()) + " IN (");
+                "SELECT " + quotedColumnList(collection) + " FROM "
+                        + sqlDialect.quoteIdentifier(collection.childTable())
+                        + " WHERE " + sqlDialect.quoteIdentifier(collection.parentFk()) + " IN (");
         return appendGroupedKeyHydration(constants, entity, collection.field(), selectConst,
                 collection.parentFk(), collection.valueObjectType(), voMapper);
     }
@@ -3858,8 +4071,8 @@ public class RepositoryProcessor extends AbstractProcessor {
         String inverseFk = Names.fkColumn(a.inverseName());
         String selectConst = addConstant(constants, "SQL_SELECT_" + upperSnake(a.name()),
                 "SELECT " + entityColumnList(targetModel) + " FROM "
-                        + Names.quote(targetModel.metadata().tableName())
-                        + " WHERE " + Names.quote(inverseFk) + " IN (");
+                        + sqlDialect.quoteIdentifier(targetModel.metadata().tableName())
+                        + " WHERE " + sqlDialect.quoteIdentifier(inverseFk) + " IN (");
         return appendGroupedKeyHydration(constants, entity, a.name(), selectConst, inverseFk,
                 targetModel.typeName(), relationship.targetMapper());
     }
@@ -3954,14 +4167,14 @@ public class RepositoryProcessor extends AbstractProcessor {
         String targetIdColumn = targetModel.id().column();
 
         String fkConst = addConstant(constants, "SQL_SELECT_" + upperSnake(a.name()) + "_FK",
-                "SELECT " + Names.quote(idColumn) + ", " + Names.quote(fkColumn) + " FROM "
-                        + Names.quote(entity.metadata().tableName())
-                        + " WHERE " + Names.quote(idColumn) + " IN (");
+                "SELECT " + sqlDialect.quoteIdentifier(idColumn) + ", " + sqlDialect.quoteIdentifier(fkColumn) + " FROM "
+                        + sqlDialect.quoteIdentifier(entity.metadata().tableName())
+                        + " WHERE " + sqlDialect.quoteIdentifier(idColumn) + " IN (");
         String targetConst = addConstant(constants,
                 "SQL_FIND_" + upperSnake(targetSimpleName(targetModel)) + "_BY_IDS",
                 "SELECT " + entityColumnList(targetModel) + " FROM "
-                        + Names.quote(targetModel.metadata().tableName())
-                        + " WHERE " + Names.quote(targetIdColumn) + " IN (");
+                        + sqlDialect.quoteIdentifier(targetModel.metadata().tableName())
+                        + " WHERE " + sqlDialect.quoteIdentifier(targetIdColumn) + " IN (");
 
         ClassName sqlSpec = ClassName.get(JdbcClient.class).nestedClass("SqlSpec");
         TypeName entityType = entity.typeName();
@@ -4058,13 +4271,13 @@ public class RepositoryProcessor extends AbstractProcessor {
      * columns are never selected) a one-to-many/many-to-one SELECT must carry the target's own FK
      * columns so its row mapper and, for one-to-many, the inverse grouping label are readable.
      */
-    private static String entityColumnList(EntityModel entity) {
+    private String entityColumnList(EntityModel entity) {
         StringBuilder sb = new StringBuilder();
         for (ColumnRef column : entity.metadata().columns()) {
             if (!sb.isEmpty()) {
                 sb.append(", ");
             }
-            sb.append(Names.quote(column.column()));
+            sb.append(sqlDialect.quoteIdentifier(column.column()));
         }
         return sb.toString();
     }
@@ -4075,13 +4288,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * repositories from being re-walked, mirroring {@link #voModels} for value objects.
      */
     private EntityModel entityModel(TypeElement targetElement) {
-        String fqn = targetElement.getQualifiedName().toString();
-        EntityModel model = entityModels.get(fqn);
-        if (model == null) {
-            model = buildEntity(targetElement);
-            entityModels.put(fqn, model);
-        }
-        return model;
+        return typeMappingBuilder.entityModel(targetElement);
     }
 
     /**
@@ -4125,6 +4332,10 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     private static String capitalize(String field) {
         return Character.toUpperCase(field.charAt(0)) + field.substring(1);
+    }
+
+    private static String lastPathSegment(String path) {
+        return path.substring(path.lastIndexOf('.') + 1);
     }
 
     // ------------------------------------------------------------------ helpers
@@ -4258,303 +4469,18 @@ public class RepositoryProcessor extends AbstractProcessor {
         return Names.toSnakeCase(name).toUpperCase();
     }
 
-    /** Walks the interface hierarchy for the {@code DataRepository}/{@code BasicRepository}/{@code CrudRepository} supertype. */
-    private TypeMirror resolveEntityType(TypeElement repository, Set<String> visited) {
-        if (!visited.add(repository.getQualifiedName().toString())) {
-            return null;
-        }
-        for (TypeMirror supertype : types.directSupertypes(repository.asType())) {
-            if (!(supertype instanceof DeclaredType declared)) {
-                continue;
-            }
-            String erasure = types.erasure(declared).toString();
-            if (DATA_REPOSITORY.equals(erasure) || BASIC_REPOSITORY.equals(erasure) || CRUD_REPOSITORY.equals(erasure)) {
-                List<? extends TypeMirror> arguments = declared.getTypeArguments();
-                if (!arguments.isEmpty()) {
-                    return arguments.get(0);
-                }
-            }
-            if (declared.asElement() instanceof TypeElement parent) {
-                TypeMirror resolved = resolveEntityType(parent, visited);
-                if (resolved != null) {
-                    return resolved;
-                }
-            }
-        }
-        return null;
-    }
-
-    private boolean extendsCrud(TypeElement repository, Set<String> visited) {
-        if (!visited.add(repository.getQualifiedName().toString())) {
-            return false;
-        }
-        for (TypeMirror supertype : types.directSupertypes(repository.asType())) {
-            if (!(supertype instanceof DeclaredType declared)) {
-                continue;
-            }
-            if (CRUD_REPOSITORY.equals(types.erasure(declared).toString())) {
-                return true;
-            }
-            if (declared.asElement() instanceof TypeElement parent && extendsCrud(parent, visited)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     // ------------------------------------------------- compile-time entity model
 
     private EntityModel buildEntity(TypeElement element) {
-        boolean valueObject = isValueObjectType(element);
-        // The owner stereotype drives relationship classification (Classification Table): a bare
-        // entity-typed field composes only inside an @AggregateRoot; elsewhere it is an association.
-        Stereotype ownerStereotype = stereotypeOf(element);
-        TypeMirror typeMirror = types.erasure(element.asType());
-        TypeName typeName = TypeName.get(typeMirror);
-        String table = valueObject ? null : Names.tableName(element.getSimpleName().toString());
-        String typeNameString = element.getQualifiedName().toString();
-        Property id = null;
-        Prop.Id idProp = null;
-        List<Property> properties = new ArrayList<>();
-        List<Prop> props = new ArrayList<>();
-        List<ElementCollection> collections = new ArrayList<>();
-        Set<String> seen = new HashSet<>();
-        for (Element member : elements.getAllMembers(element)) {
-            if (member.getKind() != ElementKind.FIELD) {
-                continue;
-            }
-            VariableElement field = (VariableElement) member;
-            if (field.getModifiers().contains(Modifier.STATIC)) {
-                continue;
-            }
-            String name = field.getSimpleName().toString();
-            if (!seen.add(name)) {
-                continue;
-            }
-            String fieldType = field.asType().toString();
-            TypeName fieldTypeName = safeFieldType(field.asType());
-            boolean identityAnnotated = field.getAnnotation(Identity.class) != null;
-
-            if (valueObject && identityAnnotated) {
-                // A value object has no identity: an @Identity field is demoted to a scalar and a
-                // NOTE records the ignored annotation. (A field merely NAMED "id" is already scalar
-                // via the !valueObject guard below, so it needs no NOTE.)
-                processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
-                        "value object '" + element.getSimpleName() + "' declares '" + name
-                                + "'; ignored — value objects have no identity", element);
-            }
-            if (!valueObject && (identityAnnotated || name.equals("id"))) {
-                idProp = new Prop.Id(name, Names.columnName(name), fieldType);
-                id = new Property(name, idProp.column(), fieldTypeName, idProp, null);
-
-            } else if (field.getAnnotation(Association.class) != null) {
-                // External aggregate reference: fk-only, never hydrated.
-                TypeElement target = declaredElement(field);
-                Prop.Reference ref = referenceProp(name, Names.fkColumn(name),
-                        target != null ? target.getQualifiedName().toString() : null, target, false);
-                properties.add(new Property(name, ref.fkColumn(), fieldTypeName, ref, null));
-                props.add(ref);
-
-            } else if (embeddedTarget(field) != null) {
-                // Direct value object: flatten leaves into this table. The Property carries the VO's
-                // compile-time model so the mapper gate and the embedded read emitter can recurse.
-                TypeElement vo = embeddedTarget(field);
-                Prop.Embedded embedded = new Prop.Embedded(name, Names.columnName(name), embeddedOf(descriptorFor(vo)));
-                properties.add(new Property(name, embedded.column(), fieldTypeName, embedded, voModel(vo)));
-                props.add(embedded);
-
-            } else if (isEntityType(declaredElement(field))) {
-                // A bare entity-typed field is a many-to-one whose ownership is set by the OWNER
-                // stereotype (Classification Table): it composes only inside an @AggregateRoot (root-
-                // owned, hydrated on read). Inside an @Entity or a @ValueObject the same field is an
-                // association (composition=false) — the fk column is kept but no loader is emitted.
-                TypeElement target = declaredElement(field);
-                boolean composition = ownerStereotype == Stereotype.AGGREGATE_ROOT;
-                Prop.Reference ref = referenceProp(name, Names.fkColumn(name),
-                        target.getQualifiedName().toString(), target, composition);
-                properties.add(new Property(name, ref.fkColumn(), fieldTypeName, ref, null));
-                props.add(ref);
-
-            } else if (valueObjectElementType(field) != null) {
-                // List<@ValueObject>: element collection in a child table. The child-table placement
-                // lives in the Prop.ElementList the collection carries, so props and collections agree.
-                TypeElement vo = valueObjectElementType(field);
-                ElementCollection collection = buildCollection(table, name, vo);
-                collections.add(collection);
-                props.add(collection.element());
-
-            } else if (entityTypeElement(field) != null) {
-                // List<@Entity>: one-to-many across the child's own table. The inverse is resolved
-                // in the second pass below, so the placeholder inverse stays null here.
-                TypeElement child = entityTypeElement(field);
-                props.add(new Prop.EntityList(name, entityOf(descriptorFor(child)), null, null));
-
-            } else {
-                Prop.Scalar scalar = new Prop.Scalar(name, Names.columnName(name), fieldType);
-                properties.add(new Property(name, scalar.column(), fieldTypeName, scalar, null));
-                props.add(scalar);
-            }
-        }
-        if (!valueObject && id == null) {
-            idProp = new Prop.Id("id", Names.columnName("id"), "java.lang.Long");
-            id = new Property("id", idProp.column(), ClassName.get(Long.class), idProp, null);
-        }
-        // Second pass: resolve ONE_TO_MANY inverses now that all parent properties are known.
-        DataModel self = valueObject ? new EmbeddedValueObjectModel(typeNameString, props)
-                : new EntityDataModel(ownerStereotype, typeNameString, table, idProp, props);
-        List<Prop> resolved = new ArrayList<>(props.size());
-        for (Prop p : props) {
-            if (p instanceof Prop.EntityList entityList && entityList.targetTypeName() != null) {
-                TypeElement childEl = elements.getTypeElement(entityList.targetTypeName());
-                EntityDataModel child = childEl != null ? entityOf(descriptorFor(childEl)) : null;
-                String inverse = child != null ? findInverseName(self, child) : null;
-                resolved.add(new Prop.EntityList(entityList.name(), entityList.target(),
-                        inverse, inverse == null ? null : Names.fkColumn(inverse)));
-            } else {
-                resolved.add(p);
-            }
-        }
-        DataModel metadata = valueObject ? new EmbeddedValueObjectModel(typeNameString, resolved)
-                : new EntityDataModel(ownerStereotype, typeNameString, table, idProp, resolved);
-        return new EntityModel(typeMirror, typeName, id, properties, collections, metadata);
+        return typeMappingBuilder.buildEntity(element);
     }
 
-    /** The DDD stereotype for an entity/value-object element. */
     private Stereotype stereotypeOf(TypeElement element) {
-        if (isValueObjectType(element)) {
-            return Stereotype.VALUE_OBJECT;
-        }
-        return element.getAnnotation(io.github.fludakit.data.annotation.AggregateRoot.class) != null
-                ? Stereotype.AGGREGATE_ROOT : Stereotype.ENTITY;
-    }
-
-    /**
-     * A foreign-key reference property. {@code composition} distinguishes an in-aggregate many-to-one
-     * (root-owned, hydrated on read) from an external {@code @Association} (fk-only, never hydrated);
-     * both share the {@link Prop.Reference} shape. The target's table/id column resolve the join edge
-     * for downstream traversal and are resolved from the target's own descriptor (memoized, cycle-safe).
-     */
-    private Prop.Reference referenceProp(String name, String fkColumn, String targetTypeName,
-                                         TypeElement target, boolean composition) {
-        DataModel targetModel = target != null ? descriptorFor(target) : null;
-        return new Prop.Reference(name, fkColumn, targetTypeName, entityOf(targetModel), composition);
-    }
-
-    private ElementCollection buildCollection(String parentTable, String field, TypeElement valueObject) {
-        String childTable = Names.childTable(parentTable, field);
-        String parentFk = parentTable + "_id";
-        // The value object's flattened descriptor is the single source for the child-table column list
-        // and the param bindings; per the global contract an @Association field is a (non-composing)
-        // Reference there, exactly as in buildEntity, and binds the target's id through boundValue.
-        // The Prop.ElementList is the one source of truth for the child-table placement and columns.
-        ExternalValueObjectModel target = valueObjectMetadata(valueObject, childTable, parentFk);
-        Prop.ElementList element = new Prop.ElementList(field, target, target.columns());
-        return new ElementCollection(field, TypeName.get(types.erasure(valueObject.asType())),
-                element, target);
-    }
-
-    /**
-     * {@link TypeName#get(javax.lang.model.type.TypeMirror)} for a possibly exotic field type. A
-     * mirror JavaPoet cannot represent (it throws {@link IllegalArgumentException}) degrades to
-     * {@link TypeName#OBJECT}: never JDBC-safe, so the existing {@link #canGenerateRowMapper} gate
-     * silently skips the mapper exactly as the old string-only path did, instead of aborting
-     * annotation processing.
-     */
-    private static TypeName safeFieldType(TypeMirror type) {
-        try {
-            return TypeName.get(type);
-        } catch (IllegalArgumentException e) {
-            return TypeName.OBJECT;
-        }
-    }
-
-    /**
-     * Builds the id-less descriptor for a {@code List<@ValueObject>} element type. Classification
-     * follows the global contract: {@code @Association} → a non-composing {@link Prop.Reference} (never
-     * composing); everything else is a {@link Prop.Scalar} column.
-     */
-    private ExternalValueObjectModel valueObjectMetadata(TypeElement valueObject, String childTable,
-                                                       String parentFk) {
-        List<Prop> props = new ArrayList<>();
-        Set<String> seen = new HashSet<>();
-        for (Element member : elements.getAllMembers(valueObject)) {
-            if (member.getKind() != ElementKind.FIELD) {
-                continue;
-            }
-            VariableElement field = (VariableElement) member;
-            if (field.getModifiers().contains(Modifier.STATIC)) {
-                continue;
-            }
-            String name = field.getSimpleName().toString();
-            if (!seen.add(name) || field.getAnnotation(Identity.class) != null || name.equals("id")) {
-                continue;
-            }
-            String fieldType = field.asType().toString();
-            if (field.getAnnotation(Association.class) != null) {
-                // Mirror buildEntity's external-reference branch: carry the target's FQN so the
-                // relationship hydration / embedded mapping can resolve the association target.
-                TypeElement target = declaredElement(field);
-                props.add(referenceProp(name, Names.fkColumn(name),
-                        target != null ? target.getQualifiedName().toString() : null, target, false));
-            } else {
-                props.add(new Prop.Scalar(name, Names.columnName(name), fieldType));
-            }
-        }
-        return new ExternalValueObjectModel(valueObject.getQualifiedName().toString(),
-                childTable, parentFk, List.copyOf(props));
-    }
-
-    private boolean isEntityType(TypeElement te) {
-        return te != null
-                && (te.getAnnotation(io.github.fludakit.data.annotation.Entity.class) != null
-                 || te.getAnnotation(io.github.fludakit.data.annotation.AggregateRoot.class) != null);
+        return typeMappingBuilder.stereotypeOf(element);
     }
 
     private boolean isValueObjectType(TypeElement te) {
-        return te != null && te.getAnnotation(io.github.fludakit.data.annotation.ValueObject.class) != null;
-    }
-
-    /** The TypeElement of a direct field whose type is a value object (for EMBEDDED), else null. */
-    private TypeElement embeddedTarget(VariableElement field) {
-        if (field.getAnnotation(Association.class) != null) return null;
-        TypeMirror type = field.asType();
-        if (!(type instanceof DeclaredType declared)) return null;
-        if (!(declared.asElement() instanceof TypeElement te)) return null;
-        return isValueObjectType(te) ? te : null;
-    }
-
-    /** Element TypeElement of a {@code java.util.List<E>} field, when E matches; null otherwise. */
-    private TypeElement listElementType(VariableElement field,
-                                        java.util.function.Predicate<TypeElement> elementMatcher) {
-        if (field.getAnnotation(Association.class) != null) return null;
-        if (!(field.asType() instanceof DeclaredType declared) || declared.getTypeArguments().size() != 1
-                || !"java.util.List".equals(types.erasure(declared).toString())) {
-            return null;
-        }
-        TypeMirror argument = declared.getTypeArguments().get(0);
-        if (!(argument instanceof DeclaredType element) || !(element.asElement() instanceof TypeElement te)) {
-            return null;
-        }
-        return elementMatcher.test(te) ? te : null;
-    }
-
-    /** The element TypeElement of a List&lt;E&gt; field when E is an entity (for ONE_TO_MANY), else null. */
-    private TypeElement entityTypeElement(VariableElement field) {
-        return listElementType(field, this::isEntityType);
-    }
-
-    /** The element TypeElement of a List&lt;E&gt; field when E is a value object (for ELEMENT_COLLECTION). */
-    private TypeElement valueObjectElementType(VariableElement field) {
-        return listElementType(field, this::isValueObjectType);
-    }
-
-    /** The declared TypeElement of a (non-collection) field, or null. */
-    private TypeElement declaredElement(VariableElement field) {
-        if (field.asType() instanceof DeclaredType declared
-                && declared.asElement() instanceof TypeElement te) {
-            return te;
-        }
-        return null;
+        return typeMappingBuilder.isValueObjectType(te);
     }
 
     /**
@@ -4563,121 +4489,51 @@ public class RepositoryProcessor extends AbstractProcessor {
      * a descriptor already being built returns a shallow property-less placeholder (only
      * {@code typeName} is consumed for a back-reference).
      */
-    private DataModel descriptorFor(TypeElement te) {
-        String fqn = te.getQualifiedName().toString();
-        DataModel cached = descriptorCache.get(fqn);
-        if (cached != null) return cached;
-        if (inProgress.contains(fqn)) {
-            // Cycle: return a shallow, property-less placeholder; only typeName is consumed
-            // for a back-reference, and findInverseName tolerates an empty property list.
-            return stereotypeOf(te) == Stereotype.VALUE_OBJECT
-                    ? new EmbeddedValueObjectModel(fqn, List.of())
-                    : new EntityDataModel(stereotypeOf(te), fqn,
-                            Names.tableName(te.getSimpleName().toString()), null, List.of());
-        }
-        inProgress.add(fqn);
-        try {
-            DataModel d = buildEntity(te).metadata();
-            descriptorCache.put(fqn, d);
-            return d;
-        } finally {
-            inProgress.remove(fqn);
-        }
-    }
-
-    /** The entity-kind view of a built model, or {@code null} when it is not an entity model.
-     *  Kind mismatches (e.g. an {@code @Association} at a value object) degrade exactly as the
-     *  old null-target snapshot did: no table, no id column, target left unresolved. */
-    private static EntityDataModel entityOf(DataModel m) {
-        return m instanceof EntityDataModel e ? e : null;
-    }
-
-    /** The embedded-kind view of a built model, or {@code null} when it is not one. */
-    private static EmbeddedValueObjectModel embeddedOf(DataModel m) {
-        return m instanceof EmbeddedValueObjectModel e ? e : null;
-    }
-
-    /**
-     * Compile-time model of an {@code EMBEDDED} target value object: memoized like {@link #descriptorFor}
-     * and cycle-bounded — a re-entrant build (A embeds B embeds A, which is Java-legal although VOs
-     * cannot cycle back into an aggregate) returns {@code null} so the mapper gate fails closed on that
-     * property instead of recursing forever.
-     */
-    private EntityModel voModel(TypeElement voElement) {
-        String fqn = voElement.getQualifiedName().toString();
-        EntityModel cached = voModels.get(fqn);
-        if (cached != null) {
-            return cached;
-        }
-        if (voModelsInProgress.contains(fqn)) {
-            return null;
-        }
-        voModelsInProgress.add(fqn);
-        try {
-            EntityModel model = buildEntity(voElement);
-            voModels.put(fqn, model);
-            return model;
-        } finally {
-            voModelsInProgress.remove(fqn);
-        }
-    }
-
-    /**
-     * Scans the child's properties for a back-reference to the parent; a cyclic child whose descriptor
-     * is the shallow placeholder yields {@code null}, which Plan C's hydration resolves instead from
-     * the child's own generated metadata. An unresolved inverse is treated as read-only/unmapped. Both
-     * the composing many-to-one and the external {@code @Association} are {@link Prop.Reference}s, so
-     * either matches the parent's type name.
-     */
-    private String findInverseName(DataModel parent, DataModel child) {
-        for (Prop p : child.props()) {
-            if (p instanceof Prop.Reference reference
-                    && parent.typeName().equals(reference.targetTypeName())) {
-                return reference.name();
-            }
-        }
-        return null; // unresolved inverse: hydration (Plan C) will treat this as read-only/unmapped
+    private TypeMapping descriptorFor(TypeElement te) {
+        return typeMappingBuilder.descriptorFor(te);
     }
 
     // --------------------------------------------------------------- nested types
 
     /**
      * The processor's resolved view of ONE query-by-names method: the single source feeding both the
-     * rendered SQL constant (E3) and the generated {@code <Repository>Model}. {@code modelName} is
-     * the nested class's simple name (overload-suffixed); {@code QueryModel<T>}'s {@code Object}
-     * parameter is irrelevant to rendering — the generated class re-types it to the entity.
+     * rendered SQL constant (E3) and the generated {@code <Repository>Queries}. {@code typeName} is
+     * the nested class's simple name (overload-suffixed).
      */
-    private record ResolvedQueryModel(String modelName, Operation operation, ResultKind resultKind,
-                                      List<ResolvedPredicate> predicates, List<ResolvedSort> sorts,
+    private record QueryDefinitionSpec(String typeName, Operation operation, ResultKind resultKind,
+                                      List<Predicate> predicates, List<SortSpec> sorts,
                                       PagingMode paging, int limit, List<SeekTerm> seekTerms,
-                                      List<ParamBinding> paramBindings) implements QueryModel<Object> {
+                                      List<ParamBinding> paramBindings) implements QueryDefinition {
     }
 
     /**
-     * Fold one query-by-names method's resolved lists into a {@link ResolvedQueryModel}. The paging
+     * Fold one query-by-names method's resolved lists into a {@link QueryDefinitionSpec}. The paging
      * mode and result kind come from the return {@link Kind} plus the parsed action; seek terms are
      * the runtime cursor key for CURSOR and the published default key for the other paged modes
      * (E1's base constant drops sorts/limit at render time, so the
      * declared sorts stay in the model for introspection). {@code paramBindings} are exactly the
      * {@code .param($S, ...)} tokens {@link #appendBoundParameters} emits, keyed by argument slot.
      */
-    private static ResolvedQueryModel queryModelOf(String modelName, Operation operation, Kind kind,
-                                                   DataModel md, List<Predicate> predicates,
+    private static QueryDefinitionSpec queryDefinitionOf(String typeName, Operation operation, Kind kind,
+                                                   TypeMapping md, List<Predicate> predicates,
                                                    List<ColumnRef> predicateRefs,
-                                                   List<Boolean> existentialPredicates,
                                                    List<SortSpec> sorts, List<ColumnRef> sortRefs,
                                                    List<Boolean> existentialSorts, int limit,
                                                    List<Binding> bindings,
                                                    List<? extends VariableElement> parameters) {
-        List<ResolvedPredicate> resolvedPredicates = new ArrayList<>();
+        List<Predicate> logicalPredicates = new ArrayList<>();
         for (int i = 0; i < predicates.size(); i++) {
-            resolvedPredicates.add(new ResolvedPredicate(predicates.get(i), predicateRefs.get(i),
-                    Boolean.TRUE.equals(existentialPredicates.get(i))));
+            Predicate predicate = predicates.get(i);
+            logicalPredicates.add(Predicate.of(
+                    resolvedAttributePath(md, predicateRefs.get(i), predicate.property()),
+                    predicate.operator(), predicate.param()));
         }
-        List<ResolvedSort> resolvedSorts = new ArrayList<>();
+        List<SortSpec> logicalSorts = new ArrayList<>(sorts);
         for (int i = 0; i < sorts.size(); i++) {
-            resolvedSorts.add(new ResolvedSort(sorts.get(i), sortRefs.get(i),
-                    Boolean.TRUE.equals(existentialSorts.get(i))));
+            SortSpec sort = sorts.get(i);
+            logicalSorts.set(i, SortSpec.of(
+                    resolvedAttributePath(md, sortRefs.get(i), sort.property()),
+                    sort.ascending(), sort.ignoreCase()));
         }
         PagingMode paging = kind == Kind.PAGE ? PagingMode.OFFSET
                 : kind == Kind.CURSORED_PAGE ? PagingMode.CURSOR : PagingMode.NONE;
@@ -4697,7 +4553,8 @@ public class RepositoryProcessor extends AbstractProcessor {
         // Every paged shape (OFFSET as well as CURSOR) publishes the keyset key: the runtime emitPaged
         // wiring computes the same props/dirs lists for both, and SqlBuilder.build ignores seek terms
         // (paging != NONE renders the base constant), so this changes no rendered SQL.
-        List<SeekTerm> seekTerms = paging == PagingMode.NONE ? List.of() : seekTerms(md, resolvedSorts);
+        List<SeekTerm> seekTerms = paging == PagingMode.NONE ? List.of()
+                : seekTerms(md, sortRefs, existentialSorts, logicalSorts);
         List<ParamBinding> paramBindings = new ArrayList<>();
         for (Binding binding : bindings) {
             Operator operator = binding.operator();
@@ -4708,9 +4565,16 @@ public class RepositoryProcessor extends AbstractProcessor {
             paramBindings.add(new ParamBinding(binding.paramIndex(),
                     parameters.get(binding.paramIndex()).getSimpleName().toString()));
         }
-        return new ResolvedQueryModel(modelName, operation, resultKind,
-                List.copyOf(resolvedPredicates), List.copyOf(resolvedSorts), paging, limit,
+        return new QueryDefinitionSpec(typeName, operation, resultKind,
+                List.copyOf(logicalPredicates), List.copyOf(logicalSorts), paging, limit,
                 List.copyOf(seekTerms), List.copyOf(paramBindings));
+    }
+
+    private static String resolvedAttributePath(TypeMapping mapping, ColumnRef ref, String fallback) {
+        for (Map.Entry<String, ColumnRef> entry : mapping.columnRefs().entrySet()) {
+            if (entry.getValue().equals(ref)) return entry.getKey();
+        }
+        return fallback;
     }
 
     /**
@@ -4719,18 +4583,19 @@ public class RepositoryProcessor extends AbstractProcessor {
      * last term is not already an ascending id — the same rule {@link #emitPaged} applies to the
      * runtime {@code props}/{@code dirs} lists, kept here so the published model matches the wiring.
      */
-    private static List<SeekTerm> seekTerms(DataModel md, List<ResolvedSort> sorts) {
-        ColumnRef idRef = new ColumnRef(md.idColumn(), md.id().name());
+    private static List<SeekTerm> seekTerms(TypeMapping md, List<ColumnRef> sortRefs,
+                                            List<Boolean> existentialSorts, List<SortSpec> sorts) {
+        ColumnRef idRef = new ColumnRef(md.idColumn());
         if (sorts.isEmpty()) {
             return List.of(new SeekTerm(idRef, true));
         }
         List<SeekTerm> out = new ArrayList<>();
-        for (ResolvedSort sort : sorts) {
-            out.add(new SeekTerm(sort.ref(), sort.sort().ascending()));
+        for (int i = 0; i < sorts.size(); i++) {
+            out.add(new SeekTerm(sortRefs.get(i), sorts.get(i).ascending()));
         }
-        boolean toManySort = sorts.stream().anyMatch(ResolvedSort::existential);
-        ResolvedSort last = sorts.get(sorts.size() - 1);
-        boolean lastIsIdAsc = md.id().name().equals(last.sort().property()) && last.sort().ascending();
+        boolean toManySort = existentialSorts.stream().anyMatch(Boolean.TRUE::equals);
+        SortSpec last = sorts.get(sorts.size() - 1);
+        boolean lastIsIdAsc = md.id().name().equals(last.property()) && last.ascending();
         if (toManySort && !lastIsIdAsc) {
             out.add(new SeekTerm(idRef, true));
         }
@@ -4744,8 +4609,8 @@ public class RepositoryProcessor extends AbstractProcessor {
      * it — {@code null} otherwise or when the VO build cycles. The descriptor's own props list is
      * built in parallel from the same {@link Prop} instances (one source of truth).
      */
-    private record Property(String name, String column, TypeName type, Prop prop,
-                            EntityModel embeddedModel) { }
+    record Property(String name, String column, TypeName type, Prop prop,
+                    EntityModel embeddedModel) { }
 
     /**
      * A {@code List<@ValueObject>} element collection. {@code element} (the {@link Prop.ElementList}
@@ -4754,8 +4619,8 @@ public class RepositoryProcessor extends AbstractProcessor {
      * the param bindings, so fk-bearing children resolve through the same {@link #boundValue} walk as
      * parent-entity paths.
      */
-    private record ElementCollection(String field, TypeName valueObjectType,
-                                     Prop.ElementList element, ExternalValueObjectModel descriptor) {
+    record ElementCollection(String field, TypeName valueObjectType,
+                             Prop.ElementList element, ElementCollectionValueObjectMapping descriptor) {
         String childTable() {
             return element.childTable();
         }
@@ -4765,9 +4630,9 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
     }
 
-    private record EntityModel(TypeMirror typeMirror, TypeName typeName, Property id,
-                               List<Property> properties, List<ElementCollection> collections,
-                               DataModel metadata) { }
+    record EntityModel(TypeMirror typeMirror, TypeName typeName, Property id,
+                       List<Property> properties, List<ElementCollection> collections,
+                       TypeMapping metadata) { }
 
     private record Binding(String property, Operator operator, int paramIndex) { }
 

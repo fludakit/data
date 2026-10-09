@@ -8,6 +8,27 @@ A fluent data-access toolkit for Jakarta EE / CDI applications.
 
 - `fluda-data-core`: the core API and supporting types.
 
+## Jakarta Data and SQL scope
+
+Repository methods and derived queries are analyzed at compile time and emitted as generated
+implementations that execute through `JdbcClient`. The current SQL dialect is H2. Generated SQL
+uses a dialect seam for identifier quoting and pagination syntax; this does not imply support for
+other databases yet.
+Repository type resolution, entity/value-object model construction, and method declaration
+validation are handled by focused processor components before SQL and source generation.
+
+Jakarta Data Query Language (JDQL) parsing and translation are not part of this implementation.
+Methods annotated with `@Query` use native SQL supplied by the application, which is not rewritten
+by the dialect layer and may therefore be database-specific.
+
+Free-style `@Repository` interfaces can declare explicitly annotated `@Find` and `@Save` methods
+without extending a Jakarta Data repository interface; unannotated abstract methods are rejected.
+Java default methods retain their interface implementation and are not overridden by generated code.
+`@Find` supports entity-array results; parameter-based `@Delete` methods derive delete predicates
+from parameter names or `@By`. Native `@Query` parameters bind by position or by `@Param`/source
+parameter name without rewriting the supplied SQL text.
+Entity lifecycle methods support a single entity, `List<E>`, or `E[]`, including `void` results.
+
 ## Building
 
 ```bash
@@ -30,51 +51,59 @@ processor emits, in the repository's package:
 | Artifact | Holds |
 |---|---|
 | `WidgetsImpl` | the CDI bean; one `static final String SQL_*` per rendered statement |
-| `WidgetMetadata` | the reflection-free `EntityDescriptor<Widget>`: table, columns, navigated refs, `value()` |
+| `WidgetMetadata` | the reflection-free `EntityMetadata<Widget>`: table, typed path mappings, `navigate(path, root)` |
 | `WidgetRowMapper` | the reflection-free row reader (when the entity passes the gate) |
 | `_Widget` (+ `_<Widget><Field>` navs) | the Jakarta Data static metamodel, navigation only |
-| `WidgetsModel` | the resolved structure of each query-by-names method (when the repository declares at least one query-by-names or `@Find` finder; see below) |
+| `WidgetsQueries` | the logical structure of each query-by-names method (when the repository declares at least one query-by-names or `@Find` finder; see below) |
 
 ### Query metadata
 
 Every query-by-names method (`findBy…`, `countBy…`, `deleteBy…`, paged variants) and every
-`@Find`/`@By` structured finder contributes a nested class inside `<Repository>Model`:
+`@Find`/`@By` structured finder contributes a nested query definition inside `<Repository>Queries`:
 
 ```java
-public final class WidgetsModel {
-    public static final class FindByStatusQueryModel implements QueryModel<Widget> {
-        public static final FindByStatusQueryModel INSTANCE = new FindByStatusQueryModel();
+public final class WidgetsQueries {
+    public static final class FindByStatusQuery implements QueryDefinition {
+        public static final FindByStatusQuery INSTANCE = new FindByStatusQuery();
         // operation(), resultKind(), predicates(), sorts(), paging(), limit(), seekTerms(), paramBindings()
     }
 }
 ```
 
-Each accessor returns the resolved structure the SQL literal in `WidgetsImpl` was rendered from:
-predicates and sorts paired with their physical `ColumnRef`s (and the `LEFT JOIN` edges they
-contribute), the paging mode, the keyset seek terms and the parameter bindings. It is metadata, not a
-runtime hook — nothing in the engine reads it — and overloads get a declaration-order numeric suffix
-(`FindByStatusQueryModel2`). `SqlBuilder.build(schema, model)` is the single renderer that turns a
-model back into SQL (full-materialisation projections are an emission-time argument, not model
-state — a published model re-renders the root projection).
+Each accessor returns the logical query structure the SQL literal in `WidgetsImpl` was rendered
+from: predicate and sort paths, paging mode, keyset seek terms and parameter bindings. The processor
+`TypeMapping` implements `AttributePathResolver<String>` to map logical paths to physical
+`ColumnRef`s, and `SqlBuilder` combines that resolver and the table schema with the query plan during
+rendering. The generated query metadata is not a runtime hook — nothing
+in the engine reads it — and overloads get a declaration-order numeric suffix
+(`FindByStatusQuery2`). `SqlBuilder.build(schema, resolver, definition)` is the single renderer that turns a
+query definition back into SQL (full-materialisation projections are an emission-time argument, not
+definition state — a published definition re-renders the root projection).
 
 ## Breaking changes in 1.0.0-SNAPSHOT (navigable metamodel and query pipeline iterations)
 
-- `ColumnAttribute.column()` and the relation attributes' plumbing (`ForeignKeyAttribute.target()/
+- Relation attributes' plumbing (`ForeignKeyAttribute.target()/
   targetDescriptor()`, `OneToManyAttribute.inverseName()/childFkColumn()`,
   `ElementCollectionAttribute.childTable()/parentFkColumn()/elementDescriptor()`,
-  `EmbeddedAttribute.embedded()`) removed — attributes navigate only; resolution moved to the
-  generated `EntityDescriptor.navigationRefs()`.
+  `EmbeddedAttribute.embedded()`) removed — attributes navigate only; path resolution lives in
+  the generated `AttributePathResolver` index.
+- The misleading `ColumnAttribute`, `SortableColumnAttribute`, and `TextColumnAttribute` names (which
+  carried logical attribute names, not physical column details) are
+  replaced by `ScalarAttribute`, `SortableScalarAttribute`, and `TextScalarAttribute`. These
+  user-facing attributes contain logical names and paths, never physical column names. All
+  `PathAttribute`s expose a local `name()` and root-relative `path()`; sort values use the latter.
 - `ForeignKeyAttribute`/`EmbeddedAttribute`/`OneToManyAttribute`/`ElementCollectionAttribute` renamed
   to the ported Jakarta Data 1.1 vocabulary: `EntityAttribute`, `EmbeddableAttribute`, `ListAttribute`
   (covers one-to-many and element collections) under the new `NavigableAttribute` root; `*Record`
   implementations shrink to `(name)`.
-- `EntityDescriptor.columnRef` failures for unknown/navigable-but-unknown-leaf paths now report a
+- `EntityMetadata.columnRef` failures for unknown/navigable-but-unknown-leaf paths now report a
   single `Unknown property '<path>' on <Entity>` message.
-- `EntityDescriptor.columns()` no longer has a derived default implementation. Implementers must
-  supply the explicit column view (the generated `<Entity>Metadata` does; hand-written test
-  descriptors must too).
-- `EntityDescriptor.attributes()` no longer flattens embedded leaves. `attribute("address.city")`
-  does not resolve — dot paths resolve through `EntityDescriptor.columnRef(String)`, which also
+- `AttributePathResolver<A>.columnRefs()` owns the ordered path-to-placement index. Generated
+  runtime metadata uses `PathAttribute<T>` keys; processor mappings use logical string paths.
+  `ColumnRef` contains only physical column/table/join placement and never an attribute name.
+  `TableSchema.columns()` remains scoped to physical columns in one table.
+- `EntityMetadata.attributes()` no longer flattens embedded leaves. `attribute("address.city")`
+  does not resolve — dot paths resolve through `EntityMetadata.columnRef(String)`, which also
   reports the joins a path contributes.
 - Method-name finders whose predicate path traverses one relation (`findByCustomerName`) now
   generate join-aware SQL. `findByCustomerId`-style names traverse the relation's id instead of
@@ -85,8 +114,8 @@ state — a published model re-renders the root projection).
 - Path-depth asymmetry (known, documented): compile-side method-name resolution accepts at most
   ONE relation hop (multi-hop paths emit a NOTE and keep the legacy unqualified column). The
   runtime `columnRef` used by `Order.by`/`Sort` is now bounded the same way: it resolves the
-  flattened `columns()` paths plus the generated `navigationRefs()` map — exactly the one-hop
-  relation leaves whose values the `value()` switch answers for CURSOR keys (both surfaces come
+  flattened `columns()` paths plus the generated `columnRefs()` map — exactly the one-hop
+  relation leaves whose values the `navigate()` switch answers for CURSOR keys (both surfaces come
   from one shared generation-time enumeration), so a sortable path always has a working cursor
   key and anything deeper fails fast with `Unknown property '<path>' on <Entity>`.
 - Cursors for relation-sorted paged reads now end with the root id key.
@@ -99,11 +128,10 @@ state — a published model re-renders the root projection).
 - `SqlBuilder.existsClause(rootTable, rootColumn, childTable, alias, aliasColumn, predicate, leafRef)`
   is replaced by `SqlBuilder.existsConjunct(schema, predicate, leafRef)`: the correlation edge is read
   from the leaf ref's last `JoinRef` instead of six loose strings.
-- `SqlBuilder` no longer imports `io.github.fludakit.data.metamodel`; the to-many-head decision moved
-  to `EntitySchema.isToManyHead(String)`, which `DataModel` and generated `EntityDescriptor`s each
-  answer for themselves.
-- `EntitySchema` gained `isToManyHead(String)` (default `false`) and `QueryModel` is now the rendering
-  input consumed by `SqlBuilder.build(EntitySchema, QueryModel)`.
+- `TableSchema` describes one physical table only. Entity-rooted resolution and to-many
+  classification belong to `AttributePathResolver`; `TypeMapping` and `EntityMetadata<T>` provide
+  the resolver with their respective compile-time and runtime key types. Structured query rendering
+  consumes both views through `SqlBuilder.build(TableSchema, AttributePathResolver, QueryDefinition)`.
 
 ## License
 

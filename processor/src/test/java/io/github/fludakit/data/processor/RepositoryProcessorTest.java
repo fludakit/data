@@ -25,6 +25,275 @@ class RepositoryProcessorTest {
     Path workspace;
 
     @Test
+    void generatesFreeStyleAnnotatedFindRepositoryWithoutBaseInterface() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/freestyle"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-freestyle"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-freestyle"));
+
+        Files.writeString(sourceDir.resolve("Customer.java"), """
+                package freestyle;
+                public class Customer {
+                    public Long id;
+                    public String name;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getName() { return name; }
+                    public void setName(String name) { this.name = name; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("CustomerRepository.java"), """
+                package freestyle;
+                import jakarta.data.repository.By;
+                import jakarta.data.repository.Find;
+                import jakarta.data.repository.Insert;
+                import jakarta.data.repository.Repository;
+                import jakarta.data.repository.Save;
+                import jakarta.data.repository.Update;
+                import java.util.List;
+                @Repository
+                public interface CustomerRepository {
+                    @Find
+                    List<Customer> named(@By("name") String customerName);
+                    @Save Customer register(Customer customer);
+                    @Save void registerWithoutResult(Customer customer);
+                    @Insert void registerAll(List<Customer> customers);
+                    @Save List<Customer> saveAllCustomers(List<Customer> customers);
+                    @Update Customer[] updateAllCustomers(Customer[] customers);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Customer.java", "CustomerRepository.java");
+
+        String impl = sqlFlat(generatedDir.resolve("freestyle/CustomerRepositoryImpl.java"));
+        assertTrue(impl.contains("implements CustomerRepository"), impl);
+        assertTrue(impl.contains("WHERE \"name\" = :customerName"), impl);
+        assertTrue(impl.contains("jdbcClient.sql(SQL_NAMED).param(\"customerName\", customerName)"), impl);
+        assertTrue(impl.contains("Customer register(Customer customer)"), impl);
+        assertTrue(impl.contains("void registerWithoutResult(Customer customer)"), impl);
+        assertTrue(impl.contains("void registerAll(List<Customer> customers)"), impl);
+        assertTrue(impl.contains("List<Customer> saveAllCustomers(List<Customer> customers)"), impl);
+        assertTrue(impl.contains("Customer[] updateAllCustomers(Customer[] customers)"), impl);
+    }
+
+    @Test
+    void generatesArrayReturnForAnnotatedFind() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/find-array"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-find-array"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-find-array"));
+
+        Files.writeString(sourceDir.resolve("Book.java"), """
+                package findarray;
+                public class Book {
+                    public Long id;
+                    public String title;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getTitle() { return title; }
+                    public void setTitle(String title) { this.title = title; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("BookRepository.java"), """
+                package findarray;
+                import jakarta.data.repository.By;
+                import jakarta.data.repository.Find;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface BookRepository {
+                    @Find Book[] byTitle(@By("title") String title);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Book.java", "BookRepository.java");
+
+        String impl = Files.readString(generatedDir.resolve("findarray/BookRepositoryImpl.java"));
+        assertTrue(impl.contains("return jdbcClient.sql(SQL_BY_TITLE)")
+                        && impl.contains(".list().toArray(Book[]::new)"),
+                "array-return @Find must convert query results to the declared entity array:" + impl);
+    }
+
+    @Test
+    void treatsAnnotatedParameterBasedDeleteAsQuery() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/delete-query"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-delete-query"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-delete-query"));
+
+        Files.writeString(sourceDir.resolve("Book.java"), """
+                package deletequery;
+                public class Book {
+                    public Long id;
+                    public String title;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getTitle() { return title; }
+                    public void setTitle(String title) { this.title = title; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("BookRepository.java"), """
+                package deletequery;
+                import jakarta.data.repository.By;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Delete;
+                import jakarta.data.repository.Repository;
+                import java.util.List;
+                @Repository
+                public interface BookRepository extends CrudRepository<Book, Long> {
+                    @Delete int deleteByTitle(@By("title") String title);
+                    @Delete void deleteAllBooks(List<Book> books);
+                    @Delete int removeBookByTitle(String title);
+                    @Delete void clear();
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Book.java", "BookRepository.java");
+
+        String impl = sqlFlat(generatedDir.resolve("deletequery/BookRepositoryImpl.java"));
+        assertTrue(impl.contains("DELETE FROM \"book\" WHERE \"title\" = :title"), impl);
+        assertTrue(impl.contains("return jdbcClient.sql(SQL_DELETE_BY_TITLE)"), impl);
+        assertTrue(!impl.contains("title.getId()"), "scalar @Delete parameters are query criteria:" + impl);
+        assertTrue(impl.contains("void deleteAllBooks(List<Book> books)"), impl);
+        assertTrue(impl.contains("DELETE FROM \"book\" WHERE \"title\" = :title"), impl);
+        assertTrue(impl.contains("int removeBookByTitle(String title)"), impl);
+        assertTrue(impl.contains("DELETE FROM \"book\"\";"), impl);
+        assertTrue(impl.contains("void clear()"), impl);
+    }
+
+    @Test
+    void rejectsUnannotatedAbstractMethodOnFreeStyleRepository() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/freestyle-invalid"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-freestyle-invalid"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-freestyle-invalid"));
+
+        Files.writeString(sourceDir.resolve("Customer.java"), """
+                package freestyleinvalid;
+                public class Customer {
+                    public Long id;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("CustomerRepository.java"), """
+                package freestyleinvalid;
+                import jakarta.data.repository.Find;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface CustomerRepository {
+                    @Find Customer annotated();
+                    Customer findByName(String name);
+                }
+                """);
+
+        TaskResult result = runTask(sourceDir, classesDir, generatedDir, "Customer.java", "CustomerRepository.java");
+        List<Diagnostic<? extends JavaFileObject>> diagnostics = result.diagnostics();
+        assertTrue(diagnostics.stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR
+                        && d.getMessage(Locale.ROOT).contains("must declare a Jakarta Data query/lifecycle annotation")),
+                "expected unannotated method diagnostic:" + System.lineSeparator() + diagnostics);
+    }
+
+    @Test
+    void rejectsRepositoryMethodCombiningOperationAnnotations() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/combined-annotations"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-combined-annotations"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-combined-annotations"));
+
+        Files.writeString(sourceDir.resolve("Customer.java"), """
+                package combinedannotations;
+                public class Customer {
+                    public Long id;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("CustomerRepository.java"), """
+                package combinedannotations;
+                import jakarta.data.repository.Find;
+                import jakarta.data.repository.Query;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface CustomerRepository {
+                    @Find @Query("SELECT id FROM customer")
+                    Customer customer();
+                }
+                """);
+
+        TaskResult result = runTask(sourceDir, classesDir, generatedDir, "Customer.java", "CustomerRepository.java");
+        assertTrue(result.diagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR
+                        && d.getMessage(Locale.ROOT).contains("must not combine query and lifecycle annotations")),
+                "expected conflicting operation annotation diagnostic:" + System.lineSeparator()
+                        + result.diagnostics());
+    }
+
+    @Test
+    void resolvesEntityTypeThroughParameterizedRepositorySuperinterface() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/inherited"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-inherited"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-inherited"));
+
+        Files.writeString(sourceDir.resolve("Book.java"), """
+                package inherited;
+                public class Book {
+                    public Long id;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("BookStoreBase.java"), """
+                package inherited;
+                import jakarta.data.repository.CrudRepository;
+                public interface BookStoreBase<T> extends CrudRepository<T, Long> { }
+                """);
+        Files.writeString(sourceDir.resolve("BookStore.java"), """
+                package inherited;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface BookStore extends BookStoreBase<Book> { }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Book.java", "BookStoreBase.java", "BookStore.java");
+
+        String impl = Files.readString(generatedDir.resolve("inherited/BookStoreImpl.java"));
+        assertTrue(impl.contains("implements BookStore"), impl);
+        assertTrue(Files.exists(generatedDir.resolve("inherited/BookMetadata.java")),
+                "entity resolution must preserve the concrete type argument through inheritance");
+    }
+
+    @Test
+    void preservesDefaultRepositoryMethodImplementation() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/defaultmethod"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-defaultmethod"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-defaultmethod"));
+
+        Files.writeString(sourceDir.resolve("Book.java"), """
+                package defaultmethod;
+                public class Book {
+                    public Long id;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("BookStore.java"), """
+                package defaultmethod;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface BookStore extends CrudRepository<Book, Long> {
+                    default String label() { return "books"; }
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Book.java", "BookStore.java");
+
+        String impl = Files.readString(generatedDir.resolve("defaultmethod/BookStoreImpl.java"));
+        assertTrue(!impl.contains("label()"), "default methods must not be replaced by generated methods:" + impl);
+        try (var classLoader = new java.net.URLClassLoader(
+                new java.net.URL[]{classesDir.toUri().toURL()}, getClass().getClassLoader())) {
+            Object repository = Class.forName("defaultmethod.BookStoreImpl", true, classLoader)
+                    .getConstructor().newInstance();
+            assertTrue("books".equals(repository.getClass().getMethod("label").invoke(repository)),
+                    "generated repository must inherit the interface default implementation");
+        }
+    }
+
+    @Test
     void generatesImplementationForRepositoryInterface() throws Exception {
         Path sourceDir = Files.createDirectories(workspace.resolve("src/demo"));
         Path classesDir = Files.createDirectories(workspace.resolve("classes"));
@@ -303,16 +572,35 @@ class RepositoryProcessorTest {
 
                     @Query("SELECT id, title FROM book WHERE title = ?1")
                     Optional<Book> nativeByTitle(String title);
+
+                    @Query("SELECT id, title FROM book WHERE title = :title AND note <> '?1'")
+                    Optional<Book> nativeByNamedTitle(String title);
+
+                    @Query("SELECT id, title FROM book WHERE title = ?1")
+                    Book[] nativeBooksByTitle(String title);
                 }
                 """);
 
         compile(sourceDir, classesDir, generatedDir, "Book.java", "Shelf.java");
 
         String impl = Files.readString(generatedDir.resolve("demo3/ShelfImpl.java"));
+        assertTrue(impl.contains("SqlDialect SQL_DIALECT = H2Dialect.INSTANCE"),
+                "generated SQL hooks must be centralized behind the dialect field:"
+                        + System.lineSeparator() + impl);
         assertTrue(impl.contains(".query(new BookRowMapper())"),
                 "convention find must use the generated mapper:" + System.lineSeparator() + impl);
         assertTrue(impl.contains(".query(Book.class)"),
                 "@Query native SQL must keep class-based mapping:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("SELECT id, title FROM book WHERE title = ?1"),
+                "@Query native SQL must pass through without dialect rewriting:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("jdbcClient.sql(SQL_NATIVE_BY_TITLE).param(title)"),
+                "positional @Query parameters must bind in declaration order:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("jdbcClient.sql(SQL_NATIVE_BY_NAMED_TITLE).param(\"title\", title)"),
+                "named @Query parameters may use the source parameter name:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("jdbcClient.sql(SQL_NATIVE_BOOKS_BY_TITLE).param(title)")
+                        && impl.contains(".list().toArray(Book[]::new)"),
+                "array @Query results must bind positional arguments and return the declared array:"
+                        + System.lineSeparator() + impl);
         assertTrue(impl.contains("findById") && impl.contains(".query(new BookRowMapper()).optional()"),
                 "findById must use the mapper:" + System.lineSeparator() + impl);
     }
@@ -367,10 +655,10 @@ class RepositoryProcessorTest {
 
         // The @Association field must appear as an fk column (author_id), never as flattened embedded leaves.
         String md = Files.readString(generatedDir.resolve("cls/BookMetadata.java"));
-        assertTrue(md.contains("new ColumnRef(\"author_id\", \"author\")"),
-                "association must contribute its fk column to the descriptor's columns():"
+        assertTrue(md.contains("mappings.put(_Book.author, new ColumnRef(\"author_id\", \"book\", null, List.of()))"),
+                "association must contribute its fk column to the descriptor's typed mapping index:"
                         + System.lineSeparator() + md);
-        assertTrue(md.contains("new ColumnRef(\"title\", \"title\")"),
+        assertTrue(md.contains("mappings.put(_Book.title, new ColumnRef(\"title\", \"book\", null, List.of()))"),
                 "scalar column must be present:" + System.lineSeparator() + md);
         assertTrue(!md.replace(" ", "").contains("\"author_name\""),
                 "an @Association must NOT flatten the target's fields into the owner's columns:"
@@ -431,7 +719,7 @@ class RepositoryProcessorTest {
     }
 
     @Test
-    void generatedMetadataImplementsEntityDescriptorWithKindsAndTargets() throws Exception {
+    void generatedMetadataImplementsEntityMetadataWithKindsAndTargets() throws Exception {
         Path sourceDir = Files.createDirectories(workspace.resolve("src/meta"));
         Path classesDir = Files.createDirectories(workspace.resolve("classes-meta"));
         Path generatedDir = Files.createDirectories(workspace.resolve("generated-meta"));
@@ -479,9 +767,9 @@ class RepositoryProcessorTest {
         compile(sourceDir, classesDir, generatedDir, "Author.java", "Book.java", "Books.java");
 
         String md = Files.readString(generatedDir.resolve("meta/BookMetadata.java")).replaceAll("\\s+", " ");
-        assertTrue(md.contains("implements EntityDescriptor<Book>"),
+        assertTrue(md.contains("implements EntityMetadata<Book>"),
                 "generated metadata must implement the generic interface:" + System.lineSeparator() + md);
-        assertTrue(md.contains("import io.github.fludakit.data.metadata.EntityDescriptor;"), md);
+        assertTrue(md.contains("import io.github.fludakit.data.metadata.EntityMetadata;"), md);
         assertTrue(md.contains("public static final BookMetadata INSTANCE"), md);
         // Decision 1: the descriptor returns the _Book metamodel field instances, not literals,
         // and the association is a navigable member class implementing the FK attribute interface.
@@ -501,14 +789,13 @@ class RepositoryProcessorTest {
         // Plan A column constants are preserved:
         assertTrue(md.contains("public static final String TABLE_NAME = \"book\";"), md);
         assertTrue(md.contains("public static final String TITLE = \"title\";"), md);
-        // The descriptor's column view is generated EXPLICITLY from the compile-time model in
-        // declaration order (the derived EntityDescriptor.columns() default is gone): 2-arg refs.
+        // The descriptor derives its table-local column view from the typed mapping index.
         String mflat = Files.readString(generatedDir.resolve("meta/BookMetadata.java")).replaceAll("\\s+", "");
-        assertTrue(mflat.contains("publicList<ColumnRef>columns(){returnList.of("
-                        + "newColumnRef(\"id\",\"id\"),"
-                        + "newColumnRef(\"title\",\"title\"),"
-                        + "newColumnRef(\"author_id\",\"author\"));}"),
-                "columns() must be emitted explicitly from the model:" + System.lineSeparator() + mflat);
+        assertTrue(mflat.contains("mappings=newLinkedHashMap<>();")
+                        && mflat.contains("mappings.put(_Book.id,newColumnRef(\"id\",\"book\",null,List.of()))")
+                        && mflat.contains("mappings.put(_Book.title,newColumnRef(\"title\",\"book\",null,List.of()))")
+                        && !mflat.contains("columns(){"),
+                "typed mappings supply columns without generated duplicate state:" + System.lineSeparator() + mflat);
         // The id() accessor returns the typed metamodel id field (ruling 8).
         assertTrue(md.contains("public IdAttribute<Book> id()"), md);
         assertTrue(md.contains("return _Book.id;"), "id() must expose the ID attribute:" + System.lineSeparator() + md);
@@ -591,7 +878,7 @@ class RepositoryProcessorTest {
         Path voMetadata = generatedDir.resolve("emb/AddressMetadata.java");
         assertTrue(Files.exists(voMetadata), "Expected generated " + voMetadata);
         String vmd = Files.readString(voMetadata).replaceAll("\\s+", " ");
-        assertTrue(vmd.contains("implements EntityDescriptor<Address>"), vmd);
+        assertTrue(vmd.contains("implements EntityMetadata<Address>"), vmd);
         assertTrue(vmd.contains("public static final AddressMetadata INSTANCE"), vmd);
         assertTrue(!vmd.contains("TABLE_NAME"),
                 "a value object has no table and must not emit TABLE_NAME:" + System.lineSeparator() + vmd);
@@ -605,29 +892,28 @@ class RepositoryProcessorTest {
         assertTrue(vmd.contains("public static final String CITY = \"city\";"), vmd);
         String vflat = Files.readString(voMetadata).replaceAll("\\s+", "");
         assertTrue(vflat.contains("attributes(){returnList.of("
-                        + "newTextColumnAttributeRecord<Address>(\"city\"),"
-                        + "newEmbeddableAttributeRecord<Address,GeoPoint>(\"point\"));}"),
+                        + "newTextScalarAttributeRecord<Address>(\"city\",\"city\"),"
+                        + "newEmbeddableAttributeRecord<Address,GeoPoint>(\"point\",\"point\"));}"),
                 "VO attributes() must list root members once, without flattened leaves:"
                         + System.lineSeparator() + vflat);
         // D3: attributes navigate by name; the nested value object is referenced through the
         // record's TYPE ARGUMENTS (the INSTANCE plumbing went with column()). Transitive VO
         // generation is still pinned by the GeoPointMetadata existence check below.
-        assertTrue(vmd.contains("new EmbeddableAttributeRecord<Address,GeoPoint>(\"point\")"),
+        assertTrue(vmd.contains("new EmbeddableAttributeRecord<Address,GeoPoint>(\"point\", \"point\")"),
                 "embedded attribute must still name the nested value object type:" + System.lineSeparator() + vmd);
-        assertTrue(vflat.contains("newEmbeddableAttributeRecord<Address,GeoPoint>(\"point\")"),
+        assertTrue(vflat.contains("newEmbeddableAttributeRecord<Address,GeoPoint>(\"point\",\"point\")"),
                 "the embedded literal must carry the VO type arguments:" + System.lineSeparator() + vflat);
-        // ... and the VO's column view is emitted explicitly from the flattened model.
-        assertTrue(vflat.contains("publicList<ColumnRef>columns(){returnList.of("
-                        + "newColumnRef(\"city\",\"city\"),"
-                        + "newColumnRef(\"point_lat\",\"point.lat\"),"
-                        + "newColumnRef(\"point_lng\",\"point.lng\"));}"),
-                "VO columns() must be generated explicitly in declaration order:" + System.lineSeparator() + vflat);
+        // ... and the VO's flattened leaves are indexed as PathAttributes.
+        assertTrue(vflat.contains("mappings=newLinkedHashMap<>();")
+                        && vflat.contains("mappings.put(newPathAttributeRecord<>(\"lat\",\"point.lat\"),newColumnRef(\"point_lat\",null,null,List.of()))")
+                        && !vflat.contains("columns(){"),
+                "VO leaves must be indexed by PathAttribute:" + System.lineSeparator() + vflat);
         // ... which must itself have been generated (transitive EMBEDDED tree walk).
         Path innerMetadata = generatedDir.resolve("emb/GeoPointMetadata.java");
         assertTrue(Files.exists(innerMetadata), "Expected generated " + innerMetadata);
         String imd = Files.readString(innerMetadata).replaceAll("\\s+", " ");
         assertTrue(imd.contains("public static final String LAT = \"lat\";"), imd);
-        assertTrue(imd.contains("new SortableColumnAttributeRecord<GeoPoint>(\"lat\")"), imd);
+        assertTrue(imd.contains("new SortableScalarAttributeRecord<GeoPoint>(\"lat\", \"lat\")"), imd);
 
         // The owner's descriptor lists the root metamodel members (scalar + embedded nav) once, and
         // the navigable member classes carry the flattened leaves as owner-typed fields.
@@ -635,18 +921,16 @@ class RepositoryProcessorTest {
         assertTrue(cmd.contains("return List.of(_Contact.name, _Contact.address);"),
                 "attributes() must expose containers once, no flattened leaves:" + System.lineSeparator() + cmd);
         String cflat = Files.readString(generatedDir.resolve("emb/ContactMetadata.java")).replaceAll("\\s+", "");
-        assertTrue(cflat.contains("publicList<ColumnRef>columns(){returnList.of("
-                        + "newColumnRef(\"id\",\"id\"),"
-                        + "newColumnRef(\"name\",\"name\"),"
-                        + "newColumnRef(\"address_city\",\"address.city\"),"
-                        + "newColumnRef(\"address_point_lat\",\"address.point.lat\"),"
-                        + "newColumnRef(\"address_point_lng\",\"address.point.lng\"));}"),
-                "owner columns() must flatten the embedded chain:" + System.lineSeparator() + cflat);
+        assertTrue(cflat.contains("mappings.put(_Contact.address.city,newColumnRef(\"address_city\",\"contact\",null,List.of()))")
+                        && cflat.contains("mappings.put(_Contact.address.point.lat,newColumnRef(\"address_point_lat\",\"contact\",null,List.of()))")
+                        && !cflat.contains("columns(){"),
+                "the typed index flattens the embedded chain and derives root columns:"
+                        + System.lineSeparator() + cflat);
         String addrNav = Files.readString(generatedDir.resolve("emb/_ContactAddress.java")).replaceAll("\\s+", "");
         assertTrue(addrNav.contains("publicfinalclass_ContactAddressimplementsEmbeddableAttribute<Contact,Address>"),
                 addrNav);
         assertTrue(addrNav.contains(
-                "TextColumnAttribute<Contact>city=newTextColumnAttributeRecord<>(\"address.city\");"),
+                "TextScalarAttribute<Contact>city=newTextScalarAttributeRecord<>(\"city\",\"address.city\");"),
                 "embedded leaf must be an owner-typed nav field (D4: path only, no column slot):"
                         + System.lineSeparator() + addrNav);
         assertTrue(addrNav.contains("_ContactAddressPointpoint=new_ContactAddressPoint();"),
@@ -654,16 +938,18 @@ class RepositoryProcessorTest {
         // D3: the container contract is the name() accessor alone; the embedded() INSTANCE
         // wiring is gone (leaf placement lives in the descriptor's flattened columns()).
         assertTrue(addrNav.contains("publicStringname(){return\"address\";}"), addrNav);
+        assertTrue(addrNav.contains("publicStringpath(){return\"address\";}"), addrNav);
         assertTrue(!addrNav.contains("embedded()"),
                 "the slim nav class must not emit the removed embedded() override:" + System.lineSeparator() + addrNav);
         String pointNav = Files.readString(generatedDir.resolve("emb/_ContactAddressPoint.java")).replaceAll("\\s+", "");
         assertTrue(pointNav.contains("publicfinalclass_ContactAddressPointimplementsEmbeddableAttribute<Contact,GeoPoint>"),
                 pointNav);
-        assertTrue(pointNav.contains("SortableColumnAttribute<Contact>lat="
-                        + "newSortableColumnAttributeRecord<>(\"address.point.lat\");"),
+        assertTrue(pointNav.contains("SortableScalarAttribute<Contact>lat="
+                        + "newSortableScalarAttributeRecord<>(\"lat\",\"address.point.lat\");"),
                 "nested leaf keeps the full owner-rooted dot path (column placement moved to columns()):"
                         + System.lineSeparator() + pointNav);
-        assertTrue(pointNav.contains("publicStringname(){return\"address.point\";}"), pointNav);
+        assertTrue(pointNav.contains("publicStringname(){return\"point\";}"), pointNav);
+        assertTrue(pointNav.contains("publicStringpath(){return\"address.point\";}"), pointNav);
     }
 
     @Test
@@ -1336,7 +1622,7 @@ class RepositoryProcessorTest {
 
         // Flatten JavaPoet's soft wraps so the positional pins hold verbatim: relations are now
         // NAVIGABLE member classes whose leaf fields carry the owner-rooted dot paths while the fk
-        // column and the resolved inverse ride the descriptor's navigationRefs() literals, so ONLY
+        // column and the resolved inverse ride the descriptor's columnRefs() literals, so ONLY
         // an exact assertion on either surface detects a swapped argument (M-6).
         String pm = Files.readString(generatedDir.resolve("rel/_Parent.java")).replaceAll("\\s+", "");
         assertTrue(pm.contains("_ParentPrimaryprimary=new_ParentPrimary();"),
@@ -1346,33 +1632,34 @@ class RepositoryProcessorTest {
 
         String fkNav = Files.readString(generatedDir.resolve("rel/_ParentPrimary.java")).replaceAll("\\s+", "");
         assertTrue(fkNav.contains("publicfinalclass_ParentPrimaryimplementsEntityAttribute<Parent,Child>"), fkNav);
-        assertTrue(fkNav.contains("IdAttribute<Parent>id=newIdAttributeRecord<>(\"primary.id\");"),
+        assertTrue(fkNav.contains("publicStringpath(){return\"primary\";}"), fkNav);
+        assertTrue(fkNav.contains("IdAttribute<Parent>id=newIdAttributeRecord<>(\"id\",\"primary.id\");"),
                 "the managed target's id must surface as an owner-typed leaf field:" + System.lineSeparator() + fkNav);
-        assertTrue(fkNav.contains("ColumnAttribute<Parent>owner=newColumnAttributeRecord<>(\"primary.owner\");"),
+        assertTrue(fkNav.contains("ScalarAttribute<Parent>owner=newScalarAttributeRecord<>(\"owner\",\"primary.owner\");"),
                 "the target's own FK column must surface as a plain leaf:" + System.lineSeparator() + fkNav);
         assertTrue(!fkNav.contains("targetDescriptor") && !fkNav.contains("publicStringcolumn()"),
                 "D3 removed the column()/targetDescriptor() plumbing from the nav classes:" + System.lineSeparator() + fkNav);
 
         String otmNav = Files.readString(generatedDir.resolve("rel/_ParentChildren.java")).replaceAll("\\s+", "");
         // D3: the one-to-many rides the unified ListAttribute; the inverseName()/childFkColumn()
-        // contract is gone — the resolved inverse fk is pinned through navigationRefs below.
+        // contract is gone — the resolved inverse fk is pinned through columnRefs below.
         assertTrue(otmNav.contains("publicfinalclass_ParentChildrenimplementsListAttribute<Parent,Child>"), otmNav);
-        assertTrue(otmNav.contains("IdAttribute<Parent>id=newIdAttributeRecord<>(\"children.id\");"), otmNav);
+        assertTrue(otmNav.contains("publicStringpath(){return\"children\";}"), otmNav);
+        assertTrue(otmNav.contains("IdAttribute<Parent>id=newIdAttributeRecord<>(\"id\",\"children.id\");"), otmNav);
         String pmd = Files.readString(generatedDir.resolve("rel/ParentMetadata.java")).replaceAll("\\s+", "");
-        assertTrue(pmd.contains("Map.entry(\"primary.id\",newColumnRef(\"id\",\"primary.id\",null,List.of(newJoinRef(\"child\",\"primary\",\"primary_id\",\"id\"))))"),
-                "navigationRefs must pin the FK join verbatim:" + System.lineSeparator() + pmd);
-        assertTrue(pmd.contains("Map.entry(\"children.id\",newColumnRef(\"id\",\"children.id\",null,List.of(newJoinRef(\"child\",\"children\",\"id\",\"owner_id\"))))"),
-                "navigationRefs must pin the one-to-many inverse join verbatim:" + System.lineSeparator() + pmd);
+        assertTrue(pmd.contains("mappings.put(_Parent.primary.id,newColumnRef(\"id\",\"child\",\"primary\",List.of(newJoinRef(\"parent\",null,\"primary_id\",\"child\",\"primary\",\"id\"))))"),
+                "columnRefs must pin the FK join verbatim:" + System.lineSeparator() + pmd);
+        assertTrue(pmd.contains("mappings.put(_Parent.children.id,newColumnRef(\"id\",\"child\",\"children\",List.of(newJoinRef(\"parent\",null,\"id\",\"child\",\"children\",\"owner_id\"))))"),
+                "columnRefs must pin the one-to-many inverse join verbatim:" + System.lineSeparator() + pmd);
 
         String md = Files.readString(generatedDir.resolve("rel/ParentMetadata.java")).replaceAll("\\s+", " ");
         assertTrue(md.contains("return List.of(_Parent.name, _Parent.primary, _Parent.children);"),
                 "attributes() must return the metamodel field instances, not literals:" + System.lineSeparator() + md);
         String mflat = Files.readString(generatedDir.resolve("rel/ParentMetadata.java")).replaceAll("\\s+", "");
-        assertTrue(mflat.contains("publicList<ColumnRef>columns(){returnList.of("
-                        + "newColumnRef(\"id\",\"id\"),"
-                        + "newColumnRef(\"name\",\"name\"),"
-                        + "newColumnRef(\"primary_id\",\"primary\"));}"),
-                "columns() lists the local table's columns; the one-to-many contributes none:"
+        assertTrue(mflat.contains("mappings.put(_Parent.name,newColumnRef(\"name\",\"parent\",null,List.of()))")
+                        && mflat.contains("mappings.put(_Parent.primary,newColumnRef(\"primary_id\",\"parent\",null,List.of()))")
+                        && !mflat.contains("columns(){"),
+                "typed mappings list the local table's columns; the one-to-many contributes none:"
                         + System.lineSeparator() + mflat);
         assertTrue(md.contains("public static final String PRIMARY = \"primary_id\";"),
                 "the fk column constant must be emitted from the Property list:" + System.lineSeparator() + md);
@@ -1669,7 +1956,7 @@ class RepositoryProcessorTest {
                 "flattened embedded leaf must get a column constant:" + System.lineSeparator() + vmd);
         // D3: attributes navigate by name; the nested value object survives as the record's
         // type argument instead of the removed embedded-INSTANCE plumbing.
-        assertTrue(vmd.contains("new EmbeddableAttributeRecord<Address,GeoPoint>(\"point\")"),
+        assertTrue(vmd.contains("new EmbeddableAttributeRecord<Address,GeoPoint>(\"point\", \"point\")"),
                 "the EMBEDDED attribute must still reference the nested value object:" + System.lineSeparator() + vmd);
         Path inner = generatedDir.resolve("phantom/GeoPointMetadata.java");
         assertTrue(Files.exists(inner), "Expected generated " + inner);
@@ -1730,15 +2017,16 @@ class RepositoryProcessorTest {
         assertTrue(mm.contains("StringID=\"id\";"), mm);
         assertTrue(mm.contains("StringTITLE=\"title\";"), mm);
         // D4: slim record constructors take the name only; column placement is descriptor-owned.
-        assertTrue(mm.contains("IdAttribute<Book>id=newIdAttributeRecord<>(ID);"), mm);
-        assertTrue(mm.contains("TextColumnAttribute<Book>title=newTextColumnAttributeRecord<>(TITLE);"), mm);
-        // The metamodel is additive: the internal descriptor class remains, now with the explicit
-        // column view generated from the compile-time model (the derived default is gone).
+        assertTrue(mm.contains("IdAttribute<Book>id=newIdAttributeRecord<>(\"id\",ID);"), mm);
+        assertTrue(mm.contains("TextScalarAttribute<Book>title=newTextScalarAttributeRecord<>(\"title\",TITLE);"), mm);
+        // The metamodel is additive: the runtime metadata remains and derives its column view from
+        // the typed mapping index.
         assertTrue(Files.exists(generatedDir.resolve("mmbook/BookMetadata.java")),
                 "the internal <Entity>Metadata must still be generated");
         String mdb = Files.readString(generatedDir.resolve("mmbook/BookMetadata.java")).replaceAll("\\s+", "");
-        assertTrue(mdb.contains("publicList<ColumnRef>columns(){returnList.of("
-                        + "newColumnRef(\"id\",\"id\"),newColumnRef(\"title\",\"title\"));}"), mdb);
+        assertTrue(mdb.contains("mappings.put(_Book.id,newColumnRef(\"id\",\"book\",null,List.of()))")
+                        && mdb.contains("mappings.put(_Book.title,newColumnRef(\"title\",\"book\",null,List.of()))")
+                        && !mdb.contains("columns(){"), mdb);
     }
 
     @Test
@@ -1808,30 +2096,32 @@ class RepositoryProcessorTest {
         assertTrue(!mm.contains("StringADDRESS_CITY"), mm);
         assertTrue(!mm.contains("StringADDRESS_POINT_LAT"), mm);
         assertTrue(mm.contains("_ProfileAddressaddress=new_ProfileAddress();"), mm);
-        assertTrue(mm.contains("IdAttribute<Profile>id=newIdAttributeRecord<>(ID);"), mm);
+        assertTrue(mm.contains("IdAttribute<Profile>id=newIdAttributeRecord<>(\"id\",ID);"), mm);
 
         String addr = Files.readString(generatedDir.resolve("mmgp/_ProfileAddress.java")).replaceAll("\\s+", "");
         assertTrue(addr.contains("publicfinalclass_ProfileAddressimplementsEmbeddableAttribute<Profile,Address>"), addr);
-        assertTrue(addr.contains("TextColumnAttribute<Profile>city="
-                        + "newTextColumnAttributeRecord<>(\"address.city\");"),
+        assertTrue(addr.contains("TextScalarAttribute<Profile>city="
+                        + "newTextScalarAttributeRecord<>(\"city\",\"address.city\");"),
                 "embedded leaf keeps the dot-path name (D4: column placement is descriptor-owned):"
                         + System.lineSeparator() + addr);
-        assertTrue(addr.contains("SortableColumnAttribute<Profile>zip="
-                        + "newSortableColumnAttributeRecord<>(\"address.zip\");"), addr);
+        assertTrue(addr.contains("SortableScalarAttribute<Profile>zip="
+                        + "newSortableScalarAttributeRecord<>(\"zip\",\"address.zip\");"), addr);
         assertTrue(addr.contains("_ProfileAddressPointpoint=new_ProfileAddressPoint();"),
                 "nested embedded recurses into its own nav class instead of flat leaves:" + System.lineSeparator() + addr);
         assertTrue(addr.contains("publicStringname(){return\"address\";}"), addr);
+        assertTrue(addr.contains("publicStringpath(){return\"address\";}"), addr);
         assertTrue(!addr.contains("embedded()"),
                 "D3 removed the embedded() plumbing override:" + System.lineSeparator() + addr);
 
         String point = Files.readString(generatedDir.resolve("mmgp/_ProfileAddressPoint.java")).replaceAll("\\s+", "");
         assertTrue(point.contains("publicfinalclass_ProfileAddressPointimplementsEmbeddableAttribute<Profile,GeoPoint>"),
                 point);
-        assertTrue(point.contains("SortableColumnAttribute<Profile>lat="
-                        + "newSortableColumnAttributeRecord<>(\"address.point.lat\");"), point);
-        assertTrue(point.contains("SortableColumnAttribute<Profile>lng="
-                        + "newSortableColumnAttributeRecord<>(\"address.point.lng\");"), point);
-        assertTrue(point.contains("publicStringname(){return\"address.point\";}"), point);
+        assertTrue(point.contains("SortableScalarAttribute<Profile>lat="
+                        + "newSortableScalarAttributeRecord<>(\"lat\",\"address.point.lat\");"), point);
+        assertTrue(point.contains("SortableScalarAttribute<Profile>lng="
+                        + "newSortableScalarAttributeRecord<>(\"lng\",\"address.point.lng\");"), point);
+        assertTrue(point.contains("publicStringname(){return\"point\";}"), point);
+        assertTrue(point.contains("publicStringpath(){return\"address.point\";}"), point);
         // Value objects never get their own metamodel classes (aggregate roots only).
         assertTrue(!Files.exists(generatedDir.resolve("mmgp/_Address.java")),
                 "no _VO class for a value object");
@@ -1842,14 +2132,11 @@ class RepositoryProcessorTest {
         String cmd = Files.readString(generatedDir.resolve("mmgp/ProfileMetadata.java")).replaceAll("\\s+", " ");
         assertTrue(cmd.contains("return List.of(_Profile.address);"), cmd);
         String cmdFlat = Files.readString(generatedDir.resolve("mmgp/ProfileMetadata.java")).replaceAll("\\s+", "");
-        assertTrue(cmdFlat.contains("publicList<ColumnRef>columns(){returnList.of("
-                        + "newColumnRef(\"id\",\"id\"),"
-                        + "newColumnRef(\"address_city\",\"address.city\"),"
-                        + "newColumnRef(\"address_zip\",\"address.zip\"),"
-                        + "newColumnRef(\"address_point_lat\",\"address.point.lat\"),"
-                        + "newColumnRef(\"address_point_lng\",\"address.point.lng\"));}"), cmdFlat);
-        assertTrue(!cmdFlat.contains("navigationRefs"),
-                "navigationRefs is bounded to relation-traversing paths; embedded leaves resolve through columns():"
+        assertTrue(cmdFlat.contains("mappings=newLinkedHashMap<>();")
+                        && !cmdFlat.contains("columns(){"), cmdFlat);
+        assertTrue(cmdFlat.contains("mappings.put(_Profile.address.city,newColumnRef(\"address_city\",\"profile\",null,List.of()))")
+                        && cmdFlat.contains("mappings.put(_Profile.address.point.lat,newColumnRef(\"address_point_lat\",\"profile\",null,List.of()))"),
+                "columnRefs should index embedded leaves by their generated PathAttribute instances:"
                         + System.lineSeparator() + cmdFlat);
     }
 
@@ -1911,7 +2198,7 @@ class RepositoryProcessorTest {
         // D3: the nav carries no GeoMetadata.INSTANCE wiring; the leaf pinned by the full
         // owner-rooted dot path proves the nested VO resolved through the TOP-LEVEL GeoMetadata
         // model (<SimpleName>Metadata naming, existence asserted above).
-        assertTrue(geoNav.contains("TextColumnAttribute<Holder>tag=newTextColumnAttributeRecord<>(\"cfg.geo.tag\");"),
+        assertTrue(geoNav.contains("TextScalarAttribute<Holder>tag=newTextScalarAttributeRecord<>(\"tag\",\"cfg.geo.tag\");"),
                 "the nav must expose the nested leaf via its owner-rooted dot path:" + System.lineSeparator() + geoNav);
         assertTrue(!geoNav.contains("Cfg.GeoMetadata"),
                 "no qualified member-class metadata reference may be emitted:" + System.lineSeparator() + geoNav);
@@ -1989,7 +2276,7 @@ class RepositoryProcessorTest {
         assertTrue(!orderMm.contains("new _OrderItem()"),
                 "the colliding nav must NOT be instantiated:" + System.lineSeparator() + orderMm);
         assertTrue(orderMm.contains(
-                        "EntityAttribute<Order,OrderItem>item=newEntityAttributeRecord<>(ITEM);"),
+                        "EntityAttribute<Order,OrderItem>item=newEntityAttributeRecord<>(\"item\",ITEM);"),
                 "the member must fall back to the plain entity attribute record:" + System.lineSeparator() + orderMm);
 
         // The degradation is recorded as a NOTE (never an ERROR — asserted by the success above).
@@ -2061,7 +2348,7 @@ class RepositoryProcessorTest {
 
         // The chain recurses one cycle lap: _RootHead → _RootHeadTail → the back-reference nav.
         String headNav = Files.readString(generatedDir.resolve("cyc/_RootHead.java")).replaceAll("\\s+", "");
-        assertTrue(headNav.contains("TextColumnAttribute<Root>label=newTextColumnAttributeRecord<>(\"head.label\");"),
+        assertTrue(headNav.contains("TextScalarAttribute<Root>label=newTextScalarAttributeRecord<>(\"label\",\"head.label\");"),
                 headNav);
         assertTrue(headNav.contains("_RootHeadTailtail=new_RootHeadTail();"), headNav);
 
@@ -2074,7 +2361,8 @@ class RepositoryProcessorTest {
                 "the cycle nav must carry NO leaf fields:" + System.lineSeparator() + backNav);
         assertTrue(!backNav.contains("new _"),
                 "the cycle nav must not recurse into further navs:" + System.lineSeparator() + backNav);
-        assertTrue(backNav.contains("publicStringname(){return\"head.tail.node\";}"), backNav);
+        assertTrue(backNav.contains("publicStringname(){return\"node\";}"), backNav);
+        assertTrue(backNav.contains("publicStringpath(){return\"head.tail.node\";}"), backNav);
         // The cycle guard (descriptorFor) bounds the recursion with an EMPTY placeholder model that
         // keeps the type name — so the observable degrade is: no leaves, just the typed container
         // name() (D3 removed the embedded() INSTANCE plumbing entirely).
@@ -2177,27 +2465,27 @@ class RepositoryProcessorTest {
         // nested embedded VO flattens into target-local chained columns, dotted in the path.
         String fkNav = Files.readString(generatedDir.resolve("navleaf/_LoadDepot.java")).replaceAll("\\s+", "");
         assertTrue(fkNav.contains("publicfinalclass_LoadDepotimplementsEntityAttribute<Load,Depot>"), fkNav);
-        assertTrue(fkNav.contains("IdAttribute<Load>id=newIdAttributeRecord<>(\"depot.id\");"), fkNav);
-        assertTrue(fkNav.contains("TextColumnAttribute<Load>city=newTextColumnAttributeRecord<>(\"depot.city\");"), fkNav);
-        assertTrue(fkNav.contains("TextColumnAttribute<Load>street=newTextColumnAttributeRecord<>(\"depot.addr.street\");"),
+        assertTrue(fkNav.contains("IdAttribute<Load>id=newIdAttributeRecord<>(\"id\",\"depot.id\");"), fkNav);
+        assertTrue(fkNav.contains("TextScalarAttribute<Load>city=newTextScalarAttributeRecord<>(\"city\",\"depot.city\");"), fkNav);
+        assertTrue(fkNav.contains("TextScalarAttribute<Load>street=newTextScalarAttributeRecord<>(\"street\",\"depot.addr.street\");"),
                 "the target's nested embedded leaf keeps the target-local dotted path:"
                         + System.lineSeparator() + fkNav);
-        assertTrue(fkNav.contains("SortableColumnAttribute<Load>no=newSortableColumnAttributeRecord<>(\"depot.addr.no\");"), fkNav);
+        assertTrue(fkNav.contains("SortableScalarAttribute<Load>no=newSortableScalarAttributeRecord<>(\"no\",\"depot.addr.no\");"), fkNav);
         // D3/D4: the chained-column and fk-placement facts moved into the descriptor's generated
-        // navigationRefs() literals — pin the TARGET-LOCAL chained column and the join there.
+        // columnRefs() literals — pin the TARGET-LOCAL chained column and the join there.
         String lmd = Files.readString(generatedDir.resolve("navleaf/LoadMetadata.java")).replaceAll("\\s+", "");
-        assertTrue(lmd.contains("Map.entry(\"depot.addr.street\",newColumnRef(\"addr_street\",\"depot.addr.street\",null,List.of(newJoinRef(\"depot\",\"depot\",\"depot_id\",\"id\"))))"),
-                "navigationRefs must pin the target-local chained column and the FK join:" + System.lineSeparator() + lmd);
+        assertTrue(lmd.contains("mappings.put(_Load.depot.street,newColumnRef(\"addr_street\",\"depot\",\"depot\",List.of(newJoinRef(\"load\",null,\"depot_id\",\"depot\",\"depot\",\"id\"))))"),
+                "columnRefs must pin the target-local chained column and the FK join:" + System.lineSeparator() + lmd);
 
         // (b) EC nav: leaves rebuilt from the element VO props must carry the elementColumns
         // paths/columns exactly (child table contributes no table prefix to the leaf columns).
         String ecNav = Files.readString(generatedDir.resolve("navleaf/_LoadTags.java")).replaceAll("\\s+", "");
         // D3: ListAttribute covers both one-to-many and element collections — the interface name
-        // no longer separates them; the navigationRefs join shape does (child table + parent fk).
+        // no longer separates them; the columnRefs join shape does (child table + parent fk).
         assertTrue(ecNav.contains("publicfinalclass_LoadTagsimplementsListAttribute<Load,Tags>"), ecNav);
-        assertTrue(ecNav.contains("TextColumnAttribute<Load>sku=newTextColumnAttributeRecord<>(\"tags.sku\");"), ecNav);
-        assertTrue(ecNav.contains("SortableColumnAttribute<Load>qty=newSortableColumnAttributeRecord<>(\"tags.qty\");"), ecNav);
-        assertTrue(lmd.contains("Map.entry(\"tags.sku\",newColumnRef(\"sku\",\"tags.sku\",null,List.of(newJoinRef(\"load_tags\",\"tags\",\"id\",\"load_id\"))))"),
+        assertTrue(ecNav.contains("TextScalarAttribute<Load>sku=newTextScalarAttributeRecord<>(\"sku\",\"tags.sku\");"), ecNav);
+        assertTrue(ecNav.contains("SortableScalarAttribute<Load>qty=newSortableScalarAttributeRecord<>(\"qty\",\"tags.qty\");"), ecNav);
+        assertTrue(lmd.contains("mappings.put(_Load.tags.sku,newColumnRef(\"sku\",\"load_tags\",\"tags\",List.of(newJoinRef(\"load\",null,\"id\",\"load_tags\",\"tags\",\"load_id\"))))"),
                 "element-collection navigation must pin the child table and parent fk through the join:" + System.lineSeparator() + lmd);
     }
 
@@ -2268,30 +2556,30 @@ class RepositoryProcessorTest {
         assertTrue(pm.contains("_ParentChildrenchildren=new_ParentChildren();"), pm);
         assertTrue(pm.contains("StringPRIMARY=\"primary\";"), pm);
         assertTrue(pm.contains("_ParentPrimaryprimary=new_ParentPrimary();"), pm);
-        assertTrue(pm.contains("TextColumnAttribute<Parent>name=newTextColumnAttributeRecord<>(NAME);"), pm);
+        assertTrue(pm.contains("TextScalarAttribute<Parent>name=newTextScalarAttributeRecord<>(\"name\",NAME);"), pm);
         String fkNav = Files.readString(generatedDir.resolve("mmrel/_ParentPrimary.java")).replaceAll("\\s+", "");
         assertTrue(fkNav.contains("publicfinalclass_ParentPrimaryimplementsEntityAttribute<Parent,Child>"), fkNav);
-        assertTrue(fkNav.contains("IdAttribute<Parent>id=newIdAttributeRecord<>(\"primary.id\");"),
+        assertTrue(fkNav.contains("IdAttribute<Parent>id=newIdAttributeRecord<>(\"id\",\"primary.id\");"),
                 "the child's id must be a nav leaf named by its owner-rooted path:" + System.lineSeparator() + fkNav);
         // D3: targetDescriptor() plumbing is gone; the FK target resolution rides the descriptor's
-        // generated navigationRefs() literals.
+        // generated columnRefs() literals.
         String pmd = Files.readString(generatedDir.resolve("mmrel/ParentMetadata.java")).replaceAll("\\s+", "");
-        assertTrue(pmd.contains("Map.entry(\"primary.id\",newColumnRef(\"id\",\"primary.id\",null,List.of(newJoinRef(\"child\",\"primary\",\"primary_id\",\"id\"))))"),
-                "the generated navigationRefs must carry the FK join:" + System.lineSeparator() + pmd);
+        assertTrue(pmd.contains("mappings.put(_Parent.primary.id,newColumnRef(\"id\",\"child\",\"primary\",List.of(newJoinRef(\"parent\",null,\"primary_id\",\"child\",\"primary\",\"id\"))))"),
+                "the generated columnRefs must carry the FK join:" + System.lineSeparator() + pmd);
         String otmNav = Files.readString(generatedDir.resolve("mmrel/_ParentChildren.java")).replaceAll("\\s+", "");
         assertTrue(otmNav.contains("publicfinalclass_ParentChildrenimplementsListAttribute<Parent,Child>"), otmNav);
-        assertTrue(otmNav.contains("ColumnAttribute<Parent>owner=newColumnAttributeRecord<>(\"children.owner\");"),
+        assertTrue(otmNav.contains("ScalarAttribute<Parent>owner=newScalarAttributeRecord<>(\"owner\",\"children.owner\");"),
                 "the child's own FK column path must flatten into the collection nav:" + System.lineSeparator() + otmNav);
-        assertTrue(pmd.contains("Map.entry(\"children.id\",newColumnRef(\"id\",\"children.id\",null,List.of(newJoinRef(\"child\",\"children\",\"id\",\"owner_id\"))))"),
+        assertTrue(pmd.contains("mappings.put(_Parent.children.id,newColumnRef(\"id\",\"child\",\"children\",List.of(newJoinRef(\"parent\",null,\"id\",\"child\",\"children\",\"owner_id\"))))"),
                 "one-to-many navigation must join via the child table and the inverse fk:" + System.lineSeparator() + pmd);
         String cm = Files.readString(generatedDir.resolve("mmrel/_Child.java")).replaceAll("\\s+", "");
         assertTrue(cm.contains("_ChildOwnerowner=new_ChildOwner();"), cm);
         String ownerNav = Files.readString(generatedDir.resolve("mmrel/_ChildOwner.java")).replaceAll("\\s+", "");
         assertTrue(ownerNav.contains("publicfinalclass_ChildOwnerimplementsEntityAttribute<Child,Parent>"), ownerNav);
-        assertTrue(ownerNav.contains("TextColumnAttribute<Child>name="
-                        + "newTextColumnAttributeRecord<>(\"owner.name\");"), ownerNav);
-        assertTrue(ownerNav.contains("ColumnAttribute<Child>primary="
-                        + "newColumnAttributeRecord<>(\"owner.primary\");"), ownerNav);
+        assertTrue(ownerNav.contains("TextScalarAttribute<Child>name="
+                        + "newTextScalarAttributeRecord<>(\"name\",\"owner.name\");"), ownerNav);
+        assertTrue(ownerNav.contains("ScalarAttribute<Child>primary="
+                        + "newScalarAttributeRecord<>(\"primary\",\"owner.primary\");"), ownerNav);
 
         // Sort dot paths now resolve through the descriptor: the flattened embedded leaves live in
         // the generated columns(), the paging impl calls <Entity>Metadata.columnRef, and an
@@ -2337,13 +2625,13 @@ class RepositoryProcessorTest {
 
         String md = Files.readString(generatedDir.resolve("mmrel/HolderMetadata.java"))
                 .replaceAll("\\s+", "");
-        assertTrue(md.contains("newColumnRef(\"loc_city\",\"loc.city\")"),
+        assertTrue(md.contains("newColumnRef(\"loc_city\",\"holder\",null,List.of())"),
                 "embedded leaf path must resolve to its flattened column:" + System.lineSeparator() + md);
-        assertTrue(md.contains("newColumnRef(\"loc_zip\",\"loc.zip\")"),
+        assertTrue(md.contains("newColumnRef(\"loc_zip\",\"holder\",null,List.of())"),
                 "embedded leaf path must resolve to its flattened column:" + System.lineSeparator() + md);
         assertTrue(!md.contains("newColumnRef(\"loc\","),
                 "no container column for an EMBEDDED property:" + System.lineSeparator() + md);
-        assertTrue(md.contains("newColumnRef(\"id\",\"id\")"),
+        assertTrue(md.contains("newColumnRef(\"id\",\"holder\",null,List.of())"),
                 "the id column must remain:" + System.lineSeparator() + md);
         String impl = Files.readString(generatedDir.resolve("mmrel/HoldersImpl.java"));
         assertTrue(impl.contains("return HolderMetadata.INSTANCE.columnRef(property)"),
@@ -2428,8 +2716,8 @@ class RepositoryProcessorTest {
         String ownerNav = Files.readString(generatedDir.resolve("sbr/_TeamWithBareRefOwner.java")).replaceAll("\\s+", "");
         assertTrue(ownerNav.contains(
                 "publicfinalclass_TeamWithBareRefOwnerimplementsEntityAttribute<TeamWithBareRef,Owner>"), ownerNav);
-        assertTrue(ownerNav.contains("TextColumnAttribute<TeamWithBareRef>label="
-                        + "newTextColumnAttributeRecord<>(\"owner.label\");"), ownerNav);
+        assertTrue(ownerNav.contains("TextScalarAttribute<TeamWithBareRef>label="
+                        + "newTextScalarAttributeRecord<>(\"label\",\"owner.label\");"), ownerNav);
 
         // The composition-gated managed-target NOTE is only emitted for composing references; an
         // association is skipped entirely, so no relationship NOTE appears for owner.
@@ -2510,12 +2798,12 @@ class RepositoryProcessorTest {
         String vmd = Files.readString(holderMetadata).replaceAll("\\s+", " ");
         // D3 unifies one-to-many and element collections under ListAttribute: the attribute NAME
         // can no longer separate the two classifications at the descriptor surface. The
-        // discriminating fact is pinned instead in the owner descriptors' navigationRefs join
+        // discriminating fact is pinned instead in the owner descriptors' columnRefs join
         // shapes (navleaf pins the element-collection child-table/parent-fk join; rel and mmrel
         // pin the one-to-many inverse-fk join). What stays pinned here: a List<@Entity> in a
         // value object exposes the navigable list attribute with the ENTITY element type and
         // never contributes a column of its own.
-        assertTrue(vmd.contains("new ListAttributeRecord<Holder,Thing>(\"things\")"),
+        assertTrue(vmd.contains("new ListAttributeRecord<Holder,Thing>(\"things\", \"things\")"),
                 "a List<@Entity> in a value object must expose a navigable entity-typed list attribute:"
                         + System.lineSeparator() + vmd);
         assertTrue(!vmd.contains("new ColumnRef(\"things"),
@@ -2695,11 +2983,11 @@ class RepositoryProcessorTest {
         // (3) ORDER BY is qualified through SqlBuilder.qualify against the root table with an
         //     EXPLICIT direction (R-T3a: never a direction-less ref-based ORDER BY), and the
         //     LEFT JOIN chain is computed once from the collected refs.
-        assertTrue(impl.contains("SqlBuilder.qualify(r, \"book\")"),
+        assertTrue(impl.contains("SqlBuilder.qualify(SQL_DIALECT, r, \"book\")"),
                 "ORDER BY must qualify the resolved ref against the root table:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("s.isAscending() ? \" ASC\" : \" DESC\""),
                 "every ORDER BY term must carry an explicit ASC/DESC (R-T3a):" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("String joins = SqlBuilder.joinClause(BookMetadata.INSTANCE, refs)"),
+        assertTrue(impl.contains("String joins = SqlBuilder.joinClause(SQL_DIALECT, BookMetadata.INSTANCE, joinRefs)"),
                 "the join clause must be computed from the descriptor and refs:" + System.lineSeparator() + impl);
 
         // (4) joins is spliced immediately after the FROM-bound find constant in BOTH the OFFSET and
@@ -3138,9 +3426,9 @@ class RepositoryProcessorTest {
                 "WorkExperience.java", "Profile.java", "Profiles.java");
 
         String impl = sqlFlat(generatedDir.resolve("t6rt/ProfilesImpl.java"));
-        assertTrue(impl.contains("orderBy.append(SqlBuilder.isToManyHead(ProfileMetadata.INSTANCE, r)"
-                        + " ? SqlBuilder.aggregateSortTerm(ProfileMetadata.INSTANCE, r, s.isAscending())"
-                        + " : SqlBuilder.qualify(r, \"profile\"))"),
+        assertTrue(impl.contains("orderBy.append(SqlBuilder.isToManyPath(ProfileMetadata.INSTANCE, s.property())"
+                        + " ? SqlBuilder.aggregateSortTerm(SQL_DIALECT, ProfileMetadata.INSTANCE, r, s.isAscending())"
+                        + " : SqlBuilder.qualify(SQL_DIALECT, r, \"profile\"))"),
                 "to-many sort heads must switch the ORDER BY term to the aggregate sort term:"
                         + System.lineSeparator() + impl);
         assertTrue(impl.contains("boolean keyed = false;"),
@@ -3162,11 +3450,11 @@ class RepositoryProcessorTest {
         assertTrue(impl.contains("jdbcClient.sql(((joins.isEmpty() && !keyed ? SQL_FIND_ALL"
                         + " : SQL_FIND_ALL_QUALIFIED) + joins + \" WHERE \" + where"),
                 "CURSOR must take the qualified plain select when keyed too:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("terms.add(SqlBuilder.aggregateSortTerm(ProfileMetadata.INSTANCE, r,"
+        assertTrue(impl.contains("terms.add(SqlBuilder.aggregateSortTerm(SQL_DIALECT, ProfileMetadata.INSTANCE, r,"
                         + " dirs.get(i)))"),
                 "seek terms must use the aggregate sort term verbatim for to-many refs:"
                         + System.lineSeparator() + impl);
-        assertTrue(impl.contains("String joins = SqlBuilder.joinClause(ProfileMetadata.INSTANCE, refs)"),
+        assertTrue(impl.contains("String joins = SqlBuilder.joinClause(SQL_DIALECT, ProfileMetadata.INSTANCE, joinRefs)"),
                 "the joinClause call must stay as emitted (to-many refs are skipped by the clause itself):"
                         + System.lineSeparator() + impl);
         assertTrue(impl.contains("CursorSupport.cursorFor(props, dirs, ProfileMetadata.INSTANCE, e)"),
@@ -3358,9 +3646,9 @@ class RepositoryProcessorTest {
     }
 
     @Test
-    void generatesRepositoryModelWithNestedQueryModels() throws Exception {
-        // Plan E (E2): query-by-names methods publish their resolved structure as a generated
-        // <Repo>Model. Assert the shape, the resolved refs, the paging mode and the cursor
+    void generatesRepositoryQueriesWithNestedQueryDefinitions() throws Exception {
+        // Plan E (E2): query-by-names methods publish their logical structure as a generated
+        // <Repo>Queries. Assert the shape, the logical predicate, the paging mode and the cursor
         // tiebreak, plus the overload suffix. The <Repo>Impl bytes are unchanged in this task.
         Path sourceDir = Files.createDirectories(workspace.resolve("src/qmd"));
         Path classesDir = Files.createDirectories(workspace.resolve("classes-qmd"));
@@ -3398,48 +3686,103 @@ class RepositoryProcessorTest {
 
         compile(sourceDir, classesDir, generatedDir, "Widget.java", "Widgets.java");
 
-        Path modelFile = generatedDir.resolve("qmd/WidgetsModel.java");
-        assertTrue(Files.exists(modelFile), "expected generated " + modelFile);
-        String model = Files.readString(modelFile).replaceAll("\\s+", " ");
+        Path queriesFile = generatedDir.resolve("qmd/WidgetsQueries.java");
+        assertTrue(Files.exists(queriesFile), "expected generated " + queriesFile);
+        String queries = Files.readString(queriesFile).replaceAll("\\s+", " ");
 
-        assertTrue(model.contains("public final class WidgetsModel"), "holder:" + System.lineSeparator() + model);
-        // one nested model per query-by-names method, in declaration order, overload suffixed
-        assertTrue(model.contains("public static final class FindByStatusQueryModel"
-                        + " implements QueryModel<Widget>"),
-                "find query model:" + System.lineSeparator() + model);
-        assertTrue(model.contains("public static final class FindByStatusQueryModel2"
-                        + " implements QueryModel<Widget>"),
-                "paged overload must be suffixed:" + System.lineSeparator() + model);
-        assertTrue(model.contains("public static final class CountByStatusQueryModel"
-                        + " implements QueryModel<Widget>"),
-                "count query model:" + System.lineSeparator() + model);
-        assertTrue(model.contains("public static final FindByStatusQueryModel INSTANCE"
-                        + " = new FindByStatusQueryModel();"),
-                "INSTANCE constant:" + System.lineSeparator() + model);
-        // resolved structure serialised as literals
-        assertTrue(model.contains("new ResolvedPredicate("
-                        + "Predicate.of(\"status\", Operator.EQ, \"status\"),"
-                        + " new ColumnRef(\"status\", \"status\", null, List.of()), false)"),
-                "resolved predicate:" + System.lineSeparator() + model);
-        assertTrue(model.contains("return Operation.FIND;"), "operation:" + System.lineSeparator() + model);
-        assertTrue(model.contains("return Operation.COUNT;"), "count operation:"
-                + System.lineSeparator() + model);
-        assertTrue(model.contains("return ResultKind.PAGE;"), "paged result kind:"
-                + System.lineSeparator() + model);
-        assertTrue(model.contains("return PagingMode.OFFSET;"), "paged mode:"
-                + System.lineSeparator() + model);
-        assertTrue(model.contains("return PagingMode.NONE;"), "plain mode:" + System.lineSeparator() + model);
-        assertTrue(model.contains("new ParamBinding(0, \"status\")"), "param binding:"
-                + System.lineSeparator() + model);
+        assertTrue(queries.contains("public final class WidgetsQueries"),
+                "holder:" + System.lineSeparator() + queries);
+        // one nested query definition per query-by-names method, in declaration order, overload suffixed
+        assertTrue(queries.contains("public static final class FindByStatusQuery implements QueryDefinition"),
+                "find query definition:" + System.lineSeparator() + queries);
+        assertTrue(queries.contains("public static final class FindByStatusQuery2 implements QueryDefinition"),
+                "paged overload must be suffixed:" + System.lineSeparator() + queries);
+        assertTrue(queries.contains("public static final class CountByStatusQuery implements QueryDefinition"),
+                "count query definition:" + System.lineSeparator() + queries);
+        assertTrue(queries.contains("public static final FindByStatusQuery INSTANCE = new FindByStatusQuery();"),
+                "INSTANCE constant:" + System.lineSeparator() + queries);
+        // query metadata retains logical paths; SqlBuilder resolves them against the schema.
+        assertTrue(queries.contains("Predicate.of(\"status\", Operator.EQ, \"status\")"),
+                "logical predicate:" + System.lineSeparator() + queries);
+        assertTrue(queries.contains("return Operation.FIND;"), "operation:" + System.lineSeparator() + queries);
+        assertTrue(queries.contains("return Operation.COUNT;"), "count operation:"
+                + System.lineSeparator() + queries);
+        assertTrue(queries.contains("return ResultKind.PAGE;"), "paged result kind:"
+                + System.lineSeparator() + queries);
+        assertTrue(queries.contains("return PagingMode.OFFSET;"), "paged mode:"
+                + System.lineSeparator() + queries);
+        assertTrue(queries.contains("return PagingMode.NONE;"), "plain mode:" + System.lineSeparator() + queries);
+        assertTrue(queries.contains("new ParamBinding(0, \"status\")"), "param binding:"
+                + System.lineSeparator() + queries);
         // the paged model declares no ORDER BY sorts of its own here, and its seek terms are the
         // id-ascending default the runtime cursor uses
-        assertTrue(model.contains("new SeekTerm(")
-                        && model.contains("new ColumnRef(\"id\", \"id\", null, List.of()), true)"),
-                "default cursor seek term:" + System.lineSeparator() + model);
+        assertTrue(queries.contains("new SeekTerm(")
+                        && queries.contains("new ColumnRef(\"id\", null, null, List.of()), true)"),
+                "default cursor seek term:" + System.lineSeparator() + queries);
         // the impl must not have changed shape in this task
         String impl = Files.readString(generatedDir.resolve("qmd/WidgetsImpl.java"));
         assertTrue(impl.contains("SQL_FIND_BY_STATUS"), "impl constants survive:"
                 + System.lineSeparator() + impl);
+    }
+
+    @Test
+    void overriddenInheritedFinderProducesOneQueryDefinition() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/query-override"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-query-override"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-query-override"));
+
+        Files.writeString(sourceDir.resolve("Widget.java"), """
+                package queryoverride;
+                public class Widget {
+                    public Long id;
+                    public String status;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getStatus() { return status; }
+                    public void setStatus(String status) { this.status = status; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("WidgetFinder.java"), """
+                package queryoverride;
+                import java.util.List;
+                public interface WidgetFinder {
+                    List<Widget> findByStatus(String status);
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Widgets.java"), """
+                package queryoverride;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.List;
+                @Repository
+                public interface Widgets extends CrudRepository<Widget, Long>, WidgetFinder {
+                    @Override
+                    List<Widget> findByStatus(String status);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Widget.java", "WidgetFinder.java", "Widgets.java");
+
+        String queries = Files.readString(generatedDir.resolve("queryoverride/WidgetsQueries.java"))
+                .replaceAll("\\s+", " ");
+        String impl = Files.readString(generatedDir.resolve("queryoverride/WidgetsImpl.java"))
+                .replaceAll("\\s+", " ");
+        assertTrue(queries.contains("class FindByStatusQuery implements QueryDefinition"), queries);
+        assertTrue(!queries.contains("FindByStatusQuery2"), "override must not look like an overload: " + queries);
+        assertTrue(occurrences(queries, "class FindByStatusQuery implements QueryDefinition") == 1,
+                "one query definition per effective method: " + queries);
+        assertTrue(occurrences(impl, "List<Widget> findByStatus(String status)") == 1,
+                "one implementation method per effective method: " + impl);
+    }
+
+    private static int occurrences(String text, String value) {
+        int count = 0;
+        int offset = 0;
+        while ((offset = text.indexOf(value, offset)) >= 0) {
+            count++;
+            offset += value.length();
+        }
+        return count;
     }
 
     /**
@@ -3599,10 +3942,12 @@ class RepositoryProcessorTest {
         Files.writeString(sourceDir.resolve("Ord.java"), """
                 package relpath;
                 import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Find;
                 import jakarta.data.repository.Repository;
                 import java.util.stream.Stream;
                 @Repository
                 public interface Ord extends CrudRepository<Order, Long> {
+                    @Find
                     Stream<Order> findByCustomerName(String name);
                 }
                 """);
@@ -3708,7 +4053,7 @@ class RepositoryProcessorTest {
     void qualifiedRootSelectParityGuardPinsBothHelperCallShapes() throws Exception {
         // S-1 parity guard. The SQL_FIND_ALL_QUALIFIED emission and the joined-find branch now
         // render through ONE SqlBuilder.qualifiedRootSelect helper, reached via
-        // SqlBuilder.build(EntitySchema, QueryModel[, String]). The two intentional modes of that
+        // SqlBuilder.build(TableSchema, QueryDefinition[, String]). The two intentional modes of that
         // helper are both unpinned by the existing suite for THIS descriptor: the EXISTS-only find (no
         // join spliced) keeps the BARE root projection, while the same descriptor's qualified findAll
         // constant lists every root column as \"order\".\"col\". Locked byte-for-byte here.
@@ -4418,12 +4763,12 @@ class RepositoryProcessorTest {
 
     @Test
     void generatedMetadataValueSwitchReadsRelationAndCollectionPathsWithoutReflection() throws Exception {
-        // Task 4 (S-3): <Entity>Metadata.value(dotPath, entity) is the reflection-free cursor-key read,
+        // <Entity>Metadata.navigate(path, root) is the reflection-free cursor-key read,
         // emitted as a switch over exactly the paths columnRef resolves. The estore Order fixture supplies
         // the to-one head (customer.name) and the element collection (orderItems.sku); the profile-style
         // fixture supplies the composition entity list (workHistory.company). compile() also compiles the
         // GENERATED sources, so this run is itself the proof that
-        // OrderMetadata.value("customer.name", order) type-checks against the fixture.
+        // OrderMetadata.navigate("customer.name", root) type-checks against the fixture.
         Path orderSrc = Files.createDirectories(workspace.resolve("src/val-order"));
         Path orderClasses = Files.createDirectories(workspace.resolve("classes-val-order"));
         Path orderGen = Files.createDirectories(workspace.resolve("generated-val-order"));
@@ -4440,7 +4785,7 @@ class RepositoryProcessorTest {
                 "ValOrders.java");
 
         String order = sqlFlat(orderGen.resolve("relpath/OrderMetadata.java"));
-        assertTrue(order.contains("public Object value(String dotPath, Object entity)"),
+        assertTrue(order.contains("public Object navigate(String path, Order root)"),
                 "the descriptor must override value with the interface signature:"
                         + System.lineSeparator() + order);
         assertTrue(order.contains("case \"status\": return e.getStatus();"),
@@ -4455,7 +4800,7 @@ class RepositoryProcessorTest {
                 "an element-collection leaf must map the child list behind a null-COLLECTION guard:"
                         + System.lineSeparator() + order);
         assertTrue(order.contains("default: throw new IllegalArgumentException(\"Unknown property path '\""
-                        + " + dotPath + \"' on Order\")"),
+                        + " + path + \"' on Order\")"),
                 "an unknown path must fail fast naming the path and the entity:" + System.lineSeparator() + order);
         assertTrue(!order.contains("getDeclaredField") && !order.contains("java.lang.reflect"),
                 "the value switch must stay reflection-free:" + System.lineSeparator() + order);

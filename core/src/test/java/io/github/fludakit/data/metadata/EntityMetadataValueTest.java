@@ -1,9 +1,9 @@
 package io.github.fludakit.data.metadata;
 
 import io.github.fludakit.data.metamodel.IdAttribute;
-import io.github.fludakit.data.metamodel.TextColumnAttributeRecord;
+import io.github.fludakit.data.metamodel.PathAttribute;
+import io.github.fludakit.data.metamodel.TextScalarAttributeRecord;
 import io.github.fludakit.data.page.CursorSupport;
-import jakarta.data.metamodel.Attribute;
 import jakarta.data.page.PageRequest;
 import org.junit.jupiter.api.Test;
 
@@ -13,27 +13,27 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Locks the {@link EntityDescriptor#value(String, Object)} contract (the interface default throws,
- * an override answers local and relation dot paths, unknown paths fail fast) and the descriptor-driven
- * {@link CursorSupport#cursorFor(List, List, EntityDescriptor, Object)} overload's min/max reduction of
+ * Locks the {@link EntityMetadata#navigate(String, Object)} contract (the interface default throws,
+ * an override answers local and relation dot paths, unknown paths fail fast) and the metadata-driven
+ * {@link CursorSupport#cursorFor(List, List, EntityMetadata, Object)} overload's min/max reduction of
  * a to-many value list by sort direction.
  */
-class EntityDescriptorValueTest {
+class EntityMetadataValueTest {
 
     static class Node { }
 
-    /** R2-style hand-rolled descriptor: exactly the interface members, NO value override. */
+    /** Hand-written metadata without a navigation override. */
     record Bare<T>(Class<T> entityClass, String tableName, IdAttribute<T> id,
-                   List<Attribute<T>> attributes, List<ColumnRef> columns)
-            implements EntityDescriptor<T> { }
+                   List<PathAttribute<T>> attributes, List<ColumnRef> columns)
+            implements EntityMetadata<T> { }
 
-    /** Overrides value for one to-many and one single-valued path, mirroring the generated switch. */
+    /** Overrides navigation for one to-many and one single-valued path, mirroring generated code. */
     record WithValues<T>(Class<T> entityClass, String tableName, IdAttribute<T> id,
-                         List<Attribute<T>> attributes, List<ColumnRef> columns,
-                         List<Object> itemsName, Object name) implements EntityDescriptor<T> {
+                         List<PathAttribute<T>> attributes, List<ColumnRef> columns,
+                         List<Object> itemsName, Object name) implements EntityMetadata<T> {
         @Override
-        public Object value(String dotPath, Object entity) {
-            switch (dotPath) {
+        public Object navigate(String path, T root) {
+            switch (path) {
                 case "items.name": {
                     return itemsName;
                 }
@@ -41,40 +41,40 @@ class EntityDescriptorValueTest {
                     return name;
                 }
                 default: {
-                    throw new IllegalArgumentException("Unknown property path '" + dotPath
+                    throw new IllegalArgumentException("Unknown property path '" + path
                             + "' on " + entityClass.getSimpleName());
                 }
             }
         }
     }
 
-    private static EntityDescriptor<Node> bare() {
+    private static EntityMetadata<Node> bare() {
         return new Bare<>(Node.class, "bare_node", null,
-                List.<Attribute<Node>>of(new TextColumnAttributeRecord<Node>("name")),
-                List.of(new ColumnRef("name", "name")));
+                List.<PathAttribute<Node>>of(new TextScalarAttributeRecord<Node>("name")),
+                List.of(new ColumnRef("name")));
     }
 
-    private static EntityDescriptor<Node> withValues(List<Object> itemsName) {
+    private static EntityMetadata<Node> withValues(List<Object> itemsName) {
         return new WithValues<>(Node.class, "node", null,
-                List.<Attribute<Node>>of(new TextColumnAttributeRecord<Node>("name")),
-                List.of(new ColumnRef("name", "name")),
+                List.<PathAttribute<Node>>of(new TextScalarAttributeRecord<Node>("name")),
+                List.of(new ColumnRef("name")),
                 itemsName, "z");
     }
 
     @Test
     void defaultThrowsUnsupportedOperationException() {
-        EntityDescriptor<Node> descriptor = bare();
+        EntityMetadata<Node> descriptor = bare();
 
-        assertThatThrownBy(() -> descriptor.value("name", new Object()))
+        assertThatThrownBy(() -> descriptor.navigate("name", new Node()))
                 .isInstanceOf(UnsupportedOperationException.class)
-                .hasMessage("descriptor " + descriptor.getClass().getSimpleName()
-                        + " does not support value extraction");
+                .hasMessage(descriptor.getClass().getSimpleName()
+                        + " does not support property navigation");
     }
 
     @Test
     void cursorForReducesToManyListByDirection() {
-        EntityDescriptor<Node> md = withValues(List.of("b", "a", "c"));
-        Object node = new Object();
+        EntityMetadata<Node> md = withValues(List.of("b", "a", "c"));
+        Node node = new Node();
 
         PageRequest.Cursor asc =
                 CursorSupport.cursorFor(List.of("items.name"), List.of(true), md, node);
@@ -87,20 +87,20 @@ class EntityDescriptorValueTest {
 
     @Test
     void cursorForReducesEmptyToManyListToNullKey() {
-        EntityDescriptor<Node> md = withValues(List.of());
+        EntityMetadata<Node> md = withValues(List.of());
 
         PageRequest.Cursor cursor =
-                CursorSupport.cursorFor(List.of("items.name"), List.of(true), md, new Object());
+                CursorSupport.cursorFor(List.of("items.name"), List.of(true), md, new Node());
 
         assertThat(cursor.get(0)).isNull();
     }
 
     @Test
     void cursorForPassesSingleValuesThroughAndComposesMultiKeyCursors() {
-        EntityDescriptor<Node> md = withValues(List.of("b", "a", "c"));
+        EntityMetadata<Node> md = withValues(List.of("b", "a", "c"));
 
         PageRequest.Cursor cursor = CursorSupport.cursorFor(
-                List.of("name", "items.name"), List.of(false, true), md, new Object());
+                List.of("name", "items.name"), List.of(false, true), md, new Node());
 
         assertThat(cursor.size()).isEqualTo(2);
         assertThat(cursor.get(0)).isEqualTo("z");
@@ -110,21 +110,21 @@ class EntityDescriptorValueTest {
     @Test
     void cursorForFailsFastOnNonComparableListElements() {
         // Task 6 note-7 guard: a cursor sort through e.g. "workHistory.profile" yields a
-        // List<Profile> from descriptor value extraction; Profile is not Comparable, and silently
+        // List<Profile> from metadata path navigation; Profile is not Comparable, and silently
         // ClassCastException-ing at page-two seek time is worse than a named, immediate failure.
-        EntityDescriptor<Node> md = withValues(List.of(new Node(), new Node()));
+        EntityMetadata<Node> md = withValues(List.of(new Node(), new Node()));
 
         assertThatThrownBy(() -> CursorSupport.cursorFor(
-                List.of("items.name"), List.of(true), md, new Object()))
+                List.of("items.name"), List.of(true), md, new Node()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("cursor sort on non-comparable path element");
     }
 
     @Test
-    void overriddenValueStillFailsFastForUnknownPath() {
-        EntityDescriptor<Node> md = withValues(List.of("b"));
+    void navigationOverrideFailsFastForUnknownPath() {
+        EntityMetadata<Node> md = withValues(List.of("b"));
 
-        assertThatThrownBy(() -> md.value("nope", new Object()))
+        assertThatThrownBy(() -> md.navigate("nope", new Node()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Unknown property path 'nope'")
                 .hasMessageContaining("Node");
@@ -132,12 +132,12 @@ class EntityDescriptorValueTest {
 
     @Test
     void depthTwoRelationPathFailsFastNamingTheExactPath() {
-        // C-2 honesty pin: the generated value switch answers ONE relation hop by construction, so a
+        // C-2 honesty pin: generated navigation answers ONE relation hop by construction, so a
         // depth-2 path lands in the default branch and the IllegalArgumentException names the exact
         // path — the failure surface the README path-depth bullet documents for CURSOR page keys.
-        EntityDescriptor<Node> md = withValues(List.of("b"));
+        EntityMetadata<Node> md = withValues(List.of("b"));
 
-        assertThatThrownBy(() -> md.value("items.product.name", new Object()))
+        assertThatThrownBy(() -> md.navigate("items.product.name", new Node()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("Unknown property path 'items.product.name' on Node");
     }

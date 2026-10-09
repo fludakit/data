@@ -3706,8 +3706,9 @@ class RepositoryProcessorTest {
     }
     @Test
     void qualifiedRootSelectParityGuardPinsBothHelperCallShapes() throws Exception {
-        // S-1 parity guard. joinedFindAllSelect / SQL_FIND_ALL_QUALIFIED and methodSql's joined-find
-        // branch now render through ONE qualifiedRootSelect helper. The two intentional modes of that
+        // S-1 parity guard. The SQL_FIND_ALL_QUALIFIED emission and the joined-find branch now
+        // render through ONE SqlBuilder.qualifiedRootSelect helper, reached via
+        // SqlBuilder.build(EntitySchema, QueryModel[, String]). The two intentional modes of that
         // helper are both unpinned by the existing suite for THIS descriptor: the EXISTS-only find (no
         // join spliced) keeps the BARE root projection, while the same descriptor's qualified findAll
         // constant lists every root column as \"order\".\"col\". Locked byte-for-byte here.
@@ -3835,8 +3836,8 @@ class RepositoryProcessorTest {
         // to-one predicate (Reference head "customer") and a to-many predicate (ElementList head
         // "orderItems") must render the mixed shapes CONJUNCTED - the LEFT JOIN splice for the
         // to-one traversal AND the EXISTS semi-join for the to-many traversal, AND-ed in one WHERE
-        // (methodSql emits the non-existential conjuncts first). Each shape alone is pinned above;
-        // this pins their conjunction.
+        // (SqlBuilder.build emits the non-existential conjuncts first). Each shape alone is pinned
+        // above; this pins their conjunction.
         Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-mix"));
         Path classesDir = Files.createDirectories(workspace.resolve("classes-rp-mix"));
         Path generatedDir = Files.createDirectories(workspace.resolve("generated-rp-mix"));
@@ -4021,7 +4022,7 @@ class RepositoryProcessorTest {
     @Test
     void deleteByThroughRelationRendersExistsSemiJoin() throws Exception {
         // C-1: a deleteBy whose predicate traverses a relation renders a correlated EXISTS semi-join
-        // through methodSql's delete mode — a joined DELETE ... LEFT JOIN is invalid SQL on
+        // through SqlBuilder.build's delete mode — a joined DELETE ... LEFT JOIN is invalid SQL on
         // H2/PostgreSQL/SQL Server — and emits NO delete NOTE. The old T8-I1 NOTE-degrade to the
         // join-free legacy predicate could match the wrong rows and is removed. Guards: a LOCAL-property
         // deleteBy stays byte-identical legacy with no join, no DELETE ever carries a LEFT JOIN, and
@@ -4083,7 +4084,7 @@ class RepositoryProcessorTest {
     void deleteByThroughElementCollectionAndMixedPredicatesRenderExists() throws Exception {
         // C-1 pins: a to-many delete renders the SAME EXISTS conjunct find/count use (delete now
         // agrees with them — gap 1's promise); a mixed to-one + local delete conjoins the bare
-        // local term FIRST and the reversed-edge EXISTS second (methodSql's two-pass conjunct
+        // local term FIRST and the reversed-edge EXISTS second (SqlBuilder.build's two-pass conjunct
         // order); a multi-hop delete path stays NOTE-rejected by the resolver and renders neither
         // EXISTS nor a join.
         Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-del2"));
@@ -4557,9 +4558,9 @@ class RepositoryProcessorTest {
 
     @Test
     void nonPagedSortThroughElementListRendersAggregateAndNoTiebreak() throws Exception {
-        // C-4.1/C-4.2 (plan B parked minor): the NON-paged methodSql emission of a to-many sort head
-        // renders the same aggregate term verbatim in ORDER BY, splices NO LEFT JOIN for the
-        // collection, and gains NO root-id tiebreak — tiebreaking is a paged-cursor concern (seek
+        // C-4.1/C-4.2 (plan B parked minor): the NON-paged SqlBuilder.build emission of a to-many
+        // sort head renders the same aggregate term verbatim in ORDER BY, splices NO LEFT JOIN for
+        // the collection, and gains NO root-id tiebreak — tiebreaking is a paged-cursor concern (seek
         // keys need a total order); findTop… through a collection stays order-nondeterministic among
         // ties like any non-paged ORDER BY.
         Path sourceDir = Files.createDirectories(workspace.resolve("src/c4sort"));

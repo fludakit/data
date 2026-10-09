@@ -90,7 +90,8 @@ import java.util.Set;
  * implementing {@link io.github.fludakit.data.metadata.EntityDescriptor} (the compile-time descriptor model behind all SQL), a
  * {@code <Entity>RowMapper} for entities whose fields are all JDBC-safe or embeddable value objects,
  * a Jakarta Data 1.0 {@code _Entity} static metamodel interface per aggregate root
- * (see {@link #generateStaticMetamodel}), and a {@code <Repository>Model} holder publishing one
+ * (see {@link #generateStaticMetamodel}), and — only when the repository declares at least one
+ * query-by-names or {@code @Find} finder — a {@code <Repository>Model} holder publishing one
  * nested {@link QueryModel} per query-by-names method (see {@link #generateRepositoryModel}).
  *
  * <p>The generated implementation class is {@link ApplicationScoped} and carries a single injected
@@ -857,11 +858,11 @@ public class RepositoryProcessor extends AbstractProcessor {
                 .returns(ParameterizedTypeName.get(ClassName.get(java.util.List.class), MD_COLUMN_REF))
                 .addStatement("return $L", columns.build()).build());
 
-        // D3/D4: the navigated leaf cases — the EXACT path set both the value() switch below and
-        // the navigationRefs() map are generated from (shared compile-time enumeration; the
-        // mirror-drift risk is closed at generation time: navigationRefs() path set ==
-        // value()-switch relation-path set by construction). Map.ofEntries (not Map.of) so any
-        // cardinality compiles.
+        // D3/D4: the navigated leaf cases — ONE shared compile-time enumeration feeds both the
+        // value() switch below and the navigationRefs() map; the mirror-drift risk is closed at
+        // generation time: the navigationRefs() path set is a SUPERSET of the value()-switch
+        // relation-path set (head-level guards drop from both; putValueCase may NOTE-drop a path
+        // from the value switch only). Map.ofEntries (not Map.of) so any cardinality compiles.
         List<NavCase> navs = navCases(entityElement, entity);
         if (!navs.isEmpty()) {
             CodeBlock.Builder entries = CodeBlock.builder();
@@ -938,10 +939,13 @@ public class RepositoryProcessor extends AbstractProcessor {
     private record NavCase(String path, ColumnRef ref, TypeElement targetElement, DataModel target,
                            CodeBlock head, boolean toOne) { }
 
-    /** The relation-traversing leaf cases of one entity — the EXACT path set both the value()
+    /** The relation-traversing leaf cases of one entity — the ONE enumeration both the value()
      *  switch and the navigationRefs() map are generated from (the loop moved verbatim out of
-     *  valueSwitch; head-level guards keep the historical NOTE-degrade semantics: an unmapped
-     *  target or accessor-less head drops the head from BOTH surfaces). */
+     *  valueSwitch; navigationRefs() consumes the full list, so its path set is a SUPERSET of
+     *  the value()-switch relation-path set: putValueCase may NOTE-drop a path from the switch
+     *  only, and valueExtractor may omit the whole switch). Head-level guards keep the
+     *  historical NOTE-degrade semantics: an unmapped target or accessor-less head drops the
+     *  head from BOTH surfaces). */
     private List<NavCase> navCases(TypeElement entityElement, EntityModel entity) {
         DataModel md = entity.metadata();
         List<NavCase> out = new ArrayList<>();
@@ -993,9 +997,10 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
 
         // (2) Depth 1 through every relationship the descriptor publishes — the SHARED
-        // navCases() enumeration (the navigationRefs() map consumes the identical list, so the
-        // path sets agree by construction). Anything deeper is multi-hop for resolveCompilePath
-        // too, so it stays out of both surfaces by construction.
+        // navCases() enumeration (the navigationRefs() map consumes the identical list; its
+        // path set is a SUPERSET of these value()-switch cases, since putValueCase may
+        // NOTE-drop a path from the switch only). Anything deeper is multi-hop for
+        // resolveCompilePath too, so it stays out of both surfaces by construction.
         for (NavCase nav : navs) {
             String leafPath = nav.path().substring(nav.path().indexOf(".") + 1);
             CodeBlock body = nav.toOne()

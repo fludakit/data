@@ -33,7 +33,7 @@ processor emits, in the repository's package:
 | `WidgetMetadata` | the reflection-free `EntityDescriptor<Widget>`: table, columns, navigated refs, `value()` |
 | `WidgetRowMapper` | the reflection-free row reader (when the entity passes the gate) |
 | `_Widget` (+ `_<Widget><Field>` navs) | the Jakarta Data static metamodel, navigation only |
-| `WidgetsModel` | the resolved structure of each query-by-names method (see below) |
+| `WidgetsModel` | the resolved structure of each query-by-names method (when the repository declares at least one query-by-names or `@Find` finder; see below) |
 
 ### Query metadata
 
@@ -54,9 +54,10 @@ predicates and sorts paired with their physical `ColumnRef`s (and the `LEFT JOIN
 contribute), the paging mode, the keyset seek terms and the parameter bindings. It is metadata, not a
 runtime hook — nothing in the engine reads it — and overloads get a declaration-order numeric suffix
 (`FindByStatusQueryModel2`). `SqlBuilder.build(schema, model)` is the single renderer that turns a
-model back into SQL.
+model back into SQL (full-materialisation projections are an emission-time argument, not model
+state — a published model re-renders the root projection).
 
-## Breaking changes in 1.0.0-SNAPSHOT (navigable metamodel iteration)
+## Breaking changes in 1.0.0-SNAPSHOT (navigable metamodel and query pipeline iterations)
 
 - `ColumnAttribute.column()` and the relation attributes' plumbing (`ForeignKeyAttribute.target()/
   targetDescriptor()`, `OneToManyAttribute.inverseName()/childFkColumn()`,

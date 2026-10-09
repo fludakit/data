@@ -108,7 +108,11 @@ public final class SqlBuilder {
      * <ul>
      * <li>An existential (to-many head) predicate ref renders as an {@link #existsConjunct EXISTS}
      *     conjunct and contributes NO join; in DELETE mode every traversed predicate ref does
-     *     (a joined {@code DELETE ... LEFT JOIN} is invalid SQL on H2/PostgreSQL/SQL Server).</li>
+     *     (a joined {@code DELETE ... LEFT JOIN} is invalid SQL on H2/PostgreSQL/SQL Server).
+     *     The DELETE-mode suppression inspects predicate refs only: emitted delete models always
+     *     carry empty sorts, so a hand-built model with {@code Operation.DELETE} and joined sort
+     *     refs would render an invalid {@code DELETE ... LEFT JOIN} — joined sort refs are not
+     *     supported for DELETE.</li>
      * <li>An existential sort renders an {@link #aggregateSortTerm} and contributes NO join; only
      *     to-one predicate refs and to-one sort refs splice the {@link #joinClause} chain.</li>
      * <li>The legacy delegation fires exactly when nothing joins and nothing needs an EXISTS or an

@@ -85,12 +85,13 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Generates four artifacts at compile time: a {@code <Repository>Impl} class for every
+ * Generates five artifacts at compile time: a {@code <Repository>Impl} class for every
  * {@link Repository @Repository} interface, a reflection-free {@code <Entity>Metadata} class
  * implementing {@link io.github.fludakit.data.metadata.EntityDescriptor} (the compile-time descriptor model behind all SQL), a
  * {@code <Entity>RowMapper} for entities whose fields are all JDBC-safe or embeddable value objects,
- * and a Jakarta Data 1.0 {@code _Entity} static metamodel interface per aggregate root
- * (see {@link #generateStaticMetamodel}).
+ * a Jakarta Data 1.0 {@code _Entity} static metamodel interface per aggregate root
+ * (see {@link #generateStaticMetamodel}), and a {@code <Repository>Model} holder publishing one
+ * nested {@link QueryModel} per query-by-names method (see {@link #generateRepositoryModel}).
  *
  * <p>The generated implementation class is {@link ApplicationScoped} and carries a single injected
  * collaborator, a {@link JdbcClient}. Every query's SQL is emitted as a {@code private static final
@@ -574,7 +575,9 @@ public class RepositoryProcessor extends AbstractProcessor {
                 JavaFile.builder(packageName, holder.build()).skipJavaLangImports(true).build());
     }
 
-    /** One nested {@code <Method>QueryModel} class serialising {@code model}'s nine accessors. */
+    /** One nested {@code <Method>QueryModel} class serialising the eight {@link QueryModel}
+     *  accessors of {@code model}; its {@code modelName} names the nested class — it is not an
+     *  accessor. */
     private TypeSpec queryModelType(ResolvedQueryModel model, TypeName entityType) {
         ClassName self = ClassName.bestGuess(model.modelName());
         TypeSpec.Builder query = TypeSpec.classBuilder(model.modelName())

@@ -20,6 +20,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
+/**
+ * The engine's ONE SQL renderer. Every statement is a pure function of a schema view
+ * ({@link EntitySchema}: the compile-time {@link io.github.fludakit.data.model.DataModel} or a
+ * generated {@link io.github.fludakit.data.metadata.EntityDescriptor}) plus, for a whole query method,
+ * a resolved {@link io.github.fludakit.data.query.QueryModel}. {@link #build(EntitySchema,
+ * io.github.fludakit.data.query.QueryModel)} is the layout hub; the named builders below are its
+ * primitives and the classic no-join delegation. Identifier quoting is {@link Names#quote} throughout.
+ */
+
 public final class SqlBuilder {
 
     public String selectBy(EntitySchema md, List<Predicate> predicates, List<SortSpec> sorts, int limit, String cursorClause) {

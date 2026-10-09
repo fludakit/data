@@ -33,7 +33,13 @@ public interface QueryModel<T> {
      *  parameters bind through {@link #paramBindings()}, not here. */
     int limit();
 
-    /** Cursor seek terms (non-empty iff {@link #paging()} is {@link PagingMode#CURSOR}). */
+    /**
+     * The keyset seek key. A {@link PagingMode#CURSOR} consumer uses these terms for its seek
+     * predicates; an OFFSET-mode model carries the same published default ordering key ({@code id ASC}
+     * when the method declares no sorts, with the id tiebreak appended per the paged-emission
+     * mirroring). Rendering does not consume it — {@code SqlBuilder.build} never reads
+     * {@code seekTerms()}. Empty exactly when {@link #paging()} is {@link PagingMode#NONE}.
+     */
     List<SeekTerm> seekTerms();
 
     /** Method-argument slot → named-parameter token. */

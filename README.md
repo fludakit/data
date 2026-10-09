@@ -22,6 +22,40 @@ See the [reference documentation site](https://fludakit.github.io/) for getting 
 
 Contributions are welcome — issues, pull requests, and feature suggestions are all encouraged. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build the project and submit changes.
 
+## Generated artifacts
+
+For each `@Repository` interface `Widgets extends CrudRepository<Widget, Long>` the annotation
+processor emits, in the repository's package:
+
+| Artifact | Holds |
+|---|---|
+| `WidgetsImpl` | the CDI bean; one `static final String SQL_*` per rendered statement |
+| `WidgetMetadata` | the reflection-free `EntityDescriptor<Widget>`: table, columns, navigated refs, `value()` |
+| `WidgetRowMapper` | the reflection-free row reader (when the entity passes the gate) |
+| `_Widget` (+ `_<Widget><Field>` navs) | the Jakarta Data static metamodel, navigation only |
+| `WidgetsModel` | the resolved structure of each query-by-names method (see below) |
+
+### Query metadata
+
+Every query-by-names method (`findBy…`, `countBy…`, `deleteBy…`, paged variants) and every
+`@Find`/`@By` structured finder contributes a nested class inside `<Repository>Model`:
+
+```java
+public final class WidgetsModel {
+    public static final class FindByStatusQueryModel implements QueryModel<Widget> {
+        public static final FindByStatusQueryModel INSTANCE = new FindByStatusQueryModel();
+        // operation(), resultKind(), predicates(), sorts(), paging(), limit(), seekTerms(), paramBindings()
+    }
+}
+```
+
+Each accessor returns the resolved structure the SQL literal in `WidgetsImpl` was rendered from:
+predicates and sorts paired with their physical `ColumnRef`s (and the `LEFT JOIN` edges they
+contribute), the paging mode, the keyset seek terms and the parameter bindings. It is metadata, not a
+runtime hook — nothing in the engine reads it — and overloads get a declaration-order numeric suffix
+(`FindByStatusQueryModel2`). `SqlBuilder.build(schema, model)` is the single renderer that turns a
+model back into SQL.
+
 ## Breaking changes in 1.0.0-SNAPSHOT (navigable metamodel iteration)
 
 - `ColumnAttribute.column()` and the relation attributes' plumbing (`ForeignKeyAttribute.target()/
@@ -61,6 +95,14 @@ Contributions are welcome — issues, pull requests, and feature suggestions are
   — and delete exactly the roots the matching `findBy…` read returns. Before, they were NOTE-degraded
   to a join-free predicate on the lower-snake column, which could match the wrong rows. Relation-free
   delete rendering is unchanged; multi-hop paths stay NOTE-rejected (legacy fallback).
+- `SqlBuilder.existsClause(rootTable, rootColumn, childTable, alias, aliasColumn, predicate, leafRef)`
+  is replaced by `SqlBuilder.existsConjunct(schema, predicate, leafRef)`: the correlation edge is read
+  from the leaf ref's last `JoinRef` instead of six loose strings.
+- `SqlBuilder` no longer imports `io.github.fludakit.data.metamodel`; the to-many-head decision moved
+  to `EntitySchema.isToManyHead(String)`, which `DataModel` and generated `EntityDescriptor`s each
+  answer for themselves.
+- `EntitySchema` gained `isToManyHead(String)` (default `false`) and `QueryModel` is now the rendering
+  input consumed by `SqlBuilder.build(EntitySchema, QueryModel)`.
 
 ## License
 

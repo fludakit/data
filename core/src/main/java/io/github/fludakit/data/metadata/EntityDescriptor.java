@@ -96,9 +96,12 @@ public interface EntityDescriptor<T> extends EntitySchema {
 
     /**
      * Dot paths resolved through a relation/embedded head — path → physical placement (column plus
-     * contributed joins). Generated as a literal by the processor over EXACTLY the path set the
-     * generated {@code value()} switch enumerates (shared compile-time enumeration; the mirror-drift
-     * risk is closed at generation time). The default is empty so a hand-rolled descriptor navigates
+     * contributed joins).
+     * {@code navigationRefs()} path set is a SUPERSET of the {@code value()}-switch relation-path set:
+     * the two are generated from ONE compile-time enumeration, and a case whose accessor cannot be
+     * resolved is left out of {@code value()} only (with a NOTE), so a navigated path always resolves a
+     * {@code ColumnRef} even when its runtime value is unavailable. The default is empty so a
+     * hand-rolled descriptor navigates
      * only its {@link #columns()} view.
      */
     default Map<String, ColumnRef> navigationRefs() {

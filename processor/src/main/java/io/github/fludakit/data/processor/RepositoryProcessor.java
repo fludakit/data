@@ -2683,7 +2683,8 @@ public class RepositoryProcessor extends AbstractProcessor {
             }
         }
         String joinedFindConstant = joinCapable
-                ? addConstant(constants, "SQL_FIND_ALL_QUALIFIED", joinedFindAllSelect(entity.metadata()))
+                ? addConstant(constants, "SQL_FIND_ALL_QUALIFIED",
+                        SqlBuilder.qualifiedRootSelect(entity.metadata(), List.of(), true, ""))
                 : null;
 
         String entityFqn = entity.typeName().toString();
@@ -2807,16 +2808,6 @@ public class RepositoryProcessor extends AbstractProcessor {
                 CursorSupport.class, metadataClass);
         builder.endControlFlow();
         builder.addStatement("return new $T<>($L, content, cursors, -1L)", SimpleCursoredPage.class, pageRequest);
-    }
-
-    /**
-     * The join-safe paged findAll FROM constant (R-T11c): every root column qualified by the root
-     * table, exactly Task 9's joined method-find projection shape ({@code "profile"."id",
-     * "profile"."address_city", ...}). Qualification keeps each result-set label at the bare physical
-     * column, so the generated row mapper reads either find constant unchanged.
-     */
-    private String joinedFindAllSelect(DataModel md) {
-        return SqlBuilder.qualifiedRootSelect(md, java.util.List.of(), true, "");
     }
 
     /** The single {@code "qualifier"."column"} rendering shared by every qualified projection emission (S-1). */
@@ -3104,8 +3095,8 @@ public class RepositoryProcessor extends AbstractProcessor {
                     predicates, predicateRefs, existentialPredicates, List.of(), List.of(), List.of(),
                     0, bindings, parameters));
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
-                    methodSql(action, entity.metadata(), predicates, predicateRefs, existentialPredicates,
-                            List.of(), List.of(), List.of(), 0, ""));
+                    new SqlBuilder().build(entity.metadata(),
+                            queryModels.get(queryModels.size() - 1)));
             CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
             appendBoundParameters(call, bindings, parameters);
             call.add(".singleValue($T.class)", Long.class);
@@ -3121,7 +3112,7 @@ public class RepositoryProcessor extends AbstractProcessor {
 
         if ("delete".equals(action)) {
             // C-1: a delete whose predicate traverses a relation renders correlated EXISTS
-            // semi-joins through methodSql's delete mode — the old NOTE-degrade to the join-free
+            // semi-joins through SqlBuilder.build's delete mode — the old NOTE-degrade to the join-free
             // legacy predicate could match the wrong rows, and a joined DELETE ... LEFT JOIN is
             // invalid SQL. Multi-hop paths are NOTE-rejected by resolveCompilePaths BEFORE this
             // point (their refs stay unjoined, so they render legacy and emit no delete NOTE).
@@ -3129,8 +3120,8 @@ public class RepositoryProcessor extends AbstractProcessor {
                     predicates, predicateRefs, existentialPredicates, List.of(), List.of(), List.of(),
                     0, bindings, parameters));
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
-                    methodSql("delete", entity.metadata(), predicates, predicateRefs,
-                            existentialPredicates, List.of(), List.of(), List.of(), 0, ""));
+                    new SqlBuilder().build(entity.metadata(),
+                            queryModels.get(queryModels.size() - 1)));
             CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
             appendBoundParameters(call, bindings, parameters);
             call.add(".update()");
@@ -3180,8 +3171,8 @@ public class RepositoryProcessor extends AbstractProcessor {
                     predicates, predicateRefs, existentialPredicates, methodSorts,
                     pagedSortRefs, pagedExistentialSorts, 0, bindings, parameters));
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
-                    methodSql("find", entity.metadata(), predicates, predicateRefs, existentialPredicates,
-                            List.of(), List.of(), List.of(), 0, ""));
+                    new SqlBuilder().build(entity.metadata(),
+                            queryModels.get(queryModels.size() - 1)));
             emitPaged(builder, entity, pageRequest, methodSorts, constant, constants, bindings, parameters,
                     kind == Kind.CURSORED_PAGE, mapperType, hydrate);
             return;
@@ -3209,8 +3200,8 @@ public class RepositoryProcessor extends AbstractProcessor {
                 predicates, predicateRefs, existentialPredicates,
                 methodSorts, sortRefs, existentialSorts, parsed != null ? parsed.limit() : 0,
                 bindings, parameters));
-        String sql = methodSql(action, entity.metadata(), predicates, predicateRefs, existentialPredicates,
-                methodSorts, sortRefs, existentialSorts, parsed != null ? parsed.limit() : 0, extraProjection);
+        ResolvedQueryModel queryModel = queryModels.get(queryModels.size() - 1);
+        String sql = new SqlBuilder().build(entity.metadata(), queryModel, extraProjection);
         String constant = addConstant(constants, "SQL_" + upperSnake(name), sql);
         CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
         appendBoundParameters(call, bindings, parameters);
@@ -3681,41 +3672,6 @@ public class RepositoryProcessor extends AbstractProcessor {
             }
         }
         return null;
-    }
-
-    /**
-     * E1 transitional adapter: the loose per-call lists folded into a {@link QueryModel} view and
-     * rendered by {@link SqlBuilder#build(EntitySchema, QueryModel, String)} — the layout lives in
-     * exactly one place now. Deleted in E3 once every emitter site feeds a real model.
-     */
-    private String methodSql(String action, DataModel md, List<Predicate> predicates,
-                             List<ColumnRef> predicateRefs, List<Boolean> existentialPredicates,
-                             List<SortSpec> sorts, List<ColumnRef> sortRefs, List<Boolean> existentialSorts,
-                             int limit, String extraProjection) {
-        Operation operation = "count".equals(action) ? Operation.COUNT
-                : "exists".equals(action) ? Operation.EXISTS
-                : "delete".equals(action) ? Operation.DELETE : Operation.FIND;
-        List<ResolvedPredicate> resolvedPredicates = new ArrayList<>();
-        for (int i = 0; i < predicates.size(); i++) {
-            resolvedPredicates.add(new ResolvedPredicate(predicates.get(i), predicateRefs.get(i),
-                    Boolean.TRUE.equals(existentialPredicates.get(i))));
-        }
-        List<ResolvedSort> resolvedSorts = new ArrayList<>();
-        for (int i = 0; i < sorts.size(); i++) {
-            resolvedSorts.add(new ResolvedSort(sorts.get(i), sortRefs.get(i),
-                    Boolean.TRUE.equals(existentialSorts.get(i))));
-        }
-        return new SqlBuilder().build(md, new LegacyQueryModel(operation,
-                List.copyOf(resolvedPredicates), List.copyOf(resolvedSorts), limit), extraProjection);
-    }
-
-    /** The E1 render-only view the transitional {@link #methodSql} adapter hands to {@code SqlBuilder}. */
-    private record LegacyQueryModel(Operation operation, List<ResolvedPredicate> predicates,
-                                    List<ResolvedSort> sorts, int limit) implements QueryModel<Object> {
-        @Override public ResultKind resultKind() { return ResultKind.LIST; }
-        @Override public PagingMode paging() { return PagingMode.NONE; }
-        @Override public List<SeekTerm> seekTerms() { return List.of(); }
-        @Override public List<ParamBinding> paramBindings() { return List.of(); }
     }
 
     private String specialParameter(List<? extends VariableElement> parameters,
@@ -4691,8 +4647,9 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     /**
      * Fold one query-by-names method's resolved lists into a {@link ResolvedQueryModel}. The paging
-     * mode and result kind come from the return {@link Kind} plus the parsed action; seek terms mirror
-     * the runtime cursor key exactly (E1's base constant drops sorts/limit at render time, so the
+     * mode and result kind come from the return {@link Kind} plus the parsed action; seek terms are
+     * the runtime cursor key for CURSOR and the published default key for the other paged modes
+     * (E1's base constant drops sorts/limit at render time, so the
      * declared sorts stay in the model for introspection). {@code paramBindings} are exactly the
      * {@code .param($S, ...)} tokens {@link #appendBoundParameters} emits, keyed by argument slot.
      */

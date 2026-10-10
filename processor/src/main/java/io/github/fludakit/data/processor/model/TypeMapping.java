@@ -7,9 +7,11 @@ import io.github.fludakit.data.metadata.TableSchema;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Immutable compile-time mapping metadata for an entity or value-object use.
@@ -71,48 +73,82 @@ public sealed interface TypeMapping extends TableSchema, AttributePathResolver<S
 
     /**
      * Column references for every resolvable attribute path, including leaves reached through one
-     * relationship. This is the compile-time mapping source used by {@code SqlBuilder}; the query
-     * plan itself carries logical paths only.
+     * or more relationships. To-one {@link Prop.Reference} chains traverse transitively (arbitrary
+     * depth); to-many heads ({@link Prop.EntityList}/{@link Prop.ElementList}) stay depth-1 over the
+     * element/entity's local columns. This is the compile-time mapping source used by
+     * {@code SqlBuilder}; the query plan itself carries logical paths only.
      */
     @Override
     default Map<String, ColumnRef> columnRefs() {
+        return columnRefs(new HashSet<>());
+    }
+
+    private Map<String, ColumnRef> columnRefs(Set<String> inProgress) {
         Map<String, ColumnRef> refs = new LinkedHashMap<>(localAttributeRefs());
-        for (Prop prop : props()) {
-            Map<String, ColumnRef> targetAttributeRefs;
-            JoinRef join;
-            if (prop instanceof Prop.Reference reference) {
-                if (reference.target() == null || reference.targetTable() == null
-                        || reference.targetIdColumn() == null) {
+        if (!inProgress.add(typeName())) {
+            return Collections.unmodifiableMap(refs); // cycle: stop traversing here
+        }
+        try {
+            for (Prop prop : props()) {
+                JoinRef join = relationJoin(prop);
+                if (join == null) {
                     continue;
                 }
-                targetAttributeRefs = reference.target().localAttributeRefs();
-                join = new JoinRef(tableName(), null, reference.fkColumn(),
-                        reference.targetTable(), reference.name(), reference.targetIdColumn());
-            } else if (prop instanceof Prop.EntityList entityList) {
-                if (entityList.target() == null || entityList.targetTable() == null
-                        || entityList.inverseFkColumn() == null || idColumn() == null) {
+                TypeMapping target = relationTarget(prop);
+                if (target == null) {
                     continue;
                 }
-                targetAttributeRefs = entityList.target().localAttributeRefs();
-                join = new JoinRef(tableName(), null, idColumn(),
-                        entityList.targetTable(), entityList.name(), entityList.inverseFkColumn());
-            } else if (prop instanceof Prop.ElementList elementList) {
-                if (elementList.target() == null || elementList.childTable() == null
-                        || elementList.parentFkColumn() == null || idColumn() == null) {
-                    continue;
+                Map<String, ColumnRef> targetRefs = prop instanceof Prop.Reference
+                        ? target.columnRefs(inProgress)
+                        : target.localAttributeRefs();
+                for (Map.Entry<String, ColumnRef> entry : targetRefs.entrySet()) {
+                    ColumnRef chained = entry.getValue().joins().isEmpty()
+                            ? entry.getValue().through(join)
+                            : entry.getValue().prepend(join);
+                    refs.put(prop.name() + "." + entry.getKey(), chained);
                 }
-                targetAttributeRefs = elementList.target().localAttributeRefs();
-                join = new JoinRef(tableName(), null, idColumn(),
-                        elementList.childTable(), elementList.name(), elementList.parentFkColumn());
-            } else {
-                continue;
             }
-            for (Map.Entry<String, ColumnRef> entry : targetAttributeRefs.entrySet()) {
-                if (!entry.getValue().joins().isEmpty()) continue;
-                refs.put(prop.name() + "." + entry.getKey(), entry.getValue().through(join));
-            }
+        } finally {
+            inProgress.remove(typeName());
         }
         return Collections.unmodifiableMap(refs);
+    }
+
+    /** The LEFT JOIN edge a relation property contributes, or {@code null} when unbuildable. */
+    private JoinRef relationJoin(Prop prop) {
+        if (prop instanceof Prop.Reference reference) {
+            if (reference.target() == null || reference.targetTable() == null
+                    || reference.targetIdColumn() == null) {
+                return null;
+            }
+            return new JoinRef(tableName(), null, reference.fkColumn(),
+                    reference.targetTable(), reference.name(), reference.targetIdColumn());
+        }
+        if (prop instanceof Prop.EntityList entityList) {
+            if (entityList.target() == null || entityList.targetTable() == null
+                    || entityList.inverseFkColumn() == null || idColumn() == null) {
+                return null;
+            }
+            return new JoinRef(tableName(), null, idColumn(),
+                    entityList.targetTable(), entityList.name(), entityList.inverseFkColumn());
+        }
+        if (prop instanceof Prop.ElementList elementList) {
+            if (elementList.target() == null || elementList.childTable() == null
+                    || elementList.parentFkColumn() == null || idColumn() == null) {
+                return null;
+            }
+            return new JoinRef(tableName(), null, idColumn(),
+                    elementList.childTable(), elementList.name(), elementList.parentFkColumn());
+        }
+        return null;
+    }
+
+    /** The compile-time model a relation property targets, or {@code null} for non-relations. */
+    private static TypeMapping relationTarget(Prop prop) {
+        if (prop instanceof Prop.Reference reference) return reference.target();
+        if (prop instanceof Prop.EntityList entityList) return entityList.target();
+        if (prop instanceof Prop.ElementList elementList) return elementList.target();
+        return null;
     }
 
     /** Local table-column bindings, excluding every relation traversal. */

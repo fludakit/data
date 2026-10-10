@@ -44,6 +44,15 @@ class SqlBuilderTest {
     }
 
     @Test
+    void postgreSqlDialectQuotesAndPaginatesLikeStandardSql() {
+        PostgreSqlDialect dialect = PostgreSqlDialect.INSTANCE;
+        assertEquals("\"order\"\"details\"", dialect.quoteIdentifier("order\"details"));
+        assertEquals(" LIMIT 10", dialect.limitClause("10"));
+        assertEquals(" OFFSET 20", dialect.offsetClause("20"));
+        assertEquals(" LIMIT 10 OFFSET 20", dialect.limitOffsetClause("10", "20"));
+    }
+
+    @Test
     void sqlBuilderUsesTheConfiguredDialect() {
         SqlDialect testDialect = new SqlDialect() {
             @Override
@@ -61,7 +70,7 @@ class SqlBuilderTest {
                 return " SKIP " + offsetExpression;
             }
         };
-        String sql = new SqlBuilder(testDialect).selectBy(customer(), List.of(), List.of(), 5, null);
+        String sql = new SqlBuilder(customer()).dialect(testDialect).selectBy(List.of(), List.of(), 5, null);
         assertEquals("SELECT [id], [name] FROM [customer] FETCH FIRST 5 ROWS ONLY", sql);
     }
 
@@ -110,7 +119,7 @@ class SqlBuilderTest {
 
     @Test
     void rendersSelectWithWhereAndOrder() {
-        String sql = new SqlBuilder().selectBy(customer(),
+        String sql = new SqlBuilder(customer()).selectBy(
                 List.of(Predicate.of("name", Operator.EQ, "name")),
                 List.of(SortSpec.of("id", true, false)), 0, null);
         assertThat(sql).isEqualTo("SELECT \"id\", \"name\" FROM \"customer\" WHERE \"name\" = :name ORDER BY \"id\" ASC");
@@ -118,15 +127,15 @@ class SqlBuilderTest {
 
     @Test
     void orderByResolvesEmbeddedDotPathToFlattenedColumn() {
-        String sql = new SqlBuilder().selectBy(profile(), List.of(),
+        String sql = new SqlBuilder(profile()).selectBy(List.of(),
                 List.of(SortSpec.of("address.city", true, false)), 0, null);
         assertThat(sql).endsWith("ORDER BY \"address_city\" ASC");
-        assertThat(SqlBuilder.resolveColumn(profile(), "address.city")).isEqualTo("address_city");
+        assertThat(new SqlBuilder(profile()).resolveColumn("address.city")).isEqualTo("address_city");
     }
 
     @Test
     void orderByRejectsUnknownProperty() {
-        assertThatThrownBy(() -> new SqlBuilder().orderBy(customer(), List.of(SortSpec.of("nope", true, false))))
+        assertThatThrownBy(() -> new SqlBuilder(customer()).orderBy(List.of(SortSpec.of("nope", true, false))))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Unknown property 'nope'");
     }
@@ -134,14 +143,14 @@ class SqlBuilderTest {
     @Test
     void orderByRejectsEmbeddedContainerName() {
         // The container itself carries no column: sorting by "address" must not silently pass.
-        assertThatThrownBy(() -> new SqlBuilder().orderBy(profile(), List.of(SortSpec.of("address", true, false))))
+        assertThatThrownBy(() -> new SqlBuilder(profile()).orderBy(List.of(SortSpec.of("address", true, false))))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("Unknown property 'address' on Profile");
     }
 
     @Test
     void rendersInsert() {
-        assertThat(new SqlBuilder().insert(customer(), customer()))
+        assertThat(new SqlBuilder(customer()).insert())
                 .isEqualTo("INSERT INTO \"customer\" (\"id\", \"name\") VALUES (:id, :name)");
     }
 
@@ -162,8 +171,8 @@ class SqlBuilderTest {
                 List.of(new JoinRef("order", null, "id", "order_item", "orderItems", "order_id")));
         TableSchema rootMd = rootSchema("order", List.of(joined));
         assertEquals(" LEFT JOIN \"order_item\" AS \"orderItems\" ON \"order\".\"id\" = \"orderItems\".\"order_id\"",
-                SqlBuilder.joinClause(rootMd, List.of(joined)));
-        assertEquals("\"orderItems\".\"amount\"", SqlBuilder.qualify(joined, "order"));
+                new SqlBuilder(rootMd).joinClause(List.of(joined)));
+        assertEquals("\"orderItems\".\"amount\"", new SqlBuilder(rootMd).qualify(joined));
     }
 
     @Test
@@ -173,12 +182,13 @@ class SqlBuilderTest {
         ColumnRef twoHop = new ColumnRef("name", "team", "players", List.of(
                 new JoinRef("game", null, "primary_player_id", "player", "primary", "id"),
                 new JoinRef("player", "primary", "team_id", "team", "players", "id")));
-        String clause = SqlBuilder.joinClause(rootSchema("game", List.of(twoHop)), List.of(twoHop));
+        TableSchema game = rootSchema("game", List.of(twoHop));
+        String clause = new SqlBuilder(game).joinClause(List.of(twoHop));
         assertEquals(" LEFT JOIN \"player\" AS \"primary\" ON \"game\".\"primary_player_id\" = \"primary\".\"id\""
                         + " LEFT JOIN \"team\" AS \"players\" ON \"primary\".\"team_id\" = \"players\".\"id\"",
                 clause);
         assertThat(clause).contains("\"primary\".\"team_id\" = \"players\".\"id\"");
-        assertEquals("\"players\".\"name\"", SqlBuilder.qualify(twoHop, "game"));
+        assertEquals("\"players\".\"name\"", new SqlBuilder(game).qualify(twoHop));
     }
 
     @Test
@@ -194,7 +204,8 @@ class SqlBuilderTest {
         ColumnRef c = new ColumnRef("label", "squad", "squads", List.of(
                 primary,
                 new JoinRef("player", "primary", "squad_id", "squad", "squads", "id")));
-        String clause = SqlBuilder.joinClause(rootSchema("game", List.of(a, c)), List.of(a, c));
+        TableSchema game = rootSchema("game", List.of(a, c));
+        String clause = new SqlBuilder(game).joinClause(List.of(a, c));
         assertEquals(" LEFT JOIN \"player\" AS \"primary\" ON \"game\".\"primary_player_id\" = \"primary\".\"id\""
                         + " LEFT JOIN \"team\" AS \"players\" ON \"primary\".\"team_id\" = \"players\".\"id\""
                         + " LEFT JOIN \"squad\" AS \"squads\" ON \"primary\".\"squad_id\" = \"squads\".\"id\"",
@@ -212,7 +223,8 @@ class SqlBuilderTest {
                 List.of(head, new JoinRef("order_item", "orderItems", "item_id", "item", "item", "id")));
         ColumnRef dup = new ColumnRef("price", "other_table", "orderItems",
                 List.of(new JoinRef("order", null, "x", "other_table", "orderItems", "y")));
-        String clause = SqlBuilder.joinClause(rootSchema("order", List.of(a, b, dup)), List.of(a, dup, b));
+        TableSchema order = rootSchema("order", List.of(a, b, dup));
+        String clause = new SqlBuilder(order).joinClause(List.of(a, dup, b));
         assertEquals(" LEFT JOIN \"order_item\" AS \"orderItems\" ON \"order\".\"id\" = \"orderItems\".\"order_id\""
                         + " LEFT JOIN \"item\" AS \"item\" ON \"orderItems\".\"item_id\" = \"item\".\"id\"",
                 clause);
@@ -221,34 +233,36 @@ class SqlBuilderTest {
     @Test
     void joinClauseIsEmptyForJoinFreeRefs() {
         ColumnRef local = new ColumnRef("total");
-        assertEquals("", SqlBuilder.joinClause(rootSchema("order", List.of(local)), List.of(local)));
+        assertEquals("", new SqlBuilder(rootSchema("order", List.of(local))).joinClause(List.of(local)));
     }
 
     @Test
     void qualifyResolvesLocalRefsByTableThenRootTable() {
-        assertEquals("\"order\".\"total\"", SqlBuilder.qualify(new ColumnRef("total"), "order"));
+        TableSchema order = rootSchema("order", List.of());
+        assertEquals("\"order\".\"total\"", new SqlBuilder(order).qualify(new ColumnRef("total"), "order"));
         assertEquals("\"other\".\"total\"",
-                SqlBuilder.qualify(new ColumnRef("total", "other", null, List.of()), "order"));
-        assertThatThrownBy(() -> SqlBuilder.qualify(new ColumnRef("total"), null))
+                new SqlBuilder(order).qualify(new ColumnRef("total", "other", null, List.of()), "order"));
+        assertThatThrownBy(() -> new SqlBuilder(order).qualify(new ColumnRef("total"), null))
                 .isInstanceOf(IllegalStateException.class);
         assertEquals("\"other\".\"total\"",
-                SqlBuilder.qualify(new ColumnRef("total", "other", null, List.of()), null));
+                new SqlBuilder(order).qualify(new ColumnRef("total", "other", null, List.of()), null));
     }
 
     @Test
     void renderOverloadQualifiesPredicateColumnWithRef() {
         ColumnRef joined = new ColumnRef("amount", "order_item", "orderItems",
                 List.of(new JoinRef("order", null, "id", "order_item", "orderItems", "order_id")));
+        TableSchema order = rootSchema("order", List.of());
         assertEquals("\"orderItems\".\"amount\" = :orderItems_amount",
-                SqlBuilder.render(Predicate.of("orderItems.amount", Operator.EQ, "orderItems_amount"), joined));
+                new SqlBuilder(order).render(Predicate.of("orderItems.amount", Operator.EQ, "orderItems_amount"), joined));
         // Explicit non-root table, no joins.
         ColumnRef foreign = new ColumnRef("total", "other", null, List.of());
         assertEquals("\"other\".\"total\" = :total",
-                SqlBuilder.render(Predicate.of("other.total", Operator.EQ, "total"), foreign));
+                new SqlBuilder(order).render(Predicate.of("other.total", Operator.EQ, "total"), foreign));
         // Fully-local ref renders unqualified, byte-identical to the legacy path.
         ColumnRef local = new ColumnRef("total");
         assertEquals("\"total\" = :total",
-                SqlBuilder.render(Predicate.of("total", Operator.EQ, "total"), local));
+                new SqlBuilder(order).render(Predicate.of("total", Operator.EQ, "total"), local));
     }
 
     // ---- Task 6: aggregate sort terms replace to-many joined sorts ----
@@ -285,12 +299,12 @@ class SqlBuilderTest {
         ColumnRef local = new ColumnRef("full_name");
         ColumnRef embedded = new ColumnRef("address_city");
 
-        assertThat(SqlBuilder.isToManyPath(md, "contacts.value")).isTrue();
-        assertThat(SqlBuilder.isToManyPath(md, "workHistory.company")).isTrue();
-        assertThat(SqlBuilder.isToManyPath(md, "customer.name")).isFalse();
+        assertThat(new SqlBuilder(md).isToManyPath("contacts.value")).isTrue();
+        assertThat(new SqlBuilder(md).isToManyPath("workHistory.company")).isTrue();
+        assertThat(new SqlBuilder(md).isToManyPath("customer.name")).isFalse();
         // Join-free refs (local or embedded) never carry a relation head.
-        assertThat(SqlBuilder.isToManyPath(md, "fullName")).isFalse();
-        assertThat(SqlBuilder.isToManyPath(md, "address.city")).isFalse();
+        assertThat(new SqlBuilder(md).isToManyPath("fullName")).isFalse();
+        assertThat(new SqlBuilder(md).isToManyPath("address.city")).isFalse();
     }
 
     @Test
@@ -300,10 +314,10 @@ class SqlBuilderTest {
                 List.of(new JoinRef("profile", null, "id", "work_experience", "workHistory", "profile_id")));
         assertEquals("(SELECT MIN(\"workHistory\".\"company\") FROM \"work_experience\" \"workHistory\""
                         + " WHERE \"workHistory\".\"profile_id\" = \"profile\".\"id\")",
-                SqlBuilder.aggregateSortTerm(md, asc, true));
+                new SqlBuilder(md).aggregateSortTerm(asc, true));
         assertEquals("(SELECT MAX(\"workHistory\".\"company\") FROM \"work_experience\" \"workHistory\""
                         + " WHERE \"workHistory\".\"profile_id\" = \"profile\".\"id\")",
-                SqlBuilder.aggregateSortTerm(md, asc, false));
+                new SqlBuilder(md).aggregateSortTerm(asc, false));
 
         // Deeper edges chain INSIDE the subquery (LEFT JOIN AS shape); correlation stays on the head.
         ColumnRef deep = new ColumnRef("name", "country", "country", List.of(
@@ -312,10 +326,10 @@ class SqlBuilderTest {
         assertEquals("(SELECT MIN(\"country\".\"name\") FROM \"work_experience\" \"workHistory\""
                         + " LEFT JOIN \"country\" AS \"country\" ON \"workHistory\".\"country_id\""
                         + " = \"country\".\"id\" WHERE \"workHistory\".\"profile_id\" = \"profile\".\"id\")",
-                SqlBuilder.aggregateSortTerm(md, deep, true));
+                new SqlBuilder(md).aggregateSortTerm(deep, true));
 
         // A join-free ref has nothing to aggregate: fail fast rather than emit a correlated nothing.
-        assertThatThrownBy(() -> SqlBuilder.aggregateSortTerm(md, new ColumnRef("id"), true))
+        assertThatThrownBy(() -> new SqlBuilder(md).aggregateSortTerm(new ColumnRef("id"), true))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("aggregate sort term requires a relation path");
     }
@@ -328,13 +342,13 @@ class SqlBuilderTest {
         ColumnRef toOne = new ColumnRef("name", "customer", "customer",
                 List.of(new JoinRef("profile", null, "customer_id", "customer", "customer", "id")));
 
-        String clause = SqlBuilder.joinClause(md, List.of(toOne));
+        String clause = new SqlBuilder(md).joinClause(List.of(toOne));
         assertThat(clause).doesNotContain("\"work_experience\"");
         assertThat(clause).isEqualTo(" LEFT JOIN \"customer\" AS \"customer\""
                 + " ON \"profile\".\"customer_id\" = \"customer\".\"id\"");
 
         // Compile-time schemas (non-descriptors) are untouched: the processor filters existentials itself.
         TableSchema schema = rootSchema("profile", List.of(toMany));
-        assertThat(SqlBuilder.joinClause(schema, List.of(toMany))).contains("LEFT JOIN \"work_experience\"");
+        assertThat(new SqlBuilder(schema).joinClause(List.of(toMany))).contains("LEFT JOIN \"work_experience\"");
     }
 }

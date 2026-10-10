@@ -34,6 +34,7 @@ import io.github.fludakit.data.query.ResultKind;
 import io.github.fludakit.data.query.SeekTerm;
 import io.github.fludakit.data.query.SortSpec;
 import io.github.fludakit.data.sql.H2Dialect;
+import io.github.fludakit.data.sql.PostgreSqlDialect;
 import io.github.fludakit.data.sql.SqlBuilder;
 import io.github.fludakit.data.sql.SqlDialect;
 import io.github.fludakit.jdbc.JdbcClient;
@@ -54,8 +55,10 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import javax.annotation.processing.AbstractProcessor;
+import javax.annotation.processing.ProcessingEnvironment;
 import javax.annotation.processing.RoundEnvironment;
 import javax.annotation.processing.SupportedAnnotationTypes;
+import javax.annotation.processing.SupportedOptions;
 import javax.lang.model.SourceVersion;
 import javax.lang.model.element.Element;
 import javax.lang.model.element.ElementKind;
@@ -96,6 +99,7 @@ import java.util.Set;
  * derived at compile time from its fields by convention (see {@link Names}).</p>
  */
 @SupportedAnnotationTypes("jakarta.data.repository.Repository")
+@SupportedOptions("fluda.dialect")
 public class RepositoryProcessor extends AbstractProcessor {
 
     private static final String PAGE_REQUEST = "jakarta.data.page.PageRequest";
@@ -215,7 +219,8 @@ public class RepositoryProcessor extends AbstractProcessor {
     private RepositoryTypeMappingBuilder typeMappingBuilder;
     private RepositoryMethodValidator repositoryMethodValidator;
     private RepositorySourceWriter sourceWriter;
-    private final SqlDialect sqlDialect = H2Dialect.INSTANCE;
+    private SqlDialect sqlDialect = H2Dialect.INSTANCE;
+    private ClassName dialectClass = ClassName.get(H2Dialect.class);
 
     /** Entity FQN → generated {@code <Entity>RowMapper} type, deduped across processing rounds. */
     private final Map<String, ClassName> rowMappers = new LinkedHashMap<>();
@@ -271,6 +276,24 @@ public class RepositoryProcessor extends AbstractProcessor {
     @Override
     public SourceVersion getSupportedSourceVersion() {
         return SourceVersion.latestSupported();
+    }
+
+    @Override
+    public synchronized void init(ProcessingEnvironment processingEnv) {
+        super.init(processingEnv);
+        String name = processingEnv.getOptions().get("fluda.dialect");
+        if (name == null || name.isBlank() || "h2".equalsIgnoreCase(name)) {
+            sqlDialect = H2Dialect.INSTANCE;
+            dialectClass = ClassName.get(H2Dialect.class);
+        } else if ("postgres".equalsIgnoreCase(name) || "postgresql".equalsIgnoreCase(name)) {
+            sqlDialect = PostgreSqlDialect.INSTANCE;
+            dialectClass = ClassName.get(PostgreSqlDialect.class);
+        } else {
+            processingEnv.getMessager().printMessage(Diagnostic.Kind.WARNING,
+                    "Unknown SQL dialect '" + name + "' — falling back to h2");
+            sqlDialect = H2Dialect.INSTANCE;
+            dialectClass = ClassName.get(H2Dialect.class);
+        }
     }
 
     @Override
@@ -523,7 +546,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                 .addSuperinterface(TypeName.get(repository.asType()));
         classBuilder.addField(FieldSpec.builder(SqlDialect.class, "SQL_DIALECT",
                         Modifier.PRIVATE, Modifier.STATIC, Modifier.FINAL)
-                .initializer("$T.INSTANCE", H2Dialect.class)
+                .initializer("$T.INSTANCE", dialectClass)
                 .build());
         for (Map.Entry<String, String> constant : constants.entrySet()) {
             classBuilder.addField(FieldSpec.builder(String.class, constant.getKey(),
@@ -699,6 +722,15 @@ public class RepositoryProcessor extends AbstractProcessor {
         return JDBC_SAFE_TYPES.contains(type.toString());
     }
 
+    /** True when {@code type} names an enum, which the reflection-free mapper reads via String + valueOf. */
+    private boolean isEnumType(TypeName type) {
+        if (!(type instanceof ClassName className)) {
+            return false;
+        }
+        TypeElement element = elements.getTypeElement(className.canonicalName());
+        return element != null && element.getKind() == ElementKind.ENUM;
+    }
+
     /**
      * Gate for the reflection-free row mapper: safe when every property is JDBC-safe, an
      * {@code ASSOCIATION}/{@code MANY_TO_ONE} fk (skipped on read), or an {@code EMBEDDED} value
@@ -707,14 +739,14 @@ public class RepositoryProcessor extends AbstractProcessor {
      * fails closed.
      */
     private boolean canGenerateRowMapper(EntityModel entity) {
-        if (entity.id() != null && !isJdbcSafe(entity.id().type())) {
+        if (entity.id() != null && !isJdbcSafe(entity.id().type()) && !isEnumType(entity.id().type())) {
             return false;
         }
         for (Property p : entity.properties()) {
             if (p.prop() instanceof Prop.Reference) {
                 continue; // FK-only or hydrated by loaders (Tasks 3-4)
             }
-            if (isJdbcSafe(p.type())) {
+            if (isJdbcSafe(p.type()) || isEnumType(p.type())) {
                 continue;
             }
             if (p.prop() instanceof Prop.Embedded && p.embeddedModel() != null
@@ -2137,6 +2169,11 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     /** Boxed/reference read expression; a primitive column is guarded separately in {@link #appendPropertyRead}. */
     private CodeBlock readExpression(TypeName type, ClassName metadataType, String property) {
+        if (isEnumType(type)) {
+            // Enums persist as their name; read the string and convert, null-safe for a nullable column.
+            return CodeBlock.of("rs.getString($T.$L) == null ? null : $T.valueOf($T.class, rs.getString($T.$L))",
+                    metadataType, constName(property), Enum.class, type, metadataType, constName(property));
+        }
         return CodeBlock.of("rs.getObject($T.$L, $T.class)", metadataType, constName(property), type.box());
     }
 
@@ -2372,7 +2409,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             // ...) is application-assigned — the identity column joins the INSERT and binds from the
             // entity; there is no keyholder roundtrip for a value known before the insert.
             String appConstant = addConstant(constants, "SQL_INSERT",
-                    new SqlBuilder(sqlDialect).insert(entity.metadata(), entity.metadata(), true));
+                    new SqlBuilder(entity.metadata(), entity.metadata()).dialect(sqlDialect).insert(true));
             CodeBlock.Builder appSql = CodeBlock.builder().add("jdbcClient.sql($L)", appConstant);
             appSql.add(".param($S, $L.$L())", SqlBuilder.paramName(entity.metadata().id().name()),
                     value, getter(entity.id().name()));
@@ -2385,7 +2422,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             // NEW-I: the coercion method follows the id type — Long renders longValue() byte-identically
             // to the pre-Task-4 hardcoded emission, Integer renders intValue() so its impl compiles.
             String constant = addConstant(constants, "SQL_INSERT",
-                    new SqlBuilder(sqlDialect).insert(entity.metadata(), entity.metadata(), false));
+                    new SqlBuilder(entity.metadata(), entity.metadata()).dialect(sqlDialect).insert(false));
             builder.addStatement("$T keys = new $T()", GeneratedKeyHolder.class, GeneratedKeyHolder.class);
             CodeBlock.Builder sql = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
             appendColumnParams(sql, entity, value);
@@ -2446,7 +2483,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         TypeMapping md = target.metadata();
         String inverseFk = list.inverseFkColumn();
         String constant = addConstant(constants, "SQL_INSERT_" + upperSnake(list.name()),
-                new SqlBuilder(sqlDialect).insert(md, md, false));
+                new SqlBuilder(md, md).dialect(sqlDialect).insert(false));
         builder.beginControlFlow("for ($T item : $L.$L())", target.typeName(), value, getter(list.name()));
         builder.beginControlFlow("if (item != null)");
         builder.addStatement("$T childKeys = new $T()", GeneratedKeyHolder.class, GeneratedKeyHolder.class);
@@ -2598,7 +2635,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     private void appendUpdateStatements(MethodSpec.Builder builder, String value, EntityModel entity,
                                         Map<String, String> constants, List<EntityRelationship> cascades) {
         String constant = addConstant(constants, "SQL_UPDATE",
-                new SqlBuilder(sqlDialect).update(entity.metadata(), entity.metadata()));
+                new SqlBuilder(entity.metadata(), entity.metadata()).dialect(sqlDialect).update());
 
         CodeBlock.Builder update = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
         appendColumnParams(update, entity, value);
@@ -2672,7 +2709,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * or a FK-bearing {@code primary}) rooted at {@code rootVar}. Every intermediate null short-
      * circuits to SQL NULL; a final ASSOCIATION/MANY_TO_ONE attribute binds its id.
      */
-    private static CodeBlock boundValue(TypeMapping md, String rootVar, String attributePath, ColumnRef ref) {
+    private CodeBlock boundValue(TypeMapping md, String rootVar, String attributePath, ColumnRef ref) {
         String[] segments = attributePath.split("\\.");
         StringBuilder chain = new StringBuilder(rootVar);
         List<String> nullChecks = new ArrayList<>();
@@ -2686,6 +2723,10 @@ public class RepositoryProcessor extends AbstractProcessor {
             } else if (attr instanceof Prop.Reference) {
                 nullChecks.add(chain.toString());
                 chain.append(".getId()");
+            } else if (isEnumProp(attr)) {
+                // Enums persist as their name, not the Java-serialized value.
+                nullChecks.add(chain.toString());
+                chain.append(".name()");
             }
         }
         if (nullChecks.isEmpty()) {
@@ -2699,6 +2740,17 @@ public class RepositoryProcessor extends AbstractProcessor {
             guard.append(nullChecks.get(i)).append(" == null");
         }
         return CodeBlock.of("$L ? null : $L", guard.toString(), chain.toString());
+    }
+
+    /** True when a scalar/id property holds an enum, which is written as its name and read via valueOf. */
+    private boolean isEnumProp(Prop prop) {
+        String fqn = prop instanceof Prop.Id id ? id.typeFqn()
+                : prop instanceof Prop.Scalar scalar ? scalar.typeFqn() : null;
+        if (fqn == null) {
+            return false;
+        }
+        TypeElement element = elements.getTypeElement(fqn);
+        return element != null && element.getKind() == ElementKind.ENUM;
     }
 
     private void emitBatch(MethodSpec.Builder builder, ExecutableElement method, VariableElement parameter,
@@ -2718,7 +2770,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     private void emitFindById(MethodSpec.Builder builder, String value, EntityModel entity,
                               Map<String, String> constants, ClassName mapperType, boolean hydrate) {
         String constant = addConstant(constants, "SQL_FIND_BY_ID",
-                new SqlBuilder(sqlDialect).selectBy(entity.metadata(),
+                new SqlBuilder(entity.metadata()).dialect(sqlDialect).selectBy(
                         List.of(Predicate.of(entity.id().name(), Operator.EQ, "id")), List.of(), 0, null));
         if (!hydrate) {
             builder.addStatement("return jdbcClient.sql($L).param($S, $L).query($L).optional()",
@@ -2752,14 +2804,14 @@ public class RepositoryProcessor extends AbstractProcessor {
                     list.inverseFkColumn(), value);
         }
         String constant = addConstant(constants, "SQL_DELETE",
-                new SqlBuilder(sqlDialect).deleteById(entity.metadata()));
+                new SqlBuilder(entity.metadata()).dialect(sqlDialect).deleteById());
         builder.addStatement("jdbcClient.sql($L).param($S, $L).update()", constant, "id", value);
     }
 
     private void emitFindAll(MethodSpec.Builder builder, EntityModel entity, Map<String, String> constants,
                              ClassName mapperType, boolean hydrate) {
         String constant = addConstant(constants, "SQL_FIND_ALL",
-                new SqlBuilder(sqlDialect).selectBy(entity.metadata(), List.of(), List.of(), 0, null));
+                new SqlBuilder(entity.metadata()).dialect(sqlDialect).selectBy(List.of(), List.of(), 0, null));
         if (!hydrate) {
             builder.addStatement("return jdbcClient.sql($L).query($L).stream()",
                     constant, queryArg(entity, mapperType));
@@ -2778,9 +2830,9 @@ public class RepositoryProcessor extends AbstractProcessor {
         String pageRequest = parameterName(parameters.get(0), "pageRequest");
         String sortBy = parameterName(parameters.get(1), "sortBy");
         String findConstant = addConstant(constants, "SQL_FIND_ALL",
-                new SqlBuilder(sqlDialect).selectBy(entity.metadata(), List.of(), List.of(), 0, null));
+                new SqlBuilder(entity.metadata()).dialect(sqlDialect).selectBy(List.of(), List.of(), 0, null));
         String countConstant = addConstant(constants, "SQL_COUNT_ALL",
-                new SqlBuilder(sqlDialect).countBy(entity.metadata(), List.of()));
+                new SqlBuilder(entity.metadata()).dialect(sqlDialect).countBy(List.of()));
         // R-T11c: a runtime sort can traverse a relation and splice a LEFT JOIN onto this constant —
         // if the joined table shares a column name (entity targets always share "id") the bare select
         // list becomes ambiguous. When the descriptor has ANY traversable prop, register a second,
@@ -2797,7 +2849,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
         String joinedFindConstant = joinCapable
                 ? addConstant(constants, "SQL_FIND_ALL_QUALIFIED",
-                        SqlBuilder.qualifiedRootSelect(entity.metadata(), List.of(), true, ""))
+                        new SqlBuilder(entity.metadata()).dialect(sqlDialect).qualifiedRootSelect(List.of(), true, ""))
                 : null;
 
         String entityFqn = entity.typeName().toString();
@@ -2805,12 +2857,9 @@ public class RepositoryProcessor extends AbstractProcessor {
         if (metadataClass == null) {
             metadataClass = embeddedMetadataName(entityFqn);
         }
-        String rootTable = entity.metadata().tableName();
+        builder.addStatement("$T sql = new $T($T.INSTANCE).dialect(SQL_DIALECT)",
+                SqlBuilder.class, SqlBuilder.class, metadataClass);
 
-        builder.addStatement("$T cols = new $T<>()", List.class, ArrayList.class);
-        builder.addStatement("$T<$T> dirs = new $T<>()", List.class, Boolean.class, ArrayList.class);
-        builder.addStatement("$T<$T> props = new $T<>()", List.class, String.class, ArrayList.class);
-        builder.addStatement("$T<$T> refs = new $T<>()", List.class, MD_COLUMN_REF, ArrayList.class);
         builder.addStatement("$T<$T> joinRefs = new $T<>()", List.class, MD_COLUMN_REF, ArrayList.class);
         builder.addStatement("$T orderBy = new $T()", StringBuilder.class, StringBuilder.class);
         if (joinCapable) {
@@ -2818,47 +2867,28 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
         builder.beginControlFlow("for ($T<?> s : $L)", Sort.class, sortBy);
         builder.addStatement("$T r = resolveRef(s.property())", MD_COLUMN_REF);
-        builder.addStatement("cols.add(r.column())");
-        builder.addStatement("refs.add(r)");
-        builder.addStatement("dirs.add(s.isAscending())");
-        builder.addStatement("props.add(s.property())");
         builder.beginControlFlow("if (orderBy.length() > 0)");
         builder.addStatement("orderBy.append($S)", ", ");
         builder.endControlFlow();
         if (joinCapable) {
-            builder.beginControlFlow("if ($T.isToManyPath($T.INSTANCE, s.property()))",
-                    SqlBuilder.class, metadataClass);
+            builder.beginControlFlow("if (sql.isToManyPath(s.property()))");
             builder.addStatement("keyed = true");
             builder.nextControlFlow("else");
             builder.addStatement("joinRefs.add(r)");
             builder.endControlFlow();
-            builder.addStatement("orderBy.append($T.isToManyPath($T.INSTANCE, s.property())"
-                            + " ? $T.aggregateSortTerm(SQL_DIALECT, $T.INSTANCE, r, s.isAscending())"
-                            + " : $T.qualify(SQL_DIALECT, r, $S)).append(s.isAscending() ? $S : $S)",
-                    SqlBuilder.class, metadataClass, SqlBuilder.class, metadataClass,
-                    SqlBuilder.class, rootTable, " ASC", " DESC");
-            builder.endControlFlow();
-            builder.beginControlFlow("if (keyed && !(dirs.size() > 0"
-                            + " && Boolean.TRUE.equals(dirs.get(dirs.size() - 1))"
-                            + " && $S.equals(props.get(props.size() - 1))))", entity.id().name());
-            builder.addStatement("orderBy.append($S)", ", " + sqlDialect.quoteIdentifier(rootTable) + "."
-                    + sqlDialect.quoteIdentifier(entity.metadata().idColumn()) + " ASC");
-            builder.addStatement("cols.add($S)", entity.metadata().idColumn());
-            builder.addStatement("dirs.add(true)");
-            builder.addStatement("props.add($S)", entity.id().name());
-            builder.addStatement("refs.add(resolveRef($S))", entity.id().name());
-            builder.addStatement("joinRefs.add(resolveRef($S))", entity.id().name());
+            builder.addStatement("orderBy.append(sql.isToManyPath(s.property())"
+                            + " ? sql.aggregateSortTerm(r, s.isAscending())"
+                            + " : sql.qualify(r)).append(s.isAscending() ? $S : $S)",
+                    " ASC", " DESC");
             builder.endControlFlow();
         } else {
-            builder.addStatement("orderBy.append($T.qualify(SQL_DIALECT, r, $S))"
+            builder.addStatement("orderBy.append(sql.qualify(r))"
                             + ".append(s.isAscending() ? $S : $S)",
-                    SqlBuilder.class, rootTable, " ASC", " DESC");
+                    " ASC", " DESC");
             builder.endControlFlow();
         }
-        builder.addStatement("$T joins = $T.joinClause(SQL_DIALECT, $T.INSTANCE, joinRefs)",
-            String.class, SqlBuilder.class, metadataClass);
+        builder.addStatement("$T joins = sql.joinClause(joinRefs)", String.class);
 
-        builder.beginControlFlow("if ($L.mode() == $T.Mode.OFFSET)", pageRequest, PageRequest.class);
         builder.addStatement("long offset = ($L.page() - 1) * $L.size()", pageRequest, pageRequest);
         if (joinCapable) {
             builder.addStatement("$T<$T> content = jdbcClient.sql(((joins.isEmpty() && !keyed ? $L : $L) + joins"
@@ -2880,58 +2910,6 @@ public class RepositoryProcessor extends AbstractProcessor {
             builder.addStatement("$L", hydrationCall(entity, "content"));
         }
         builder.addStatement("return new $T<>($L, content, total)", SimplePage.class, pageRequest);
-        builder.endControlFlow();
-
-        builder.addStatement("$T.Cursor cursor = $L.cursor().orElseThrow()", PageRequest.class, pageRequest);
-        if (joinCapable) {
-            // Parked Task-7 finding M-1: the seek predicate must follow the same qualification rule as
-            // the select list — an unqualified "id" in the WHERE is exactly as ambiguous as in the
-            // projection once a join is spliced. Terms are rendered verbatim (already quoted) through
-            // the new CursorSupport.seekWhereTerms; joins.isEmpty() keeps the bare-column shape, so a
-            // join-free cursor read stays byte-identical to the old emission.
-            builder.addStatement("$T<$T> terms = new $T<>()", List.class, String.class, ArrayList.class);
-            builder.beginControlFlow("for (int i = 0; i < refs.size(); i++)");
-            builder.addStatement("$T r = refs.get(i)", MD_COLUMN_REF);
-            builder.beginControlFlow("if ($T.isToManyPath($T.INSTANCE, props.get(i)))",
-                    SqlBuilder.class, metadataClass);
-            builder.addStatement("terms.add($T.aggregateSortTerm(SQL_DIALECT, $T.INSTANCE, r, dirs.get(i)))",
-                    SqlBuilder.class, metadataClass);
-            builder.nextControlFlow("else if (joins.isEmpty() && !keyed)");
-            builder.addStatement("terms.add(SQL_DIALECT.quoteIdentifier(r.column()))");
-            builder.nextControlFlow("else");
-            builder.addStatement("terms.add($T.qualify(SQL_DIALECT, r, $S))",
-                    SqlBuilder.class, rootTable);
-            builder.endControlFlow();
-            builder.endControlFlow();
-            builder.addStatement("$T where = $T.seekWhereTerms(terms, dirs, cursor, $L.mode() == $T.Mode.CURSOR_NEXT)",
-                    String.class, CursorSupport.class, pageRequest, PageRequest.class);
-            builder.addStatement("$T<$T> content = jdbcClient.sql(((joins.isEmpty() && !keyed ? $L : $L) + joins + $S + where"
-                            + " + (orderBy.length() > 0 ? $S + orderBy : $S) + $S + $L.size() + $S))"
-                            + ".params($T.cursorParams(cursor)).query($L).list()",
-                    List.class, entity.typeName(), findConstant, joinedFindConstant, " WHERE ", " ORDER BY ", "",
-                    sqlDialect.limitClause(""), pageRequest, " + 1", CursorSupport.class, queryArg(entity, mapperType));
-        } else {
-            builder.addStatement("$T where = $T.seekWhere(cols, dirs, cursor, $L.mode() == $T.Mode.CURSOR_NEXT)",
-                    String.class, CursorSupport.class, pageRequest, PageRequest.class);
-            builder.addStatement("$T<$T> content = jdbcClient.sql($L + joins + $S + where + (orderBy.length() > 0 ? $S + orderBy : $S)"
-                            + " + $S + $L.size() + $S).params($T.cursorParams(cursor)).query($L).list()",
-                    List.class, entity.typeName(), findConstant, " WHERE ", " ORDER BY ", "",
-                    sqlDialect.limitClause(""), pageRequest,
-                    " + 1", CursorSupport.class, queryArg(entity, mapperType));
-        }
-        builder.addStatement("boolean hasMore = content.size() > $L.size()", pageRequest);
-        builder.beginControlFlow("if (hasMore)");
-        builder.addStatement("content = content.subList(0, $L.size())", pageRequest);
-        builder.endControlFlow();
-        if (hydrate) {
-            builder.addStatement("$L", hydrationCall(entity, "content"));
-        }
-        builder.addStatement("$T<$T.Cursor> cursors = new $T<>()", List.class, PageRequest.class, ArrayList.class);
-        builder.beginControlFlow("for ($T e : content)", entity.typeName());
-        builder.addStatement("cursors.add($T.cursorFor(props, dirs, $T.INSTANCE, e))",
-                CursorSupport.class, metadataClass);
-        builder.endControlFlow();
-        builder.addStatement("return new $T<>($L, content, cursors, -1L)", SimpleCursoredPage.class, pageRequest);
     }
 
     /** The single {@code "qualifier"."column"} rendering shared by every qualified projection emission (S-1). */
@@ -2990,7 +2968,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             String column;
             ColumnRef aggregateRef = null;
             try {
-                column = SqlBuilder.resolveColumn(entity.metadata(), s.property());
+                column = new SqlBuilder(entity.metadata(), entity.metadata()).dialect(sqlDialect).resolveColumn(s.property());
             } catch (IllegalArgumentException unknown) {
                 // Task 6: a sort property the flat column view cannot answer may still resolve through
                 // the compile model to a TO-MANY head — that renders the aggregate subquery term (the
@@ -3008,7 +2986,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             properties.add(s.property());
             directions.add(Boolean.toString(s.ascending()));
             terms.add(column != null ? sqlDialect.quoteIdentifier(column)
-                    : SqlBuilder.aggregateSortTerm(sqlDialect, entity.metadata(), aggregateRef, s.ascending()));
+                    : new SqlBuilder(entity.metadata()).dialect(sqlDialect).aggregateSortTerm(aggregateRef, s.ascending()));
         }
         if (toManySort && !("true".equals(directions.get(directions.size() - 1))
                 && entity.id().name().equals(properties.get(properties.size() - 1)))) {
@@ -3036,13 +3014,13 @@ public class RepositoryProcessor extends AbstractProcessor {
             }
             orderBy = ob.toString();
         } else {
-            orderBy = new SqlBuilder(sqlDialect).orderBy(entity.metadata(), effective);
+            orderBy = new SqlBuilder(entity.metadata(), entity.metadata()).dialect(sqlDialect).orderBy(effective);
         }
         String wherePrefix = bindings.isEmpty() ? " WHERE " : " AND ";
 
         if (!cursored) {
             String countConstant = addConstant(constants, "SQL_COUNT_ALL",
-                    new SqlBuilder(sqlDialect).countBy(entity.metadata(), List.of()));
+                    new SqlBuilder(entity.metadata()).dialect(sqlDialect).countBy(List.of()));
             builder.addStatement("long offset = ($L.page() - 1) * $L.size()", pageRequest, pageRequest);
             CodeBlock.Builder call = CodeBlock.builder()
                     .add("jdbcClient.sql($L + $S + $S + $L.size() + $S + offset)", findConstant, orderBy,
@@ -3061,10 +3039,9 @@ public class RepositoryProcessor extends AbstractProcessor {
 
         builder.addStatement("$T.Cursor cursor = $L.cursor().orElse(null)", PageRequest.class, pageRequest);
         builder.beginControlFlow("if (cursor == null)");
-        builder.addStatement("long offset = ($L.page() - 1) * $L.size()", pageRequest, pageRequest);
         CodeBlock.Builder offsetCall = CodeBlock.builder()
-                .add("jdbcClient.sql($L + $S + $S + $L.size() + $S + offset)", findConstant, orderBy,
-                        sqlDialect.limitClause(""), pageRequest, sqlDialect.offsetClause(""));
+                .add("jdbcClient.sql($L + $S + $S + $L.size())", findConstant, orderBy,
+                        sqlDialect.limitClause(""), pageRequest);
         appendBoundParameters(offsetCall, bindings, parameters);
         offsetCall.add(".query($L).list()", queryArg(entity, mapperType));
         builder.addStatement("$T<$T> content = $L", List.class, entity.typeName(), offsetCall.build());
@@ -3287,8 +3264,9 @@ public class RepositoryProcessor extends AbstractProcessor {
                     predicates, predicateRefs, List.of(), List.of(), List.of(),
                     0, bindings, parameters));
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
-                    new SqlBuilder(sqlDialect).build(entity.metadata(), entity.metadata(),
-                            queryDefinitions.get(queryDefinitions.size() - 1)));
+                    new SqlBuilder(entity.metadata(), entity.metadata(),
+                            queryDefinitions.get(queryDefinitions.size() - 1))
+                            .dialect(sqlDialect).count());
             CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
             appendBoundParameters(call, bindings, parameters);
             call.add(".singleValue($T.class)", Long.class);
@@ -3306,14 +3284,28 @@ public class RepositoryProcessor extends AbstractProcessor {
             // C-1: a delete whose predicate traverses a relation renders correlated EXISTS
             // semi-joins through SqlBuilder.build's delete mode — the old NOTE-degrade to the join-free
             // legacy predicate could match the wrong rows, and a joined DELETE ... LEFT JOIN is
-            // invalid SQL. Multi-hop paths are NOTE-rejected by resolveCompilePaths BEFORE this
-            // point (their refs stay unjoined, so they render legacy and emit no delete NOTE).
+            // invalid SQL. A multi-hop (2+ join) delete would need a NESTED EXISTS (each intermediate
+            // relationship opens its own correlated subquery); that is not rendered yet, so it keeps
+            // the legacy NOTE-degrade exactly as before.
+            List<ColumnRef> deleteRefs = predicateRefs;
+            for (int i = 0; i < predicateRefs.size(); i++) {
+                ColumnRef ref = predicateRefs.get(i);
+                if (ref != null && ref.joins().size() > 1) {
+                    processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
+                            ResolutionVocabulary.multiHop(predicates.get(i).property()), method);
+                    if (deleteRefs == predicateRefs) {
+                        deleteRefs = new ArrayList<>(predicateRefs);
+                    }
+                    deleteRefs.set(i, legacyColumnRef(predicates.get(i).property()));
+                }
+            }
             queryDefinitions.add(queryDefinitionOf(queryDefinitionName, Operation.DELETE, kind, entity.metadata(),
-                    predicates, predicateRefs, List.of(), List.of(), List.of(),
+                    predicates, deleteRefs, List.of(), List.of(), List.of(),
                     0, bindings, parameters));
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
-                    new SqlBuilder(sqlDialect).build(entity.metadata(), entity.metadata(),
-                            queryDefinitions.get(queryDefinitions.size() - 1)));
+                    new SqlBuilder(entity.metadata(), entity.metadata(),
+                            queryDefinitions.get(queryDefinitions.size() - 1))
+                            .dialect(sqlDialect).delete());
             CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
             appendBoundParameters(call, bindings, parameters);
             call.add(".update()");
@@ -3363,8 +3355,9 @@ public class RepositoryProcessor extends AbstractProcessor {
                     predicates, predicateRefs, methodSorts,
                     pagedSortRefs, pagedExistentialSorts, 0, bindings, parameters));
             String constant = addConstant(constants, "SQL_" + upperSnake(name),
-                    new SqlBuilder(sqlDialect).build(entity.metadata(), entity.metadata(),
-                            queryDefinitions.get(queryDefinitions.size() - 1)));
+                    new SqlBuilder(entity.metadata(), entity.metadata(),
+                            queryDefinitions.get(queryDefinitions.size() - 1))
+                            .dialect(sqlDialect).select());
             emitPaged(builder, entity, pageRequest, methodSorts, constant, constants, bindings, parameters,
                     kind == Kind.CURSORED_PAGE, mapperType, hydrate);
             return;
@@ -3393,8 +3386,8 @@ public class RepositoryProcessor extends AbstractProcessor {
                 parsed != null ? parsed.limit() : 0,
                 bindings, parameters));
         QueryDefinitionSpec queryDefinition = queryDefinitions.get(queryDefinitions.size() - 1);
-        String sql = new SqlBuilder(sqlDialect).build(entity.metadata(), entity.metadata(),
-                queryDefinition, extraProjection);
+        String sql = new SqlBuilder(entity.metadata(), entity.metadata(), queryDefinition)
+                .dialect(sqlDialect).select(extraProjection);
         String constant = addConstant(constants, "SQL_" + upperSnake(name), sql);
         CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
         appendBoundParameters(call, bindings, parameters);
@@ -3745,9 +3738,15 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     /**
      * Resolves {@code remainder} as a leaf under a relation {@code prop} and attaches the join edge the
-     * traversal contributes. The alias is exactly the property name.
+     * traversal contributes. The alias is exactly the property name. To-one {@link Prop.Reference}
+     * chains traverse transitively (each hop prepends its edge); a to-many head is always an
+     * existential leaf and never recurses deeper.
      */
     private PathResolution resolveRelationHead(TypeMapping md, Prop prop, String remainder) {
+        return resolveRelationHead(md, prop, remainder, new HashSet<>());
+    }
+
+    private PathResolution resolveRelationHead(TypeMapping md, Prop prop, String remainder, Set<String> visited) {
         if (prop instanceof Prop.ElementList elementList) {
             ColumnRef leaf = localColumnRef(elementList.target().localAttributeRefs(), remainder);
             if (leaf == null) {
@@ -3759,29 +3758,43 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
         String targetFqn = prop instanceof Prop.Reference reference
                 ? reference.targetTypeName() : ((Prop.EntityList) prop).targetTypeName();
+        if (!visited.add(targetFqn)) {
+            return PathResolution.relationUnresolved(); // cyclic relationship: degrade, don't recurse forever
+        }
         TypeMapping target = descriptorByFqn(targetFqn);
         if (target == null) {
             return PathResolution.relationUnresolved();
-        }
-        ColumnRef leaf = localColumnRef(target.localAttributeRefs(), remainder);
-        if (leaf == null) {
-            // Not a local leaf of the target — if the remainder names ANOTHER relation the path is
-            // multi-hop; otherwise this head is simply not the right split, so keep searching.
-            for (String[] deeper : candidateHeads(remainder)) {
-                if (isTraversable(propOrNull(target, deeper[0]))) {
-                    return PathResolution.tooManyRelations();
-                }
-            }
-            return PathResolution.unresolved();
         }
         JoinRef join = referenceOrListJoin(md, target, prop);
         if (join == null) {
             return PathResolution.relationUnresolved();
         }
-        ColumnRef traversed = leaf.through(join);
-        return prop instanceof Prop.EntityList
-                ? PathResolution.existentialRef(traversed)
-                : PathResolution.resolved(traversed);
+        ColumnRef leaf = localColumnRef(target.localAttributeRefs(), remainder);
+        if (leaf != null) {
+            ColumnRef traversed = leaf.through(join);
+            return prop instanceof Prop.EntityList
+                    ? PathResolution.existentialRef(traversed)
+                    : PathResolution.resolved(traversed);
+        }
+        // The remainder names another relation in the target: a to-one Reference continues the
+        // traversal (multi-hop); a to-many head nested under a to-one stays out of scope.
+        for (String[] deeper : candidateHeads(remainder)) {
+            Prop deeperProp = propOrNull(target, deeper[0]);
+            if (deeperProp instanceof Prop.Reference) {
+                PathResolution inner = resolveRelationHead(target, deeperProp, deeper[1], visited);
+                if (inner.multiHop() || inner.unresolvedRelation() || inner.ref() == null) {
+                    return inner;
+                }
+                ColumnRef chained = inner.ref().prepend(join);
+                return prop instanceof Prop.EntityList
+                        ? PathResolution.existentialRef(chained)
+                        : PathResolution.resolved(chained);
+            }
+            if (isTraversable(deeperProp)) {
+                return PathResolution.tooManyRelations();
+            }
+        }
+        return PathResolution.unresolved();
     }
 
     /** The LEFT JOIN edge for a Reference / EntityList traversal; {@code null} when unbuildable. */

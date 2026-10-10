@@ -145,8 +145,7 @@ class TeamEntityTest {
 
         PageRequest beyond = PageRequest.ofPage(1).size(10)
                 .afterCursor(PageRequest.Cursor.forKey("Zzz"));
-        Page<Team> page = teams.findAll(beyond, Order.by(_Team.players.name.asc()));
-        assertThat(page).isInstanceOf(CursoredPage.class);
+        CursoredPage<Team> page = teams.orderedByPlayerName(beyond);
         // Cursor beyond the whole keyset: the qualified ("player"."name" > :cursor0) predicate ran
         // without the ambiguity error and matched nothing.
         assertThat(page.content()).isEmpty();
@@ -168,15 +167,11 @@ class TeamEntityTest {
         // afterCursor, mirroring cursorModeRelationSortSeeksOnJoinQualifiedPredicate. The key is
         // the two-term [aggregate sort key, appended root-id tiebreak] shape, seeded below every
         // MIN ("A" < "alpha", id > 0) so page 1 starts at the head of the keyset.
-        Page<Team> firstPage = teams.findAll(
-                PageRequest.ofPage(1).size(1).afterCursor(PageRequest.Cursor.forKey("A", 0L)),
-                Order.by(_Team.players.name.asc()));
-        assertThat(firstPage).isInstanceOf(CursoredPage.class);
-        CursoredPage<Team> first = (CursoredPage<Team>) firstPage;
+        CursoredPage<Team> first = teams.orderedByPlayerName(
+                PageRequest.ofPage(1).size(1).afterCursor(PageRequest.Cursor.forKey("A", 0L)));
         assertThat(first.content()).extracting(Team::getName).containsExactly("Falcons");
 
-        Page<Team> second = teams.findAll(first.nextPageRequest(), Order.by(_Team.players.name.asc()));
-        assertThat(second).isInstanceOf(CursoredPage.class);
+        CursoredPage<Team> second = teams.orderedByPlayerName(first.nextPageRequest());
         assertThat(second.content()).extracting(Team::getName).containsExactly("Hawks");
     }
 

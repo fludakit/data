@@ -398,19 +398,15 @@ class RepositoryProcessorTest {
         Path classesDir = Files.createDirectories(workspace.resolve("classes2"));
         Path generatedDir = Files.createDirectories(workspace.resolve("generated2"));
 
-        Files.writeString(sourceDir.resolve("Status.java"), """
-                package demo2;
-                public enum Status { OPEN, CLOSED }
-                """);
         Files.writeString(sourceDir.resolve("Ticket.java"), """
                 package demo2;
                 public class Ticket {
                     public Long id;
-                    public Status status;
+                    public java.time.Duration ttl;
                     public Long getId() { return id; }
                     public void setId(Long id) { this.id = id; }
-                    public Status getStatus() { return status; }
-                    public void setStatus(Status status) { this.status = status; }
+                    public java.time.Duration getTtl() { return ttl; }
+                    public void setTtl(java.time.Duration ttl) { this.ttl = ttl; }
                 }
                 """);
         Files.writeString(sourceDir.resolve("Tickets.java"), """
@@ -421,7 +417,7 @@ class RepositoryProcessorTest {
                 public interface Tickets extends CrudRepository<Ticket, Long> { }
                 """);
 
-        compile(sourceDir, classesDir, generatedDir, "Status.java", "Ticket.java", "Tickets.java");
+        compile(sourceDir, classesDir, generatedDir, "Ticket.java", "Tickets.java");
 
         assertTrue(Files.exists(generatedDir.resolve("demo2/TicketsImpl.java")),
                 "repository impl must still be generated");
@@ -1232,21 +1228,17 @@ class RepositoryProcessorTest {
         Path classesDir = Files.createDirectories(workspace.resolve("classes-casc"));
         Path generatedDir = Files.createDirectories(workspace.resolve("generated-casc"));
 
-        Files.writeString(sourceDir.resolve("Status.java"), """
-                package casc;
-                public enum Status { OPEN, CLOSED }
-                """);
         Files.writeString(sourceDir.resolve("Line.java"), """
                 package casc;
                 import io.github.fludakit.data.annotation.ValueObject;
                 @ValueObject
                 public class Line {
                     int quantity;
-                    Status flag;
+                    java.time.Duration flag;
                     public int getQuantity() { return quantity; }
                     public void setQuantity(int quantity) { this.quantity = quantity; }
-                    public Status getFlag() { return flag; }
-                    public void setFlag(Status flag) { this.flag = flag; }
+                    public java.time.Duration getFlag() { return flag; }
+                    public void setFlag(java.time.Duration flag) { this.flag = flag; }
                 }
                 """);
         Files.writeString(sourceDir.resolve("Basket.java"), """
@@ -1274,7 +1266,7 @@ class RepositoryProcessorTest {
                 """);
 
         List<Diagnostic<? extends JavaFileObject>> diagnostics = compileWithDiagnostics(
-                sourceDir, classesDir, generatedDir, "Status.java", "Line.java", "Basket.java", "Baskets.java");
+                sourceDir, classesDir, generatedDir, "Line.java", "Basket.java", "Baskets.java");
 
         String impl = Files.readString(generatedDir.resolve("casc/BasketsImpl.java")).replace("\\\"", "\"");
 
@@ -2971,34 +2963,26 @@ class RepositoryProcessorTest {
         assertTrue(impl.contains("return BookMetadata.INSTANCE.columnRef(property)"),
                 "resolveRef must resolve through the entity descriptor:" + System.lineSeparator() + impl);
 
-        // (2) The runtime loop resolves each property ONCE and reuses the local for cols / refs /
-        //     ORDER BY, so descriptor work is not repeated and cursor seek keeps its cols list.
+        // (2) The runtime loop resolves each property ONCE and reuses the local for the join chain
+        //     and ORDER BY, so descriptor work is not repeated.
         assertTrue(impl.contains("ColumnRef r = resolveRef(s.property())"),
                 "the loop must resolve each property once:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("cols.add(r.column())"),
-                "cols must carry the resolved leaf column:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("refs.add(r)"),
-                "refs must collect the resolved ColumnRefs:" + System.lineSeparator() + impl);
 
-        // (3) ORDER BY is qualified through SqlBuilder.qualify against the root table with an
-        //     EXPLICIT direction (R-T3a: never a direction-less ref-based ORDER BY), and the
-        //     LEFT JOIN chain is computed once from the collected refs.
-        assertTrue(impl.contains("SqlBuilder.qualify(SQL_DIALECT, r, \"book\")"),
+        // (3) ORDER BY is qualified through the descriptor-backed builder against the root table with
+        //     an EXPLICIT direction (R-T3a), and the LEFT JOIN chain is computed once from the refs.
+        assertTrue(impl.contains("sql.qualify(r)"),
                 "ORDER BY must qualify the resolved ref against the root table:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("s.isAscending() ? \" ASC\" : \" DESC\""),
                 "every ORDER BY term must carry an explicit ASC/DESC (R-T3a):" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("String joins = SqlBuilder.joinClause(SQL_DIALECT, BookMetadata.INSTANCE, joinRefs)"),
+        assertTrue(impl.contains("String joins = sql.joinClause(joinRefs)"),
                 "the join clause must be computed from the descriptor and refs:" + System.lineSeparator() + impl);
 
-        // (4) joins is spliced immediately after the FROM-bound find constant in BOTH the OFFSET and
-        //     CURSOR statements — before WHERE / ORDER BY. Task 11 fix (R-T11c): Book declares a
-        //     traversable prop (@Association author), so the emission now picks between the plain
-        //     SQL_FIND_ALL and the root-table-QUALIFIED SQL_FIND_ALL_QUALIFIED at runtime — the join
-        //     is spliced onto whichever constant matches, never onto an ambiguous bare select list.
+        // (4) joins is spliced immediately after the FROM-bound find constant in the OFFSET read.
+        //     Task 11 fix (R-T11c): Book declares a traversable prop (@Association author), so the
+        //     emission picks between the plain SQL_FIND_ALL and the root-table-QUALIFIED
+        //     SQL_FIND_ALL_QUALIFIED at runtime — the join is spliced onto whichever matches.
         assertTrue(impl.contains("jdbcClient.sql(((joins.isEmpty() && !keyed ? SQL_FIND_ALL : SQL_FIND_ALL_QUALIFIED) + joins + (orderBy.length() > 0"),
                 "OFFSET statement must pick the qualified constant when joins are present:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("jdbcClient.sql(((joins.isEmpty() && !keyed ? SQL_FIND_ALL : SQL_FIND_ALL_QUALIFIED) + joins + \" WHERE \" + where"),
-                "CURSOR statement must pick the qualified constant too, before WHERE:" + System.lineSeparator() + impl);
         // The qualified constant exists and qualifies EVERY root column (labels stay bare, so the
         // existing row mapper reads both variants).
         assertTrue(impl.contains("SELECT \\\"book\\\".\\\"id\\\", \\\"book\\\".\\\"title\\\", \\\"book\\\".\\\"address_city\\\","
@@ -3360,10 +3344,8 @@ class RepositoryProcessorTest {
                 "relation-free OFFSET emission must keep the single-constant splice:" + System.lineSeparator() + impl);
         assertTrue(!impl.contains("SQL_FIND_ALL_QUALIFIED"),
                 "no qualified constant for a join-impossible descriptor:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("String where = CursorSupport.seekWhere(cols, dirs, cursor"),
-                "relation-free cursor emission must keep the bare seekWhere call:" + System.lineSeparator() + impl);
-        assertTrue(!impl.contains("seekWhereTerms"),
-                "no verbatim-terms loop for a join-impossible descriptor:" + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("CursorSupport") && !impl.contains("seekWhere"),
+                "a Page-returning findAll must not emit any cursor/seek machinery:" + System.lineSeparator() + impl);
     }
 
     @Test
@@ -3426,39 +3408,19 @@ class RepositoryProcessorTest {
                 "WorkExperience.java", "Profile.java", "Profiles.java");
 
         String impl = sqlFlat(generatedDir.resolve("t6rt/ProfilesImpl.java"));
-        assertTrue(impl.contains("orderBy.append(SqlBuilder.isToManyPath(ProfileMetadata.INSTANCE, s.property())"
-                        + " ? SqlBuilder.aggregateSortTerm(SQL_DIALECT, ProfileMetadata.INSTANCE, r, s.isAscending())"
-                        + " : SqlBuilder.qualify(SQL_DIALECT, r, \"profile\"))"),
+        assertTrue(impl.contains("orderBy.append(sql.isToManyPath(s.property())"
+                        + " ? sql.aggregateSortTerm(r, s.isAscending())"
+                        + " : sql.qualify(r))"),
                 "to-many sort heads must switch the ORDER BY term to the aggregate sort term:"
                         + System.lineSeparator() + impl);
         assertTrue(impl.contains("boolean keyed = false;"),
-                "the keyset growth flag must exist:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("if (keyed && !(dirs.size() > 0 && Boolean.TRUE.equals(dirs.get(dirs.size() - 1))"
-                        + " && \"id\".equals(props.get(props.size() - 1))))"),
-                "the id tiebreak must append unless the last ORDER BY term already IS the ascending id:"
-                        + System.lineSeparator() + impl);
-        assertTrue(impl.contains("orderBy.append(\", \"profile\".\"id\" ASC\")"),
-                "the ORDER BY must gain the root-qualified id ASC term:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("cols.add(\"id\")") && impl.contains("dirs.add(true)")
-                        && impl.contains("props.add(\"id\")") && impl.contains("refs.add(resolveRef(\"id\"))"),
-                "cols/dirs/props/refs must stay index-aligned while growing with the tiebreak:"
-                        + System.lineSeparator() + impl);
+                "the keyset flag must exist:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("jdbcClient.sql(((joins.isEmpty() && !keyed ? SQL_FIND_ALL"
                         + " : SQL_FIND_ALL_QUALIFIED) + joins + (orderBy.length() > 0"),
                 "OFFSET must take the qualified plain select when keyed even with empty joins:"
                         + System.lineSeparator() + impl);
-        assertTrue(impl.contains("jdbcClient.sql(((joins.isEmpty() && !keyed ? SQL_FIND_ALL"
-                        + " : SQL_FIND_ALL_QUALIFIED) + joins + \" WHERE \" + where"),
-                "CURSOR must take the qualified plain select when keyed too:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("terms.add(SqlBuilder.aggregateSortTerm(SQL_DIALECT, ProfileMetadata.INSTANCE, r,"
-                        + " dirs.get(i)))"),
-                "seek terms must use the aggregate sort term verbatim for to-many refs:"
-                        + System.lineSeparator() + impl);
-        assertTrue(impl.contains("String joins = SqlBuilder.joinClause(SQL_DIALECT, ProfileMetadata.INSTANCE, joinRefs)"),
+        assertTrue(impl.contains("String joins = sql.joinClause(joinRefs)"),
                 "the joinClause call must stay as emitted (to-many refs are skipped by the clause itself):"
-                        + System.lineSeparator() + impl);
-        assertTrue(impl.contains("CursorSupport.cursorFor(props, dirs, ProfileMetadata.INSTANCE, e)"),
-                "the cursor keys must come from the descriptor-driven overload:"
                         + System.lineSeparator() + impl);
         assertTrue(!impl.contains("LEFT JOIN \"work_experience\""),
                 "the generated file must not splice the to-many table as a join:"
@@ -3630,8 +3592,6 @@ class RepositoryProcessorTest {
                         + System.lineSeparator() + impl);
         assertTrue(impl.contains("jdbcClient.sql(SQL_FIND_ALL + joins + (orderBy.length() > 0"),
                 "the legacy OFFSET splice must stay:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("String where = CursorSupport.seekWhere(cols, dirs, cursor"),
-                "the legacy seekWhere delegation must stay:" + System.lineSeparator() + impl);
         assertTrue(!impl.contains("(SELECT") && !impl.contains("seekWhereTerms"),
                 "no aggregate term or verbatim-terms seek for local sorts:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("ORDER BY \"text\" ASC"),
@@ -3640,9 +3600,8 @@ class RepositoryProcessorTest {
                         + " java.util.List.of(true), cursor"),
                 "legacy finder seekWhere:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("CursorSupport.cursorFor(java.util.List.of(\"text\"),"
-                        + " java.util.List.of(true), MemoMetadata.INSTANCE, e)")
-                        && impl.contains("CursorSupport.cursorFor(props, dirs, MemoMetadata.INSTANCE, e)"),
-                "all cursor emissions ride the descriptor overload:" + System.lineSeparator() + impl);
+                        + " java.util.List.of(true), MemoMetadata.INSTANCE, e)"),
+                "cursored-finder cursor keys ride the descriptor overload:" + System.lineSeparator() + impl);
     }
 
     @Test
@@ -4243,9 +4202,9 @@ class RepositoryProcessorTest {
     }
 
     @Test
-    void multiHopMethodNamePredicateIsRejectedWithNote() throws Exception {
-        // findByCustomerCountryCode traverses TWO relations (order→customer→country). Task 8 rejects
-        // multi-hop with a NOTE (verbatim) and keeps the legacy constant (never aborts the compile).
+    void multiHopMethodNamePredicateTraversesTwoToOneRelations() throws Exception {
+        // findByCustomerCountryCode traverses TWO to-one relations (order→customer→country). The
+        // resolver now chains both LEFT JOINs and qualifies the leaf by the last alias.
         Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-mh"));
         Path classesDir = Files.createDirectories(workspace.resolve("classes-rp-mh"));
         Path generatedDir = Files.createDirectories(workspace.resolve("generated-rp-mh"));
@@ -4263,17 +4222,97 @@ class RepositoryProcessorTest {
 
         List<Diagnostic<? extends JavaFileObject>> diagnostics = compileWithDiagnostics(sourceDir, classesDir, generatedDir,
                 "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "MultiHopOrders.java");
-        // compileWithDiagnostics throws on a failed round, so reaching here proves the multi-hop NOTE
-        // degraded instead of aborting the compile.
-        Path implFile = generatedDir.resolve("relpath/MultiHopOrdersImpl.java");
-        assertTrue(Files.exists(implFile), "a multi-hop NOTE must not abort the compile");
+        String impl = sqlFlat(generatedDir.resolve("relpath/MultiHopOrdersImpl.java"));
+        assertTrue(impl.contains("FROM \"order\" LEFT JOIN \"customer\" AS \"customer\" ON \"order\".\"customer_id\" = \"customer\".\"id\""
+                        + " LEFT JOIN \"country\" AS \"country\" ON \"customer\".\"country_id\" = \"country\".\"id\""
+                        + " WHERE \"country\".\"code\" = :code"),
+                "a two-hop to-one finder must chain both LEFT JOINs and qualify the leaf by the last alias:"
+                        + System.lineSeparator() + impl);
+        assertTrue(!notesOf(diagnostics).contains("traverses more than one relation"),
+                "multi-hop to-one traversal must no longer be NOTE-rejected:" + System.lineSeparator() + notesOf(diagnostics));
+    }
 
-        String notes = notesOf(diagnostics);
-        assertTrue(notes.contains("path 'customerCountryCode' traverses more than one relation; not supported"),
-                "multi-hop must be rejected with the verbatim NOTE:" + System.lineSeparator() + notes);
-        String impl = sqlFlat(implFile);
-        assertTrue(!impl.contains("LEFT JOIN \"country\""),
-                "a rejected multi-hop must NOT emit a two-level join:" + System.lineSeparator() + impl);
+    @Test
+    void enumFieldGeneratesReflectionFreeRowMapper() throws Exception {
+        // An enum field no longer fails the row-mapper gate: the reflection-free mapper reads it from
+        // its String column via Enum.valueOf, null-safe for a nullable column.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-enum"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-rp-enum"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-rp-enum"));
+        Files.writeString(sourceDir.resolve("Status.java"), """
+                package rpenum;
+                public enum Status { ACTIVE, INACTIVE }
+                """);
+        Files.writeString(sourceDir.resolve("Account.java"), """
+                package rpenum;
+                import io.github.fludakit.data.annotation.Entity;
+                import io.github.fludakit.data.annotation.Identity;
+                @Entity
+                public class Account {
+                    @Identity Long id;
+                    String name;
+                    Status status;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getName() { return name; }
+                    public void setName(String name) { this.name = name; }
+                    public Status getStatus() { return status; }
+                    public void setStatus(Status status) { this.status = status; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Accounts.java"), """
+                package rpenum;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Accounts extends CrudRepository<Account, Long> {
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Status.java", "Account.java", "Accounts.java");
+
+        Path mapper = generatedDir.resolve("rpenum/AccountRowMapper.java");
+        assertTrue(Files.exists(mapper),
+                "an enum-bearing entity must still generate a reflection-free row mapper");
+        String src = sqlFlat(mapper);
+        assertTrue(src.contains("Enum.valueOf(Status.class, rs.getString(AccountMetadata.STATUS))"),
+                "the enum must be read via Enum.valueOf from its String column:" + System.lineSeparator() + src);
+    }
+
+    @Test
+    void postgreSqlDialectSelectionGeneratesPostgreSqlDialectField() throws Exception {
+        // -Afluda.dialect=postgresql selects the PostgreSQL dialect: the generated impl's SQL_DIALECT
+        // field references PostgreSqlDialect.INSTANCE (which today renders identically to H2).
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-pg"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-rp-pg"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-rp-pg"));
+        Files.writeString(sourceDir.resolve("Item.java"), """
+                package rppg;
+                import io.github.fludakit.data.annotation.Entity;
+                import io.github.fludakit.data.annotation.Identity;
+                @Entity
+                public class Item {
+                    @Identity Long id;
+                    String name;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getName() { return name; }
+                    public void setName(String name) { this.name = name; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Items.java"), """
+                package rppg;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Items extends CrudRepository<Item, Long> { }
+                """);
+
+        compileWithDialect(sourceDir, classesDir, generatedDir, "postgresql", "Item.java", "Items.java");
+
+        String impl = sqlFlat(generatedDir.resolve("rppg/ItemsImpl.java"));
+        assertTrue(impl.contains("PostgreSqlDialect.INSTANCE"),
+                "the generated impl must use the selected PostgreSQL dialect:" + System.lineSeparator() + impl);
     }
 
     @Test
@@ -4721,6 +4760,11 @@ class RepositoryProcessorTest {
     private record TaskResult(boolean success, List<Diagnostic<? extends JavaFileObject>> diagnostics) { }
 
     private TaskResult runTask(Path sourceDir, Path classesDir, Path generatedDir, String... fileNames) throws Exception {
+        return runTask(sourceDir, classesDir, generatedDir, List.of(), fileNames);
+    }
+
+    private TaskResult runTask(Path sourceDir, Path classesDir, Path generatedDir,
+                               List<String> processorOptions, String... fileNames) throws Exception {
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         assertNotNull(compiler, "A system Java compiler is required to run this test");
         DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
@@ -4728,14 +4772,25 @@ class RepositoryProcessorTest {
             java.util.List<java.io.File> files = new java.util.ArrayList<>();
             for (String n : fileNames) files.add(sourceDir.resolve(n).toFile());
             Iterable<? extends JavaFileObject> units = fm.getJavaFileObjects(files.toArray(new java.io.File[0]));
-            List<String> options = List.of(
+            List<String> options = new java.util.ArrayList<>(List.of(
                     "-classpath", System.getProperty("java.class.path"),
                     "-d", classesDir.toString(),
                     "-s", generatedDir.toString(),
-                    "-processor", "io.github.fludakit.data.processor.RepositoryProcessor");
+                    "-processor", "io.github.fludakit.data.processor.RepositoryProcessor"));
+            options.addAll(processorOptions);
             boolean success = compiler.getTask(null, fm, diagnostics, options, null, units).call();
             return new TaskResult(success, diagnostics.getDiagnostics());
         }
+    }
+
+    private void compileWithDialect(Path sourceDir, Path classesDir, Path generatedDir,
+                                    String dialect, String... fileNames) throws Exception {
+        TaskResult result = runTask(sourceDir, classesDir, generatedDir,
+                List.of("-Afluda.dialect=" + dialect), fileNames);
+        String messages = result.diagnostics().stream()
+                .filter(d -> d.getKind() == Diagnostic.Kind.ERROR)
+                .map(Object::toString).collect(Collectors.joining(System.lineSeparator()));
+        assertTrue(result.success(), "Annotation processing failed:" + System.lineSeparator() + messages);
     }
 
     /**

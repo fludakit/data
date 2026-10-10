@@ -39,4 +39,20 @@ public record ColumnRef(String column, String ownerTableName, String ownerAlias,
         all.add(join);
         return new ColumnRef(column, join.childTableName(), join.childAlias(), all);
     }
+
+    /**
+     * Prepends an edge to the front of this ref's join chain, keeping the leaf's owner table/alias
+     * unchanged. Used when a resolved nested-path ref (already carrying its own root-to-leaf chain)
+     * is reached through an additional outer relationship: the outer edge must come FIRST so the
+     * chain reads root-to-leaf.
+     *
+     * @param join the edge from the outer owner table to this ref's current root table
+     * @return this leaf binding with the edge prepended to its join chain
+     */
+    public ColumnRef prepend(JoinRef join) {
+        List<JoinRef> all = new ArrayList<>(joins.size() + 1);
+        all.add(join);
+        all.addAll(joins);
+        return new ColumnRef(column, ownerTableName, ownerAlias, all);
+    }
 }

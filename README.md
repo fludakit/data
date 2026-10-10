@@ -11,9 +11,9 @@ A fluent data-access toolkit for Jakarta EE / CDI applications.
 ## Jakarta Data and SQL scope
 
 Repository methods and derived queries are analyzed at compile time and emitted as generated
-implementations that execute through `JdbcClient`. The current SQL dialect is H2. Generated SQL
-uses a dialect seam for identifier quoting and pagination syntax; this does not imply support for
-other databases yet.
+implementations that execute through `JdbcClient`. Generated SQL uses a dialect seam for identifier
+quoting and pagination syntax; the shipped dialects are H2 (the default) and PostgreSQL, selected
+with the `-Afluda.dialect` annotation-processing option.
 Repository type resolution, entity/value-object model construction, and method declaration
 validation are handled by focused processor components before SQL and source generation.
 
@@ -76,7 +76,8 @@ from: predicate and sort paths, paging mode, keyset seek terms and parameter bin
 `ColumnRef`s, and `SqlBuilder` combines that resolver and the table schema with the query plan during
 rendering. The generated query metadata is not a runtime hook — nothing
 in the engine reads it — and overloads get a declaration-order numeric suffix
-(`FindByStatusQuery2`). `SqlBuilder.build(schema, resolver, definition)` is the single renderer that turns a
+(`FindByStatusQuery2`). `new SqlBuilder(schema, resolver, definition).dialect(...).select()`
+(or `.count()`/`.delete()`) is the single renderer that turns a
 query definition back into SQL (full-materialisation projections are an emission-time argument, not
 definition state — a published definition re-renders the root projection).
 
@@ -111,13 +112,14 @@ definition state — a published definition re-renders the root projection).
   rows are consequently excluded from such results. There is deliberately no FK short-circuit:
   comparing the owner's FK column directly (`"customer_id" = :id`) would newly include orphan-FK
   rows and diverge from traversal semantics — the join cost is the spec's cost.
-- Path-depth asymmetry (known, documented): compile-side method-name resolution accepts at most
-  ONE relation hop (multi-hop paths emit a NOTE and keep the legacy unqualified column). The
-  runtime `columnRef` used by `Order.by`/`Sort` is now bounded the same way: it resolves the
-  flattened `columns()` paths plus the generated `columnRefs()` map — exactly the one-hop
-  relation leaves whose values the `navigate()` switch answers for CURSOR keys (both surfaces come
-  from one shared generation-time enumeration), so a sortable path always has a working cursor
-  key and anything deeper fails fast with `Unknown property '<path>' on <Entity>`.
+- Path-depth asymmetry (known, documented): compile-side method-name resolution now traverses
+  to-one `Reference` chains transitively (arbitrary depth, cycle-safe) — `findByCustomerCountryCode`
+  chains two LEFT JOINs — while to-many heads stay depth-1 existential leaves. The runtime
+  `columnRef` used by `Order.by`/`Sort` remains one-hop bounded: it resolves the flattened
+  `columns()` paths plus the generated `columnRefs()` map — exactly the one-hop relation leaves
+  whose values the `navigate()` switch answers for CURSOR keys (both surfaces come from one shared
+  generation-time enumeration), so a sortable path always has a working cursor key and anything
+  deeper fails fast with `Unknown property '<path>' on <Entity>`.
 - Cursors for relation-sorted paged reads now end with the root id key.
 - `deleteBy…` names whose predicate path traverses one relation now render correlated `EXISTS`
   semi-joins — `deleteByCustomerName` emits `DELETE FROM "order" WHERE EXISTS (SELECT 1 FROM

@@ -8,9 +8,9 @@ limitations; it is not a promise of support for every Jakarta Data feature or da
 
 - Jakarta Data 1.0 repository methods are analyzed at compile time and implemented by generated
   classes that execute through `JdbcClient`.
-- H2 is the only implemented and tested SQL dialect. Generated SQL has a small dialect boundary
-  for database-specific syntax such as identifier quoting and pagination; the boundary is an
-  extension point, not evidence that another database is supported.
+- H2 and PostgreSQL are the shipped SQL dialects (H2 is the default). Generated SQL has a small
+  dialect boundary for database-specific syntax such as identifier quoting and pagination; the
+  boundary is an extension point for further databases.
 - `@Query` text is application-supplied native SQL. The processor binds its parameters but does not
   parse or rewrite the SQL for a dialect.
 - Jakarta Data Query Language (JDQL) parsing and translation are out of scope.
@@ -175,8 +175,8 @@ supported signatures; this list does not imply complete Jakarta Data feature cov
 
 `SqlBuilder` renders structured generated SQL from a `TableSchema`, an `AttributePathResolver`, and,
 for a whole query method, a `QueryDefinition`. `SqlDialect` owns syntax that varies between databases, including identifier
-quoting and pagination. `H2Dialect` is the only shipped implementation and is the default for
-existing convenience APIs.
+quoting and pagination. `H2Dialect` (default) and `PostgreSqlDialect` are the shipped
+implementations; the processor selects one via the `-Afluda.dialect` option.
 
 The dialect applies to SQL generated from structured operations. Native SQL supplied to `@Query`
 is passed through unchanged, so its syntax remains the application's responsibility.

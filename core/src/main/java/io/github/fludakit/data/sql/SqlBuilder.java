@@ -3,6 +3,7 @@ package io.github.fludakit.data.sql;
 import io.github.fludakit.data.Names;
 import io.github.fludakit.data.metadata.AttributePathResolver;
 import io.github.fludakit.data.metadata.ColumnRef;
+import io.github.fludakit.data.metadata.EntityMetadata;
 import io.github.fludakit.data.metadata.JoinRef;
 import io.github.fludakit.data.metadata.TableSchema;
 import io.github.fludakit.data.query.Operation;
@@ -20,40 +21,175 @@ import java.util.Objects;
 import java.util.stream.Collectors;
 
 /**
- * The engine's ONE SQL renderer. Physical statements use a {@link TableSchema} for one table;
- * structured queries also use an {@link AttributePathResolver} for entity-rooted paths. A whole query method
- * uses a logical {@link io.github.fludakit.data.query.QueryDefinition}. {@link #build(TableSchema, AttributePathResolver,
- * io.github.fludakit.data.query.QueryDefinition)} is the layout hub; the named builders below are its
- * primitives and the classic no-join delegation. Generated SQL syntax is supplied by a
- * {@link SqlDialect}; {@link H2Dialect} is the default and only shipped backend.
+ * The engine's ONE SQL renderer, now a fluent builder. Bind the {@link TableSchema}, the
+ * entity-rooted {@link AttributePathResolver} and — for a structured query — the logical
+ * {@link QueryDefinition} in the constructor, optionally override the {@link SqlDialect}, then call a
+ * terminal renderer:
+ *
+ * <pre>
+ * new SqlBuilder(schema, resolver, model).dialect(H2Dialect.INSTANCE).select();
+ * new SqlBuilder(schema, resolver).insert(false);
+ * new SqlBuilder(schema).deleteById();
+ * </pre>
+ *
+ * <p>Physical lifecycle statements use a {@link TableSchema} for one table; structured queries also use
+ * an {@link AttributePathResolver} for entity-rooted paths. {@link #select()} / {@link #count()} /
+ * {@link #delete()} render a whole query method from its {@link QueryDefinition}; the splice primitives
+ * ({@link #qualify(ColumnRef)}, {@link #joinClause(List)}, {@link #aggregateSortTerm(ColumnRef, boolean)},
+ * ...) are the same rendering pieces exposed as instance methods for callers that assemble dynamic SQL
+ * at runtime (the generated paged readers). Generated SQL syntax is supplied by the {@link SqlDialect};
+ * {@link H2Dialect} is the default and only shipped backend. {@link #paramName(String)} is the one pure
+ * (stateless) helper kept static.</p>
  */
-
 public final class SqlBuilder {
 
-    private final SqlDialect dialect;
+    private final TableSchema schema;
+    private final AttributePathResolver<?> resolver;
+    private final QueryDefinition model;
+    private SqlDialect dialect;
 
-    public SqlBuilder() {
-        this(H2Dialect.INSTANCE);
+    /** A schema-only builder for lifecycle statements and splice primitives. */
+    public SqlBuilder(TableSchema schema) {
+        this(schema, null, null);
     }
 
-    public SqlBuilder(SqlDialect dialect) {
+    /** A convenience for generated code: an {@link EntityMetadata} is both schema and resolver. */
+    public SqlBuilder(EntityMetadata<?> metadata) {
+        this(metadata, metadata, null);
+    }
+
+    /** A schema + resolver builder for lifecycle statements that bind logical paths. */
+    public SqlBuilder(TableSchema schema, AttributePathResolver<?> resolver) {
+        this(schema, resolver, null);
+    }
+
+    /** A full structured-query builder. */
+    public SqlBuilder(TableSchema schema, AttributePathResolver<?> resolver, QueryDefinition model) {
+        this.schema = Objects.requireNonNull(schema, "schema");
+        this.resolver = resolver;
+        this.model = model;
+        this.dialect = H2Dialect.INSTANCE;
+    }
+
+    /** Overrides the dialect used by every subsequent rendering. Returns {@code this}. */
+    public SqlBuilder dialect(SqlDialect dialect) {
         this.dialect = Objects.requireNonNull(dialect, "dialect");
+        return this;
     }
 
-    public String selectBy(TableSchema md, List<Predicate> predicates, List<SortSpec> sorts, int limit, String cursorClause) {
-        String cols = md.columns().stream().map(c -> dialect.quoteIdentifier(c.column())).collect(Collectors.joining(", "));
-        StringBuilder sb = new StringBuilder("SELECT ").append(cols).append(" FROM ")
-                .append(dialect.quoteIdentifier(md.tableName()));
-        appendWhere(sb, predicates, cursorClause);
-        sb.append(orderBy(md, sorts));
-        if (limit > 0) sb.append(dialect.limitClause(Integer.toString(limit)));
-        return sb.toString();
+    // --------------------------------------------------------------- structured terminals
+
+    /** Renders the builder's query model as a SELECT (FIND). */
+    public String select() {
+        return select(null);
     }
 
-    public String countBy(TableSchema md, List<Predicate> predicates) {
-        StringBuilder sb = new StringBuilder("SELECT COUNT(*) FROM ").append(dialect.quoteIdentifier(md.tableName()));
-        appendWhere(sb, predicates, null);
-        return sb.toString();
+    /** Renders the query model as a SELECT carrying a joined full-materialisation projection. */
+    public String select(String extraProjection) {
+        return build(requireModel(), extraProjection);
+    }
+
+    /** Renders the query model as a COUNT or EXISTS. */
+    public String count() {
+        return build(requireModel(), null);
+    }
+
+    /** Renders the query model as a DELETE. */
+    public String delete() {
+        return build(requireModel(), null);
+    }
+
+    // --------------------------------------------------------------- lifecycle terminals
+
+    /** Renders a classic no-join SELECT over the builder's schema. */
+    public String selectBy(List<Predicate> predicates, List<SortSpec> sorts, int limit, String cursorClause) {
+        return selectBy(schema, predicates, sorts, limit, cursorClause);
+    }
+
+    /** Renders a classic no-join COUNT over the builder's schema. */
+    public String countBy(List<Predicate> predicates) {
+        return countBy(schema, predicates);
+    }
+
+    /** Renders a classic no-join DELETE over the builder's schema. */
+    public String deleteBy(List<Predicate> predicates) {
+        return deleteBy(schema, predicates);
+    }
+
+    /** Renders an INSERT including the identifier column. */
+    public String insert() {
+        return insert(true);
+    }
+
+    /** Renders an INSERT; {@code includeId=false} omits a database-generated identity column. */
+    public String insert(boolean includeId) {
+        return insert(schema, requireResolver(), includeId);
+    }
+
+    /** Renders an UPDATE by identifier. */
+    public String update() {
+        return update(schema, requireResolver());
+    }
+
+    /** Renders a DELETE by identifier. */
+    public String deleteById() {
+        return deleteById(schema);
+    }
+
+    // --------------------------------------------------------------- splice primitives
+
+    /** Qualifies a table-local column by its owner alias, owner table, or the schema's root table. */
+    public String qualify(ColumnRef ref) {
+        return qualify(dialect, ref, schema.tableName());
+    }
+
+    /** Qualifies a column against an explicit root table. */
+    public String qualify(ColumnRef ref, String rootTable) {
+        return qualify(dialect, ref, rootTable);
+    }
+
+    /** The deduplicated {@code LEFT JOIN} chain these refs require (empty when nothing joins). */
+    public String joinClause(List<ColumnRef> refs) {
+        return joinClause(dialect, refs);
+    }
+
+    /**
+     * Resolves an entity-rooted logical attribute path to its table-local physical column. A path
+     * that traverses a relationship (its ref carries joins) has no single table-local column and is
+     * rejected, so callers fall back to relation-aware resolution (e.g. an aggregate sort term).
+     */
+    public String resolveColumn(String path) {
+        ColumnRef ref = requireResolver().columnRef(path);
+        if (!ref.joins().isEmpty()) {
+            throw new IllegalArgumentException(
+                    "'" + path + "' traverses a relationship and has no table-local column");
+        }
+        return ref.column();
+    }
+
+    /** Whether the first segment of an entity-rooted path is a to-many relation or collection. */
+    public boolean isToManyPath(String path) {
+        return requireResolver().isToManyPath(path);
+    }
+
+    /** The correlated {@code MIN}/{@code MAX} scalar subquery a to-many sort orders by. */
+    public String aggregateSortTerm(ColumnRef ref, boolean ascending) {
+        return aggregateSortTerm(dialect, schema, ref, ascending);
+    }
+
+    /** The EXISTS conjunct a predicate on an existential (or DELETE-traversed) ref renders. */
+    public String existsConjunct(Predicate predicate, ColumnRef ref) {
+        return existsConjunct(dialect, predicate, ref);
+    }
+
+    /** Renders a predicate with its column qualified by {@code ref}. */
+    public String render(Predicate predicate, ColumnRef ref) {
+        return render(dialect, predicate, ref);
+    }
+
+    /** The root-table projection/join shell ({@code SELECT ... FROM ... LEFT JOIN ...}). */
+    public String qualifiedRootSelect(List<ColumnRef> traversedToOne, boolean qualified, String extraProjection) {
+        return qualifiedRootSelect(dialect, schema, traversedToOne, qualified, extraProjection);
     }
 
     /**
@@ -65,16 +201,50 @@ public final class SqlBuilder {
         return path.replace('.', '_');
     }
 
+    // --------------------------------------------------------------- internal rendering
+
+    private QueryDefinition requireModel() {
+        if (model == null) {
+            throw new IllegalStateException("this SqlBuilder has no query model — construct it with "
+                    + "SqlBuilder(TableSchema, AttributePathResolver, QueryDefinition)");
+        }
+        return model;
+    }
+
+    private AttributePathResolver<?> requireResolver() {
+        if (resolver == null) {
+            throw new IllegalStateException("this SqlBuilder has no attribute resolver — construct it with "
+                    + "SqlBuilder(TableSchema, AttributePathResolver[, QueryDefinition])");
+        }
+        return resolver;
+    }
+
+    private String selectBy(TableSchema md, List<Predicate> predicates, List<SortSpec> sorts, int limit, String cursorClause) {
+        String cols = md.columns().stream().map(c -> dialect.quoteIdentifier(c.column())).collect(Collectors.joining(", "));
+        StringBuilder sb = new StringBuilder("SELECT ").append(cols).append(" FROM ")
+                .append(dialect.quoteIdentifier(md.tableName()));
+        appendWhere(sb, predicates, cursorClause);
+        sb.append(orderBy(md, sorts));
+        if (limit > 0) sb.append(dialect.limitClause(Integer.toString(limit)));
+        return sb.toString();
+    }
+
+    private String countBy(TableSchema md, List<Predicate> predicates) {
+        StringBuilder sb = new StringBuilder("SELECT COUNT(*) FROM ").append(dialect.quoteIdentifier(md.tableName()));
+        appendWhere(sb, predicates, null);
+        return sb.toString();
+    }
+
     /**
      * Builds an INSERT. When {@code includeId} is false the identifier column is omitted so the
      * database can generate it (identity / auto-increment); binding an explicit NULL to an identity
      * column is rejected by most databases, including H2.
      */
-    public String insert(TableSchema md, AttributePathResolver<?> attributes) {
+    private String insert(TableSchema md, AttributePathResolver<?> attributes) {
         return insert(md, attributes, true);
     }
 
-    public String insert(TableSchema md, AttributePathResolver<?> attributes, boolean includeId) {
+    private String insert(TableSchema md, AttributePathResolver<?> attributes, boolean includeId) {
         List<ColumnRef> cols = md.columns();
         if (!includeId) {
             cols = cols.stream()
@@ -87,7 +257,7 @@ public final class SqlBuilder {
         return "INSERT INTO " + dialect.quoteIdentifier(md.tableName()) + " (" + names + ") VALUES (" + params + ")";
     }
 
-    public String update(TableSchema md, AttributePathResolver<?> attributes) {
+    private String update(TableSchema md, AttributePathResolver<?> attributes) {
         List<ColumnRef> cols = md.columns();
         String idCol = dialect.quoteIdentifier(md.idColumn());
         String sets = cols.stream()
@@ -107,20 +277,15 @@ public final class SqlBuilder {
                         "No logical attribute path maps to column '" + column.column() + "'"));
     }
 
-    public String deleteById(TableSchema md) {
+    private String deleteById(TableSchema md) {
         return "DELETE FROM " + dialect.quoteIdentifier(md.tableName()) + " WHERE "
                 + dialect.quoteIdentifier(md.idColumn()) + " = :id";
     }
 
-    public String deleteBy(TableSchema md, List<Predicate> predicates) {
+    private String deleteBy(TableSchema md, List<Predicate> predicates) {
         StringBuilder sb = new StringBuilder("DELETE FROM ").append(dialect.quoteIdentifier(md.tableName()));
         appendWhere(sb, predicates, null);
         return sb.toString();
-    }
-
-    /** The rendered statement for {@code model} with no extra projection columns. */
-    public String build(TableSchema md, AttributePathResolver<?> attributes, QueryDefinition model) {
-        return build(md, attributes, model, "");
     }
 
     /**
@@ -149,8 +314,9 @@ public final class SqlBuilder {
      * {@code extraProjection} is the joined full-materialisation payload (see
      * {@link #qualifiedRootSelect}) and rides FIND shells only — count and delete ignore it.
      */
-    public String build(TableSchema md, AttributePathResolver<?> attributes,
-                        QueryDefinition model, String extraProjection) {
+    private String build(QueryDefinition model, String extraProjection) {
+        TableSchema md = schema;
+        AttributePathResolver<?> attributes = requireResolver();
         Operation operation = model.operation();
         boolean deleteMode = operation == Operation.DELETE;
         boolean countMode = operation == Operation.COUNT || operation == Operation.EXISTS;
@@ -202,16 +368,16 @@ public final class SqlBuilder {
         StringBuilder sb = new StringBuilder();
         if (countMode) {
             sb.append("SELECT COUNT(*) FROM ").append(dialect.quoteIdentifier(md.tableName()))
-                    .append(joinClause(dialect, md, joinRefs));
+                    .append(joinClause(dialect, joinRefs));
         } else if (deleteMode) {
             sb.append("DELETE FROM ").append(dialect.quoteIdentifier(md.tableName()))
-                    .append(joinClause(dialect, md, joinRefs));
+                    .append(joinClause(dialect, joinRefs));
         } else {
             // Joined find: every root column is qualified by the root table. Unqualified bare names
             // become ambiguous the moment a join adds a table sharing a column name (e.g. the target's
             // own "id"), and a full-materialisation read joins exactly such a table. Qualifying keeps
             // each label = its physical column, so the generated row mapper still reads it by name.
-            sb.append(qualifiedRootSelect(dialect, md, joinRefs, spliceJoins, extraProjection));
+            sb.append(qualifiedRootSelect(dialect, schema, joinRefs, spliceJoins, extraProjection));
         }
         List<String> conjuncts = new ArrayList<>();
         for (int i = 0; i < plain.size(); i++) {
@@ -221,7 +387,7 @@ public final class SqlBuilder {
             }
         }
         for (int i : existentialIndices) {
-            conjuncts.add(existsConjunct(dialect, md, plain.get(i), predicateRefs.get(i)));
+            conjuncts.add(existsConjunct(dialect, plain.get(i), predicateRefs.get(i)));
         }
         if (!conjuncts.isEmpty()) {
             sb.append(" WHERE ").append(String.join(" AND ", conjuncts));
@@ -232,7 +398,7 @@ public final class SqlBuilder {
                 SortSpec sort = sorts.get(i);
                 ColumnRef ref = sortRefs.get(i);
                 String term = Boolean.TRUE.equals(existentialSorts.get(i))
-                        ? aggregateSortTerm(dialect, md, ref, sort.ascending())
+                        ? aggregateSortTerm(dialect, schema, ref, sort.ascending())
                         : ref.joins().isEmpty() && ref.ownerAlias() == null
                                 && (ref.ownerTableName() == null || ref.ownerTableName().equals(md.tableName()))
                                 ? dialect.quoteIdentifier(ref.column())
@@ -268,10 +434,11 @@ public final class SqlBuilder {
         return pathHead(path) != null && attributes.isToManyPath(path);
     }
 
-    public String orderBy(AttributePathResolver<?> attributes, List<SortSpec> sorts) {
+    /** Renders the ORDER BY clause for the given sort paths, resolving each through the resolver. */
+    public String orderBy(List<SortSpec> sorts) {
         if (sorts.isEmpty()) return "";
         return " ORDER BY " + sorts.stream()
-                .map(s -> dialect.quoteIdentifier(attributes.columnRef(s.property()).column())
+                .map(s -> dialect.quoteIdentifier(requireResolver().columnRef(s.property()).column())
                         + (s.ascending() ? " ASC" : " DESC"))
                 .collect(Collectors.joining(", "));
     }
@@ -287,11 +454,7 @@ public final class SqlBuilder {
     /**
      * Qualifies a table-local column by its owner alias, owner table name, or the supplied root.
      */
-    public static String qualify(ColumnRef ref, String rootTable) {
-        return qualify(H2Dialect.INSTANCE, ref, rootTable);
-    }
-
-    public static String qualify(SqlDialect dialect, ColumnRef ref, String rootTable) {
+    private static String qualify(SqlDialect dialect, ColumnRef ref, String rootTable) {
         String qualifier;
         if (ref.ownerAlias() != null) {
             qualifier = ref.ownerAlias();
@@ -313,11 +476,7 @@ public final class SqlBuilder {
      * {@code  LEFT JOIN "<table>" AS "<alias>" ON <qualifier>."<parentColumn>" = "<alias>"."<childColumn>";}
      * Returns {@code ""} when no ref carries a join.
      */
-    public static String joinClause(TableSchema md, List<ColumnRef> refs) {
-        return joinClause(H2Dialect.INSTANCE, md, refs);
-    }
-
-    public static String joinClause(SqlDialect dialect, TableSchema md, List<ColumnRef> refs) {
+    private static String joinClause(SqlDialect dialect, List<ColumnRef> refs) {
         Map<String, JoinRef> byAlias = new LinkedHashMap<>();
         StringBuilder sb = new StringBuilder();
         for (ColumnRef ref : refs) {
@@ -334,13 +493,6 @@ public final class SqlBuilder {
             }
         }
         return sb.toString();
-    }
-
-    /**
-     * Resolves an entity-rooted logical attribute path to its table-local physical column.
-     */
-    public static String resolveColumn(AttributePathResolver<?> attributes, String property) {
-        return attributes.columnRef(property).column();
     }
 
     private void appendWhere(StringBuilder sb, List<Predicate> predicates, String cursorClause) {
@@ -366,11 +518,7 @@ public final class SqlBuilder {
      * Renders a predicate with its column qualified by {@code ref}: last-join alias, then
      * explicit table, and fully-local refs stay unqualified for legacy parity.
      */
-    public static String render(Predicate p, ColumnRef ref) {
-        return render(H2Dialect.INSTANCE, p, ref);
-    }
-
-    public static String render(SqlDialect dialect, Predicate p, ColumnRef ref) {
+    private static String render(SqlDialect dialect, Predicate p, ColumnRef ref) {
         String col = ref.joins().isEmpty() && ref.ownerAlias() == null
                 && ref.ownerTableName() == null
                 ? dialect.quoteIdentifier(ref.column())
@@ -396,11 +544,7 @@ public final class SqlBuilder {
      * FK for a to-one head. The leaf term is {@link #render(Predicate, ColumnRef)}'s alias-qualified
      * rendering, so the named parameter and the caller's binding are unchanged.
      */
-    public static String existsConjunct(TableSchema md, Predicate p, ColumnRef ref) {
-        return existsConjunct(H2Dialect.INSTANCE, md, p, ref);
-    }
-
-    public static String existsConjunct(SqlDialect dialect, TableSchema md, Predicate p, ColumnRef ref) {
+    private static String existsConjunct(SqlDialect dialect, Predicate p, ColumnRef ref) {
         JoinRef join = ref.joins().get(ref.joins().size() - 1);
         String ownerQualifier = join.ownerAlias() == null ? join.ownerTableName() : join.ownerAlias();
         return "EXISTS (SELECT 1 FROM " + dialect.quoteIdentifier(join.childTableName()) + " "
@@ -416,11 +560,6 @@ public final class SqlBuilder {
         return dot < 0 ? null : path.substring(0, dot);
     }
 
-    private static String lastPathSegment(String path) {
-        int dot = path.lastIndexOf('.');
-        return dot < 0 ? path : path.substring(dot + 1);
-    }
-
     /** True when any resolved ref carries a join, i.e. the statement must splice a LEFT JOIN chain. */
     private static boolean hasJoins(List<ColumnRef> refs) {
         for (ColumnRef r : refs) {
@@ -429,14 +568,6 @@ public final class SqlBuilder {
             }
         }
         return false;
-    }
-
-    /**
-     * True when the first segment of an entity-rooted sort path is to-many. This classification
-     * belongs to the entity attribute model, not the physical table schema.
-     */
-    public static boolean isToManyPath(AttributePathResolver<?> attributes, String attributePath) {
-        return attributes.isToManyPath(attributePath);
     }
 
     /**
@@ -449,11 +580,7 @@ public final class SqlBuilder {
      * {@code childFk = rootTable.rootId} pair taken from its {@link JoinRef}. Every identifier goes
      * through {@link Names#quote}; the result is used VERBATIM as an ORDER BY / seek term.
      */
-    public static String aggregateSortTerm(TableSchema md, ColumnRef ref, boolean ascending) {
-        return aggregateSortTerm(H2Dialect.INSTANCE, md, ref, ascending);
-    }
-
-    public static String aggregateSortTerm(SqlDialect dialect, TableSchema md, ColumnRef ref, boolean ascending) {
+    private static String aggregateSortTerm(SqlDialect dialect, TableSchema md, ColumnRef ref, boolean ascending) {
         if (ref.joins().isEmpty()) {
             throw new IllegalArgumentException(
                     "aggregate sort term requires a relation path");
@@ -495,12 +622,7 @@ public final class SqlBuilder {
      * {@code extraProjection} is unreachable through emission (full materialisation implies a to-one
      * join, which implies qualified), so it is a precondition throw, not new logic.
      */
-    public static String qualifiedRootSelect(TableSchema md, List<ColumnRef> traversedToOne,
-                                             boolean qualified, String extraProjection) {
-        return qualifiedRootSelect(H2Dialect.INSTANCE, md, traversedToOne, qualified, extraProjection);
-    }
-
-    public static String qualifiedRootSelect(SqlDialect dialect, TableSchema md, List<ColumnRef> traversedToOne,
+    private static String qualifiedRootSelect(SqlDialect dialect, TableSchema md, List<ColumnRef> traversedToOne,
                                               boolean qualified, String extraProjection) {
         if (!qualified && extraProjection != null && !extraProjection.isEmpty()) {
             throw new IllegalStateException("bare projection cannot carry extraProjection");
@@ -514,13 +636,8 @@ public final class SqlBuilder {
             sb.append(", ").append(extraProjection);
         }
         sb.append(" FROM ").append(dialect.quoteIdentifier(md.tableName()));
-        sb.append(joinClause(dialect, md, traversedToOne));
+        sb.append(joinClause(dialect, traversedToOne));
         return sb.toString();
-    }
-
-    /** The single {@code "qualifier"."column"} rendering shared by every qualified projection (S-1). */
-    private static String qualifiedColumn(String qualifier, String column) {
-        return qualifiedColumn(H2Dialect.INSTANCE, qualifier, column);
     }
 
     private static String qualifiedColumn(SqlDialect dialect, String qualifier, String column) {

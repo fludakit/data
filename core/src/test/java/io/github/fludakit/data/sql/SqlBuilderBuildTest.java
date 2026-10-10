@@ -98,8 +98,13 @@ class SqlBuilderBuildTest {
 
     private static String build(Operation operation, List<Predicate> predicates,
                                 List<SortSpec> sorts, PagingMode paging, int limit) {
-        return new SqlBuilder().build(ORDER, ATTRIBUTES,
+        SqlBuilder builder = new SqlBuilder(ORDER, ATTRIBUTES,
                 new Model(operation, predicates, sorts, paging, limit));
+        return switch (operation) {
+            case COUNT, EXISTS -> builder.count();
+            case DELETE -> builder.delete();
+            default -> builder.select();
+        };
     }
 
     @Test
@@ -120,10 +125,10 @@ class SqlBuilderBuildTest {
                 return " OFFSET " + offsetExpression;
             }
         };
-        String sql = new SqlBuilder(testDialect).build(ORDER, ATTRIBUTES,
+        String sql = new SqlBuilder(ORDER, ATTRIBUTES,
                 new Model(Operation.FIND,
                         List.of(pred(Predicate.of("customer.name", Operator.EQ, "customer_name"))),
-                        List.of(), PagingMode.NONE, 0));
+                        List.of(), PagingMode.NONE, 0)).dialect(testDialect).select();
         assertEquals("SELECT `order_table`.`id`, `order_table`.`status`, `order_table`.`customer_id`"
                         + " FROM `order_table` LEFT JOIN `customer` AS `customer`"
                         + " ON `order_table`.`customer_id` = `customer`.`id`"
@@ -211,8 +216,8 @@ class SqlBuilderBuildTest {
     void pagedModelRendersTheBaseConstantSortFreeAndLimitFree() {
         List<Predicate> preds = List.of(pred(Predicate.of("customer.name", Operator.EQ, "customer_name")));
         List<SortSpec> sorts = List.of(new SortSpec("customer.name", false, false));
-        String base = new SqlBuilder().build(ORDER, ATTRIBUTES, new Model(Operation.FIND, preds, sorts,
-                PagingMode.OFFSET, 10));
+        String base = new SqlBuilder(ORDER, ATTRIBUTES, new Model(Operation.FIND, preds, sorts,
+                PagingMode.OFFSET, 10)).select();
         assertEquals("SELECT \"order_table\".\"id\", \"order_table\".\"status\","
                         + " \"order_table\".\"customer_id\""
                         + " FROM \"order_table\""
@@ -223,11 +228,10 @@ class SqlBuilderBuildTest {
 
     @Test
     void extraProjectionRidesTheQualifiedFindShellOnly() {
-        String sql = new SqlBuilder().build(ORDER, ATTRIBUTES,
+        String sql = new SqlBuilder(ORDER, ATTRIBUTES,
                 new Model(Operation.FIND,
                         List.of(pred(Predicate.of("customer.name", Operator.EQ, "customer_name"))),
-                        List.of(), PagingMode.NONE, 0),
-                "\"customer\".\"id\" AS \"customer_join_id\"");
+                        List.of(), PagingMode.NONE, 0)).select("\"customer\".\"id\" AS \"customer_join_id\"");
         assertEquals("SELECT \"order_table\".\"id\", \"order_table\".\"status\","
                         + " \"order_table\".\"customer_id\","
                         + " \"customer\".\"id\" AS \"customer_join_id\""
@@ -240,7 +244,7 @@ class SqlBuilderBuildTest {
     @Test
     void bareProjectionCannotCarryExtraColumns() {
         IllegalStateException failure = assertThrows(IllegalStateException.class,
-                () -> SqlBuilder.qualifiedRootSelect(ORDER, List.of(), false, "\"customer\".\"id\""));
+                () -> new SqlBuilder(ORDER).qualifiedRootSelect(List.of(), false, "\"customer\".\"id\""));
         assertEquals("bare projection cannot carry extraProjection", failure.getMessage());
     }
 }

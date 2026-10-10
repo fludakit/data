@@ -1,6 +1,7 @@
 package io.github.fludakit.data.metadata;
 
 import io.github.fludakit.data.metamodel.IdAttribute;
+import io.github.fludakit.data.metamodel.ListAttribute;
 import io.github.fludakit.data.metamodel.PathAttribute;
 
 import java.util.List;

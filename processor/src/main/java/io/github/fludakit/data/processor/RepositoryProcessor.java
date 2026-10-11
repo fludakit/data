@@ -12,9 +12,9 @@ import com.squareup.javapoet.TypeName;
 import com.squareup.javapoet.TypeSpec;
 import com.squareup.javapoet.TypeVariableName;
 import io.github.fludakit.data.Names;
+import io.github.fludakit.data.metadata.AttributePathVisitor;
 import io.github.fludakit.data.metadata.ColumnRef;
-import io.github.fludakit.data.metadata.JoinRef;
-import io.github.fludakit.data.metadata.TypeMapping;
+import io.github.fludakit.data.metadata.ColumnResolution;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.metadata.EmbeddedValueObjectMapping;
@@ -150,8 +150,8 @@ public class RepositoryProcessor extends AbstractProcessor {
             ClassName.get("io.github.fludakit.data.metamodel", "ListAttributeRecord");
     private static final ClassName MD_COLUMN_REF =
             ClassName.get("io.github.fludakit.data.metadata", "ColumnRef");
-    private static final ClassName MD_JOIN_EDGE =
-            ClassName.get("io.github.fludakit.data.metadata", "JoinRef");
+    private static final ClassName MD_ATTRIBUTE_PATH_VISITOR =
+            ClassName.get("io.github.fludakit.data.metadata", "AttributePathVisitor");
     private static final ClassName MD_KIND =
             ClassName.get("io.github.fludakit.data.metadata", "TypeMapping", "Kind");
 
@@ -664,24 +664,26 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /**
-     * The {@code ColumnRef} literal — the same shape {@code generateMetadata} emits for
-     * {@code columnRefs()}, so a navigated ref serialises identically in both surfaces.
+     * The {@code ColumnRef} literal for one of the sealed cases ({@code Simple}, {@code Reference},
+     * {@code Collection}) — the same shape {@code generateMetadata} emits for {@code columnRefs()}
+     * and the {@code visit} switch.
      */
     private static CodeBlock columnRefLiteral(ColumnRef ref) {
-        CodeBlock.Builder joins = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
-        for (int i = 0; i < ref.joins().size(); i++) {
-            if (i > 0) {
-                joins.add(", ");
-            }
-            JoinRef join = ref.joins().get(i);
-            joins.add("new $T($L, $S, $S, $S)", MD_JOIN_EDGE,
-                    join.ownerTableName() == null ? CodeBlock.of("null") : CodeBlock.of("$S", join.ownerTableName()),
-                    join.ownerColumn(), join.childTableName(), join.childColumn());
+        if (ref instanceof ColumnRef.Simple simple) {
+            return CodeBlock.of("new $T.Simple($S, $L)", MD_COLUMN_REF, simple.column(),
+                    nullableString(simple.ownerTable()));
         }
-        joins.add(")");
-        return CodeBlock.of("new $T($S, $L, $L)", MD_COLUMN_REF, ref.column(),
-                ref.ownerTableName() == null ? CodeBlock.of("null") : CodeBlock.of("$S", ref.ownerTableName()),
-                joins.build());
+        if (ref instanceof ColumnRef.Reference reference) {
+            return CodeBlock.of("new $T.Reference($S, $L, $S, $S)", MD_COLUMN_REF, reference.fkColumn(),
+                    nullableString(reference.ownerTable()), reference.targetTable(), reference.targetIdColumn());
+        }
+        ColumnRef.Collection collection = (ColumnRef.Collection) ref;
+        return CodeBlock.of("new $T.Collection($S, $L, $S, $S)", MD_COLUMN_REF, collection.fkColumn(),
+                nullableString(collection.childTable()), collection.ownerTable(), collection.ownerIdColumn());
+    }
+
+    private static CodeBlock nullableString(String value) {
+        return value == null ? CodeBlock.of("null") : CodeBlock.of("$S", value);
     }
 
     /** A {@code List.of(...)} literal of column refs for a generated {@code columns()} accessor. */
@@ -3277,7 +3279,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                              ParsedMethodName parsed, Action action, boolean distinct,
                              List<? extends TypeMirror> parameterTypes, List<Binding> bindings,
                              TypeMirror returnMirror, Kind kind, String queryDefinitionName,
-                             List<Predicate> predicates, List<ColumnRef> predicateRefs) {
+                             List<Predicate> predicates, List<ColumnResolution> predicateRefs) {
     }
 
     /**
@@ -3322,14 +3324,14 @@ public class RepositoryProcessor extends AbstractProcessor {
         // Local and embedded paths resolve to plain unqualified refs.
         List<PathResolution> predicatePaths = resolveCompilePaths(entity.metadata(),
                 predicates.stream().map(Predicate::property).toList(), method, declaredProperties);
-        if (declaredProperties && predicatePaths.stream().anyMatch(p -> p.ref() == null)) {
+        if (declaredProperties && predicatePaths.stream().anyMatch(p -> p.resolution() == null)) {
             // A declared (method-name or @By) property did not resolve: the ERROR is already reported,
             // so no implementation must be rendered for this method.
             return null;
         }
         return new FindInput(name, parameters, parsed, action, distinct, parameterTypes, bindings,
                 returnMirror, kind, queryDefinitionName, predicates,
-                predicatePaths.stream().map(PathResolution::ref).toList());
+                predicatePaths.stream().map(PathResolution::resolution).toList());
     }
 
     private void emitFind(MethodSpec.Builder builder, ExecutableElement method, ExecutableType resolved,
@@ -3397,7 +3399,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             Kind kind = input.kind();
             String queryDefinitionName = input.queryDefinitionName();
             List<Predicate> predicates = input.predicates();
-            List<ColumnRef> predicateRefs = input.predicateRefs();
+            List<ColumnResolution> predicateRefs = input.predicateRefs();
     
             if (action == Action.COUNT || action == Action.EXISTS) {
                 Operation countOperation = action == Action.EXISTS ? Operation.EXISTS : Operation.COUNT;
@@ -3428,16 +3430,16 @@ public class RepositoryProcessor extends AbstractProcessor {
                 // invalid SQL. A multi-hop (2+ join) delete would need a NESTED EXISTS (each intermediate
                 // relationship opens its own correlated subquery); that is not rendered yet, so it keeps
                 // the legacy NOTE-degrade exactly as before.
-                List<ColumnRef> deleteRefs = predicateRefs;
+                List<ColumnResolution> deleteRefs = predicateRefs;
                 for (int i = 0; i < predicateRefs.size(); i++) {
-                    ColumnRef ref = predicateRefs.get(i);
-                    if (ref != null && ref.joins().size() > 1) {
+                    ColumnResolution ref = predicateRefs.get(i);
+                    if (ref != null && ref.edges().size() > 1) {
                         processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
                                 ResolutionVocabulary.multiHop(predicates.get(i).property()), method);
                         if (deleteRefs == predicateRefs) {
                             deleteRefs = new ArrayList<>(predicateRefs);
                         }
-                        deleteRefs.set(i, snakeCasedLocalColumnRef(predicates.get(i).property()));
+                        deleteRefs.set(i, resolutionOf(snakeCasedLocalColumnRef(predicates.get(i).property())));
                     }
                 }
                 queryDefinitions.add(queryDefinitionOf(queryDefinitionName, Operation.DELETE, kind, entity.metadata(),
@@ -3499,14 +3501,15 @@ public class RepositoryProcessor extends AbstractProcessor {
                 List<PathResolution> pagedSortPaths = methodSorts.stream()
                         .map(s -> resolveCompilePath(entity.metadata(), s.property()))
                         .toList();
-                List<ColumnRef> pagedSortRefs = new ArrayList<>();
+                List<ColumnResolution> pagedSortRefs = new ArrayList<>();
                 List<Boolean> pagedExistentialSorts = new ArrayList<>();
                 for (int i = 0; i < pagedSortPaths.size(); i++) {
                     // NOTE-free resolution: emitPaged rejects a multi-hop sort path right after this point,
                     // so the model degrades a ref-less rejection to the legacy local ref instead of
                     // pre-emitting a second diagnostic (and never serialises a null ref).
-                    ColumnRef ref = pagedSortPaths.get(i).ref();
-                    pagedSortRefs.add(ref == null ? snakeCasedLocalColumnRef(methodSorts.get(i).property()) : ref);
+                    ColumnResolution ref = pagedSortPaths.get(i).resolution();
+                    pagedSortRefs.add(ref == null
+                            ? resolutionOf(snakeCasedLocalColumnRef(methodSorts.get(i).property())) : ref);
                     pagedExistentialSorts.add(ref != null && pagedSortPaths.get(i).existential());
                 }
                 queryDefinitions.add(queryDefinitionOf(queryDefinitionName, Operation.FIND, kind, entity.metadata(),
@@ -3524,11 +3527,11 @@ public class RepositoryProcessor extends AbstractProcessor {
             boolean declaredSorts = parsed != null || method.getAnnotationsByType(OrderBy.class).length > 0;
             List<PathResolution> sortPaths = resolveCompilePaths(entity.metadata(),
                     methodSorts.stream().map(SortSpec::property).toList(), method, declaredSorts);
-            if (declaredSorts && sortPaths.stream().anyMatch(p -> p.ref() == null)) {
+            if (declaredSorts && sortPaths.stream().anyMatch(p -> p.resolution() == null)) {
                 // A declared order property did not resolve: ERROR already reported, skip the method.
                 return;
             }
-            List<ColumnRef> sortRefs = sortPaths.stream().map(PathResolution::ref).toList();
+            List<ColumnResolution> sortRefs = sortPaths.stream().map(PathResolution::resolution).toList();
             List<Boolean> existentialSorts = sortPaths.stream().map(PathResolution::existential).toList();
     
             // when a method-name predicate/sort path traversed a Reference,
@@ -3613,18 +3616,19 @@ public class RepositoryProcessor extends AbstractProcessor {
      * property. Composition and association references both qualify — the field is filled from the join
      * either way. Deduped by property name so one traversal of a shared head yields one projection.
      */
-    private List<Prop.Reference> collectTraversedReferences(TypeMapping<?> mapping, List<ColumnRef> predicateRefs,
-                                                            List<ColumnRef> sortRefs) {
+    private List<Prop.Reference> collectTraversedReferences(TypeMapping<?> mapping,
+                                                            List<ColumnResolution> predicateRefs,
+                                                            List<ColumnResolution> sortRefs) {
         List<Prop.Reference> out = new ArrayList<>();
-        List<ColumnRef> all = new ArrayList<>(predicateRefs);
+        List<ColumnResolution> all = new ArrayList<>(predicateRefs);
         all.addAll(sortRefs);
-        for (ColumnRef ref : all) {
-            if (ref.joins().isEmpty()) {
+        for (ColumnResolution ref : all) {
+            if (ref.local()) {
                 continue;
             }
-            // The head join's child table is the referenced entity's table; recover the matching
-            // Prop.Reference from it (the JoinRef no longer carries the property name).
-            String childTable = ref.joins().get(0).childTableName();
+            // The head edge's target table is the referenced entity's table; recover the matching
+            // Prop.Reference from it (the ColumnRef no longer carries the property name).
+            String childTable = ((ColumnRef.Reference) ref.edges().get(0)).targetTable();
             for (Prop prop : mapping.props()) {
                 if (prop instanceof Prop.Reference reference
                         && childTable.equals(reference.targetTable())) {
@@ -3832,13 +3836,19 @@ public class RepositoryProcessor extends AbstractProcessor {
      * renders it as an {@link SqlBuilder#existsConjunct(io.github.fludakit.data.metadata.TableSchema, Predicate, ColumnRef) EXISTS
      * semi-join} conjunct and splices NO join.
      */
-    private record PathResolution(ColumnRef ref, boolean multiHop, boolean unresolvedRelation,
+    private record PathResolution(ColumnResolution resolution, boolean multiHop, boolean unresolvedRelation,
                                   boolean existential) {
-        static PathResolution resolved(ColumnRef ref) { return new PathResolution(ref, false, false, false); }
-        static PathResolution existentialRef(ColumnRef ref) { return new PathResolution(ref, false, false, true); }
+        static PathResolution resolved(ColumnResolution r) { return new PathResolution(r, false, false, false); }
+        static PathResolution existentialRef(ColumnResolution r) { return new PathResolution(r, false, false, true); }
         static PathResolution unresolved() { return new PathResolution(null, false, false, false); }
         static PathResolution tooManyRelations() { return new PathResolution(null, true, false, false); }
         static PathResolution relationUnresolved() { return new PathResolution(null, false, true, false); }
+    }
+
+    private static ColumnResolution resolutionOf(ColumnRef leaf) {
+        ColumnResolution r = new ColumnResolution();
+        r.leaf(leaf);
+        return r;
     }
 
     /**
@@ -3893,7 +3903,7 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     /** The legacy fully-local ref: physical column via {@link Names#columnName}, no join, no table. */
     private static ColumnRef snakeCasedLocalColumnRef(String property) {
-        return new ColumnRef(Names.columnName(property));
+        return new ColumnRef.Simple(Names.columnName(property), null);
     }
 
     /**
@@ -3914,7 +3924,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     private PathResolution resolveCompilePath(TypeMapping<?> mapping, String path) {
         ColumnRef local = localColumnRef(mapping.columnRefs(), path);
         if (local != null) {
-            return PathResolution.resolved(local);
+            return PathResolution.resolved(resolutionOf(local));
         }
         for (String[] head : candidateHeads(path)) {
             Prop prop = propOrNull(mapping, head[0]);
@@ -3922,7 +3932,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                 continue;
             }
             PathResolution inner = resolveRelationHead(mapping, prop, head[1]);
-            if (inner.multiHop() || inner.unresolvedRelation() || inner.ref() != null) {
+            if (inner.multiHop() || inner.unresolvedRelation() || inner.resolution() != null) {
                 return inner;
             }
         }
@@ -3941,12 +3951,15 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     private PathResolution resolveRelationHead(TypeMapping<?> mapping, Prop prop, String remainder, Set<String> visited) {
         if (prop instanceof Prop.ElementCollection elementCollection) {
-            ColumnRef leaf = localColumnRef(elementCollection.target().localColumnRefs(), remainder);
+            ColumnRef leaf = localColumnRef(elementCollection.target().columnRefs(), remainder);
             if (leaf == null) {
                 return PathResolution.unresolved();
             }
-            JoinRef join = new JoinRef(mapping.tableName(), mapping.idColumn(), elementCollection.childTable(), elementCollection.parentFkColumn());
-            return PathResolution.existentialRef(leaf.through(join));
+            ColumnResolution res = new ColumnResolution();
+            res.edge(new ColumnRef.Collection(elementCollection.parentFkColumn(),
+                    elementCollection.childTable(), mapping.tableName(), mapping.idColumn()));
+            res.leaf(leaf);
+            return PathResolution.existentialRef(res);
         }
         String targetFqn = prop instanceof Prop.Reference reference
                 ? reference.targetTypeName() : ((Prop.EntityCollection) prop).targetTypeName();
@@ -3957,16 +3970,18 @@ public class RepositoryProcessor extends AbstractProcessor {
         if (target == null) {
             return PathResolution.relationUnresolved();
         }
-        JoinRef join = referenceOrListJoin(mapping, target, prop);
-        if (join == null) {
+        ColumnRef edge = relationEdge(mapping, target, prop);
+        if (edge == null) {
             return PathResolution.relationUnresolved();
         }
-        ColumnRef leaf = localColumnRef(target.localColumnRefs(), remainder);
+        ColumnRef leaf = localColumnRef(target.columnRefs(), remainder);
         if (leaf != null) {
-            ColumnRef traversed = leaf.through(join);
+            ColumnResolution res = new ColumnResolution();
+            res.edge(edge);
+            res.leaf(leaf);
             return prop instanceof Prop.EntityCollection
-                    ? PathResolution.existentialRef(traversed)
-                    : PathResolution.resolved(traversed);
+                    ? PathResolution.existentialRef(res)
+                    : PathResolution.resolved(res);
         }
         // The remainder names another relation in the target: a to-one Reference continues the
         // traversal (multi-hop); a to-many head nested under a to-one stays out of scope.
@@ -3974,10 +3989,13 @@ public class RepositoryProcessor extends AbstractProcessor {
             Prop deeperProp = propOrNull(target, deeper[0]);
             if (deeperProp instanceof Prop.Reference) {
                 PathResolution inner = resolveRelationHead(target, deeperProp, deeper[1], visited);
-                if (inner.multiHop() || inner.unresolvedRelation() || inner.ref() == null) {
+                if (inner.multiHop() || inner.unresolvedRelation() || inner.resolution() == null) {
                     return inner;
                 }
-                ColumnRef chained = inner.ref().prepend(join);
+                ColumnResolution chained = new ColumnResolution();
+                chained.edge(edge);
+                for (ColumnRef e : inner.resolution().edges()) chained.edge(e);
+                chained.leaf(inner.resolution().leaf());
                 return prop instanceof Prop.EntityCollection
                         ? PathResolution.existentialRef(chained)
                         : PathResolution.resolved(chained);
@@ -3989,19 +4007,28 @@ public class RepositoryProcessor extends AbstractProcessor {
         return PathResolution.unresolved();
     }
 
-    /** The LEFT JOIN edge for a Reference / EntityCollection traversal; {@code null} when unbuildable. */
-    private static JoinRef referenceOrListJoin(TypeMapping<?> root, TypeMapping<?> target, Prop prop) {
+    /** The relation edge for a Reference / EntityCollection / ElementCollection traversal; {@code null} when unbuildable. */
+    private static ColumnRef relationEdge(TypeMapping<?> root, TypeMapping<?> target, Prop prop) {
         if (prop instanceof Prop.Reference reference) {
             if (reference.targetTable() == null || target.idColumn() == null) {
                 return null;
             }
-            return new JoinRef(root.tableName(), reference.fkColumn(), reference.targetTable(), target.idColumn());
+            return new ColumnRef.Reference(reference.fkColumn(), root.tableName(),
+                    reference.targetTable(), target.idColumn());
         }
         if (prop instanceof Prop.EntityCollection list) {
             if (list.targetTable() == null || list.inverseFkColumn() == null) {
                 return null;
             }
-            return new JoinRef(root.tableName(), root.idColumn(), list.targetTable(), list.inverseFkColumn());
+            return new ColumnRef.Collection(list.inverseFkColumn(), list.targetTable(),
+                    root.tableName(), root.idColumn());
+        }
+        if (prop instanceof Prop.ElementCollection elementCollection) {
+            if (elementCollection.childTable() == null || elementCollection.parentFkColumn() == null) {
+                return null;
+            }
+            return new ColumnRef.Collection(elementCollection.parentFkColumn(), elementCollection.childTable(),
+                    root.tableName(), root.idColumn());
         }
         return null;
     }
@@ -4024,8 +4051,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     private static ColumnRef localColumnRef(Map<String, ColumnRef> mappings, String path) {
         String flat = path.replace(".", "");
         for (Map.Entry<String, ColumnRef> entry : mappings.entrySet()) {
-            if (entry.getValue().joins().isEmpty()
-                    && entry.getKey().replace(".", "").equalsIgnoreCase(flat)) {
+            if (entry.getKey().replace(".", "").equalsIgnoreCase(flat)) {
                 return entry.getValue();
             }
         }
@@ -4745,8 +4771,8 @@ public class RepositoryProcessor extends AbstractProcessor {
      */
     private static QueryDefinitionSpec queryDefinitionOf(String typeName, Operation operation, Kind kind,
                                                    TypeMapping<?> mapping, List<Predicate> predicates,
-                                                   List<ColumnRef> predicateRefs,
-                                                   List<SortSpec> sorts, List<ColumnRef> sortRefs,
+                                                   List<ColumnResolution> predicateRefs,
+                                                   List<SortSpec> sorts, List<ColumnResolution> sortRefs,
                                                    List<Boolean> existentialSorts, int limit,
                                                    List<Binding> bindings,
                                                    List<? extends VariableElement> parameters,
@@ -4799,9 +4825,11 @@ public class RepositoryProcessor extends AbstractProcessor {
                 List.copyOf(seekTerms), List.copyOf(paramBindings), distinct);
     }
 
-    private static String resolvedAttributePath(TypeMapping<?> mapping, ColumnRef ref, String fallback) {
-        for (Map.Entry<String, ColumnRef> entry : mapping.columnRefs().entrySet()) {
-            if (entry.getValue().equals(ref)) return entry.getKey();
+    private static String resolvedAttributePath(TypeMapping<?> mapping, ColumnResolution ref, String fallback) {
+        if (ref.local()) {
+            for (Map.Entry<String, ColumnRef> entry : mapping.columnRefs().entrySet()) {
+                if (entry.getValue().equals(ref.leaf())) return entry.getKey();
+            }
         }
         return fallback;
     }
@@ -4812,15 +4840,15 @@ public class RepositoryProcessor extends AbstractProcessor {
      * last term is not already an ascending id — the same rule {@link #emitPaged} applies to the
      * runtime {@code props}/{@code dirs} lists, kept here so the published model matches the wiring.
      */
-    private static List<SeekTerm> seekTerms(TypeMapping<?> mapping, List<ColumnRef> sortRefs,
+    private static List<SeekTerm> seekTerms(TypeMapping<?> mapping, List<ColumnResolution> sortRefs,
                                             List<Boolean> existentialSorts, List<SortSpec> sorts) {
-        ColumnRef idRef = new ColumnRef(mapping.idColumn());
+        ColumnRef idRef = new ColumnRef.Simple(mapping.idColumn(), mapping.tableName());
         if (sorts.isEmpty()) {
             return List.of(new SeekTerm(idRef, true));
         }
         List<SeekTerm> out = new ArrayList<>();
         for (int i = 0; i < sorts.size(); i++) {
-            out.add(new SeekTerm(sortRefs.get(i), sorts.get(i).ascending()));
+            out.add(new SeekTerm(sortRefs.get(i).leaf(), sorts.get(i).ascending()));
         }
         boolean toManySort = existentialSorts.stream().anyMatch(Boolean.TRUE::equals);
         SortSpec last = sorts.get(sorts.size() - 1);

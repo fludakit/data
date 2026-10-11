@@ -3,8 +3,8 @@ package io.github.fludakit.data.sql;
 import io.github.fludakit.data.Names;
 import io.github.fludakit.data.metadata.AttributePathResolver;
 import io.github.fludakit.data.metadata.ColumnRef;
+import io.github.fludakit.data.metadata.ColumnResolution;
 import io.github.fludakit.data.metadata.TypeMapping;
-import io.github.fludakit.data.metadata.JoinRef;
 import io.github.fludakit.data.metadata.TableSchema;
 import io.github.fludakit.data.query.Connector;
 import io.github.fludakit.data.query.Operation;
@@ -36,7 +36,7 @@ import java.util.stream.Collectors;
  * <p>Physical lifecycle statements use a {@link TableSchema} for one table; structured queries also use
  * an {@link AttributePathResolver} for entity-rooted paths. {@link #select()} / {@link #count()} /
  * {@link #delete()} render a whole query method from its {@link QueryDefinition}; the splice primitives
- * ({@link #qualify(ColumnRef)}, {@link #joinClause(List)}, {@link #aggregateSortTerm(ColumnRef, boolean)},
+ * ({@link #qualify(ColumnRef)}, {@link #joinClause(List)}, {@link #aggregateSortTerm(ColumnRef, List, boolean)},
  * ...) are the same rendering pieces exposed as instance methods for callers that assemble dynamic SQL
  * at runtime (the generated paged readers). Generated SQL syntax is supplied by the {@link SqlDialect};
  * {@link H2Dialect} is the default and only shipped backend. {@link #paramName(String)} is the one pure
@@ -139,7 +139,7 @@ public final class SqlBuilder {
 
     // --------------------------------------------------------------- splice primitives
 
-    /** Qualifies a table-local column by its owner alias, owner table, or the schema's root table. */
+    /** Qualifies a table-local column by its owner table, or the schema's root table. */
     public String qualify(ColumnRef ref) {
         return qualify(dialect, ref, schema.tableName());
     }
@@ -149,23 +149,24 @@ public final class SqlBuilder {
         return qualify(dialect, ref, rootTable);
     }
 
-    /** The deduplicated {@code LEFT JOIN} chain these refs require (empty when nothing joins). */
-    public String joinClause(List<ColumnRef> refs) {
-        return joinClause(dialect, refs);
+    /** The deduplicated {@code LEFT JOIN} chain these relation edges require (empty when none). */
+    public String joinClause(List<ColumnRef> edges) {
+        return joinClause(dialect, edges);
     }
 
     /**
      * Resolves an entity-rooted logical attribute path to its table-local physical column. A path
-     * that traverses a relationship (its ref carries joins) has no single table-local column and is
+     * that traverses a relationship (its walk crosses an edge) has no single table-local column and is
      * rejected, so callers fall back to relation-aware resolution (e.g. an aggregate sort term).
      */
     public String resolveColumn(String path) {
-        ColumnRef ref = requireResolver().columnRef(path);
-        if (!ref.joins().isEmpty()) {
+        ColumnResolution res = new ColumnResolution();
+        requireResolver().visit(path, res);
+        if (!res.local()) {
             throw new IllegalArgumentException(
                     "'" + path + "' traverses a relationship and has no table-local column");
         }
-        return ref.column();
+        return res.leaf().column();
     }
 
     /**
@@ -227,18 +228,18 @@ public final class SqlBuilder {
     }
 
     /** The correlated {@code MIN}/{@code MAX} scalar subquery a to-many sort orders by. */
-    public String aggregateSortTerm(ColumnRef ref, boolean ascending) {
-        return aggregateSortTerm(dialect, schema, ref, ascending);
+    public String aggregateSortTerm(ColumnRef leaf, List<ColumnRef> edges, boolean ascending) {
+        return aggregateSortTerm(dialect, schema, leaf, edges, ascending);
     }
 
     /** The EXISTS conjunct a predicate on an existential (or DELETE-traversed) ref renders. */
-    public String existsConjunct(Predicate predicate, ColumnRef ref) {
-        return existsConjunct(dialect, predicate, ref);
+    public String existsConjunct(Predicate predicate, ColumnRef leaf, List<ColumnRef> edges) {
+        return existsConjunct(dialect, predicate, leaf, edges);
     }
 
     /** Renders a predicate with its column qualified by {@code ref}. */
-    public String render(Predicate predicate, ColumnRef ref) {
-        return render(dialect, predicate, ref);
+    public String render(Predicate predicate, ColumnRef leaf, List<ColumnRef> edges) {
+        return render(dialect, predicate, leaf, edges);
     }
 
     /** The root-table projection/join shell ({@code SELECT ... FROM ... LEFT JOIN ...}). */
@@ -357,8 +358,10 @@ public final class SqlBuilder {
     }
 
     private static String attributePath(AttributePathResolver attributes, ColumnRef column) {
-        return attributes.columnRefs().entrySet().stream()
-                .filter(entry -> entry.getValue().equals(column))
+        Map<String, ColumnRef> refs = attributes instanceof TypeMapping<?> tm
+                ? tm.writeColumnRefs() : attributes.columnRefs();
+        return refs.entrySet().stream()
+                .filter(entry -> entry.getValue().column().equals(column.column()))
                 .map(Map.Entry::getKey)
                 .findFirst()
                 .orElseThrow(() -> new IllegalArgumentException(
@@ -423,11 +426,11 @@ public final class SqlBuilder {
         private final List<SortSpec> sorts;
         private final int limit;
 
-        private final List<ColumnRef> joinRefs = new ArrayList<>();
+        private final List<ColumnRef> joinEdges = new ArrayList<>();
         private final List<Integer> existentialIndices = new ArrayList<>();
         private final List<Predicate> plain;
-        private final List<ColumnRef> predicateRefs;
-        private final List<ColumnRef> sortRefs;
+        private final List<ColumnResolution> predicateRefs;
+        private final List<ColumnResolution> sortRefs;
         private final List<Boolean> existentialSorts;
         private boolean legacyCompatible = true;
 
@@ -449,7 +452,7 @@ public final class SqlBuilder {
         String run() {
             classify();
             if (existentialIndices.isEmpty() && !existentialSorts.contains(Boolean.TRUE)
-                    && !hasJoins(joinRefs) && legacyCompatible) {
+                    && joinEdges.isEmpty() && legacyCompatible) {
                 return legacyStatement();
             }
             StringBuilder sb = new StringBuilder();
@@ -466,24 +469,24 @@ public final class SqlBuilder {
         private void classify() {
             for (int i = 0; i < predicates.size(); i++) {
                 Predicate predicate = predicates.get(i);
-                ColumnRef ref = resolveColumnRef(md, attributes, predicate.property());
+                ColumnResolution ref = resolveColumnRef(md, attributes, predicate.property());
                 plain.add(predicate);
                 predicateRefs.add(ref);
                 legacyCompatible &= legacyCompatible(ref, predicate.property(), md);
-                if (isExistential(attributes, predicate.property()) || (deleteMode && !ref.joins().isEmpty())) {
+                if (isExistential(attributes, predicate.property()) || (deleteMode && !ref.local())) {
                     existentialIndices.add(i);
                 } else {
-                    joinRefs.add(ref);
+                    joinEdges.addAll(ref.edges());
                 }
             }
             for (SortSpec sort : sorts) {
-                ColumnRef ref = resolveColumnRef(md, attributes, sort.property());
+                ColumnResolution ref = resolveColumnRef(md, attributes, sort.property());
                 boolean existential = isExistential(attributes, sort.property());
                 sortRefs.add(ref);
                 existentialSorts.add(existential);
                 legacyCompatible &= legacyCompatible(ref, sort.property(), md);
                 if (!existential) {
-                    joinRefs.add(ref);
+                    joinEdges.addAll(ref.edges());
                 }
             }
         }
@@ -500,25 +503,25 @@ public final class SqlBuilder {
         }
 
         private void renderShell(StringBuilder sb) {
-            boolean spliceJoins = hasJoins(joinRefs);
+            boolean spliceJoins = !joinEdges.isEmpty();
             if (countMode) {
                 sb.append("SELECT COUNT(*) FROM ").append(dialect.quoteIdentifier(md.tableName()))
-                        .append(joinClause(dialect, joinRefs));
+                        .append(joinClause(dialect, joinEdges));
             } else if (deleteMode) {
                 sb.append("DELETE FROM ").append(dialect.quoteIdentifier(md.tableName()))
-                        .append(joinClause(dialect, joinRefs));
+                        .append(joinClause(dialect, joinEdges));
             } else {
                 // Joined find: every root column is qualified by the root table. Unqualified bare names
                 // become ambiguous the moment a join adds a table sharing a column name (e.g. the target's
                 // own "id"), and a full-materialisation read joins exactly such a table. Qualifying keeps
                 // each label = its physical column, so the generated row mapper still reads it by name.
-                sb.append(qualifiedRootSelect(dialect, schema, joinRefs, spliceJoins, extraProjection,
+                sb.append(qualifiedRootSelect(dialect, schema, joinEdges, spliceJoins, extraProjection,
                         model.distinct()));
             }
         }
 
         private void renderWhere(StringBuilder sb) {
-            boolean spliceJoins = hasJoins(joinRefs);
+            boolean spliceJoins = !joinEdges.isEmpty();
             List<String> conjuncts = new ArrayList<>();
             List<Boolean> ors = new ArrayList<>();
             if (plain.stream().anyMatch(p -> Connector.isOr(p.connector()))) {
@@ -526,20 +529,22 @@ public final class SqlBuilder {
                 // and its shape decides the renderer. The all-AND branch below may reorder freely.
                 for (int i = 0; i < plain.size(); i++) {
                     conjuncts.add(existentialIndices.contains(i)
-                            ? existsConjunct(dialect, plain.get(i), predicateRefs.get(i))
-                            : render(dialect, plain.get(i), predicateRefs.get(i), md.tableName(), spliceJoins));
+                            ? existsConjunct(dialect, plain.get(i), predicateRefs.get(i).leaf(), predicateRefs.get(i).edges())
+                            : render(dialect, plain.get(i), predicateRefs.get(i).leaf(), predicateRefs.get(i).edges(),
+                                    md.tableName(), spliceJoins));
                     ors.add(i > 0 && Connector.isOr(plain.get(i).connector()));
                 }
             } else {
                 for (int i = 0; i < plain.size(); i++) {
                     if (!existentialIndices.contains(i)) {
-                        conjuncts.add(render(dialect, plain.get(i), predicateRefs.get(i),
-                                md.tableName(), spliceJoins));
+                        conjuncts.add(render(dialect, plain.get(i), predicateRefs.get(i).leaf(),
+                                predicateRefs.get(i).edges(), md.tableName(), spliceJoins));
                         ors.add(false);
                     }
                 }
                 for (int i : existentialIndices) {
-                    conjuncts.add(existsConjunct(dialect, plain.get(i), predicateRefs.get(i)));
+                    conjuncts.add(existsConjunct(dialect, plain.get(i), predicateRefs.get(i).leaf(),
+                            predicateRefs.get(i).edges()));
                     ors.add(false);
                 }
             }
@@ -555,12 +560,12 @@ public final class SqlBuilder {
             StringBuilder orderBy = new StringBuilder();
             for (int i = 0; i < sorts.size(); i++) {
                 SortSpec sort = sorts.get(i);
-                ColumnRef ref = sortRefs.get(i);
+                ColumnResolution ref = sortRefs.get(i);
                 String term = Boolean.TRUE.equals(existentialSorts.get(i))
-                        ? aggregateSortTerm(dialect, schema, ref, sort.ascending())
-                        : isLocalTo(ref, md.tableName())
-                                ? dialect.quoteIdentifier(ref.column())
-                                : qualify(dialect, ref, md.tableName());
+                        ? aggregateSortTerm(dialect, schema, ref.leaf(), ref.edges(), sort.ascending())
+                        : isLocalTo(ref.leaf(), md.tableName())
+                                ? dialect.quoteIdentifier(ref.leaf().column())
+                                : qualify(dialect, ref.leaf(), md.tableName());
                 if (orderBy.length() > 0) {
                     orderBy.append(", ");
                 }
@@ -570,23 +575,24 @@ public final class SqlBuilder {
         }
     }
 
-    private ColumnRef resolveColumnRef(TableSchema schema, AttributePathResolver attributes, String path) {
+    private ColumnResolution resolveColumnRef(TableSchema schema, AttributePathResolver attributes, String path) {
+        ColumnResolution res = new ColumnResolution();
         try {
-            return attributes.columnRef(path);
+            attributes.visit(path, res);
         } catch (IllegalArgumentException unknownPath) {
-            return new ColumnRef(Names.columnName(path), schema.tableName());
+            res.leaf(new ColumnRef.Simple(Names.columnName(path), schema.tableName()));
         }
+        return res;
     }
 
-    private boolean legacyCompatible(ColumnRef ref, String path, TableSchema schema) {
-        return isLocalTo(ref, schema.tableName())
-                && ref.column().equals(Names.columnName(path));
+    private boolean legacyCompatible(ColumnResolution ref, String path, TableSchema schema) {
+        return ref.local() && isLocalTo(ref.leaf(), schema.tableName())
+                && ref.leaf().column().equals(Names.columnName(path));
     }
 
-    /** Whether {@code ref} is a column local to {@code table}: unjoined and owned by no table or by that table. */
-    private static boolean isLocalTo(ColumnRef ref, String table) {
-        return ref.joins().isEmpty()
-                && (ref.ownerTableName() == null || ref.ownerTableName().equals(table));
+    /** Whether {@code leaf} is a column local to {@code table}: owned by no table or by that table. */
+    private static boolean isLocalTo(ColumnRef leaf, String table) {
+        return leaf.table() == null || leaf.table().equals(table);
     }
 
     private static boolean isExistential(AttributePathResolver attributes, String path) {
@@ -597,7 +603,7 @@ public final class SqlBuilder {
     public String orderBy(List<SortSpec> sorts) {
         if (sorts.isEmpty()) return "";
         return " ORDER BY " + sorts.stream()
-                .map(s -> dialect.quoteIdentifier(requireResolver().columnRef(s.property()).column())
+                .map(s -> dialect.quoteIdentifier(resolveColumn(s.property()))
                         + (s.ascending() ? " ASC" : " DESC"))
                 .collect(Collectors.joining(", "));
     }
@@ -626,7 +632,7 @@ public final class SqlBuilder {
      * Qualifies a table-local column by its owner table name, or the supplied root.
      */
     private static String qualify(SqlDialect dialect, ColumnRef ref, String rootTable) {
-        String qualifier = ref.ownerTableName() != null ? ref.ownerTableName() : rootTable;
+        String qualifier = ref.table() != null ? ref.table() : rootTable;
         if (qualifier == null) {
             throw new IllegalStateException(
                     "Cannot qualify column '" + ref.column() + "': no owning table or root table");
@@ -634,26 +640,36 @@ public final class SqlBuilder {
         return dialect.quoteIdentifier(qualifier) + "." + dialect.quoteIdentifier(ref.column());
     }
 
+    /** The four physical fields of one relation edge, extracted from a {@code Reference}/{@code Collection}. */
+    private record JoinEdge(String ownerTable, String ownerColumn, String childTable, String childColumn) { }
+
+    private static JoinEdge edgeOf(ColumnRef edge) {
+        if (edge instanceof ColumnRef.Reference r) {
+            return new JoinEdge(r.ownerTable(), r.fkColumn(), r.targetTable(), r.targetIdColumn());
+        }
+        ColumnRef.Collection c = (ColumnRef.Collection) edge;
+        return new JoinEdge(c.ownerTable(), c.ownerIdColumn(), c.childTable(), c.fkColumn());
+    }
+
     /**
-     * The deduplicated {@code LEFT JOIN} chain these refs require. Each edge carries its own owner
-     * and child table, so rendering does not infer table identity from list position.
+     * The deduplicated {@code LEFT JOIN} chain these relation edges require. Each edge carries its
+     * own owner and child table, so rendering does not infer table identity from list position.
      * Each fragment is
      * {@code  LEFT JOIN "<table>" AS "<table>" ON <ownerTable>."<parentColumn>" = "<table>"."<childColumn>";}
-     * Returns {@code ""} when no ref carries a join.
+     * Returns {@code ""} when no edge is supplied.
      */
-    private static String joinClause(SqlDialect dialect, List<ColumnRef> refs) {
-        Map<String, JoinRef> byTable = new LinkedHashMap<>();
+    private static String joinClause(SqlDialect dialect, List<ColumnRef> edges) {
+        Map<String, JoinEdge> byTable = new LinkedHashMap<>();
         StringBuilder sb = new StringBuilder();
-        for (ColumnRef ref : refs) {
-            for (JoinRef join : ref.joins()) {
-                if (byTable.putIfAbsent(join.childTableName(), join) != null) continue;
-                String owner = dialect.quoteIdentifier(join.ownerTableName());
-                String alias = dialect.quoteIdentifier(join.childTableName());
-                sb.append(" LEFT JOIN ").append(dialect.quoteIdentifier(join.childTableName()))
-                        .append(" AS ").append(alias)
-                        .append(" ON ").append(owner).append('.').append(dialect.quoteIdentifier(join.ownerColumn()))
-                        .append(" = ").append(alias).append('.').append(dialect.quoteIdentifier(join.childColumn()));
-            }
+        for (ColumnRef edge : edges) {
+            JoinEdge join = edgeOf(edge);
+            if (byTable.putIfAbsent(join.childTable(), join) != null) continue;
+            String owner = dialect.quoteIdentifier(join.ownerTable());
+            String alias = dialect.quoteIdentifier(join.childTable());
+            sb.append(" LEFT JOIN ").append(dialect.quoteIdentifier(join.childTable()))
+                    .append(" AS ").append(alias)
+                    .append(" ON ").append(owner).append('.').append(dialect.quoteIdentifier(join.ownerColumn()))
+                    .append(" = ").append(alias).append('.').append(dialect.quoteIdentifier(join.childColumn()));
         }
         return sb.toString();
     }
@@ -699,41 +715,41 @@ public final class SqlBuilder {
     }
 
     /**
-     * Renders a predicate with its column qualified by {@code ref}: explicit table, and
-     * fully-local refs stay unqualified for legacy parity.
+     * Renders a predicate with its column qualified by the resolved leaf: an explicit table for a
+     * traversed leaf, and a fully-local ref stays unqualified for legacy parity.
      */
-    private static String render(SqlDialect dialect, Predicate p, ColumnRef ref) {
-        String col = ref.joins().isEmpty() && ref.ownerTableName() == null
-                ? dialect.quoteIdentifier(ref.column())
-                : qualify(dialect, ref, null);
+    private static String render(SqlDialect dialect, Predicate p, ColumnRef leaf, List<ColumnRef> edges) {
+        String col = edges.isEmpty() && leaf.table() == null
+                ? dialect.quoteIdentifier(leaf.column())
+                : qualify(dialect, leaf, null);
         return renderOperator(p.operator(), col, p.param(), p.ignoreCase());
     }
 
-    private static String render(SqlDialect dialect, Predicate predicate, ColumnRef ref,
+    private static String render(SqlDialect dialect, Predicate predicate, ColumnRef leaf, List<ColumnRef> edges,
                                  String rootTable, boolean qualifyRoot) {
-        boolean localRootColumn = isLocalTo(ref, rootTable);
+        boolean localRootColumn = isLocalTo(leaf, rootTable);
         String col = localRootColumn && !qualifyRoot
-                ? dialect.quoteIdentifier(ref.column())
-                : qualify(dialect, ref, rootTable);
+                ? dialect.quoteIdentifier(leaf.column())
+                : qualify(dialect, leaf, rootTable);
         return renderOperator(predicate.operator(), col, predicate.param(), predicate.ignoreCase());
     }
 
     /**
      * The EXISTS conjunct a predicate on an existential (to-many head) — or on ANY traversed ref in a
-     * DELETE — renders instead of a joined WHERE term: the ref's LAST join edge supplies the child
-     * table, the relation-property alias and the alias-side column; the correlation closes on the
-     * edge's root-side column ({@code parentColumn}) — the root id for a to-many head, the owner-side
-     * FK for a to-one head. The leaf term is {@link #render(Predicate, ColumnRef)}'s alias-qualified
-     * rendering, so the named parameter and the caller's binding are unchanged.
+     * DELETE — renders instead of a joined WHERE term: the ref's LAST edge supplies the child table
+     * and the edge-side column; the correlation closes on the edge's owner-side column — the root id
+     * for a to-many head, the owner-side FK for a to-one head. The leaf term is
+     * {@link #render(Predicate, ColumnRef, List)}'s table-qualified rendering, so the named parameter
+     * and the caller's binding are unchanged.
      */
-    private static String existsConjunct(SqlDialect dialect, Predicate p, ColumnRef ref) {
-        JoinRef join = ref.joins().get(ref.joins().size() - 1);
-        String owner = join.ownerTableName();
-        return "EXISTS (SELECT 1 FROM " + dialect.quoteIdentifier(join.childTableName()) + " "
-                + dialect.quoteIdentifier(join.childTableName())
-                + " WHERE " + dialect.quoteIdentifier(join.childTableName()) + "." + dialect.quoteIdentifier(join.childColumn())
-                + " = " + dialect.quoteIdentifier(owner) + "." + dialect.quoteIdentifier(join.ownerColumn())
-                + " AND " + render(dialect, p, ref) + ")";
+    private static String existsConjunct(SqlDialect dialect, Predicate p, ColumnRef leaf, List<ColumnRef> edges) {
+        ColumnRef.Collection join = (ColumnRef.Collection) edges.get(edges.size() - 1);
+        String owner = join.ownerTable();
+        return "EXISTS (SELECT 1 FROM " + dialect.quoteIdentifier(join.childTable()) + " "
+                + dialect.quoteIdentifier(join.childTable())
+                + " WHERE " + dialect.quoteIdentifier(join.childTable()) + "." + dialect.quoteIdentifier(join.fkColumn())
+                + " = " + dialect.quoteIdentifier(owner) + "." + dialect.quoteIdentifier(join.ownerIdColumn())
+                + " AND " + render(dialect, p, leaf, edges) + ")";
     }
 
     /** The first segment of an entity-rooted path, or {@code null} when it has no child segment. */
@@ -742,52 +758,42 @@ public final class SqlBuilder {
         return dot < 0 ? null : path.substring(0, dot);
     }
 
-    /** True when any resolved ref carries a join, i.e. the statement must splice a LEFT JOIN chain. */
-    private static boolean hasJoins(List<ColumnRef> refs) {
-        for (ColumnRef r : refs) {
-            if (!r.joins().isEmpty()) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     /**
      * The correlated scalar subquery a to-many sort orders by: {@code MIN} of the leaf column for an
      * ascending key, {@code MAX} for a descending one — exactly the edge the descriptor-driven cursor
-     * key reduction collapses the value list to, so seek and sort agree. The head join opens
+     * key reduction collapses the value list to, so seek and sort agree. The head edge opens
      * the subquery {@code FROM} (alias WITHOUT {@code AS}, mirroring nothing else on the statement);
      * deeper edges chain inside as the same {@code LEFT JOIN ... AS ... ON ...} fragments
      * {@link #joinClause} emits, qualified per-path. Correlation is the head's
-     * {@code childFk = rootTable.rootId} pair taken from its {@link JoinRef}. Every identifier goes
-     * through {@link Names#quote}; the result is used VERBATIM as an ORDER BY / seek term.
+     * {@code childFk = rootTable.rootId} pair taken from its {@code Collection} edge. Every identifier
+     * goes through {@link Names#quote}; the result is used VERBATIM as an ORDER BY / seek term.
      */
-    private static String aggregateSortTerm(SqlDialect dialect, TableSchema md, ColumnRef ref, boolean ascending) {
-        if (ref.joins().isEmpty()) {
+    private static String aggregateSortTerm(SqlDialect dialect, TableSchema md, ColumnRef leaf,
+                                            List<ColumnRef> edges, boolean ascending) {
+        if (edges.isEmpty()) {
             throw new IllegalArgumentException(
                     "aggregate sort term requires a relation path");
         }
-        JoinRef head = ref.joins().get(0);
-        String owner = head.ownerTableName();
+        ColumnRef.Collection head = (ColumnRef.Collection) edges.get(0);
+        String owner = head.ownerTable();
         StringBuilder sb = new StringBuilder("(SELECT ")
                 .append(ascending ? "MIN(" : "MAX(")
-                .append(qualify(dialect, ref, md.tableName()))
-                .append(") FROM ").append(dialect.quoteIdentifier(head.childTableName()))
-                .append(' ').append(dialect.quoteIdentifier(head.childTableName()));
-        for (int i = 1; i < ref.joins().size(); i++) {
-            JoinRef join = ref.joins().get(i);
-            String joinOwner = join.ownerTableName();
-            sb.append(" LEFT JOIN ").append(dialect.quoteIdentifier(join.childTableName()))
-                    .append(" AS ").append(dialect.quoteIdentifier(join.childTableName()))
-                    .append(" ON ").append(dialect.quoteIdentifier(joinOwner)).append('.')
+                .append(qualify(dialect, leaf, md.tableName()))
+                .append(") FROM ").append(dialect.quoteIdentifier(head.childTable()))
+                .append(' ').append(dialect.quoteIdentifier(head.childTable()));
+        for (int i = 1; i < edges.size(); i++) {
+            JoinEdge join = edgeOf(edges.get(i));
+            sb.append(" LEFT JOIN ").append(dialect.quoteIdentifier(join.childTable()))
+                    .append(" AS ").append(dialect.quoteIdentifier(join.childTable()))
+                    .append(" ON ").append(dialect.quoteIdentifier(join.ownerTable())).append('.')
                     .append(dialect.quoteIdentifier(join.ownerColumn()))
-                    .append(" = ").append(dialect.quoteIdentifier(join.childTableName())).append('.')
+                    .append(" = ").append(dialect.quoteIdentifier(join.childTable())).append('.')
                     .append(dialect.quoteIdentifier(join.childColumn()));
         }
-        sb.append(" WHERE ").append(dialect.quoteIdentifier(head.childTableName())).append('.')
-                .append(dialect.quoteIdentifier(head.childColumn()))
+        sb.append(" WHERE ").append(dialect.quoteIdentifier(head.childTable())).append('.')
+                .append(dialect.quoteIdentifier(head.fkColumn()))
                 .append(" = ").append(dialect.quoteIdentifier(owner)).append('.')
-                .append(dialect.quoteIdentifier(head.ownerColumn()))
+                .append(dialect.quoteIdentifier(head.ownerIdColumn()))
                 .append(')');
         return sb.toString();
     }

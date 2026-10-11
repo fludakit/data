@@ -1,59 +1,57 @@
 package io.github.fludakit.data.metadata;
 
-import java.util.ArrayList;
-import java.util.List;
-
 /**
- * A physical column reached through a join chain: the column name, its owning table, and the ordered
- * {@link JoinRef}s from the query's root table. The SQL alias for a column's owner is its table
- * name, applied by {@code SqlBuilder} at assembly time.
+ * A physical column placement in the aggregate tree, classified by its relation role.
  *
- * @param column the physical column name in the owning table
- * @param ownerTableName the physical table containing the column
- * @param joins the ordered edges from the query's root table to the owner table
+ * <p>Each case carries the information {@code SqlBuilder} needs to qualify and join the column; the
+ * SQL alias for a table is always the table name itself, applied at assembly time.</p>
  */
-public record ColumnRef(String column, String ownerTableName, List<JoinRef> joins) {
+public sealed interface ColumnRef {
 
-    public ColumnRef {
-        joins = joins == null ? List.of() : List.copyOf(joins);
-    }
+    /** The physical column name. */
+    String column();
 
-    /** Creates a physical column whose owner is supplied by query context. */
-    public ColumnRef(String column) {
-        this(column, null, List.of());
-    }
+    /** The physical table the column lives on. */
+    String table();
 
-    /** Creates a root-table binding without a join chain. */
-    public ColumnRef(String column, String ownerTableName) {
-        this(column, ownerTableName, List.of());
+    /**
+     * A plain column on its own table: an identifier, scalar, or a flattened embedded value-object
+     * leaf. Carries no relation edge.
+     *
+     * @param column     the physical column name
+     * @param ownerTable the physical table containing the column
+     */
+    record Simple(String column, String ownerTable) implements ColumnRef {
+        @Override public String table() { return ownerTable; }
     }
 
     /**
-     * Carries this leaf binding through one relationship to the target table.
+     * The to-one foreign-key column in the OWNER table referencing an external entity. Doubles as the
+     * join edge {@code ownerTable.fkColumn = targetTable.targetIdColumn} when a path traverses it.
      *
-     * @param join the edge from the current owner table to the target table
-     * @return a table-local leaf binding with the edge appended to its join chain
+     * @param fkColumn       the FK column in the owner table
+     * @param ownerTable     the table carrying the FK
+     * @param targetTable    the referenced entity's table
+     * @param targetIdColumn the referenced entity's identifier column
      */
-    public ColumnRef through(JoinRef join) {
-        List<JoinRef> all = new ArrayList<>(joins.size() + 1);
-        all.addAll(joins);
-        all.add(join);
-        return new ColumnRef(column, join.childTableName(), all);
+    record Reference(String fkColumn, String ownerTable, String targetTable,
+                     String targetIdColumn) implements ColumnRef {
+        @Override public String column() { return fkColumn; }
+        @Override public String table() { return ownerTable; }
     }
 
     /**
-     * Prepends an edge to the front of this ref's join chain, keeping the leaf's owner table
-     * unchanged. Used when a resolved nested-path ref (already carrying its own root-to-leaf chain)
-     * is reached through an additional outer relationship: the outer edge must come FIRST so the
-     * chain reads root-to-leaf.
+     * The to-many foreign-key column in a CHILD table pointing back to the owner. Encodes the join
+     * edge {@code ownerTable.ownerIdColumn = childTable.fkColumn}.
      *
-     * @param join the edge from the outer owner table to this ref's current root table
-     * @return this leaf binding with the edge prepended to its join chain
+     * @param fkColumn      the FK column in the child table
+     * @param childTable    the child table carrying the FK
+     * @param ownerTable    the owner table referenced by the FK
+     * @param ownerIdColumn the owner table's identifier column
      */
-    public ColumnRef prepend(JoinRef join) {
-        List<JoinRef> all = new ArrayList<>(joins.size() + 1);
-        all.add(join);
-        all.addAll(joins);
-        return new ColumnRef(column, ownerTableName, all);
+    record Collection(String fkColumn, String childTable, String ownerTable,
+                      String ownerIdColumn) implements ColumnRef {
+        @Override public String column() { return fkColumn; }
+        @Override public String table() { return childTable; }
     }
 }

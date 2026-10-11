@@ -89,7 +89,7 @@ final class RepositoryTypeMappingBuilder {
             } else if (field.getAnnotation(Association.class) != null) {
                 TypeElement target = declaredElement(field);
                 Prop.Reference ref = referenceProp(name, Names.fkColumn(name),
-                        target != null ? target.getQualifiedName().toString() : null, target, false);
+                        target != null ? target.getQualifiedName().toString() : null, target, false, false);
                 properties.add(new RepositoryProcessor.Property(name, ref.fkColumn(), fieldTypeName, ref, null));
                 props.add(ref);
 
@@ -102,10 +102,11 @@ final class RepositoryTypeMappingBuilder {
 
             } else if (isEntityType(declaredElement(field))) {
                 TypeElement target = declaredElement(field);
-                // Bare entity references compose only when owned by an aggregate root.
+                // Bare entity references compose only when owned by an aggregate root; on a non-root
+                // entity they are the inverse FK back to the root — a write-only back-reference.
                 boolean composition = ownerKind == Kind.AGGREGATE_ROOT;
                 Prop.Reference ref = referenceProp(name, Names.fkColumn(name),
-                        target.getQualifiedName().toString(), target, composition);
+                        target.getQualifiedName().toString(), target, composition, !composition);
                 properties.add(new RepositoryProcessor.Property(name, ref.fkColumn(), fieldTypeName, ref, null));
                 props.add(ref);
 
@@ -223,9 +224,10 @@ final class RepositoryTypeMappingBuilder {
     }
 
     private Prop.Reference referenceProp(String name, String fkColumn, String targetTypeName,
-                                         TypeElement target, boolean composition) {
+                                         TypeElement target, boolean composition, boolean backReference) {
         TypeMapping<?> targetModel = target == null ? null : descriptorFor(target);
-        return new Prop.Reference(name, fkColumn, targetTypeName, entityOf(targetModel), composition);
+        return new Prop.Reference(name, fkColumn, targetTypeName, entityOf(targetModel), composition,
+                backReference);
     }
 
     private RepositoryProcessor.ElementCollection buildCollection(
@@ -275,7 +277,7 @@ final class RepositoryTypeMappingBuilder {
             if (field.getAnnotation(Association.class) != null) {
                 TypeElement target = declaredElement(field);
                 props.add(referenceProp(name, Names.fkColumn(name),
-                        target != null ? target.getQualifiedName().toString() : null, target, false));
+                        target != null ? target.getQualifiedName().toString() : null, target, false, false));
             } else {
                 props.add(new Prop.Scalar(name, Names.columnName(name), fieldType));
             }

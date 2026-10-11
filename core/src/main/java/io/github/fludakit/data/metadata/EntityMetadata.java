@@ -5,7 +5,6 @@ import io.github.fludakit.data.metamodel.ListAttribute;
 import io.github.fludakit.data.metamodel.PathAttribute;
 
 import java.util.List;
-import java.util.Map;
 
 /**
  * Acyclic, reflection-free description of an entity (or value object), built from the generated
@@ -22,15 +21,18 @@ import java.util.Map;
  * {@link TableSchema} view for table-local columns and this entity-level mapping for path resolution.</p>
  *
  * <p>{@link #attributes()} lists root-level nodes once, including embedded and relation containers.
- * {@link #columnRefs()} associates every SQL-resolvable {@link PathAttribute} with its
+ * {@link #columnRefs()} associates every SQL-resolvable logical path (a string) with its
  * physical placement. It includes flattened embedded leaves and relation-traversing leaves; container
  * nodes remain in {@code attributes()} because they do not have one physical column mapping.</p>
  *
  * @param <T> the entity type
  */
-public interface EntityMetadata<T> extends TableSchema, AttributePathResolver<PathAttribute<T>> {
+public interface EntityMetadata<T> extends TableSchema, AttributePathResolver {
 
     Class<T> entityClass();
+
+    /** Domain role of the mapped type: entity, value object, or aggregate root. */
+    Stereotype stereotype();
 
     /** Physical table name, or {@code null} for a value object. */
     @Override
@@ -62,7 +64,7 @@ public interface EntityMetadata<T> extends TableSchema, AttributePathResolver<Pa
     }
 
     default boolean isValueObject() {
-        return tableName() == null;
+        return stereotype() == Stereotype.VALUE_OBJECT;
     }
 
     default String idColumn() {
@@ -106,18 +108,14 @@ public interface EntityMetadata<T> extends TableSchema, AttributePathResolver<Pa
                 + " does not support property navigation");
     }
 
-    @Override
-    default String attributePath(PathAttribute<T> attribute) {
-        return attribute.path();
-    }
-
-    /** Resolves a dot path through the typed mapping index, including flattened and navigated leaves. */
+    /** Resolves a dot path through the mapping index, including flattened and navigated leaves. */
     @Override
     default ColumnRef columnRef(String path) {
-        for (Map.Entry<PathAttribute<T>, ColumnRef> entry : columnRefs().entrySet()) {
-            if (entry.getKey().path().equals(path)) return entry.getValue();
+        ColumnRef ref = columnRefs().get(path);
+        if (ref == null) {
+            throw new IllegalArgumentException("Unknown property '" + path + "' on "
+                    + entityClass().getSimpleName());
         }
-        throw new IllegalArgumentException("Unknown property '" + path + "' on "
-                + entityClass().getSimpleName());
+        return ref;
     }
 }

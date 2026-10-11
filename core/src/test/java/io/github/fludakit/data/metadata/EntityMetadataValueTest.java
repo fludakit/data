@@ -22,12 +22,22 @@ class EntityMetadataValueTest {
     /** Hand-written metadata without a navigation override. */
     record Bare<T>(Class<T> entityClass, String tableName, IdAttribute<T> id,
                    List<PathAttribute<T>> attributes, List<ColumnRef> columns)
-            implements EntityMetadata<T> { }
+            implements EntityMetadata<T> {
+        @Override
+        public Stereotype stereotype() {
+            return tableName == null ? Stereotype.VALUE_OBJECT : Stereotype.ENTITY;
+        }
+    }
 
     /** Overrides navigation for one to-many and one single-valued path, mirroring generated code. */
     record WithValues<T>(Class<T> entityClass, String tableName, IdAttribute<T> id,
                          List<PathAttribute<T>> attributes, List<ColumnRef> columns,
                          List<Object> itemsName, Object name) implements EntityMetadata<T> {
+        @Override
+        public Stereotype stereotype() {
+            return tableName == null ? Stereotype.VALUE_OBJECT : Stereotype.ENTITY;
+        }
+
         @Override
         public Object navigate(String path, T root) {
             switch (path) {

@@ -1181,10 +1181,10 @@ class RepositoryProcessorTest {
 
         // The @Association field must appear as an fk column (author_id), never as flattened embedded leaves.
         String md = Files.readString(generatedDir.resolve("cls/BookMetadata.java"));
-        assertTrue(md.contains("mappings.put(_Book.author, new ColumnRef(\"author_id\", \"book\", null, List.of()))"),
+        assertTrue(md.contains("mappings.put(\"author\", new ColumnRef(\"author_id\", \"book\", null, List.of()))"),
                 "association must contribute its fk column to the descriptor's typed mapping index:"
                         + System.lineSeparator() + md);
-        assertTrue(md.contains("mappings.put(_Book.title, new ColumnRef(\"title\", \"book\", null, List.of()))"),
+        assertTrue(md.contains("mappings.put(\"title\", new ColumnRef(\"title\", \"book\", null, List.of()))"),
                 "scalar column must be present:" + System.lineSeparator() + md);
         assertTrue(!md.replace(" ", "").contains("\"author_name\""),
                 "an @Association must NOT flatten the target's fields into the owner's columns:"
@@ -1318,8 +1318,8 @@ class RepositoryProcessorTest {
         // The descriptor derives its table-local column view from the typed mapping index.
         String mflat = Files.readString(generatedDir.resolve("meta/BookMetadata.java")).replaceAll("\\s+", "");
         assertTrue(mflat.contains("mappings=newLinkedHashMap<>();")
-                        && mflat.contains("mappings.put(_Book.id,newColumnRef(\"id\",\"book\",null,List.of()))")
-                        && mflat.contains("mappings.put(_Book.title,newColumnRef(\"title\",\"book\",null,List.of()))")
+                        && mflat.contains("mappings.put(\"id\",newColumnRef(\"id\",\"book\",null,List.of()))")
+                        && mflat.contains("mappings.put(\"title\",newColumnRef(\"title\",\"book\",null,List.of()))")
                         && !mflat.contains("columns(){"),
                 "typed mappings supply columns without generated duplicate state:" + System.lineSeparator() + mflat);
         // The id() accessor returns the typed metamodel id field (ruling 8).
@@ -1431,7 +1431,7 @@ class RepositoryProcessorTest {
                 "the embedded literal must carry the VO type arguments:" + System.lineSeparator() + vflat);
         // ... and the VO's flattened leaves are indexed as PathAttributes.
         assertTrue(vflat.contains("mappings=newLinkedHashMap<>();")
-                        && vflat.contains("mappings.put(newPathAttributeRecord<>(\"lat\",\"point.lat\"),newColumnRef(\"point_lat\",null,null,List.of()))")
+                        && vflat.contains("mappings.put(\"point.lat\",newColumnRef(\"point_lat\",null,null,List.of()))")
                         && !vflat.contains("columns(){"),
                 "VO leaves must be indexed by PathAttribute:" + System.lineSeparator() + vflat);
         // ... which must itself have been generated (transitive EMBEDDED tree walk).
@@ -1447,8 +1447,8 @@ class RepositoryProcessorTest {
         assertTrue(cmd.contains("return List.of(_Contact.name, _Contact.address);"),
                 "attributes() must expose containers once, no flattened leaves:" + System.lineSeparator() + cmd);
         String cflat = Files.readString(generatedDir.resolve("emb/ContactMetadata.java")).replaceAll("\\s+", "");
-        assertTrue(cflat.contains("mappings.put(_Contact.address.city,newColumnRef(\"address_city\",\"contact\",null,List.of()))")
-                        && cflat.contains("mappings.put(_Contact.address.point.lat,newColumnRef(\"address_point_lat\",\"contact\",null,List.of()))")
+        assertTrue(cflat.contains("mappings.put(\"address.city\",newColumnRef(\"address_city\",\"contact\",null,List.of()))")
+                        && cflat.contains("mappings.put(\"address.point.lat\",newColumnRef(\"address_point_lat\",\"contact\",null,List.of()))")
                         && !cflat.contains("columns(){"),
                 "the typed index flattens the embedded chain and derives root columns:"
                         + System.lineSeparator() + cflat);
@@ -2169,17 +2169,17 @@ class RepositoryProcessorTest {
         assertTrue(otmNav.contains("publicStringpath(){return\"children\";}"), otmNav);
         assertTrue(otmNav.contains("IdAttribute<Parent>id=newIdAttributeRecord<>(\"id\",\"children.id\");"), otmNav);
         String pmd = Files.readString(generatedDir.resolve("rel/ParentMetadata.java")).replaceAll("\\s+", "");
-        assertTrue(pmd.contains("mappings.put(_Parent.primary.id,newColumnRef(\"id\",\"child\",\"primary\",List.of(newJoinRef(\"parent\",null,\"primary_id\",\"child\",\"primary\",\"id\"))))"),
+        assertTrue(pmd.contains("mappings.put(\"primary.id\",newColumnRef(\"id\",\"child\",\"primary\",List.of(newJoinRef(\"parent\",null,\"primary_id\",\"child\",\"primary\",\"id\"))))"),
                 "columnRefs must pin the FK join verbatim:" + System.lineSeparator() + pmd);
-        assertTrue(pmd.contains("mappings.put(_Parent.children.id,newColumnRef(\"id\",\"child\",\"children\",List.of(newJoinRef(\"parent\",null,\"id\",\"child\",\"children\",\"owner_id\"))))"),
+        assertTrue(pmd.contains("mappings.put(\"children.id\",newColumnRef(\"id\",\"child\",\"children\",List.of(newJoinRef(\"parent\",null,\"id\",\"child\",\"children\",\"owner_id\"))))"),
                 "columnRefs must pin the one-to-many inverse join verbatim:" + System.lineSeparator() + pmd);
 
         String md = Files.readString(generatedDir.resolve("rel/ParentMetadata.java")).replaceAll("\\s+", " ");
         assertTrue(md.contains("return List.of(_Parent.name, _Parent.primary, _Parent.children);"),
                 "attributes() must return the metamodel field instances, not literals:" + System.lineSeparator() + md);
         String mflat = Files.readString(generatedDir.resolve("rel/ParentMetadata.java")).replaceAll("\\s+", "");
-        assertTrue(mflat.contains("mappings.put(_Parent.name,newColumnRef(\"name\",\"parent\",null,List.of()))")
-                        && mflat.contains("mappings.put(_Parent.primary,newColumnRef(\"primary_id\",\"parent\",null,List.of()))")
+        assertTrue(mflat.contains("mappings.put(\"name\",newColumnRef(\"name\",\"parent\",null,List.of()))")
+                        && mflat.contains("mappings.put(\"primary\",newColumnRef(\"primary_id\",\"parent\",null,List.of()))")
                         && !mflat.contains("columns(){"),
                 "typed mappings list the local table's columns; the one-to-many contributes none:"
                         + System.lineSeparator() + mflat);
@@ -2546,8 +2546,8 @@ class RepositoryProcessorTest {
         assertTrue(Files.exists(generatedDir.resolve("mmbook/BookMetadata.java")),
                 "the internal <Entity>Metadata must still be generated");
         String mdb = Files.readString(generatedDir.resolve("mmbook/BookMetadata.java")).replaceAll("\\s+", "");
-        assertTrue(mdb.contains("mappings.put(_Book.id,newColumnRef(\"id\",\"book\",null,List.of()))")
-                        && mdb.contains("mappings.put(_Book.title,newColumnRef(\"title\",\"book\",null,List.of()))")
+        assertTrue(mdb.contains("mappings.put(\"id\",newColumnRef(\"id\",\"book\",null,List.of()))")
+                        && mdb.contains("mappings.put(\"title\",newColumnRef(\"title\",\"book\",null,List.of()))")
                         && !mdb.contains("columns(){"), mdb);
     }
 
@@ -2656,8 +2656,8 @@ class RepositoryProcessorTest {
         String cmdFlat = Files.readString(generatedDir.resolve("mmgp/ProfileMetadata.java")).replaceAll("\\s+", "");
         assertTrue(cmdFlat.contains("mappings=newLinkedHashMap<>();")
                         && !cmdFlat.contains("columns(){"), cmdFlat);
-        assertTrue(cmdFlat.contains("mappings.put(_Profile.address.city,newColumnRef(\"address_city\",\"profile\",null,List.of()))")
-                        && cmdFlat.contains("mappings.put(_Profile.address.point.lat,newColumnRef(\"address_point_lat\",\"profile\",null,List.of()))"),
+        assertTrue(cmdFlat.contains("mappings.put(\"address.city\",newColumnRef(\"address_city\",\"profile\",null,List.of()))")
+                        && cmdFlat.contains("mappings.put(\"address.point.lat\",newColumnRef(\"address_point_lat\",\"profile\",null,List.of()))"),
                 "columnRefs should index embedded leaves by their generated PathAttribute instances:"
                         + System.lineSeparator() + cmdFlat);
     }
@@ -2996,7 +2996,7 @@ class RepositoryProcessorTest {
         // D3/D4: the chained-column and fk-placement facts moved into the descriptor's generated
         // columnRefs() literals — pin the TARGET-LOCAL chained column and the join there.
         String lmd = Files.readString(generatedDir.resolve("navleaf/LoadMetadata.java")).replaceAll("\\s+", "");
-        assertTrue(lmd.contains("mappings.put(_Load.depot.street,newColumnRef(\"addr_street\",\"depot\",\"depot\",List.of(newJoinRef(\"load\",null,\"depot_id\",\"depot\",\"depot\",\"id\"))))"),
+        assertTrue(lmd.contains("mappings.put(\"depot.addr.street\",newColumnRef(\"addr_street\",\"depot\",\"depot\",List.of(newJoinRef(\"load\",null,\"depot_id\",\"depot\",\"depot\",\"id\"))))"),
                 "columnRefs must pin the target-local chained column and the FK join:" + System.lineSeparator() + lmd);
 
         // (b) EC nav: leaves rebuilt from the element VO props must carry the elementColumns
@@ -3007,7 +3007,7 @@ class RepositoryProcessorTest {
         assertTrue(ecNav.contains("publicfinalclass_LoadTagsimplementsListAttribute<Load,Tags>"), ecNav);
         assertTrue(ecNav.contains("TextScalarAttribute<Load>sku=newTextScalarAttributeRecord<>(\"sku\",\"tags.sku\");"), ecNav);
         assertTrue(ecNav.contains("SortableScalarAttribute<Load>qty=newSortableScalarAttributeRecord<>(\"qty\",\"tags.qty\");"), ecNav);
-        assertTrue(lmd.contains("mappings.put(_Load.tags.sku,newColumnRef(\"sku\",\"load_tags\",\"tags\",List.of(newJoinRef(\"load\",null,\"id\",\"load_tags\",\"tags\",\"load_id\"))))"),
+        assertTrue(lmd.contains("mappings.put(\"tags.sku\",newColumnRef(\"sku\",\"load_tags\",\"tags\",List.of(newJoinRef(\"load\",null,\"id\",\"load_tags\",\"tags\",\"load_id\"))))"),
                 "element-collection navigation must pin the child table and parent fk through the join:" + System.lineSeparator() + lmd);
     }
 
@@ -3086,13 +3086,13 @@ class RepositoryProcessorTest {
         // D3: targetDescriptor() plumbing is gone; the FK target resolution rides the descriptor's
         // generated columnRefs() literals.
         String pmd = Files.readString(generatedDir.resolve("mmrel/ParentMetadata.java")).replaceAll("\\s+", "");
-        assertTrue(pmd.contains("mappings.put(_Parent.primary.id,newColumnRef(\"id\",\"child\",\"primary\",List.of(newJoinRef(\"parent\",null,\"primary_id\",\"child\",\"primary\",\"id\"))))"),
+        assertTrue(pmd.contains("mappings.put(\"primary.id\",newColumnRef(\"id\",\"child\",\"primary\",List.of(newJoinRef(\"parent\",null,\"primary_id\",\"child\",\"primary\",\"id\"))))"),
                 "the generated columnRefs must carry the FK join:" + System.lineSeparator() + pmd);
         String otmNav = Files.readString(generatedDir.resolve("mmrel/_ParentChildren.java")).replaceAll("\\s+", "");
         assertTrue(otmNav.contains("publicfinalclass_ParentChildrenimplementsListAttribute<Parent,Child>"), otmNav);
         assertTrue(otmNav.contains("ScalarAttribute<Parent>owner=newScalarAttributeRecord<>(\"owner\",\"children.owner\");"),
                 "the child's own FK column path must flatten into the collection nav:" + System.lineSeparator() + otmNav);
-        assertTrue(pmd.contains("mappings.put(_Parent.children.id,newColumnRef(\"id\",\"child\",\"children\",List.of(newJoinRef(\"parent\",null,\"id\",\"child\",\"children\",\"owner_id\"))))"),
+        assertTrue(pmd.contains("mappings.put(\"children.id\",newColumnRef(\"id\",\"child\",\"children\",List.of(newJoinRef(\"parent\",null,\"id\",\"child\",\"children\",\"owner_id\"))))"),
                 "one-to-many navigation must join via the child table and the inverse fk:" + System.lineSeparator() + pmd);
         String cm = Files.readString(generatedDir.resolve("mmrel/_Child.java")).replaceAll("\\s+", "");
         assertTrue(cm.contains("_ChildOwnerowner=new_ChildOwner();"), cm);

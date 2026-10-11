@@ -2,6 +2,7 @@ package io.github.fludakit.data.sql;
 
 import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.EntityMetadata;
+import io.github.fludakit.data.metadata.Stereotype;
 import io.github.fludakit.data.metamodel.IdAttribute;
 import io.github.fludakit.data.metamodel.PathAttribute;
 import io.github.fludakit.data.metamodel.TextScalarAttributeRecord;
@@ -25,6 +26,11 @@ class CursorKeysTest {
     record WithValues<T>(Class<T> entityClass, String tableName, IdAttribute<T> id,
                          List<PathAttribute<T>> attributes, List<ColumnRef> columns,
                          List<Object> itemsName, Object name) implements EntityMetadata<T> {
+        @Override
+        public Stereotype stereotype() {
+            return tableName == null ? Stereotype.VALUE_OBJECT : Stereotype.ENTITY;
+        }
+
         @Override
         public Object navigate(String path, T root) {
             switch (path) {

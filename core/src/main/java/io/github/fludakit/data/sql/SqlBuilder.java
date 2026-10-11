@@ -45,7 +45,7 @@ import java.util.stream.Collectors;
 public final class SqlBuilder {
 
     private final TableSchema schema;
-    private final AttributePathResolver<?> resolver;
+    private final AttributePathResolver resolver;
     private final QueryDefinition model;
     private SqlDialect dialect;
 
@@ -60,12 +60,12 @@ public final class SqlBuilder {
     }
 
     /** A schema + resolver builder for lifecycle statements that bind logical paths. */
-    public SqlBuilder(TableSchema schema, AttributePathResolver<?> resolver) {
+    public SqlBuilder(TableSchema schema, AttributePathResolver resolver) {
         this(schema, resolver, null);
     }
 
     /** A full structured-query builder. */
-    public SqlBuilder(TableSchema schema, AttributePathResolver<?> resolver, QueryDefinition model) {
+    public SqlBuilder(TableSchema schema, AttributePathResolver resolver, QueryDefinition model) {
         this.schema = Objects.requireNonNull(schema, "schema");
         this.resolver = resolver;
         this.model = model;
@@ -287,7 +287,7 @@ public final class SqlBuilder {
         return model;
     }
 
-    private AttributePathResolver<?> requireResolver() {
+    private AttributePathResolver requireResolver() {
         if (resolver == null) {
             throw new IllegalStateException("this SqlBuilder has no attribute resolver — construct it with "
                     + "SqlBuilder(TableSchema, AttributePathResolver[, QueryDefinition])");
@@ -328,11 +328,11 @@ public final class SqlBuilder {
      * database can generate it (identity / auto-increment); binding an explicit NULL to an identity
      * column is rejected by most databases, including H2.
      */
-    private String insert(TableSchema md, AttributePathResolver<?> attributes) {
+    private String insert(TableSchema md, AttributePathResolver attributes) {
         return insert(md, attributes, true);
     }
 
-    private String insert(TableSchema md, AttributePathResolver<?> attributes, boolean includeId) {
+    private String insert(TableSchema md, AttributePathResolver attributes, boolean includeId) {
         List<ColumnRef> cols = md.columns();
         if (!includeId) {
             cols = cols.stream()
@@ -345,7 +345,7 @@ public final class SqlBuilder {
         return "INSERT INTO " + dialect.quoteIdentifier(md.tableName()) + " (" + names + ") VALUES (" + params + ")";
     }
 
-    private String update(TableSchema md, AttributePathResolver<?> attributes) {
+    private String update(TableSchema md, AttributePathResolver attributes) {
         List<ColumnRef> cols = md.columns();
         String idCol = dialect.quoteIdentifier(md.idColumn());
         String sets = cols.stream()
@@ -356,10 +356,10 @@ public final class SqlBuilder {
         return "UPDATE " + dialect.quoteIdentifier(md.tableName()) + " SET " + sets + " WHERE " + idCol + " = :id";
     }
 
-    private static <A> String attributePath(AttributePathResolver<A> attributes, ColumnRef column) {
+    private static String attributePath(AttributePathResolver attributes, ColumnRef column) {
         return attributes.columnRefs().entrySet().stream()
                 .filter(entry -> entry.getValue().equals(column))
-                .map(entry -> attributes.attributePath(entry.getKey()))
+                .map(Map.Entry::getKey)
                 .findFirst()
                 .orElseThrow(() -> new IllegalArgumentException(
                         "No logical attribute path maps to column '" + column.column() + "'"));
@@ -415,7 +415,7 @@ public final class SqlBuilder {
         private final QueryDefinition model;
         private final String extraProjection;
         private final TableSchema md = schema;
-        private final AttributePathResolver<?> attributes = requireResolver();
+        private final AttributePathResolver attributes = requireResolver();
         private final Operation operation;
         private final boolean deleteMode;
         private final boolean countMode;
@@ -570,7 +570,7 @@ public final class SqlBuilder {
         }
     }
 
-    private ColumnRef resolveColumnRef(TableSchema schema, AttributePathResolver<?> attributes, String path) {
+    private ColumnRef resolveColumnRef(TableSchema schema, AttributePathResolver attributes, String path) {
         try {
             return attributes.columnRef(path);
         } catch (IllegalArgumentException unknownPath) {
@@ -589,7 +589,7 @@ public final class SqlBuilder {
                 && (ref.ownerTableName() == null || ref.ownerTableName().equals(table));
     }
 
-    private static boolean isExistential(AttributePathResolver<?> attributes, String path) {
+    private static boolean isExistential(AttributePathResolver attributes, String path) {
         return pathHead(path) != null && attributes.isToManyPath(path);
     }
 

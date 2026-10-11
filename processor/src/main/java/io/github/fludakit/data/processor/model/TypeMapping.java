@@ -21,7 +21,7 @@ import java.util.Set;
  * {@link TableSchema} and {@link AttributePathResolver} separately: physical columns describe one
  * table, while entity-rooted paths resolve through the attribute resolver.</p>
  */
-public sealed interface TypeMapping extends TableSchema, AttributePathResolver<String>
+public sealed interface TypeMapping extends TableSchema, AttributePathResolver
         permits EntityTypeMapping, EmbeddedValueObjectMapping, ElementCollectionValueObjectMapping {
 
     /** Domain role of the mapped type. */
@@ -164,11 +164,6 @@ public sealed interface TypeMapping extends TableSchema, AttributePathResolver<S
             throw new IllegalArgumentException("Unknown property '" + path + "' on " + typeName());
         }
         return ref;
-    }
-
-    @Override
-    default String attributePath(String path) {
-        return path;
     }
 
     /**

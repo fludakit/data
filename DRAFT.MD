@@ -45,8 +45,8 @@ The generated Jakarta Data static metamodel supplies type-safe attribute instanc
 provides runtime mapping and navigation data.
 
 `attributes()` contains each root-level metamodel node once, including embedded and relation
-containers. `AttributePathResolver<PathAttribute<T>>.columnRefs()` indexes SQL-resolvable leaves by
-their `PathAttribute<T>` keys, including flattened embedded leaves and supported relation paths.
+containers. `AttributePathResolver.columnRefs()` indexes SQL-resolvable leaves by their logical
+path string, including flattened embedded leaves and supported relation paths.
 Generated metadata preserves declaration order in this index; the default `columns()` view filters
 out joined or qualified mappings to expose the root table's physical columns without duplicating
 mapping state. `ColumnRef` contains only `(column, ownerTableName, ownerAlias, joins)`: the logical

@@ -2,6 +2,7 @@ package io.github.fludakit.data.sql;
 
 import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.EntityMetadata;
+import io.github.fludakit.data.metadata.Stereotype;
 import io.github.fludakit.data.metadata.TableSchema;
 import io.github.fludakit.data.metadata.JoinRef;
 import io.github.fludakit.data.metamodel.EmbeddableAttributeRecord;
@@ -9,7 +10,6 @@ import io.github.fludakit.data.metamodel.EntityAttributeRecord;
 import io.github.fludakit.data.metamodel.IdAttributeRecord;
 import io.github.fludakit.data.metamodel.ListAttributeRecord;
 import io.github.fludakit.data.metamodel.PathAttribute;
-import io.github.fludakit.data.metamodel.PathAttributeRecord;
 import io.github.fludakit.data.metamodel.TextScalarAttributeRecord;
 import io.github.fludakit.data.query.Connector;
 import io.github.fludakit.data.query.Operator;
@@ -79,6 +79,7 @@ class SqlBuilderTest {
         return new EntityMetadata<>() {
             @Override public Class<Customer> entityClass() { return Customer.class; }
             @Override public String tableName() { return "customer"; }
+            @Override public Stereotype stereotype() { return Stereotype.ENTITY; }
             @Override public IdAttributeRecord<Customer> id() {
                 return new IdAttributeRecord<>("id");
             }
@@ -88,9 +89,9 @@ class SqlBuilderTest {
             @Override public List<ColumnRef> columns() {
                 return List.of(new ColumnRef("id"), new ColumnRef("name"));
             }
-            @Override public java.util.Map<PathAttribute<Customer>, ColumnRef> columnRefs() {
-                return java.util.Map.of(new PathAttributeRecord<Customer>("id", "id"), new ColumnRef("id"),
-                        new PathAttributeRecord<Customer>("name", "name"), new ColumnRef("name"));
+            @Override public java.util.Map<String, ColumnRef> columnRefs() {
+                return java.util.Map.of("id", new ColumnRef("id"),
+                        "name", new ColumnRef("name"));
             }
         };
     }
@@ -100,6 +101,7 @@ class SqlBuilderTest {
         return new EntityMetadata<>() {
             @Override public Class<Profile> entityClass() { return Profile.class; }
             @Override public String tableName() { return "profile"; }
+            @Override public Stereotype stereotype() { return Stereotype.ENTITY; }
             @Override public IdAttributeRecord<Profile> id() { return new IdAttributeRecord<>("id"); }
             @Override public List<PathAttribute<Profile>> attributes() {
                 return List.of(
@@ -109,11 +111,10 @@ class SqlBuilderTest {
                 return List.of(new ColumnRef("id", "profile"),
                         new ColumnRef("address_city", "profile"));
             }
-            @Override public java.util.Map<PathAttribute<Profile>, ColumnRef> columnRefs() {
+            @Override public java.util.Map<String, ColumnRef> columnRefs() {
                 return java.util.Map.of(
-                        new PathAttributeRecord<Profile>("id", "id"), new ColumnRef("id", "profile"),
-                        new PathAttributeRecord<Profile>("city", "address.city"),
-                        new ColumnRef("address_city", "profile"));
+                        "id", new ColumnRef("id", "profile"),
+                        "address.city", new ColumnRef("address_city", "profile"));
             }
         };
     }
@@ -322,6 +323,7 @@ class SqlBuilderTest {
         return new EntityMetadata<>() {
             @Override public Class<Profile> entityClass() { return Profile.class; }
             @Override public String tableName() { return "profile"; }
+            @Override public Stereotype stereotype() { return Stereotype.ENTITY; }
             @Override public IdAttributeRecord<Profile> id() { return new IdAttributeRecord<>("id"); }
             @Override public List<PathAttribute<Profile>> attributes() {
                 return List.of(

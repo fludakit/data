@@ -55,14 +55,10 @@ class SqlBuilderBuildTest {
     private static final ColumnRef LINE_PRODUCT = new ColumnRef("product", "line", "lines",
             List.of(new JoinRef("order_table", null, "id", "line", "lines", "order_id")));
 
-    private static final AttributePathResolver<String> ATTRIBUTES = new AttributePathResolver<>() {
+    private static final AttributePathResolver ATTRIBUTES = new AttributePathResolver() {
         @Override public Map<String, ColumnRef> columnRefs() {
             return Map.of("status", STATUS, "customer.name", CUSTOMER_NAME,
                     "tags.label", TAG_LABEL, "lines.product", LINE_PRODUCT);
-        }
-
-        @Override public String attributePath(String path) {
-            return path;
         }
 
         @Override public ColumnRef columnRef(String path) {

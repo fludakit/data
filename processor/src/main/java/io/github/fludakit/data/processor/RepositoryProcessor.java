@@ -127,8 +127,6 @@ public class RepositoryProcessor extends AbstractProcessor {
     private static final ClassName FM_TEXT = ClassName.get("io.github.fludakit.data.metamodel", "TextScalarAttribute");
     private static final ClassName FM_PATH_ATTRIBUTE =
             ClassName.get("io.github.fludakit.data.metamodel", "PathAttribute");
-    private static final ClassName FM_PATH_ATTRIBUTE_RECORD =
-            ClassName.get("io.github.fludakit.data.metamodel", "PathAttributeRecord");
     private static final ClassName FM_EMBEDDED = ClassName.get("io.github.fludakit.data.metamodel", "EmbeddableAttribute");
     private static final ClassName FM_FK = ClassName.get("io.github.fludakit.data.metamodel", "EntityAttribute");
     private static final ClassName FM_OTM = ClassName.get("io.github.fludakit.data.metamodel", "ListAttribute");
@@ -153,6 +151,8 @@ public class RepositoryProcessor extends AbstractProcessor {
             ClassName.get("io.github.fludakit.data.metadata", "ColumnRef");
     private static final ClassName MD_JOIN_EDGE =
             ClassName.get("io.github.fludakit.data.metadata", "JoinRef");
+    private static final ClassName MD_STEREOTYPE =
+            ClassName.get("io.github.fludakit.data.metadata", "Stereotype");
 
     // the query-metadata types the generated <Repository>Queries serialises literals with.
     private static final ClassName Q_QUERY_DEFINITION =
@@ -836,6 +836,12 @@ public class RepositoryProcessor extends AbstractProcessor {
                 .addAnnotation(Override.class)
                 .returns(ParameterizedTypeName.get(ClassName.get(Class.class), entityType))
                 .addStatement("return $T.class", entityType).build());
+        // The domain role is stated explicitly rather than inferred from a null table name.
+        builder.addMethod(MethodSpec.methodBuilder("stereotype").addModifiers(Modifier.PUBLIC)
+                .addAnnotation(Override.class)
+                .returns(MD_STEREOTYPE)
+                .addStatement("return $T.$L", MD_STEREOTYPE, entity.metadata().stereotype().name())
+                .build());
         builder.addMethod(stringAccessor("tableName", entity.metadata().tableName()));
 
         MmMember idMember = null;
@@ -877,27 +883,26 @@ public class RepositoryProcessor extends AbstractProcessor {
                 .returns(ParameterizedTypeName.get(ClassName.get(java.util.List.class), attribute))
                 .addStatement("return $L", list.build()).build());
 
-        // One shared path enumeration feeds the runtime attribute index and navigate() switch.
+        // One shared path enumeration feeds the runtime attribute index and navigate() switch. The
+        // columnRefs() index is keyed by the logical path string, not the metamodel field instance.
         List<NavCase> navs = navCases(entityElement, entity);
         Map<String, CodeBlock> mappedAttributes = new LinkedHashMap<>();
         Map<String, ColumnRef> pathMappings = new LinkedHashMap<>();
         for (Map.Entry<String, ColumnRef> mapping : entity.metadata().localAttributeRefs().entrySet()) {
-            mappedAttributes.put(mapping.getKey(), pathAttributeReference(
-                    entityElement, entity, metamodelType, mapping.getKey()));
+            mappedAttributes.put(mapping.getKey(), CodeBlock.of("$S", mapping.getKey()));
             pathMappings.put(mapping.getKey(), mapping.getValue());
         }
         for (NavCase nav : navs) {
-            mappedAttributes.putIfAbsent(nav.path(), pathAttributeReference(
-                    entityElement, entity, metamodelType, nav.path()));
+            mappedAttributes.putIfAbsent(nav.path(), CodeBlock.of("$S", nav.path()));
             pathMappings.putIfAbsent(nav.path(), nav.ref());
         }
-        TypeName attributeType = ParameterizedTypeName.get(FM_PATH_ATTRIBUTE, entityType);
+        ClassName pathKey = ClassName.get(String.class);
         MethodSpec.Builder columnRefs = MethodSpec.methodBuilder("columnRefs").addModifiers(Modifier.PUBLIC)
                 .addAnnotation(Override.class)
                 .returns(ParameterizedTypeName.get(ClassName.get(java.util.Map.class),
-                        attributeType, MD_COLUMN_REF))
+                        pathKey, MD_COLUMN_REF))
                 .addStatement("$T<$T, $T> mappings = new $T<>()",
-                        ClassName.get(java.util.Map.class), attributeType, MD_COLUMN_REF,
+                        ClassName.get(java.util.Map.class), pathKey, MD_COLUMN_REF,
                         ClassName.get(java.util.LinkedHashMap.class));
         for (Map.Entry<String, CodeBlock> entry : mappedAttributes.entrySet()) {
             columnRefs.addStatement("mappings.put($L, $L)", entry.getValue(),
@@ -919,50 +924,6 @@ public class RepositoryProcessor extends AbstractProcessor {
         writeSourceFile(packageName + "." + simpleName, entityElement,
                 JavaFile.builder(packageName, builder.build()).skipJavaLangImports(true).build());
         return self;
-    }
-
-    private CodeBlock pathAttributeReference(TypeElement entityElement, EntityModel entity,
-                                             ClassName metamodelType, String path) {
-        if (metamodelType == null) {
-            return CodeBlock.of("new $T<>($S, $S)", FM_PATH_ATTRIBUTE_RECORD,
-                    lastPathSegment(path), path);
-        }
-        String[] segments = path.split("\\.");
-        if (segments.length == 1) {
-            return CodeBlock.of("$T.$L", metamodelType, segments[0]);
-        }
-        String packageName = elements.getPackageOf(entityElement).getQualifiedName().toString();
-        Prop head = entity.metadata().props().stream()
-                .filter(prop -> prop.name().equals(segments[0]))
-                .findFirst().orElse(null);
-        if (head instanceof Prop.Reference || head instanceof Prop.EntityList
-                || head instanceof Prop.ElementList) {
-            boolean elementCollection = head instanceof Prop.ElementList;
-            String navSimple = "_" + entityElement.getSimpleName() + capitalize(segments[0]);
-            if (!relationTargetResolved(memberTargetFqn(head), elementCollection)
-                    || !generatedNavigationTypes.contains(packageName + "." + navSimple)) {
-                return pathAttributeRecord(path);
-            }
-            return CodeBlock.of("$T.$L.$L", metamodelType, segments[0],
-                    segments[segments.length - 1]);
-        }
-        String navSimple = "_" + entityElement.getSimpleName() + capitalize(segments[0]);
-        if (!generatedNavigationTypes.contains(packageName + "." + navSimple)) {
-            return pathAttributeRecord(path);
-        }
-        for (int i = 1; i < segments.length - 1; i++) {
-            String nestedNav = navSimple + capitalize(segments[i]);
-            if (!generatedNavigationTypes.contains(packageName + "." + nestedNav)) {
-                return pathAttributeRecord(path);
-            }
-            navSimple = nestedNav;
-        }
-        return CodeBlock.of("$T.$L", metamodelType, String.join(".", segments));
-    }
-
-    private CodeBlock pathAttributeRecord(String path) {
-        return CodeBlock.of("new $T<>($S, $S)", FM_PATH_ATTRIBUTE_RECORD,
-                lastPathSegment(path), path);
     }
 
     /**

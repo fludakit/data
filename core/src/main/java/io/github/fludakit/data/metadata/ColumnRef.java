@@ -4,7 +4,10 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Physical column placement in one table, with the join chain needed to reach its owner.
+ * A physical column reached through a query-specific join chain. The physical identity — the column
+ * name and its owning table — is stable across queries and is exposed alone as
+ * {@link #physicalColumn()}; the query-scoped part is the {@link #ownerAlias()} and the ordered
+ * {@link #joins()} (each a {@link JoinRef}) that reach the owner from the query's root table.
  *
  * @param column the physical column name in the owning table
  * @param ownerTableName the physical table containing the column
@@ -15,6 +18,11 @@ public record ColumnRef(String column, String ownerTableName, String ownerAlias,
 
     public ColumnRef {
         joins = joins == null ? List.of() : List.copyOf(joins);
+    }
+
+    /** The physical placement alone, without the query-scoped alias or join chain. */
+    public Column physicalColumn() {
+        return new Column(column, ownerTableName);
     }
 
     /** Creates a physical column whose owner is supplied by query context. */

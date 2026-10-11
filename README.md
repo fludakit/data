@@ -198,10 +198,9 @@ row, the entity is inserted *with* its id. Found by the Jakarta Data TCK and pin
   implementations shrink to `(name)`.
 - `EntityMetadata.columnRef` failures for unknown/navigable-but-unknown-leaf paths now report a
   single `Unknown property '<path>' on <Entity>` message.
-- `AttributePathResolver<A>.columnRefs()` owns the ordered path-to-placement index. Generated
-  runtime metadata uses `PathAttribute<T>` keys; processor mappings use logical string paths.
-  `ColumnRef` contains only physical column/table/join placement and never an attribute name.
-  `TableSchema.columns()` remains scoped to physical columns in one table.
+- `AttributePathResolver.columnRefs()` owns the ordered path-to-placement index, keyed by the
+  logical path string. `ColumnRef` contains only physical column/table/join placement and never an
+  attribute name. `TableSchema.columns()` remains scoped to physical columns in one table.
 - `EntityMetadata.attributes()` no longer flattens embedded leaves. `attribute("address.city")`
   does not resolve — dot paths resolve through `EntityMetadata.columnRef(String)`, which also
   reports the joins a path contributes.

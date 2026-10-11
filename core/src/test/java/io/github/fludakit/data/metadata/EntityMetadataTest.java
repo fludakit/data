@@ -8,7 +8,6 @@ import io.github.fludakit.data.metamodel.IdAttributeRecord;
 import io.github.fludakit.data.metamodel.ListAttribute;
 import io.github.fludakit.data.metamodel.ListAttributeRecord;
 import io.github.fludakit.data.metamodel.PathAttribute;
-import io.github.fludakit.data.metamodel.PathAttributeRecord;
 import io.github.fludakit.data.metamodel.SortableScalarAttributeRecord;
 import io.github.fludakit.data.metamodel.TextScalarAttributeRecord;
 import jakarta.data.Sort;
@@ -36,7 +35,12 @@ class EntityMetadataTest {
      */
     record Fixture<T>(Class<T> entityClass, String tableName, IdAttribute<T> id,
                       List<PathAttribute<T>> attributes, List<ColumnRef> columns,
-                      Map<PathAttribute<T>, ColumnRef> columnRefs) implements EntityMetadata<T> { }
+                      Map<String, ColumnRef> columnRefs) implements EntityMetadata<T> {
+        @Override
+        public Stereotype stereotype() {
+            return tableName == null ? Stereotype.VALUE_OBJECT : Stereotype.ENTITY;
+        }
+    }
 
     static EntityMetadata<Address> address() {
         return new Fixture<>(Address.class, null, null,
@@ -61,14 +65,10 @@ class EntityMetadataTest {
                         new ColumnRef("address_street", "person"),
                         new ColumnRef("address_zip", "person")),
                 Map.of(
-                        new PathAttributeRecord<Person>("id", "id"),
-                        new ColumnRef("id", "person"),
-                        new PathAttributeRecord<Person>("name", "name"),
-                        new ColumnRef("name", "person"),
-                        new PathAttributeRecord<Person>("street", "address.street"),
-                        new ColumnRef("address_street", "person"),
-                        new PathAttributeRecord<Person>("zip", "address.zip"),
-                        new ColumnRef("address_zip", "person")));
+                        "id", new ColumnRef("id", "person"),
+                        "name", new ColumnRef("name", "person"),
+                        "address.street", new ColumnRef("address_street", "person"),
+                        "address.zip", new ColumnRef("address_zip", "person")));
     }
 
     @Test
@@ -196,24 +196,17 @@ class EntityMetadataTest {
                         new ColumnRef("primary_id", "rel.parent")),
                 // The typed index covers local and relation-traversing paths as generated metadata does.
                 Map.of(
-                        new PathAttributeRecord<Parent>("id", "id"),
-                        new ColumnRef("id", "rel.parent"),
-                        new PathAttributeRecord<Parent>("name", "name"),
-                        new ColumnRef("name", "rel.parent"),
-                        new PathAttributeRecord<Parent>("city", "address.city"),
-                        new ColumnRef("address_city", "rel.parent"),
-                        new PathAttributeRecord<Parent>("primary", "primary"),
-                        new ColumnRef("primary_id", "rel.parent"),
-                        new PathAttributeRecord<Parent>("label", "primary.label"),
-                        new ColumnRef("label", "rel.child", "primary",
+                        "id", new ColumnRef("id", "rel.parent"),
+                        "name", new ColumnRef("name", "rel.parent"),
+                        "address.city", new ColumnRef("address_city", "rel.parent"),
+                        "primary", new ColumnRef("primary_id", "rel.parent"),
+                        "primary.label", new ColumnRef("label", "rel.child", "primary",
                                 List.of(new JoinRef("rel.parent", null, "primary_id",
                                         "rel.child", "primary", "id"))),
-                        new PathAttributeRecord<Parent>("seq", "children.seq"),
-                        new ColumnRef("seq", "rel.child", "children",
+                        "children.seq", new ColumnRef("seq", "rel.child", "children",
                                 List.of(new JoinRef("rel.parent", null, "id",
                                         "rel.child", "children", "owner_id"))),
-                        new PathAttributeRecord<Parent>("text", "notes.text"),
-                        new ColumnRef("text", "parent_notes", "notes",
+                        "notes.text", new ColumnRef("text", "parent_notes", "notes",
                                 List.of(new JoinRef("rel.parent", null, "id",
                                         "parent_notes", "notes", "parent_id")))));
     }

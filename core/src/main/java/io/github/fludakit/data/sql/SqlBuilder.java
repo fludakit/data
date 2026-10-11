@@ -3,7 +3,7 @@ package io.github.fludakit.data.sql;
 import io.github.fludakit.data.Names;
 import io.github.fludakit.data.metadata.AttributePathResolver;
 import io.github.fludakit.data.metadata.ColumnRef;
-import io.github.fludakit.data.metadata.EntityMetadata;
+import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.JoinRef;
 import io.github.fludakit.data.metadata.TableSchema;
 import io.github.fludakit.data.query.Connector;
@@ -54,8 +54,8 @@ public final class SqlBuilder {
         this(schema, null, null);
     }
 
-    /** A convenience for generated code: an {@link EntityMetadata} is both schema and resolver. */
-    public SqlBuilder(EntityMetadata<?> metadata) {
+    /** A convenience for generated code: a {@link TypeMapping} is both schema and resolver. */
+    public SqlBuilder(TypeMapping<?> metadata) {
         this(metadata, metadata, null);
     }
 

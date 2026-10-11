@@ -1,20 +1,17 @@
-package io.github.fludakit.data.processor.model;
-
-import io.github.fludakit.data.metadata.ColumnRef;
-import io.github.fludakit.data.processor.model.TypeMapping.Prop;
+package io.github.fludakit.data.metadata;
 
 import java.util.List;
 
 /** Value object whose properties flatten into its owner's table. */
-public record EmbeddedValueObjectMapping(String typeName, List<Prop> props) implements TypeMapping {
+public record EmbeddedValueObjectMapping<T>(String typeName, List<Prop> props) implements TypeMapping<T> {
 
     public EmbeddedValueObjectMapping {
         props = List.copyOf(props);
     }
 
     @Override
-    public Stereotype stereotype() {
-        return Stereotype.VALUE_OBJECT;
+    public Kind kind() {
+        return Kind.VALUE_OBJECT;
     }
 
     @Override

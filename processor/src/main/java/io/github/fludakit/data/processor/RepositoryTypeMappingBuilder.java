@@ -5,12 +5,12 @@ import com.squareup.javapoet.TypeName;
 import io.github.fludakit.data.Names;
 import io.github.fludakit.data.annotation.Association;
 import io.github.fludakit.data.annotation.Identity;
-import io.github.fludakit.data.processor.model.TypeMapping;
-import io.github.fludakit.data.processor.model.TypeMapping.Prop;
-import io.github.fludakit.data.processor.model.TypeMapping.Stereotype;
-import io.github.fludakit.data.processor.model.EmbeddedValueObjectMapping;
-import io.github.fludakit.data.processor.model.EntityTypeMapping;
-import io.github.fludakit.data.processor.model.ElementCollectionValueObjectMapping;
+import io.github.fludakit.data.metadata.TypeMapping.Kind;
+import io.github.fludakit.data.metadata.TypeMapping;
+import io.github.fludakit.data.metadata.TypeMapping.Prop;
+import io.github.fludakit.data.metadata.EmbeddedValueObjectMapping;
+import io.github.fludakit.data.metadata.EntityTypeMapping;
+import io.github.fludakit.data.metadata.ElementCollectionValueObjectMapping;
 import javax.annotation.processing.Messager;
 import javax.lang.model.element.Element;
 import javax.lang.model.element.ElementKind;
@@ -49,7 +49,7 @@ final class RepositoryTypeMappingBuilder {
 
     RepositoryProcessor.EntityModel buildEntity(TypeElement element) {
         boolean valueObject = isValueObjectType(element);
-        Stereotype ownerStereotype = stereotypeOf(element);
+        Kind ownerKind = kindOf(element);
         TypeMirror typeMirror = types.erasure(element.asType());
         TypeName typeName = TypeName.get(typeMirror);
         String table = valueObject ? null : Names.tableName(element.getSimpleName().toString());
@@ -104,7 +104,7 @@ final class RepositoryTypeMappingBuilder {
             } else if (isEntityType(declaredElement(field))) {
                 TypeElement target = declaredElement(field);
                 // Bare entity references compose only when owned by an aggregate root.
-                boolean composition = ownerStereotype == Stereotype.AGGREGATE_ROOT;
+                boolean composition = ownerKind == Kind.AGGREGATE_ROOT;
                 Prop.Reference ref = referenceProp(name, Names.fkColumn(name),
                         target.getQualifiedName().toString(), target, composition);
                 properties.add(new RepositoryProcessor.Property(name, ref.fkColumn(), fieldTypeName, ref, null));
@@ -139,13 +139,13 @@ final class RepositoryTypeMappingBuilder {
         }
 
         // Resolve one-to-many inverse references after collecting all parent properties.
-        TypeMapping self = valueObject ? new EmbeddedValueObjectMapping(typeNameString, props)
-                : new EntityTypeMapping(ownerStereotype, typeNameString, table, idProp, props);
+        TypeMapping<?> self = valueObject ? new EmbeddedValueObjectMapping(typeNameString, props)
+                : new EntityTypeMapping(ownerKind, typeNameString, table, idProp, props);
         List<Prop> resolved = new ArrayList<>(props.size());
         for (Prop prop : props) {
             if (prop instanceof Prop.EntityList entityList && entityList.targetTypeName() != null) {
                 TypeElement childElement = elements.getTypeElement(entityList.targetTypeName());
-                EntityTypeMapping child = childElement != null
+                EntityTypeMapping<?> child = childElement != null
                         ? entityOf(descriptorFor(childElement)) : null;
                 String inverse = child != null ? findInverseName(self, child) : null;
                 resolved.add(new Prop.EntityList(entityList.name(), entityList.target(),
@@ -154,27 +154,27 @@ final class RepositoryTypeMappingBuilder {
                 resolved.add(prop);
             }
         }
-        TypeMapping metadata = valueObject ? new EmbeddedValueObjectMapping(typeNameString, resolved)
-                : new EntityTypeMapping(ownerStereotype, typeNameString, table, idProp, resolved);
+        TypeMapping<?> metadata = valueObject ? new EmbeddedValueObjectMapping(typeNameString, resolved)
+                : new EntityTypeMapping(ownerKind, typeNameString, table, idProp, resolved);
         return new RepositoryProcessor.EntityModel(typeMirror, typeName, id, properties, collections, metadata);
     }
 
-    TypeMapping descriptorFor(TypeElement element) {
+    TypeMapping<?> descriptorFor(TypeElement element) {
         String fqn = element.getQualifiedName().toString();
-        TypeMapping cached = descriptorCache.get(fqn);
+        TypeMapping<?> cached = descriptorCache.get(fqn);
         if (cached != null) {
             return cached;
         }
         if (descriptorsInProgress.contains(fqn)) {
-            Stereotype stereotype = stereotypeOf(element);
-            return stereotype == Stereotype.VALUE_OBJECT
+            Kind stereotype = kindOf(element);
+            return stereotype == Kind.VALUE_OBJECT
                     ? new EmbeddedValueObjectMapping(fqn, List.of())
                     : new EntityTypeMapping(stereotype, fqn, Names.tableName(element.getSimpleName().toString()),
                             null, List.of());
         }
         descriptorsInProgress.add(fqn);
         try {
-            TypeMapping descriptor = buildEntity(element).metadata();
+            TypeMapping<?> descriptor = buildEntity(element).metadata();
             descriptorCache.put(fqn, descriptor);
             return descriptor;
         } finally {
@@ -215,17 +215,17 @@ final class RepositoryTypeMappingBuilder {
                 && element.getAnnotation(io.github.fludakit.data.annotation.ValueObject.class) != null;
     }
 
-    Stereotype stereotypeOf(TypeElement element) {
+    Kind kindOf(TypeElement element) {
         if (isValueObjectType(element)) {
-            return Stereotype.VALUE_OBJECT;
+            return Kind.VALUE_OBJECT;
         }
         return element.getAnnotation(io.github.fludakit.data.annotation.AggregateRoot.class) != null
-                ? Stereotype.AGGREGATE_ROOT : Stereotype.ENTITY;
+                ? Kind.AGGREGATE_ROOT : Kind.ENTITY;
     }
 
     private Prop.Reference referenceProp(String name, String fkColumn, String targetTypeName,
                                          TypeElement target, boolean composition) {
-        TypeMapping targetModel = target == null ? null : descriptorFor(target);
+        TypeMapping<?> targetModel = target == null ? null : descriptorFor(target);
         return new Prop.Reference(name, fkColumn, targetTypeName, entityOf(targetModel), composition);
     }
 
@@ -233,7 +233,7 @@ final class RepositoryTypeMappingBuilder {
             String parentTable, String field, TypeElement valueObject) {
         String childTable = Names.childTable(parentTable, field);
         String parentFk = Names.fkColumn(parentTable);
-        ElementCollectionValueObjectMapping target = valueObjectMetadata(valueObject, childTable, parentFk);
+        ElementCollectionValueObjectMapping<?> target = valueObjectMetadata(valueObject, childTable, parentFk);
         Prop.ElementList element = new Prop.ElementList(field, target, target.columns());
         return new RepositoryProcessor.ElementCollection(field,
                 TypeName.get(types.erasure(valueObject.asType())), element, target);
@@ -256,7 +256,7 @@ final class RepositoryTypeMappingBuilder {
         }
     }
 
-    private ElementCollectionValueObjectMapping valueObjectMetadata(
+    private ElementCollectionValueObjectMapping<?> valueObjectMetadata(
             TypeElement valueObject, String childTable, String parentFk) {
         List<Prop> props = new ArrayList<>();
         Set<String> seen = new HashSet<>();
@@ -332,15 +332,15 @@ final class RepositoryTypeMappingBuilder {
         return null;
     }
 
-    private static EntityTypeMapping entityOf(TypeMapping model) {
-        return model instanceof EntityTypeMapping entity ? entity : null;
+    private static EntityTypeMapping<?> entityOf(TypeMapping<?> model) {
+        return model instanceof EntityTypeMapping<?> entity ? entity : null;
     }
 
-    private static EmbeddedValueObjectMapping embeddedOf(TypeMapping model) {
-        return model instanceof EmbeddedValueObjectMapping embedded ? embedded : null;
+    private static EmbeddedValueObjectMapping<?> embeddedOf(TypeMapping<?> model) {
+        return model instanceof EmbeddedValueObjectMapping<?> embedded ? embedded : null;
     }
 
-    private static String findInverseName(TypeMapping parent, TypeMapping child) {
+    private static String findInverseName(TypeMapping<?> parent, TypeMapping<?> child) {
         for (Prop prop : child.props()) {
             if (prop instanceof Prop.Reference reference
                     && parent.typeName().equals(reference.targetTypeName())) {

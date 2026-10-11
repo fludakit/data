@@ -1,9 +1,4 @@
-package io.github.fludakit.data.processor.model;
-
-import io.github.fludakit.data.metadata.ColumnRef;
-import io.github.fludakit.data.metadata.JoinRef;
-import io.github.fludakit.data.metadata.AttributePathResolver;
-import io.github.fludakit.data.metadata.TableSchema;
+package io.github.fludakit.data.metadata;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -14,20 +9,21 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Immutable compile-time mapping metadata for an entity or value-object use.
+ * Immutable mapping metadata for an entity or value-object use, shared by the processor (build
+ * time) and {@code SqlBuilder} (runtime).
  *
  * <p>The mapping has no compiler API or reflection dependencies. Its variants describe table-backed
  * entities, embedded value objects, and value-object element collections. It also implements
  * {@link TableSchema} and {@link AttributePathResolver} separately: physical columns describe one
  * table, while entity-rooted paths resolve through the attribute resolver.</p>
  */
-public sealed interface TypeMapping extends TableSchema, AttributePathResolver
-        permits EntityTypeMapping, EmbeddedValueObjectMapping, ElementCollectionValueObjectMapping {
+public interface TypeMapping<T> extends TableSchema, AttributePathResolver {
+
+    /** Domain role of the mapped type: entity, value object, or aggregate root. */
+    enum Kind { ENTITY, VALUE_OBJECT, AGGREGATE_ROOT }
 
     /** Domain role of the mapped type. */
-    enum Stereotype { AGGREGATE_ROOT, ENTITY, VALUE_OBJECT }
-
-    Stereotype stereotype();
+    Kind kind();
 
     /** Fully qualified Java type name. */
     String typeName();
@@ -39,7 +35,7 @@ public sealed interface TypeMapping extends TableSchema, AttributePathResolver
     List<Prop> props();
 
     default boolean isValueObject() {
-        return stereotype() == Stereotype.VALUE_OBJECT;
+        return kind() == Kind.VALUE_OBJECT;
     }
 
     default String idColumn() {
@@ -57,6 +53,16 @@ public sealed interface TypeMapping extends TableSchema, AttributePathResolver
             }
         }
         throw new IllegalArgumentException("Unknown property '" + name + "' on " + typeName());
+    }
+
+    /**
+     * Navigates from {@code root} through a dot path and returns the runtime value, without
+     * reflection. Generated implementations override with a {@code switch} over resolvable paths;
+     * the default throws so a hand-built mapping cannot be mistaken for a value-capable one.
+     */
+    default Object navigate(String path, T root) {
+        throw new UnsupportedOperationException(getClass().getSimpleName()
+                + " does not support property navigation");
     }
 
     /** Returns whether the named property is a to-many relation or element collection. */
@@ -94,7 +100,7 @@ public sealed interface TypeMapping extends TableSchema, AttributePathResolver
                 if (join == null) {
                     continue;
                 }
-                TypeMapping target = relationTarget(prop);
+                TypeMapping<?> target = relationTarget(prop);
                 if (target == null) {
                     continue;
                 }
@@ -144,7 +150,7 @@ public sealed interface TypeMapping extends TableSchema, AttributePathResolver
     }
 
     /** The compile-time model a relation property targets, or {@code null} for non-relations. */
-    private static TypeMapping relationTarget(Prop prop) {
+    private static TypeMapping<?> relationTarget(Prop prop) {
         if (prop instanceof Prop.Reference reference) return reference.target();
         if (prop instanceof Prop.EntityList entityList) return entityList.target();
         if (prop instanceof Prop.ElementList elementList) return elementList.target();
@@ -232,7 +238,7 @@ public sealed interface TypeMapping extends TableSchema, AttributePathResolver
          * Embedded value object whose leaves flatten into this table. A {@code null} target marks
          * an unresolved model during processor analysis.
          */
-        record Embedded(String name, String column, EmbeddedValueObjectMapping target) implements Prop { }
+        record Embedded(String name, String column, EmbeddedValueObjectMapping<?> target) implements Prop { }
 
         /**
          * To-one foreign-key reference. The target name remains available while a cyclic target
@@ -240,7 +246,7 @@ public sealed interface TypeMapping extends TableSchema, AttributePathResolver
          * external associations.
          */
         record Reference(String name, String fkColumn, String targetTypeName,
-                         EntityTypeMapping target, boolean composition) implements Prop {
+                         EntityTypeMapping<?> target, boolean composition) implements Prop {
 
             /** Referenced table, or {@code null} until the target is resolved. */
             public String targetTable() {
@@ -257,7 +263,7 @@ public sealed interface TypeMapping extends TableSchema, AttributePathResolver
          * To-many entity relation stored in the target table. Inverse details may be {@code null}
          * until relation resolution completes.
          */
-        record EntityList(String name, EntityTypeMapping target,
+        record EntityList(String name, EntityTypeMapping<?> target,
                            String inverseName, String inverseFkColumn) implements Prop {
 
             /** Target entity type, or {@code null} until resolved. */
@@ -275,7 +281,7 @@ public sealed interface TypeMapping extends TableSchema, AttributePathResolver
          * Value-object element collection stored in a child table. {@code elementColumns} contains
          * the flattened element columns in write order.
          */
-        record ElementList(String name, ElementCollectionValueObjectMapping target,
+        record ElementList(String name, ElementCollectionValueObjectMapping<?> target,
                            List<ColumnRef> elementColumns) implements Prop {
 
             public ElementList {

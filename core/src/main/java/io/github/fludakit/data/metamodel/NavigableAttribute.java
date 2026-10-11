@@ -8,7 +8,7 @@ package io.github.fludakit.data.metamodel;
  *
  * <p>Navigation-only: an attribute carries its NAME and nothing else. Table/foreign-key placement
  * lives in the processor's compile-time entity model and, at runtime, in the generated
- * {@code EntityMetadata.columnRefs()} index.</p>
+ * {@code TypeMapping.columnRefs()} index.</p>
  *
  * @param <T> the owner type
  * @param <U> the navigated target type (value object, associated entity, or element type)

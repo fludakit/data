@@ -1,16 +1,11 @@
 package io.github.fludakit.data.sql;
 
 import io.github.fludakit.data.metadata.ColumnRef;
-import io.github.fludakit.data.metadata.EntityMetadata;
-import io.github.fludakit.data.metadata.Stereotype;
-import io.github.fludakit.data.metadata.TableSchema;
 import io.github.fludakit.data.metadata.JoinRef;
-import io.github.fludakit.data.metamodel.EmbeddableAttributeRecord;
-import io.github.fludakit.data.metamodel.EntityAttributeRecord;
-import io.github.fludakit.data.metamodel.IdAttributeRecord;
-import io.github.fludakit.data.metamodel.ListAttributeRecord;
-import io.github.fludakit.data.metamodel.PathAttribute;
-import io.github.fludakit.data.metamodel.TextScalarAttributeRecord;
+import io.github.fludakit.data.metadata.TypeMapping.Kind;
+import io.github.fludakit.data.metadata.TableSchema;
+import io.github.fludakit.data.metadata.TypeMapping;
+import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.query.Connector;
 import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.Predicate;
@@ -75,16 +70,14 @@ class SqlBuilderTest {
         assertEquals("SELECT [id], [name] FROM [customer] FETCH FIRST 5 ROWS ONLY", sql);
     }
 
-    static EntityMetadata<Customer> customer() {
-        return new EntityMetadata<>() {
-            @Override public Class<Customer> entityClass() { return Customer.class; }
+    static TypeMapping<Customer> customer() {
+        return new TypeMapping<Customer>() {
             @Override public String tableName() { return "customer"; }
-            @Override public Stereotype stereotype() { return Stereotype.ENTITY; }
-            @Override public IdAttributeRecord<Customer> id() {
-                return new IdAttributeRecord<>("id");
-            }
-            @Override public List<PathAttribute<Customer>> attributes() {
-                return List.of(new TextScalarAttributeRecord<>("name"));
+            @Override public Kind kind() { return Kind.ENTITY; }
+            @Override public String typeName() { return "Customer"; }
+            @Override public Prop.Id id() { return new Prop.Id("id", "id", "java.lang.Long"); }
+            @Override public List<Prop> props() {
+                return List.of(new Prop.Scalar("name", "name", "java.lang.String"));
             }
             @Override public List<ColumnRef> columns() {
                 return List.of(new ColumnRef("id"), new ColumnRef("name"));
@@ -97,15 +90,14 @@ class SqlBuilderTest {
     }
 
     /** Profile with an embedded Address: the flattened leaves live in the explicit columns() view. */
-    static EntityMetadata<Profile> profile() {
-        return new EntityMetadata<>() {
-            @Override public Class<Profile> entityClass() { return Profile.class; }
+    static TypeMapping<Profile> profile() {
+        return new TypeMapping<Profile>() {
             @Override public String tableName() { return "profile"; }
-            @Override public Stereotype stereotype() { return Stereotype.ENTITY; }
-            @Override public IdAttributeRecord<Profile> id() { return new IdAttributeRecord<>("id"); }
-            @Override public List<PathAttribute<Profile>> attributes() {
-                return List.of(
-                        new EmbeddableAttributeRecord<Profile, Address>("address"));
+            @Override public Kind kind() { return Kind.ENTITY; }
+            @Override public String typeName() { return "Profile"; }
+            @Override public Prop.Id id() { return new Prop.Id("id", "id", "java.lang.Long"); }
+            @Override public List<Prop> props() {
+                return List.of(new Prop.Embedded("address", "address", null));
             }
             @Override public List<ColumnRef> columns() {
                 return List.of(new ColumnRef("id", "profile"),
@@ -319,17 +311,17 @@ class SqlBuilderTest {
     // ---- Task 6: aggregate sort terms replace to-many joined sorts ----
 
     /** Profile descriptor carrying one element collection, one one-to-many and one to-one head. */
-    static EntityMetadata<Profile> mixedProfile() {
-        return new EntityMetadata<>() {
-            @Override public Class<Profile> entityClass() { return Profile.class; }
+    static TypeMapping<Profile> mixedProfile() {
+        return new TypeMapping<Profile>() {
             @Override public String tableName() { return "profile"; }
-            @Override public Stereotype stereotype() { return Stereotype.ENTITY; }
-            @Override public IdAttributeRecord<Profile> id() { return new IdAttributeRecord<>("id"); }
-            @Override public List<PathAttribute<Profile>> attributes() {
+            @Override public Kind kind() { return Kind.ENTITY; }
+            @Override public String typeName() { return "Profile"; }
+            @Override public Prop.Id id() { return new Prop.Id("id", "id", "java.lang.Long"); }
+            @Override public List<Prop> props() {
                 return List.of(
-                        new ListAttributeRecord<Profile, Contact>("contacts"),
-                        new ListAttributeRecord<Profile, WorkExperience>("workHistory"),
-                        new EntityAttributeRecord<Profile, Customer>("customer"));
+                        new Prop.EntityList("contacts", null, null, null),
+                        new Prop.EntityList("workHistory", null, null, null),
+                        new Prop.Reference("customer", "customer_id", null, null, false));
             }
             @Override public List<ColumnRef> columns() {
                 return List.of(new ColumnRef("id"),
@@ -341,7 +333,7 @@ class SqlBuilderTest {
 
     @Test
     void isToManyPathDetectsCollectionAndEntityListPaths() {
-        EntityMetadata<Profile> md = mixedProfile();
+        TypeMapping md = mixedProfile();
         ColumnRef elementHead = new ColumnRef("value", "profile_contacts", "contacts",
                 List.of(new JoinRef("profile", null, "id", "profile_contacts", "contacts", "profile_id")));
         ColumnRef entityHead = new ColumnRef("company", "work_experience", "workHistory",
@@ -388,7 +380,7 @@ class SqlBuilderTest {
 
     @Test
     void joinClauseSkipsToManyHeadRefsForRuntimeDescriptorsOnly() {
-        EntityMetadata<Profile> md = mixedProfile();
+        TypeMapping md = mixedProfile();
         ColumnRef toMany = new ColumnRef("company", "work_experience", "workHistory",
                 List.of(new JoinRef("profile", null, "id", "work_experience", "workHistory", "profile_id")));
         ColumnRef toOne = new ColumnRef("name", "customer", "customer",

@@ -1,6 +1,6 @@
 package io.github.fludakit.data.sql;
 
-import io.github.fludakit.data.metadata.EntityMetadata;
+import io.github.fludakit.data.metadata.TypeMapping;
 import jakarta.data.page.PageRequest;
 
 import java.util.List;
@@ -19,7 +19,7 @@ public final class CursorKeys {
 
     /**
      * Builds the cursor key for {@code entity} from its sorted property paths, reading every value
-     * through the metadata's reflection-free {@link EntityMetadata#navigate(String, Object)} — so a
+     * through the metadata's reflection-free {@link TypeMapping#navigate(String, Object)} — so a
      * to-many sort key collapses to the same edge the joined SQL aggregate produces: the minimum for an
      * ascending key, the maximum for a descending one (nulls ignored, as SQL {@code MIN}/{@code MAX}
      * ignore them; an empty or all-null list yields a {@code null} key).
@@ -30,7 +30,7 @@ public final class CursorKeys {
      * @param entity     the root object the cursor continues from
      */
     public static <T> PageRequest.Cursor forEntity(List<String> properties, List<Boolean> ascending,
-                                                   EntityMetadata<T> md, T entity) {
+                                                    TypeMapping<T> md, T entity) {
         if (properties.size() != ascending.size()) {
             throw new IllegalArgumentException("cursor key requires one direction per property: "
                     + properties.size() + " properties, " + ascending.size() + " directions");

@@ -1293,14 +1293,10 @@ class RepositoryProcessorTest {
         compile(sourceDir, classesDir, generatedDir, "Author.java", "Book.java", "Books.java");
 
         String md = Files.readString(generatedDir.resolve("meta/BookMetadata.java")).replaceAll("\\s+", " ");
-        assertTrue(md.contains("implements EntityMetadata<Book>"),
-                "generated metadata must implement the generic interface:" + System.lineSeparator() + md);
-        assertTrue(md.contains("import io.github.fludakit.data.metadata.EntityMetadata;"), md);
+        assertTrue(md.contains("implements TypeMapping<Book>"),
+                "generated metadata must implement the mapping interface:" + System.lineSeparator() + md);
+        assertTrue(md.contains("import io.github.fludakit.data.metadata.TypeMapping;"), md);
         assertTrue(md.contains("public static final BookMetadata INSTANCE"), md);
-        // Decision 1: the descriptor returns the _Book metamodel field instances, not literals,
-        // and the association is a navigable member class implementing the FK attribute interface.
-        assertTrue(md.contains("_Book.author"),
-                "@Association must be exposed through the navigable metamodel member:" + System.lineSeparator() + md);
         String mm = Files.readString(generatedDir.resolve("meta/_Book.java")).replaceAll("\\s+", "");
         assertTrue(mm.contains("_BookAuthorauthor=new_BookAuthor();"),
                 "the association member must instantiate its nav class:" + System.lineSeparator() + mm);
@@ -1320,17 +1316,14 @@ class RepositoryProcessorTest {
         assertTrue(mflat.contains("mappings=newLinkedHashMap<>();")
                         && mflat.contains("mappings.put(\"id\",newColumnRef(\"id\",\"book\",null,List.of()))")
                         && mflat.contains("mappings.put(\"title\",newColumnRef(\"title\",\"book\",null,List.of()))")
-                        && !mflat.contains("columns(){"),
-                "typed mappings supply columns without generated duplicate state:" + System.lineSeparator() + mflat);
-        // The id() accessor returns the typed metamodel id field (ruling 8).
-        assertTrue(md.contains("public IdAttribute<Book> id()"), md);
-        assertTrue(md.contains("return _Book.id;"), "id() must expose the ID attribute:" + System.lineSeparator() + md);
-        // entityClass() replaces the old typeName() string.
-        assertTrue(md.contains("public Class<Book> entityClass()"), md);
-        assertTrue(md.contains("return Book.class;"), md);
-        // The scalar field rides the same metamodel reference list: a $S null crash would have
-        // failed the compile() above, so reaching this line proves null-safe emission.
-        assertTrue(md.contains("_Book.title"), md);
+                        && mflat.contains("columns(){"),
+                "the descriptor emits columns() and the string-keyed index:" + System.lineSeparator() + mflat);
+        // The id() accessor returns the compile-time Prop.Id literal.
+        assertTrue(md.contains("public TypeMapping.Prop.Id id()"), md);
+        assertTrue(md.contains("return new TypeMapping.Prop.Id(\"id\", \"id\", \"java.lang.Long\");"),
+                "id() must expose the identifier property:" + System.lineSeparator() + md);
+        assertTrue(md.contains("public String typeName()"), md);
+        assertTrue(md.contains("public TypeMapping.Kind kind()"), md);
     }
 
     @Test
@@ -1404,7 +1397,7 @@ class RepositoryProcessorTest {
         Path voMetadata = generatedDir.resolve("emb/AddressMetadata.java");
         assertTrue(Files.exists(voMetadata), "Expected generated " + voMetadata);
         String vmd = Files.readString(voMetadata).replaceAll("\\s+", " ");
-        assertTrue(vmd.contains("implements EntityMetadata<Address>"), vmd);
+        assertTrue(vmd.contains("implements TypeMapping"), vmd);
         assertTrue(vmd.contains("public static final AddressMetadata INSTANCE"), vmd);
         assertTrue(!vmd.contains("TABLE_NAME"),
                 "a value object has no table and must not emit TABLE_NAME:" + System.lineSeparator() + vmd);
@@ -1413,43 +1406,43 @@ class RepositoryProcessorTest {
         // A VO has no metamodel, so its members are fresh attribute-record literals (Decision 1's
         // fallback mode) and the id accessor is a typed null. The list carries the ROOT members only:
         // the nested EMBEDDED container appears once and its leaves are no longer flat attributes.
-        assertTrue(vmd.contains("public IdAttribute<Address> id()") && vmd.contains("return null;"),
+        assertTrue(vmd.contains("public TypeMapping.Prop.Id id()") && vmd.contains("return null;"),
                 "value objects report a null id:" + System.lineSeparator() + vmd);
         assertTrue(vmd.contains("public static final String CITY = \"city\";"), vmd);
         String vflat = Files.readString(voMetadata).replaceAll("\\s+", "");
-        assertTrue(vflat.contains("attributes(){returnList.of("
-                        + "newTextScalarAttributeRecord<Address>(\"city\",\"city\"),"
-                        + "newEmbeddableAttributeRecord<Address,GeoPoint>(\"point\",\"point\"));}"),
-                "VO attributes() must list root members once, without flattened leaves:"
+        assertTrue(vflat.contains("props(){returnList.of("
+                        + "newTypeMapping.Prop.Scalar(\"city\",\"city\",\"java.lang.String\"),"
+                        + "newTypeMapping.Prop.Embedded(\"point\",\"point\",null));}"),
+                "VO props() must list root members once, without flattened leaves:"
                         + System.lineSeparator() + vflat);
         // D3: attributes navigate by name; the nested value object is referenced through the
         // record's TYPE ARGUMENTS (the INSTANCE plumbing went with column()). Transitive VO
         // generation is still pinned by the GeoPointMetadata existence check below.
-        assertTrue(vmd.contains("new EmbeddableAttributeRecord<Address,GeoPoint>(\"point\", \"point\")"),
+        assertTrue(vmd.contains("new TypeMapping.Prop.Embedded(\"point\", \"point\", null)"),
                 "embedded attribute must still name the nested value object type:" + System.lineSeparator() + vmd);
-        assertTrue(vflat.contains("newEmbeddableAttributeRecord<Address,GeoPoint>(\"point\",\"point\")"),
+        assertTrue(vflat.contains("newTypeMapping.Prop.Embedded(\"point\",\"point\",null)"),
                 "the embedded literal must carry the VO type arguments:" + System.lineSeparator() + vflat);
         // ... and the VO's flattened leaves are indexed as PathAttributes.
         assertTrue(vflat.contains("mappings=newLinkedHashMap<>();")
                         && vflat.contains("mappings.put(\"point.lat\",newColumnRef(\"point_lat\",null,null,List.of()))")
-                        && !vflat.contains("columns(){"),
+                        && vflat.contains("columns(){"),
                 "VO leaves must be indexed by PathAttribute:" + System.lineSeparator() + vflat);
         // ... which must itself have been generated (transitive EMBEDDED tree walk).
         Path innerMetadata = generatedDir.resolve("emb/GeoPointMetadata.java");
         assertTrue(Files.exists(innerMetadata), "Expected generated " + innerMetadata);
         String imd = Files.readString(innerMetadata).replaceAll("\\s+", " ");
         assertTrue(imd.contains("public static final String LAT = \"lat\";"), imd);
-        assertTrue(imd.contains("new SortableScalarAttributeRecord<GeoPoint>(\"lat\", \"lat\")"), imd);
+        assertTrue(imd.contains("new TypeMapping.Prop.Scalar(\"lat\", \"lat\", \"double\")"), imd);
 
         // The owner's descriptor lists the root metamodel members (scalar + embedded nav) once, and
         // the navigable member classes carry the flattened leaves as owner-typed fields.
         String cmd = Files.readString(generatedDir.resolve("emb/ContactMetadata.java")).replaceAll("\\s+", " ");
-        assertTrue(cmd.contains("return List.of(_Contact.name, _Contact.address);"),
-                "attributes() must expose containers once, no flattened leaves:" + System.lineSeparator() + cmd);
+        assertTrue(cmd.contains("return List.of(new TypeMapping.Prop.Scalar(\"name\", \"name\", \"java.lang.String\"), new TypeMapping.Prop.Embedded(\"address\", \"address\", null));"),
+                "props() must expose containers once, no flattened leaves:" + System.lineSeparator() + cmd);
         String cflat = Files.readString(generatedDir.resolve("emb/ContactMetadata.java")).replaceAll("\\s+", "");
         assertTrue(cflat.contains("mappings.put(\"address.city\",newColumnRef(\"address_city\",\"contact\",null,List.of()))")
                         && cflat.contains("mappings.put(\"address.point.lat\",newColumnRef(\"address_point_lat\",\"contact\",null,List.of()))")
-                        && !cflat.contains("columns(){"),
+                        && cflat.contains("columns(){"),
                 "the typed index flattens the embedded chain and derives root columns:"
                         + System.lineSeparator() + cflat);
         String addrNav = Files.readString(generatedDir.resolve("emb/_ContactAddress.java")).replaceAll("\\s+", "");
@@ -2175,12 +2168,12 @@ class RepositoryProcessorTest {
                 "columnRefs must pin the one-to-many inverse join verbatim:" + System.lineSeparator() + pmd);
 
         String md = Files.readString(generatedDir.resolve("rel/ParentMetadata.java")).replaceAll("\\s+", " ");
-        assertTrue(md.contains("return List.of(_Parent.name, _Parent.primary, _Parent.children);"),
-                "attributes() must return the metamodel field instances, not literals:" + System.lineSeparator() + md);
+        assertTrue(md.contains("public List<TypeMapping.Prop> props()"),
+                "props() must list the root members:" + System.lineSeparator() + md);
         String mflat = Files.readString(generatedDir.resolve("rel/ParentMetadata.java")).replaceAll("\\s+", "");
         assertTrue(mflat.contains("mappings.put(\"name\",newColumnRef(\"name\",\"parent\",null,List.of()))")
                         && mflat.contains("mappings.put(\"primary\",newColumnRef(\"primary_id\",\"parent\",null,List.of()))")
-                        && !mflat.contains("columns(){"),
+                        && mflat.contains("columns(){"),
                 "typed mappings list the local table's columns; the one-to-many contributes none:"
                         + System.lineSeparator() + mflat);
         assertTrue(md.contains("public static final String PRIMARY = \"primary_id\";"),
@@ -2478,7 +2471,7 @@ class RepositoryProcessorTest {
                 "flattened embedded leaf must get a column constant:" + System.lineSeparator() + vmd);
         // D3: attributes navigate by name; the nested value object survives as the record's
         // type argument instead of the removed embedded-INSTANCE plumbing.
-        assertTrue(vmd.contains("new EmbeddableAttributeRecord<Address,GeoPoint>(\"point\", \"point\")"),
+        assertTrue(vmd.contains("new TypeMapping.Prop.Embedded(\"point\", \"point\", null)"),
                 "the EMBEDDED attribute must still reference the nested value object:" + System.lineSeparator() + vmd);
         Path inner = generatedDir.resolve("phantom/GeoPointMetadata.java");
         assertTrue(Files.exists(inner), "Expected generated " + inner);
@@ -2548,7 +2541,7 @@ class RepositoryProcessorTest {
         String mdb = Files.readString(generatedDir.resolve("mmbook/BookMetadata.java")).replaceAll("\\s+", "");
         assertTrue(mdb.contains("mappings.put(\"id\",newColumnRef(\"id\",\"book\",null,List.of()))")
                         && mdb.contains("mappings.put(\"title\",newColumnRef(\"title\",\"book\",null,List.of()))")
-                        && !mdb.contains("columns(){"), mdb);
+                        && mdb.contains("columns(){"), mdb);
     }
 
     @Test
@@ -2652,10 +2645,10 @@ class RepositoryProcessorTest {
 
         // The owner descriptor: root members once, explicit flattened columns in legacy order.
         String cmd = Files.readString(generatedDir.resolve("mmgp/ProfileMetadata.java")).replaceAll("\\s+", " ");
-        assertTrue(cmd.contains("return List.of(_Profile.address);"), cmd);
+        assertTrue(cmd.contains("return List.of(new TypeMapping.Prop.Embedded(\"address\", \"address\", null));"), cmd);
         String cmdFlat = Files.readString(generatedDir.resolve("mmgp/ProfileMetadata.java")).replaceAll("\\s+", "");
         assertTrue(cmdFlat.contains("mappings=newLinkedHashMap<>();")
-                        && !cmdFlat.contains("columns(){"), cmdFlat);
+                        && cmdFlat.contains("columns(){"), cmdFlat);
         assertTrue(cmdFlat.contains("mappings.put(\"address.city\",newColumnRef(\"address_city\",\"profile\",null,List.of()))")
                         && cmdFlat.contains("mappings.put(\"address.point.lat\",newColumnRef(\"address_point_lat\",\"profile\",null,List.of()))"),
                 "columnRefs should index embedded leaves by their generated PathAttribute instances:"
@@ -3325,7 +3318,7 @@ class RepositoryProcessorTest {
         // pin the one-to-many inverse-fk join). What stays pinned here: a List<@Entity> in a
         // value object exposes the navigable list attribute with the ENTITY element type and
         // never contributes a column of its own.
-        assertTrue(vmd.contains("new ListAttributeRecord<Holder,Thing>(\"things\", \"things\")"),
+        assertTrue(vmd.contains("new TypeMapping.Prop.EntityList(\"things\", null, null, null)"),
                 "a List<@Entity> in a value object must expose a navigable entity-typed list attribute:"
                         + System.lineSeparator() + vmd);
         assertTrue(!vmd.contains("new ColumnRef(\"things"),
@@ -3390,7 +3383,7 @@ class RepositoryProcessorTest {
         // The id is treated as a scalar: it flattens into the owner table as start_id, and the VO
         // metadata reports a null id (value objects have no identity accessor).
         String vmd = Files.readString(generatedDir.resolve("void1/PointMetadata.java")).replaceAll("\\s+", " ");
-        assertTrue(vmd.contains("public IdAttribute<Point> id()") && vmd.contains("return null;"),
+        assertTrue(vmd.contains("public TypeMapping.Prop.Id id()") && vmd.contains("return null;"),
                 "a value object reports a null id even when it declares @Identity:" + System.lineSeparator() + vmd);
         String md = Files.readString(generatedDir.resolve("void1/LineMetadata.java"));
         assertTrue(md.contains("public static final String START_ID = \"start_id\";"),

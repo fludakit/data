@@ -14,11 +14,11 @@ import com.squareup.javapoet.TypeVariableName;
 import io.github.fludakit.data.Names;
 import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.JoinRef;
-import io.github.fludakit.data.processor.model.TypeMapping;
-import io.github.fludakit.data.processor.model.TypeMapping.Prop;
-import io.github.fludakit.data.processor.model.TypeMapping.Stereotype;
-import io.github.fludakit.data.processor.model.EmbeddedValueObjectMapping;
-import io.github.fludakit.data.processor.model.ElementCollectionValueObjectMapping;
+import io.github.fludakit.data.metadata.TypeMapping;
+import io.github.fludakit.data.metadata.TypeMapping;
+import io.github.fludakit.data.metadata.TypeMapping.Prop;
+import io.github.fludakit.data.metadata.EmbeddedValueObjectMapping;
+import io.github.fludakit.data.metadata.ElementCollectionValueObjectMapping;
 import io.github.fludakit.data.page.SimpleCursoredPage;
 import io.github.fludakit.data.page.SimplePage;
 import io.github.fludakit.data.qbn.ParsedMethodName;
@@ -89,7 +89,7 @@ import java.util.stream.Collectors;
 /**
  * Generates five artifacts at compile time: a {@code <Repository>Impl} class for every
  * {@link Repository @Repository} interface, a reflection-free {@code <Entity>Metadata} class
- * implementing {@link io.github.fludakit.data.metadata.EntityMetadata} (the runtime metamodel for the entity), a
+ * implementing {@link io.github.fludakit.data.metadata.TypeMapping} (the runtime metamodel for the entity), a
  * {@code <Entity>RowMapper} for entities whose fields are all JDBC-safe or embeddable value objects,
  * a Jakarta Data 1.0 {@code _Entity} static metamodel interface per aggregate root
  * (see {@link #generateStaticMetamodel}), and — only when the repository declares at least one
@@ -151,8 +151,8 @@ public class RepositoryProcessor extends AbstractProcessor {
             ClassName.get("io.github.fludakit.data.metadata", "ColumnRef");
     private static final ClassName MD_JOIN_EDGE =
             ClassName.get("io.github.fludakit.data.metadata", "JoinRef");
-    private static final ClassName MD_STEREOTYPE =
-            ClassName.get("io.github.fludakit.data.metadata", "Stereotype");
+    private static final ClassName MD_KIND =
+            ClassName.get("io.github.fludakit.data.metadata", "TypeMapping", "Kind");
 
     // the query-metadata types the generated <Repository>Queries serialises literals with.
     private static final ClassName Q_QUERY_DEFINITION =
@@ -454,7 +454,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             hydratedRelationships.add(new EntityRelationship(a, targetModel, targetMapper));
         }
         // Aggregate write cascade. Two rules:
-        // Stereotype gate: the composition lifecycle is bound to the root ONLY for
+        // Kind gate: the composition lifecycle is bound to the root ONLY for
         // @AggregateRoot owners; inside an @Entity an entity collection is a
         // "collection of associated objects" whose lifecycle is NOT bound, so a replace-all
         // there would silently DELETE associated child rows. Non-root owners therefore get NO write
@@ -468,7 +468,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         // emits its own write-honest NOTE ("children will NOT be cascaded on save/update/delete") so
         // save() can never silently drop children without write-side diagnostics.
         List<EntityRelationship> cascadeRelationships = new ArrayList<>();
-        if (stereotypeOf(entityElement) == Stereotype.AGGREGATE_ROOT) {
+        if (kindOf(entityElement) == TypeMapping.Kind.AGGREGATE_ROOT) {
             for (Prop a : entity.metadata().props()) {
                 if (!(a instanceof Prop.EntityList list)) {
                     continue;
@@ -702,6 +702,48 @@ public class RepositoryProcessor extends AbstractProcessor {
                 joins.build());
     }
 
+    /** A {@code List.of(...)} literal of column refs for a generated {@code columns()} accessor. */
+    private static CodeBlock columnRefList(List<ColumnRef> refs) {
+        CodeBlock.Builder list = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
+        for (int i = 0; i < refs.size(); i++) {
+            if (i > 0) {
+                list.add(", ");
+            }
+            list.add(columnRefLiteral(refs.get(i)));
+        }
+        return list.add(")").build();
+    }
+
+    /**
+     * The local-only {@code Prop} literal for a generated {@code props()} accessor: the declared
+     * property shape with a {@code null} relation target, because the generated descriptor overrides
+     * {@code columnRefs()} and {@code navigate()} and never walks the transitive mapping.
+     */
+    private static CodeBlock propLiteral(ClassName descriptor, Prop p) {
+        ClassName prop = descriptor.nestedClass("Prop");
+        if (p instanceof Prop.Scalar scalar) {
+            return CodeBlock.of("new $T($S, $S, $S)", prop.nestedClass("Scalar"),
+                    scalar.name(), scalar.column(), scalar.typeFqn());
+        }
+        if (p instanceof Prop.Reference reference) {
+            return CodeBlock.of("new $T($S, $S, $S, null, $L)", prop.nestedClass("Reference"),
+                    reference.name(), reference.fkColumn(), reference.targetTypeName(), reference.composition());
+        }
+        if (p instanceof Prop.Embedded embedded) {
+            return CodeBlock.of("new $T($S, $S, null)", prop.nestedClass("Embedded"),
+                    embedded.name(), embedded.column());
+        }
+        if (p instanceof Prop.EntityList entityList) {
+            return CodeBlock.of("new $T($S, null, $S, $S)", prop.nestedClass("EntityList"),
+                    entityList.name(), entityList.inverseName(), entityList.inverseFkColumn());
+        }
+        if (p instanceof Prop.ElementList elementList) {
+            return CodeBlock.of("new $T($S, null, $L)", prop.nestedClass("ElementList"),
+                    elementList.name(), columnRefList(elementList.elementColumns()));
+        }
+        throw new IllegalStateException("unknown property kind: " + p.getClass().getName());
+    }
+
     private static CodeBlock predicateLiteral(Predicate predicate) {
         return CodeBlock.of("$T.of($S, $T.$L, $S, $T.$L, $L)", Q_PREDICATE, predicate.property(), Q_OPERATOR,
                 predicate.operator().name(), predicate.param(), Q_CONNECTOR,
@@ -768,9 +810,9 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /**
-     * Emits {@code <Entity>Metadata implements EntityMetadata<Entity>}: the column-name
+     * Emits {@code <Entity>Metadata implements TypeMapping<Entity>}: the column-name
      * constants (one per mapped property plus the table name) alongside the descriptor view —
-     * {@code INSTANCE}, {@code entityClass()}, {@code tableName()}, {@code id()} and
+     * {@code INSTANCE}, {@code tableName()}, {@code kind()}, {@code typeName()}, {@code id()} and
      * {@code attributes()} and {@code columnRefs()}. A value object (EMBEDDED target) has no table and no id, so its
      * TABLE_NAME constant is omitted and the matching accessors return {@code null}. An EMBEDDED
      * property contributes no constant of its own — its {@code column} slot holds a leaf prefix,
@@ -784,13 +826,12 @@ public class RepositoryProcessor extends AbstractProcessor {
      * {@code columnRefs()} indexes their generated {@code PathAttribute} instances. The ordered
      * mapping index also supplies the inherited root-table {@code columns()} view.
      */
-    private ClassName generateMetadata(TypeElement entityElement, EntityModel entity,
-                                       List<MmMember> members, ClassName metamodelType) {
+    private ClassName generateMetadata(TypeElement entityElement, EntityModel entity) {
         String packageName = elements.getPackageOf(entityElement).getQualifiedName().toString();
         String simpleName = entityElement.getSimpleName() + "Metadata";
         ClassName self = ClassName.get(packageName, simpleName);
         TypeName entityType = entity.typeName();
-        ClassName descriptor = ClassName.get("io.github.fludakit.data.metadata", "EntityMetadata");
+        ClassName descriptor = ClassName.get("io.github.fludakit.data.metadata", "TypeMapping");
 
         TypeSpec.Builder builder = TypeSpec.classBuilder(simpleName)
                 .addModifiers(Modifier.PUBLIC, Modifier.FINAL)
@@ -832,56 +873,41 @@ public class RepositoryProcessor extends AbstractProcessor {
             }
         }
 
-        builder.addMethod(MethodSpec.methodBuilder("entityClass").addModifiers(Modifier.PUBLIC)
-                .addAnnotation(Override.class)
-                .returns(ParameterizedTypeName.get(ClassName.get(Class.class), entityType))
-                .addStatement("return $T.class", entityType).build());
         // The domain role is stated explicitly rather than inferred from a null table name.
-        builder.addMethod(MethodSpec.methodBuilder("stereotype").addModifiers(Modifier.PUBLIC)
+        builder.addMethod(MethodSpec.methodBuilder("kind").addModifiers(Modifier.PUBLIC)
                 .addAnnotation(Override.class)
-                .returns(MD_STEREOTYPE)
-                .addStatement("return $T.$L", MD_STEREOTYPE, entity.metadata().stereotype().name())
+                .returns(MD_KIND)
+                .addStatement("return $T.$L", MD_KIND, entity.metadata().kind().name())
                 .build());
         builder.addMethod(stringAccessor("tableName", entity.metadata().tableName()));
+        builder.addMethod(stringAccessor("typeName", entity.metadata().typeName()));
 
-        MmMember idMember = null;
-        for (MmMember m : members) {
-            if (m.prop() instanceof Prop.Id) {
-                idMember = m;
-                break;
-            }
-        }
+        ClassName propId = descriptor.nestedClass("Prop").nestedClass("Id");
+        Prop.Id idProp = entity.metadata().id();
         MethodSpec.Builder id = MethodSpec.methodBuilder("id").addModifiers(Modifier.PUBLIC)
-                .addAnnotation(Override.class).returns(ParameterizedTypeName.get(FM_ID, entityType));
-        if (idMember == null) {
+                .addAnnotation(Override.class).returns(propId);
+        if (idProp == null) {
             id.addStatement("return null");
-        } else if (metamodelType != null) {
-            id.addStatement("return $T.$L", metamodelType, idMember.identifier());
         } else {
-            id.addStatement("return $L", memberInitializer(entityType, idMember, false));
+            id.addStatement("return new $T($S, $S, $S)", propId, idProp.name(), idProp.column(), idProp.typeFqn());
         }
         builder.addMethod(id.build());
 
-        TypeName attribute = ParameterizedTypeName.get(FM_PATH_ATTRIBUTE, entityType);
-        CodeBlock.Builder list = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
+        ClassName prop = descriptor.nestedClass("Prop");
+        CodeBlock.Builder propsList = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
         boolean first = true;
-        for (MmMember m : members) {
-            if (m.prop() instanceof Prop.Id) {
-                continue; // exposed through id(), not duplicated in attributes()
-            }
+        for (Prop p : entity.metadata().props()) {
             if (!first) {
-                list.add(", ");
+                propsList.add(", ");
             }
             first = false;
-            list.add(metamodelType != null
-                    ? CodeBlock.of("$T.$L", metamodelType, m.identifier())
-                    : memberInitializer(entityType, m, false));
+            propsList.add(propLiteral(descriptor, p));
         }
-        list.add(")");
-        builder.addMethod(MethodSpec.methodBuilder("attributes").addModifiers(Modifier.PUBLIC)
+        propsList.add(")");
+        builder.addMethod(MethodSpec.methodBuilder("props").addModifiers(Modifier.PUBLIC)
                 .addAnnotation(Override.class)
-                .returns(ParameterizedTypeName.get(ClassName.get(java.util.List.class), attribute))
-                .addStatement("return $L", list.build()).build());
+                .returns(ParameterizedTypeName.get(ClassName.get(java.util.List.class), prop))
+                .addStatement("return $L", propsList.build()).build());
 
         // One shared path enumeration feeds the runtime attribute index and navigate() switch. The
         // columnRefs() index is keyed by the logical path string, not the metamodel field instance.
@@ -911,6 +937,12 @@ public class RepositoryProcessor extends AbstractProcessor {
         columnRefs.addStatement("return $T.unmodifiableMap(mappings)",
                 ClassName.get(java.util.Collections.class));
         builder.addMethod(columnRefs.build());
+
+        builder.addMethod(MethodSpec.methodBuilder("columns").addModifiers(Modifier.PUBLIC)
+                .addAnnotation(Override.class)
+                .returns(ParameterizedTypeName.get(ClassName.get(java.util.List.class), MD_COLUMN_REF))
+                .addStatement("return $L", columnRefList(entity.metadata().columns()))
+                .build());
 
         // the read-side twin of the column view. columns()/columnRef() answer WHERE a dot
         // path lives; value() answers what it IS on a materialised row, so a paged read can build its own
@@ -950,7 +982,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /** One navigated leaf: the full dot path, its resolved ColumnRef and what valueSwitch needs. */
-    private record NavCase(String path, ColumnRef ref, TypeElement targetElement, TypeMapping target,
+    private record NavCase(String path, ColumnRef ref, TypeElement targetElement, TypeMapping<?> target,
                            CodeBlock head, boolean toOne) { }
 
     /** The relation-traversing leaf cases of one entity — the ONE enumeration both the value()
@@ -961,14 +993,14 @@ public class RepositoryProcessor extends AbstractProcessor {
      *  historical NOTE-degrade semantics: an unmapped target or accessor-less head drops the
      *  head from BOTH surfaces). */
     private List<NavCase> navCases(TypeElement entityElement, EntityModel entity) {
-        TypeMapping mapping = entity.metadata();
+        TypeMapping<?> mapping = entity.metadata();
         List<NavCase> out = new ArrayList<>();
         for (Prop p : mapping.props()) {
             if (!isTraversable(p)) {
                 continue;
             }
             String targetFqn = memberTargetFqn(p);
-            TypeMapping target = descriptorByFqn(targetFqn);
+            TypeMapping<?> target = descriptorByFqn(targetFqn);
             TypeElement targetElement = target == null ? null
                     : elements.getTypeElement(stripGenerics(target.typeName()));
             String headGetter = getter(p.name());
@@ -977,7 +1009,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             }
             CodeBlock head = CodeBlock.of("e.$L()", headGetter);
             boolean toOne = p instanceof Prop.Reference;
-            TypeMapping localTarget;
+            TypeMapping<?> localTarget;
             JoinRef join;
             if (p instanceof Prop.ElementList elementList) {
                 localTarget = elementList.target();
@@ -1001,7 +1033,7 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     private MethodSpec valueSwitch(TypeElement entityElement, EntityModel entity,
                                  List<NavCase> navs) {
-        TypeMapping mapping = entity.metadata();
+        TypeMapping<?> mapping = entity.metadata();
         Map<String, CodeBlock> cases = new LinkedHashMap<>();
 
         // (1) The flattened column view this descriptor publishes: identifier, scalars, to-one heads
@@ -1064,7 +1096,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * on {@code element}), or {@code null} when a hop is unknown, is not an embedded value object, or
      * has no accessor. Only {@link Prop.Embedded} may carry a further segment.
      */
-    private CodeBlock valueChain(TypeElement element, TypeMapping mapping, CodeBlock recv, String path) {
+    private CodeBlock valueChain(TypeElement element, TypeMapping<?> mapping, CodeBlock recv, String path) {
         int dot = path.indexOf('.');
         String head = dot < 0 ? path : path.substring(0, dot);
         Prop p = propOrNull(mapping, head);
@@ -1087,7 +1119,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * A to-one leaf: the target's own chain, guarded on the reference itself —
      * {@code e.getCustomer() == null ? null : e.getCustomer().getName()}.
      */
-    private CodeBlock guardedValueChain(TypeElement targetElement, TypeMapping target,
+    private CodeBlock guardedValueChain(TypeElement targetElement, TypeMapping<?> target,
                                         CodeBlock head, String leafPath) {
         CodeBlock body = valueChain(targetElement, target, head, leafPath);
         return body == null ? null : CodeBlock.of("$L == null ? null : $L", head, body);
@@ -1098,7 +1130,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * segment) or a null-safe chain lambda (embedded leaf) and collected to a list. A null container
      * reads as an empty list, never null, so the cursor reducer always gets a list.
      */
-    private CodeBlock toManyValue(TypeElement childElement, TypeMapping childModel,
+    private CodeBlock toManyValue(TypeElement childElement, TypeMapping<?> childModel,
                                   CodeBlock collection, String leafPath) {
         CodeBlock mapper;
         if (leafPath.indexOf('.') < 0) {
@@ -1124,7 +1156,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * {@code <VO>Metadata.INSTANCE} reference resolves to a generated class; the
      * {@link #metadataTypes} guard is set before recursing, which bounds cycles (A embeds B embeds A).
      */
-    private void generateEmbeddedDescriptors(TypeMapping owner) {
+    private void generateEmbeddedDescriptors(TypeMapping<?> owner) {
         for (Prop a : owner.props()) {
             if (!(a instanceof Prop.Embedded embedded) || embedded.target() == null) {
                 continue;
@@ -1141,9 +1173,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             String voPackage = elements.getPackageOf(voElement).getQualifiedName().toString();
             metadataTypes.put(voFqn, ClassName.get(voPackage, voElement.getSimpleName() + "Metadata"));
             generateEmbeddedDescriptors(voModel.metadata());
-            // The metadataTypes guard above is what bounds VO cycles; emit directly (a VO has no
-            // metamodel, so its members become record literals — the `metamodelType == null` mode).
-            generateMetadata(voElement, voModel, collectMembers(voElement, voModel.metadata()), null);
+            generateMetadata(voElement, voModel);
         }
     }
 
@@ -1169,8 +1199,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             generateStaticMetamodel(entityElement, members);
         }
         if (needMetadata) {
-            metadataTypes.put(fqn,
-                    generateMetadata(entityElement, entity, members, metamodelTypes.get(fqn)));
+            metadataTypes.put(fqn, generateMetadata(entityElement, entity));
         }
     }
 
@@ -1282,7 +1311,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             navCollision(origin, fqn, path);
             return null;
         }
-        EmbeddedValueObjectMapping target = embedded.target();
+        EmbeddedValueObjectMapping<?> target = embedded.target();
         TypeName targetType = classArgOf(target == null ? null : target.typeName());
         TypeSpec.Builder builder = TypeSpec.classBuilder(navSimple)
                 .addModifiers(Modifier.PUBLIC, Modifier.FINAL)
@@ -1332,7 +1361,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         Set<String> taken = new HashSet<>();
         if (relationTargetResolved(targetFqn, false)) {
             TypeElement targetElement = elements.getTypeElement(stripGenerics(targetFqn));
-            TypeMapping target = entityModel(targetElement).metadata();
+            TypeMapping<?> target = entityModel(targetElement).metadata();
             if (target.id() != null) {
                 addRelationLeaf(builder, taken, origin, owner, m.path(), "", target.id());
             }
@@ -1422,7 +1451,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         // Java 17 safety: instanceof chain, never a pattern switch.
         if (p instanceof Prop.Embedded embedded) {
             String prefix = columnPrefix + embedded.column() + "_";
-            EmbeddedValueObjectMapping vo = embedded.target();
+            EmbeddedValueObjectMapping<?> vo = embedded.target();
             if (vo != null && vo.id() != null) {
                 addRelationLeaf(builder, taken, origin, owner, path, prefix, vo.id());
             }
@@ -1529,14 +1558,14 @@ public class RepositoryProcessor extends AbstractProcessor {
                             String column, Prop prop) { }
 
     /** The member list of one descriptor: id first, then properties in declaration order. */
-    private List<MmMember> collectMembers(Element origin, TypeMapping model) {
+    private List<MmMember> collectMembers(Element origin, TypeMapping<?> model) {
         List<MmMember> members = new ArrayList<>();
         addMembers(members, new HashSet<>(), origin, model, "", "");
         return members;
     }
 
     private void addMembers(List<MmMember> out, Set<String> taken, Element origin,
-                             TypeMapping model, String pathPrefix, String columnPrefix) {
+                             TypeMapping<?> model, String pathPrefix, String columnPrefix) {
         if (model.id() != null) {
             addMember(out, taken, origin, model.id(), pathPrefix, columnPrefix);
         }
@@ -2449,7 +2478,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                                               EntityRelationship relationship, Map<String, String> constants) {
         Prop.EntityList list = (Prop.EntityList) relationship.attribute();
         EntityModel target = relationship.targetModel();
-        TypeMapping mapping = target.metadata();
+        TypeMapping<?> mapping = target.metadata();
         String inverseFk = list.inverseFkColumn();
         String constant = addConstant(constants, "SQL_INSERT_" + upperSnake(list.name()),
                 new SqlBuilder(mapping, mapping).dialect(sqlDialect).insert(false));
@@ -2714,7 +2743,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * would drift against the rendered placeholders.
      */
     private void appendColumnParams(CodeBlock.Builder sql, EntityModel entity, String var) {
-        TypeMapping mapping = entity.metadata();
+        TypeMapping<?> mapping = entity.metadata();
         for (Map.Entry<String, ColumnRef> entry : mapping.columnRefs().entrySet()) {
             ColumnRef ref = entry.getValue();
             if (!ref.joins().isEmpty()) continue;
@@ -2731,11 +2760,11 @@ public class RepositoryProcessor extends AbstractProcessor {
      * or a FK-bearing {@code primary}) rooted at {@code rootVar}. Every intermediate null short-
      * circuits to SQL NULL; a final ASSOCIATION/MANY_TO_ONE attribute binds its id.
      */
-    private CodeBlock boundValue(TypeMapping mapping, String rootVar, String attributePath, ColumnRef ref) {
+    private CodeBlock boundValue(TypeMapping<?> mapping, String rootVar, String attributePath, ColumnRef ref) {
         String[] segments = attributePath.split("\\.");
         StringBuilder chain = new StringBuilder(rootVar);
         List<String> nullChecks = new ArrayList<>();
-        TypeMapping current = mapping;
+        TypeMapping<?> current = mapping;
         for (int i = 0; i < segments.length; i++) {
             Prop attr = current.prop(segments[i]);
             chain.append('.').append(getter(segments[i])).append("()");
@@ -3603,7 +3632,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * property. Composition and association references both qualify — the field is filled from the join
      * either way. Deduped by property name so one traversal of a shared head yields one projection.
      */
-    private List<Prop.Reference> collectTraversedReferences(TypeMapping mapping, List<ColumnRef> predicateRefs,
+    private List<Prop.Reference> collectTraversedReferences(TypeMapping<?> mapping, List<ColumnRef> predicateRefs,
                                                             List<ColumnRef> sortRefs) {
         List<Prop.Reference> out = new ArrayList<>();
         List<ColumnRef> all = new ArrayList<>(predicateRefs);
@@ -3630,7 +3659,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * by the join alias and re-labelled {@code <alias>_join_<column>} so the read is unambiguous against
      * the root's own columns. Emitted in the target's {@code columns()} declaration order.
      */
-    private String joinedProjection(TypeMapping mapping, List<Prop.Reference> traversed) {
+    private String joinedProjection(TypeMapping<?> mapping, List<Prop.Reference> traversed) {
         StringBuilder sb = new StringBuilder();
         for (Prop.Reference ref : traversed) {
             TypeElement target = elements.getTypeElement(ref.targetTypeName());
@@ -3832,7 +3861,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * (identical to {@code SqlBuilder}'s old {@code Names.columnName} rendering) whenever the descriptor
      * cannot resolve the path. The returned resolutions line up index-for-index with {@code paths}.
      */
-    private List<PathResolution> resolveCompilePaths(TypeMapping mapping, List<String> paths, ExecutableElement method) {
+    private List<PathResolution> resolveCompilePaths(TypeMapping<?> mapping, List<String> paths, ExecutableElement method) {
         return resolveCompilePaths(mapping, paths, method, false);
     }
 
@@ -3843,7 +3872,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * unparseable keyword suffix ({@code findByNameIsNull} lexes as property {@code nameIs}) would
      * otherwise generate a predicate on a column that does not exist.
      */
-    private List<PathResolution> resolveCompilePaths(TypeMapping mapping, List<String> paths,
+    private List<PathResolution> resolveCompilePaths(TypeMapping<?> mapping, List<String> paths,
                                                      ExecutableElement method, boolean strict) {
         List<PathResolution> out = new ArrayList<>();
         for (String path : paths) {
@@ -3883,7 +3912,7 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     /**
      * Resolves a single method-name property to a {@link ColumnRef} through the compile model, using the
-     * same algorithm as the runtime {@code EntityMetadata.columnRef} but driven by the concatenated
+     * same algorithm as the runtime {@code TypeMapping.columnRef} but driven by the concatenated
      * camel path the {@code qbn} parser emits (which carries NO dots). So a head/remainder split happens
      * at camel-hump (and any literal {@code '.'}) boundaries rather than at a single dot. Order:
      * <ol>
@@ -3896,7 +3925,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * A remainder that would itself need a relation yields {@link PathResolution#multiHop()}; a head whose
      * target cannot be resolved yields {@link PathResolution#relationUnresolved()}.
      */
-    private PathResolution resolveCompilePath(TypeMapping mapping, String path) {
+    private PathResolution resolveCompilePath(TypeMapping<?> mapping, String path) {
         ColumnRef local = localColumnRef(mapping.columnRefs(), path);
         if (local != null) {
             return PathResolution.resolved(local);
@@ -3920,11 +3949,11 @@ public class RepositoryProcessor extends AbstractProcessor {
      * chains traverse transitively (each hop prepends its edge); a to-many head is always an
      * existential leaf and never recurses deeper.
      */
-    private PathResolution resolveRelationHead(TypeMapping mapping, Prop prop, String remainder) {
+    private PathResolution resolveRelationHead(TypeMapping<?> mapping, Prop prop, String remainder) {
         return resolveRelationHead(mapping, prop, remainder, new HashSet<>());
     }
 
-    private PathResolution resolveRelationHead(TypeMapping mapping, Prop prop, String remainder, Set<String> visited) {
+    private PathResolution resolveRelationHead(TypeMapping<?> mapping, Prop prop, String remainder, Set<String> visited) {
         if (prop instanceof Prop.ElementList elementList) {
             ColumnRef leaf = localColumnRef(elementList.target().localAttributeRefs(), remainder);
             if (leaf == null) {
@@ -3939,7 +3968,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         if (!visited.add(targetFqn)) {
             return PathResolution.relationUnresolved(); // cyclic relationship: degrade, don't recurse forever
         }
-        TypeMapping target = descriptorByFqn(targetFqn);
+        TypeMapping<?> target = descriptorByFqn(targetFqn);
         if (target == null) {
             return PathResolution.relationUnresolved();
         }
@@ -3976,7 +4005,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /** The LEFT JOIN edge for a Reference / EntityList traversal; {@code null} when unbuildable. */
-    private static JoinRef referenceOrListJoin(TypeMapping root, TypeMapping target, Prop prop) {
+    private static JoinRef referenceOrListJoin(TypeMapping<?> root, TypeMapping<?> target, Prop prop) {
         if (prop instanceof Prop.Reference reference) {
             if (reference.targetTable() == null || target.idColumn() == null) {
                 return null;
@@ -3995,7 +4024,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     /** The compile-time descriptor for a relationship target FQN, or {@code null} if unmapped. */
-    private TypeMapping descriptorByFqn(String fqn) {
+    private TypeMapping<?> descriptorByFqn(String fqn) {
         if (fqn == null) {
             return null;
         }
@@ -4047,7 +4076,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * {@code "customerCountryCode"}), so the decapitalized form is matched as a fallback — mirroring how
      * the {@code qbn} parser only decapitalizes the FIRST hump of the concatenated property string.
      */
-    private static Prop propOrNull(TypeMapping mapping, String name) {
+    private static Prop propOrNull(TypeMapping<?> mapping, String name) {
         Prop exact = propByExactName(mapping, name);
         if (exact != null) {
             return exact;
@@ -4058,7 +4087,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         return propByExactName(mapping, Character.toLowerCase(name.charAt(0)) + name.substring(1));
     }
 
-    private static Prop propByExactName(TypeMapping mapping, String name) {
+    private static Prop propByExactName(TypeMapping<?> mapping, String name) {
         if (mapping.id() != null && mapping.id().name().equals(name)) {
             return mapping.id();
         }
@@ -4698,8 +4727,8 @@ public class RepositoryProcessor extends AbstractProcessor {
         return typeMappingBuilder.buildEntity(element);
     }
 
-    private Stereotype stereotypeOf(TypeElement element) {
-        return typeMappingBuilder.stereotypeOf(element);
+    private TypeMapping.Kind kindOf(TypeElement element) {
+        return typeMappingBuilder.kindOf(element);
     }
 
     private boolean isValueObjectType(TypeElement te) {
@@ -4712,7 +4741,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * a descriptor already being built returns a shallow property-less placeholder (only
      * {@code typeName} is consumed for a back-reference).
      */
-    private TypeMapping descriptorFor(TypeElement te) {
+    private TypeMapping<?> descriptorFor(TypeElement te) {
         return typeMappingBuilder.descriptorFor(te);
     }
 
@@ -4732,7 +4761,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * {@code .param($S, ...)} tokens {@link #appendBoundParameters} emits, keyed by argument slot.
      */
     private static QueryDefinitionSpec queryDefinitionOf(String typeName, Operation operation, Kind kind,
-                                                   TypeMapping mapping, List<Predicate> predicates,
+                                                   TypeMapping<?> mapping, List<Predicate> predicates,
                                                    List<ColumnRef> predicateRefs,
                                                    List<SortSpec> sorts, List<ColumnRef> sortRefs,
                                                    List<Boolean> existentialSorts, int limit,
@@ -4787,7 +4816,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                 List.copyOf(seekTerms), List.copyOf(paramBindings), distinct);
     }
 
-    private static String resolvedAttributePath(TypeMapping mapping, ColumnRef ref, String fallback) {
+    private static String resolvedAttributePath(TypeMapping<?> mapping, ColumnRef ref, String fallback) {
         for (Map.Entry<String, ColumnRef> entry : mapping.columnRefs().entrySet()) {
             if (entry.getValue().equals(ref)) return entry.getKey();
         }
@@ -4800,7 +4829,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * last term is not already an ascending id — the same rule {@link #emitPaged} applies to the
      * runtime {@code props}/{@code dirs} lists, kept here so the published model matches the wiring.
      */
-    private static List<SeekTerm> seekTerms(TypeMapping mapping, List<ColumnRef> sortRefs,
+    private static List<SeekTerm> seekTerms(TypeMapping<?> mapping, List<ColumnRef> sortRefs,
                                             List<Boolean> existentialSorts, List<SortSpec> sorts) {
         ColumnRef idRef = new ColumnRef(mapping.idColumn());
         if (sorts.isEmpty()) {
@@ -4837,7 +4866,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * parent-entity paths.
      */
     record ElementCollection(String field, TypeName valueObjectType,
-                             Prop.ElementList element, ElementCollectionValueObjectMapping descriptor) {
+                             Prop.ElementList element, ElementCollectionValueObjectMapping<?> descriptor) {
         String childTable() {
             return element.childTable();
         }
@@ -4849,7 +4878,7 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     record EntityModel(TypeMirror typeMirror, TypeName typeName, Property id,
                        List<Property> properties, List<ElementCollection> collections,
-                       TypeMapping metadata) { }
+                       TypeMapping<?> metadata) { }
 
     /**
      * One resolved predicate and the method arguments that feed it. Most operators take a single

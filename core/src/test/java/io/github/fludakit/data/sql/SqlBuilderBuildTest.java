@@ -5,6 +5,7 @@ import io.github.fludakit.data.metadata.JoinRef;
 import io.github.fludakit.data.metadata.TableSchema;
 import io.github.fludakit.data.metadata.AttributePathResolver;
 import io.github.fludakit.data.query.Connector;
+import io.github.fludakit.data.query.LimitSpec;
 import io.github.fludakit.data.query.Operation;
 import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.PagingMode;
@@ -46,14 +47,11 @@ class SqlBuilderBuildTest {
     /** A local (unjoined, non-existential) ref for {@code status}. */
     private static final ColumnRef STATUS = new ColumnRef("status");
     /** A to-one traversed ref for {@code customer.name}: joins through the owner's FK. */
-    private static final ColumnRef CUSTOMER_NAME = new ColumnRef("name", "customer", "customer",
-            List.of(new JoinRef("order_table", null, "customer_id", "customer", "customer", "id")));
-    /** An existential element-collection ref for {@code tags.label} (head = ElementList). */
-    private static final ColumnRef TAG_LABEL = new ColumnRef("label", "order_tags", "tags",
-            List.of(new JoinRef("order_table", null, "id", "order_tags", "tags", "order_id")));
-    /** An existential one-to-many ref for {@code lines.product} (head = EntityList). */
-    private static final ColumnRef LINE_PRODUCT = new ColumnRef("product", "line", "lines",
-            List.of(new JoinRef("order_table", null, "id", "line", "lines", "order_id")));
+    private static final ColumnRef CUSTOMER_NAME = new ColumnRef("name", "customer", List.of(new JoinRef("order_table", "customer_id", "customer", "id")));
+    /** An existential element-collection ref for {@code tags.label} (head = ElementCollection). */
+    private static final ColumnRef TAG_LABEL = new ColumnRef("label", "order_tags", List.of(new JoinRef("order_table", "id", "order_tags", "order_id")));
+    /** An existential one-to-many ref for {@code lines.product} (head = EntityCollection). */
+    private static final ColumnRef LINE_PRODUCT = new ColumnRef("product", "line", List.of(new JoinRef("order_table", "id", "line", "order_id")));
 
     private static final AttributePathResolver ATTRIBUTES = new AttributePathResolver() {
         @Override public Map<String, ColumnRef> columnRefs() {
@@ -78,25 +76,22 @@ class SqlBuilderBuildTest {
         }
     };
 
-    /** The rendering-under-test as a QueryDefinition view: the interface, not a record. */
-    private record Model(Operation operation, List<Predicate> predicates, List<SortSpec> sorts,
-                         PagingMode paging, int limit, boolean distinct) implements QueryDefinition {
-        Model(Operation operation, List<Predicate> predicates, List<SortSpec> sorts,
-              PagingMode paging, int limit) {
-            this(operation, predicates, sorts, paging, limit, false);
-        }
-        Model {
-            predicates = List.copyOf(predicates);
-            sorts = List.copyOf(sorts);
-        }
-        @Override public ResultKind resultKind() { return ResultKind.LIST; }
-        @Override public List<SeekTerm> seekTerms() { return List.of(); }
-        @Override public List<ParamBinding> paramBindings() { return List.of(); }
+    /** The rendering-under-test as a {@link QueryDefinition} record. */
+    private static QueryDefinition model(Operation operation, List<Predicate> predicates,
+                                         List<SortSpec> sorts, PagingMode paging, int limit) {
+        return model(operation, predicates, sorts, paging, limit, false);
+    }
+
+    private static QueryDefinition model(Operation operation, List<Predicate> predicates,
+                                         List<SortSpec> sorts, PagingMode paging, int limit,
+                                         boolean distinct) {
+        return new QueryDefinition(operation, ResultKind.LIST, predicates, sorts, paging,
+                new LimitSpec(limit, 0), List.of(), List.of(), distinct);
     }
 
     @Test
     void distinctFindSelectsDistinctRows() {
-        String sql = new SqlBuilder(ORDER, ATTRIBUTES, new Model(Operation.FIND,
+        String sql = new SqlBuilder(ORDER, ATTRIBUTES, model(Operation.FIND,
                 List.of(pred(Predicate.of("status", Operator.EQ, "status"))),
                 List.of(), PagingMode.NONE, 0, true)).select();
         assertEquals("SELECT DISTINCT \"id\", \"status\", \"customer_id\" FROM \"order_table\""
@@ -106,7 +101,7 @@ class SqlBuilderBuildTest {
     @Test
     void distinctCountCountsDistinctIdentifiers() {
         // COUNT(DISTINCT *) is not valid SQL, so the row identity column carries the DISTINCT.
-        String sql = new SqlBuilder(ORDER, ATTRIBUTES, new Model(Operation.COUNT,
+        String sql = new SqlBuilder(ORDER, ATTRIBUTES, model(Operation.COUNT,
                 List.of(pred(Predicate.of("status", Operator.EQ, "status"))),
                 List.of(), PagingMode.NONE, 0, true)).count();
         assertEquals("SELECT COUNT(DISTINCT \"id\") FROM \"order_table\" WHERE \"status\" = :status", sql);
@@ -155,15 +150,15 @@ class SqlBuilderBuildTest {
                         pred(Predicate.of("status", Operator.EQ, "status"))),
                 List.of(), PagingMode.NONE, 0);
         assertEquals("SELECT \"id\", \"status\", \"customer_id\" FROM \"order_table\""
-                + " WHERE EXISTS (SELECT 1 FROM \"order_tags\" \"tags\""
-                + " WHERE \"tags\".\"order_id\" = \"order_table\".\"id\" AND \"tags\".\"label\" = :label)"
+                + " WHERE EXISTS (SELECT 1 FROM \"order_tags\" \"order_tags\""
+                + " WHERE \"order_tags\".\"order_id\" = \"order_table\".\"id\" AND \"order_tags\".\"label\" = :label)"
                 + " AND \"status\" = :status", sql);
     }
 
     private static String build(Operation operation, List<Predicate> predicates,
                                 List<SortSpec> sorts, PagingMode paging, int limit) {
         SqlBuilder builder = new SqlBuilder(ORDER, ATTRIBUTES,
-                new Model(operation, predicates, sorts, paging, limit));
+                model(operation, predicates, sorts, paging, limit));
         return switch (operation) {
             case COUNT, EXISTS -> builder.count();
             case DELETE -> builder.delete();
@@ -190,7 +185,7 @@ class SqlBuilderBuildTest {
             }
         };
         String sql = new SqlBuilder(ORDER, ATTRIBUTES,
-                new Model(Operation.FIND,
+                model(Operation.FIND,
                         List.of(pred(Predicate.of("customer.name", Operator.EQ, "customer_name"))),
                         List.of(), PagingMode.NONE, 0)).dialect(testDialect).select();
         assertEquals("SELECT `order_table`.`id`, `order_table`.`status`, `order_table`.`customer_id`"
@@ -246,9 +241,9 @@ class SqlBuilderBuildTest {
     @Test
     void existentialElementCollectionPredicateRendersExistsWithABareProjection() {
         assertEquals("SELECT \"id\", \"status\", \"customer_id\" FROM \"order_table\""
-                        + " WHERE EXISTS (SELECT 1 FROM \"order_tags\" \"tags\""
-                        + " WHERE \"tags\".\"order_id\" = \"order_table\".\"id\""
-                        + " AND \"tags\".\"label\" = :label)",
+                        + " WHERE EXISTS (SELECT 1 FROM \"order_tags\" \"order_tags\""
+                        + " WHERE \"order_tags\".\"order_id\" = \"order_table\".\"id\""
+                        + " AND \"order_tags\".\"label\" = :label)",
                 build(Operation.FIND,
                         List.of(pred(Predicate.of("tags.label", Operator.EQ, "label"))),
                         List.of(), PagingMode.NONE, 0));
@@ -258,8 +253,8 @@ class SqlBuilderBuildTest {
     void toManySortRendersTheAggregateTermAndContributesNoJoin() {
         assertEquals("SELECT \"id\", \"status\", \"customer_id\" FROM \"order_table\""
                         + " WHERE \"status\" = :status"
-                        + " ORDER BY (SELECT MIN(\"lines\".\"product\") FROM \"line\" \"lines\""
-                        + " WHERE \"lines\".\"order_id\" = \"order_table\".\"id\") ASC",
+                        + " ORDER BY (SELECT MIN(\"line\".\"product\") FROM \"line\" \"line\""
+                        + " WHERE \"line\".\"order_id\" = \"order_table\".\"id\") ASC",
                 build(Operation.FIND,
                         List.of(pred(Predicate.of("status", Operator.EQ, "status"))),
                         List.of(new SortSpec("lines.product", true, false)),
@@ -280,7 +275,7 @@ class SqlBuilderBuildTest {
     void pagedModelRendersTheBaseConstantSortFreeAndLimitFree() {
         List<Predicate> preds = List.of(pred(Predicate.of("customer.name", Operator.EQ, "customer_name")));
         List<SortSpec> sorts = List.of(new SortSpec("customer.name", false, false));
-        String base = new SqlBuilder(ORDER, ATTRIBUTES, new Model(Operation.FIND, preds, sorts,
+        String base = new SqlBuilder(ORDER, ATTRIBUTES, model(Operation.FIND, preds, sorts,
                 PagingMode.OFFSET, 10)).select();
         assertEquals("SELECT \"order_table\".\"id\", \"order_table\".\"status\","
                         + " \"order_table\".\"customer_id\""
@@ -293,7 +288,7 @@ class SqlBuilderBuildTest {
     @Test
     void extraProjectionRidesTheQualifiedFindShellOnly() {
         String sql = new SqlBuilder(ORDER, ATTRIBUTES,
-                new Model(Operation.FIND,
+                model(Operation.FIND,
                         List.of(pred(Predicate.of("customer.name", Operator.EQ, "customer_name"))),
                         List.of(), PagingMode.NONE, 0)).select("\"customer\".\"id\" AS \"customer_join_id\"");
         assertEquals("SELECT \"order_table\".\"id\", \"order_table\".\"status\","

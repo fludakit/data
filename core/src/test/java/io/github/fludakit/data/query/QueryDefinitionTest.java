@@ -10,21 +10,9 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class QueryDefinitionTest {
 
-    record Sample(QueryDefinition delegate) implements QueryDefinition {
-        @Override public Operation operation() { return Operation.FIND; }
-        @Override public ResultKind resultKind() { return ResultKind.LIST; }
-        @Override public List<Predicate> predicates() { return delegate.predicates(); }
-        @Override public List<SortSpec> sorts() { return delegate.sorts(); }
-        @Override public PagingMode paging() { return PagingMode.CURSOR; }
-        @Override public int limit() { return 10; }
-        @Override public List<SeekTerm> seekTerms() { return delegate.seekTerms(); }
-        @Override public List<ParamBinding> paramBindings() { return delegate.paramBindings(); }
-    }
-
     @Test
     void queryPlanCarriesLogicalTermsWithoutPhysicalPlacement() {
-        ColumnRef joined = new ColumnRef("name", "customer", "customer",
-                List.of(new JoinRef("order", null, "customer_id", "customer", "customer", "id")));
+        ColumnRef joined = new ColumnRef("name", "customer", List.of(new JoinRef("order", "customer_id", "customer", "id")));
         Predicate p = Predicate.of("customer.name", Operator.EQ, "customer_name");
         SortSpec sort = new SortSpec("customer.name", true, false);
         assertEquals("customer.name", p.property());
@@ -52,18 +40,14 @@ class QueryDefinitionTest {
     }
 
     @Test
-    void interfaceSurface() {
-        QueryDefinition legacyShape = new QueryDefinition() {
-            @Override public Operation operation() { return Operation.COUNT; }
-            @Override public ResultKind resultKind() { return ResultKind.COUNT; }
-            @Override public List<Predicate> predicates() { return List.of(); }
-            @Override public List<SortSpec> sorts() { return List.of(); }
-            @Override public PagingMode paging() { return PagingMode.NONE; }
-            @Override public int limit() { return 0; }
-            @Override public List<SeekTerm> seekTerms() { return List.of(); }
-            @Override public List<ParamBinding> paramBindings() { return List.of(); }
-        };
-        assertEquals(Operation.COUNT, legacyShape.operation());
-        assertEquals(PagingMode.NONE, legacyShape.paging());
+    void queryDefinitionRecordCarriesTheLimitSpec() {
+        QueryDefinition definition = new QueryDefinition(
+                Operation.COUNT, ResultKind.COUNT, List.of(), List.of(),
+                PagingMode.NONE, new LimitSpec(5, 10), List.of(), List.of(), false);
+        assertEquals(Operation.COUNT, definition.operation());
+        assertEquals(PagingMode.NONE, definition.paging());
+        assertEquals(5, definition.limit().limit());
+        assertEquals(10, definition.limit().offset());
+        assertEquals(LimitSpec.none(), new LimitSpec(0, 0));
     }
 }

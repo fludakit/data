@@ -439,7 +439,7 @@ public final class SqlBuilder {
             this.countMode = operation == Operation.COUNT || operation == Operation.EXISTS;
             this.predicates = model.predicates();
             this.sorts = model.paging() == PagingMode.NONE ? model.sorts() : List.of();
-            this.limit = model.paging() == PagingMode.NONE ? model.limit() : 0;
+            this.limit = model.paging() == PagingMode.NONE ? model.limit().limit() : 0;
             this.plain = new ArrayList<>(predicates.size());
             this.predicateRefs = new ArrayList<>(predicates.size());
             this.sortRefs = new ArrayList<>(sorts.size());
@@ -583,9 +583,9 @@ public final class SqlBuilder {
                 && ref.column().equals(Names.columnName(path));
     }
 
-    /** Whether {@code ref} is a column local to {@code table}: unjoined, unaliased, and owned by no table or by that table. */
+    /** Whether {@code ref} is a column local to {@code table}: unjoined and owned by no table or by that table. */
     private static boolean isLocalTo(ColumnRef ref, String table) {
-        return ref.joins().isEmpty() && ref.ownerAlias() == null
+        return ref.joins().isEmpty()
                 && (ref.ownerTableName() == null || ref.ownerTableName().equals(table));
     }
 
@@ -623,43 +623,32 @@ public final class SqlBuilder {
     }
 
     /**
-     * Qualifies a table-local column by its owner alias, owner table name, or the supplied root.
+     * Qualifies a table-local column by its owner table name, or the supplied root.
      */
     private static String qualify(SqlDialect dialect, ColumnRef ref, String rootTable) {
-        String qualifier;
-        if (ref.ownerAlias() != null) {
-            qualifier = ref.ownerAlias();
-        } else if (ref.ownerTableName() != null) {
-            qualifier = ref.ownerTableName();
-        } else if (rootTable != null) {
-            qualifier = rootTable;
-        } else {
+        String qualifier = ref.ownerTableName() != null ? ref.ownerTableName() : rootTable;
+        if (qualifier == null) {
             throw new IllegalStateException(
                     "Cannot qualify column '" + ref.column() + "': no owning table or root table");
         }
         return dialect.quoteIdentifier(qualifier) + "." + dialect.quoteIdentifier(ref.column());
     }
 
-    /** The name an owner is referenced by in a join condition: its alias, or its table name when unaliased. */
-    private static String ownerQualifier(JoinRef join) {
-        return join.ownerAlias() == null ? join.ownerTableName() : join.ownerAlias();
-    }
-
     /**
      * The deduplicated {@code LEFT JOIN} chain these refs require. Each edge carries its own owner
-     * and child table/alias, so rendering does not infer table identity from list position.
+     * and child table, so rendering does not infer table identity from list position.
      * Each fragment is
-     * {@code  LEFT JOIN "<table>" AS "<alias>" ON <qualifier>."<parentColumn>" = "<alias>"."<childColumn>";}
+     * {@code  LEFT JOIN "<table>" AS "<table>" ON <ownerTable>."<parentColumn>" = "<table>"."<childColumn>";}
      * Returns {@code ""} when no ref carries a join.
      */
     private static String joinClause(SqlDialect dialect, List<ColumnRef> refs) {
-        Map<String, JoinRef> byAlias = new LinkedHashMap<>();
+        Map<String, JoinRef> byTable = new LinkedHashMap<>();
         StringBuilder sb = new StringBuilder();
         for (ColumnRef ref : refs) {
             for (JoinRef join : ref.joins()) {
-                if (byAlias.putIfAbsent(join.childAlias(), join) != null) continue;
-                String owner = dialect.quoteIdentifier(ownerQualifier(join));
-                String alias = dialect.quoteIdentifier(join.childAlias());
+                if (byTable.putIfAbsent(join.childTableName(), join) != null) continue;
+                String owner = dialect.quoteIdentifier(join.ownerTableName());
+                String alias = dialect.quoteIdentifier(join.childTableName());
                 sb.append(" LEFT JOIN ").append(dialect.quoteIdentifier(join.childTableName()))
                         .append(" AS ").append(alias)
                         .append(" ON ").append(owner).append('.').append(dialect.quoteIdentifier(join.ownerColumn()))
@@ -710,12 +699,11 @@ public final class SqlBuilder {
     }
 
     /**
-     * Renders a predicate with its column qualified by {@code ref}: last-join alias, then
-     * explicit table, and fully-local refs stay unqualified for legacy parity.
+     * Renders a predicate with its column qualified by {@code ref}: explicit table, and
+     * fully-local refs stay unqualified for legacy parity.
      */
     private static String render(SqlDialect dialect, Predicate p, ColumnRef ref) {
-        String col = ref.joins().isEmpty() && ref.ownerAlias() == null
-                && ref.ownerTableName() == null
+        String col = ref.joins().isEmpty() && ref.ownerTableName() == null
                 ? dialect.quoteIdentifier(ref.column())
                 : qualify(dialect, ref, null);
         return renderOperator(p.operator(), col, p.param(), p.ignoreCase());
@@ -740,10 +728,10 @@ public final class SqlBuilder {
      */
     private static String existsConjunct(SqlDialect dialect, Predicate p, ColumnRef ref) {
         JoinRef join = ref.joins().get(ref.joins().size() - 1);
-        String owner = ownerQualifier(join);
+        String owner = join.ownerTableName();
         return "EXISTS (SELECT 1 FROM " + dialect.quoteIdentifier(join.childTableName()) + " "
-                + dialect.quoteIdentifier(join.childAlias())
-                + " WHERE " + dialect.quoteIdentifier(join.childAlias()) + "." + dialect.quoteIdentifier(join.childColumn())
+                + dialect.quoteIdentifier(join.childTableName())
+                + " WHERE " + dialect.quoteIdentifier(join.childTableName()) + "." + dialect.quoteIdentifier(join.childColumn())
                 + " = " + dialect.quoteIdentifier(owner) + "." + dialect.quoteIdentifier(join.ownerColumn())
                 + " AND " + render(dialect, p, ref) + ")";
     }
@@ -780,23 +768,23 @@ public final class SqlBuilder {
                     "aggregate sort term requires a relation path");
         }
         JoinRef head = ref.joins().get(0);
-        String owner = ownerQualifier(head);
+        String owner = head.ownerTableName();
         StringBuilder sb = new StringBuilder("(SELECT ")
                 .append(ascending ? "MIN(" : "MAX(")
                 .append(qualify(dialect, ref, md.tableName()))
                 .append(") FROM ").append(dialect.quoteIdentifier(head.childTableName()))
-                .append(' ').append(dialect.quoteIdentifier(head.childAlias()));
+                .append(' ').append(dialect.quoteIdentifier(head.childTableName()));
         for (int i = 1; i < ref.joins().size(); i++) {
             JoinRef join = ref.joins().get(i);
-            String joinOwner = ownerQualifier(join);
+            String joinOwner = join.ownerTableName();
             sb.append(" LEFT JOIN ").append(dialect.quoteIdentifier(join.childTableName()))
-                    .append(" AS ").append(dialect.quoteIdentifier(join.childAlias()))
+                    .append(" AS ").append(dialect.quoteIdentifier(join.childTableName()))
                     .append(" ON ").append(dialect.quoteIdentifier(joinOwner)).append('.')
                     .append(dialect.quoteIdentifier(join.ownerColumn()))
-                    .append(" = ").append(dialect.quoteIdentifier(join.childAlias())).append('.')
+                    .append(" = ").append(dialect.quoteIdentifier(join.childTableName())).append('.')
                     .append(dialect.quoteIdentifier(join.childColumn()));
         }
-        sb.append(" WHERE ").append(dialect.quoteIdentifier(head.childAlias())).append('.')
+        sb.append(" WHERE ").append(dialect.quoteIdentifier(head.childTableName())).append('.')
                 .append(dialect.quoteIdentifier(head.childColumn()))
                 .append(" = ").append(dialect.quoteIdentifier(owner)).append('.')
                 .append(dialect.quoteIdentifier(head.ownerColumn()))

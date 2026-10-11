@@ -1,5 +1,6 @@
 package io.github.fludakit.data.processor;
 
+import io.github.fludakit.data.query.LimitSpec;
 import io.github.fludakit.data.query.Operation;
 import io.github.fludakit.data.query.PagingMode;
 import io.github.fludakit.data.query.ParamBinding;
@@ -22,7 +23,13 @@ import java.util.List;
  */
 record QueryDefinitionSpec(String typeName, Operation operation, ResultKind resultKind,
                            List<Predicate> predicates, List<SortSpec> sorts,
-                           PagingMode paging, int limit, List<SeekTerm> seekTerms,
+                           PagingMode paging, LimitSpec limit, List<SeekTerm> seekTerms,
                            List<ParamBinding> paramBindings,
-                           boolean distinct) implements QueryDefinition {
+                           boolean distinct) {
+
+    /** The published {@link QueryDefinition} this spec serialises (the {@code typeName} is the field name). */
+    QueryDefinition definition() {
+        return new QueryDefinition(operation, resultKind, predicates, sorts, paging,
+                limit, seekTerms, paramBindings, distinct);
+    }
 }

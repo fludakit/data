@@ -97,7 +97,7 @@ class SqlBuilderTest {
             @Override public String typeName() { return "Profile"; }
             @Override public Prop.Id id() { return new Prop.Id("id", "id", "java.lang.Long"); }
             @Override public List<Prop> props() {
-                return List.of(new Prop.Embedded("address", "address", null));
+                return List.of(new Prop.Embedded("address", null));
             }
             @Override public List<ColumnRef> columns() {
                 return List.of(new ColumnRef("id", "profile"),
@@ -210,66 +210,65 @@ class SqlBuilderTest {
 
     @Test
     void joinClauseEmitsSingleLeftJoinAndQualifiesLeafByLastAlias() {
-        ColumnRef joined = new ColumnRef("amount", "order_item", "orderItems",
-                List.of(new JoinRef("order", null, "id", "order_item", "orderItems", "order_id")));
+        ColumnRef joined = new ColumnRef("amount", "order_item", List.of(new JoinRef("order", "id", "order_item", "order_id")));
         TableSchema rootMd = rootSchema("order", List.of(joined));
-        assertEquals(" LEFT JOIN \"order_item\" AS \"orderItems\" ON \"order\".\"id\" = \"orderItems\".\"order_id\"",
+        assertEquals(" LEFT JOIN \"order_item\" AS \"order_item\" ON \"order\".\"id\" = \"order_item\".\"order_id\"",
                 new SqlBuilder(rootMd).joinClause(List.of(joined)));
-        assertEquals("\"orderItems\".\"amount\"", new SqlBuilder(rootMd).qualify(joined));
+        assertEquals("\"order_item\".\"amount\"", new SqlBuilder(rootMd).qualify(joined));
     }
 
     @Test
     void joinClauseChainsQualifiersOverTwoHops() {
-        // fk hop (root -> "primary") then a second hop (-> "players"): each qualifier is the
-        // PREVIOUS join's alias, regardless of path grouping.
-        ColumnRef twoHop = new ColumnRef("name", "team", "players", List.of(
-                new JoinRef("game", null, "primary_player_id", "player", "primary", "id"),
-                new JoinRef("player", "primary", "team_id", "team", "players", "id")));
+        // Each hop aliases its child table as itself and qualifies the FK from the parent table
+        // named on the JoinRef — no per-path alias bookkeeping.
+        ColumnRef twoHop = new ColumnRef("name", "team", List.of(
+                new JoinRef("game", "primary_player_id", "player", "id"),
+                new JoinRef("player", "team_id", "team", "id")));
         TableSchema game = rootSchema("game", List.of(twoHop));
         String clause = new SqlBuilder(game).joinClause(List.of(twoHop));
-        assertEquals(" LEFT JOIN \"player\" AS \"primary\" ON \"game\".\"primary_player_id\" = \"primary\".\"id\""
-                        + " LEFT JOIN \"team\" AS \"players\" ON \"primary\".\"team_id\" = \"players\".\"id\"",
+        assertEquals(" LEFT JOIN \"player\" AS \"player\" ON \"game\".\"primary_player_id\" = \"player\".\"id\""
+                        + " LEFT JOIN \"team\" AS \"team\" ON \"player\".\"team_id\" = \"team\".\"id\"",
                 clause);
-        assertThat(clause).contains("\"primary\".\"team_id\" = \"players\".\"id\"");
-        assertEquals("\"players\".\"name\"", new SqlBuilder(game).qualify(twoHop));
+        assertThat(clause).contains("\"player\".\"team_id\" = \"team\".\"id\"");
+        assertEquals("\"team\".\"name\"", new SqlBuilder(game).qualify(twoHop));
     }
 
     @Test
     void joinClauseChainsQualifiersPerPathAcrossDivergingRefs() {
-        // Ref A navigates primary -> players; ref C navigates primary -> squads. They share the
-        // head join "primary" but diverge on the second hop. Per-path chaining must qualify C's
-        // second hop with ITS OWN previous alias ("primary"), not with the globally last-emitted
-        // fragment alias ("players"), which the old global chaining would have produced.
-        JoinRef primary = new JoinRef("game", null, "primary_player_id", "player", "primary", "id");
-        ColumnRef a = new ColumnRef("name", "team", "players", List.of(
+        // Ref A navigates player -> team; ref C navigates player -> squad. They share the head join
+        // "player" but diverge on the second hop. Each edge qualifies its FK from its own owner
+        // table name, so C's second hop reads "player"."squad_id" — never A's "team" table.
+        JoinRef primary = new JoinRef("game", "primary_player_id", "player", "id");
+        ColumnRef a = new ColumnRef("name", "team", List.of(
                 primary,
-                new JoinRef("player", "primary", "team_id", "team", "players", "id")));
-        ColumnRef c = new ColumnRef("label", "squad", "squads", List.of(
+                new JoinRef("player", "team_id", "team", "id")));
+        ColumnRef c = new ColumnRef("label", "squad", List.of(
                 primary,
-                new JoinRef("player", "primary", "squad_id", "squad", "squads", "id")));
+                new JoinRef("player", "squad_id", "squad", "id")));
         TableSchema game = rootSchema("game", List.of(a, c));
         String clause = new SqlBuilder(game).joinClause(List.of(a, c));
-        assertEquals(" LEFT JOIN \"player\" AS \"primary\" ON \"game\".\"primary_player_id\" = \"primary\".\"id\""
-                        + " LEFT JOIN \"team\" AS \"players\" ON \"primary\".\"team_id\" = \"players\".\"id\""
-                        + " LEFT JOIN \"squad\" AS \"squads\" ON \"primary\".\"squad_id\" = \"squads\".\"id\"",
+        assertEquals(" LEFT JOIN \"player\" AS \"player\" ON \"game\".\"primary_player_id\" = \"player\".\"id\""
+                        + " LEFT JOIN \"team\" AS \"team\" ON \"player\".\"team_id\" = \"team\".\"id\""
+                        + " LEFT JOIN \"squad\" AS \"squad\" ON \"player\".\"squad_id\" = \"squad\".\"id\"",
                 clause);
-        // C's second hop is qualified by the shared head "primary", not by A's "players".
-        assertThat(clause).contains("\"primary\".\"squad_id\" = \"squads\".\"id\"");
-        assertThat(clause).doesNotContain("\"players\".\"squad_id\"");
+        // C's second hop is qualified by its own owner table "player", not by A's "team".
+        assertThat(clause).contains("\"player\".\"squad_id\" = \"squad\".\"id\"");
+        assertThat(clause).doesNotContain("\"team\".\"squad_id\"");
     }
 
     @Test
-    void joinClauseDedupesByAliasFirstOccurrenceWins() {
-        JoinRef head = new JoinRef("order", null, "id", "order_item", "orderItems", "order_id");
-        ColumnRef a = new ColumnRef("amount", "order_item", "orderItems", List.of(head));
-        ColumnRef b = new ColumnRef("qty", "item", "item",
-                List.of(head, new JoinRef("order_item", "orderItems", "item_id", "item", "item", "id")));
-        ColumnRef dup = new ColumnRef("price", "other_table", "orderItems",
-                List.of(new JoinRef("order", null, "x", "other_table", "orderItems", "y")));
-        TableSchema order = rootSchema("order", List.of(a, b, dup));
-        String clause = new SqlBuilder(order).joinClause(List.of(a, dup, b));
-        assertEquals(" LEFT JOIN \"order_item\" AS \"orderItems\" ON \"order\".\"id\" = \"orderItems\".\"order_id\""
-                        + " LEFT JOIN \"item\" AS \"item\" ON \"orderItems\".\"item_id\" = \"item\".\"id\"",
+    void joinClauseDedupesByChildTableFirstOccurrenceWins() {
+        // a and b both carry the head join to order_item; b's re-emission is suppressed. The
+        // unrelated other_table join stays, because dedupe is now keyed by the child table name.
+        JoinRef head = new JoinRef("order", "id", "order_item", "order_id");
+        ColumnRef a = new ColumnRef("amount", "order_item", List.of(head));
+        ColumnRef b = new ColumnRef("qty", "item", List.of(head, new JoinRef("order_item", "item_id", "item", "id")));
+        ColumnRef other = new ColumnRef("price", "other_table", List.of(new JoinRef("order", "x", "other_table", "y")));
+        TableSchema order = rootSchema("order", List.of(a, b, other));
+        String clause = new SqlBuilder(order).joinClause(List.of(a, other, b));
+        assertEquals(" LEFT JOIN \"order_item\" AS \"order_item\" ON \"order\".\"id\" = \"order_item\".\"order_id\""
+                        + " LEFT JOIN \"other_table\" AS \"other_table\" ON \"order\".\"x\" = \"other_table\".\"y\""
+                        + " LEFT JOIN \"item\" AS \"item\" ON \"order_item\".\"item_id\" = \"item\".\"id\"",
                 clause);
     }
 
@@ -284,22 +283,21 @@ class SqlBuilderTest {
         TableSchema order = rootSchema("order", List.of());
         assertEquals("\"order\".\"total\"", new SqlBuilder(order).qualify(new ColumnRef("total"), "order"));
         assertEquals("\"other\".\"total\"",
-                new SqlBuilder(order).qualify(new ColumnRef("total", "other", null, List.of()), "order"));
+                new SqlBuilder(order).qualify(new ColumnRef("total", "other", List.of()), "order"));
         assertThatThrownBy(() -> new SqlBuilder(order).qualify(new ColumnRef("total"), null))
                 .isInstanceOf(IllegalStateException.class);
         assertEquals("\"other\".\"total\"",
-                new SqlBuilder(order).qualify(new ColumnRef("total", "other", null, List.of()), null));
+                new SqlBuilder(order).qualify(new ColumnRef("total", "other", List.of()), null));
     }
 
     @Test
     void renderOverloadQualifiesPredicateColumnWithRef() {
-        ColumnRef joined = new ColumnRef("amount", "order_item", "orderItems",
-                List.of(new JoinRef("order", null, "id", "order_item", "orderItems", "order_id")));
+        ColumnRef joined = new ColumnRef("amount", "order_item", List.of(new JoinRef("order", "id", "order_item", "order_id")));
         TableSchema order = rootSchema("order", List.of());
-        assertEquals("\"orderItems\".\"amount\" = :orderItems_amount",
+        assertEquals("\"order_item\".\"amount\" = :orderItems_amount",
                 new SqlBuilder(order).render(Predicate.of("orderItems.amount", Operator.EQ, "orderItems_amount"), joined));
         // Explicit non-root table, no joins.
-        ColumnRef foreign = new ColumnRef("total", "other", null, List.of());
+        ColumnRef foreign = new ColumnRef("total", "other", List.of());
         assertEquals("\"other\".\"total\" = :total",
                 new SqlBuilder(order).render(Predicate.of("other.total", Operator.EQ, "total"), foreign));
         // Fully-local ref renders unqualified, byte-identical to the legacy path.
@@ -319,8 +317,8 @@ class SqlBuilderTest {
             @Override public Prop.Id id() { return new Prop.Id("id", "id", "java.lang.Long"); }
             @Override public List<Prop> props() {
                 return List.of(
-                        new Prop.EntityList("contacts", null, null, null),
-                        new Prop.EntityList("workHistory", null, null, null),
+                        new Prop.EntityCollection("contacts", null, null, null),
+                        new Prop.EntityCollection("workHistory", null, null, null),
                         new Prop.Reference("customer", "customer_id", null, null, false));
             }
             @Override public List<ColumnRef> columns() {
@@ -332,14 +330,11 @@ class SqlBuilderTest {
     }
 
     @Test
-    void isToManyPathDetectsCollectionAndEntityListPaths() {
+    void isToManyPathDetectsCollectionAndEntityCollectionPaths() {
         TypeMapping md = mixedProfile();
-        ColumnRef elementHead = new ColumnRef("value", "profile_contacts", "contacts",
-                List.of(new JoinRef("profile", null, "id", "profile_contacts", "contacts", "profile_id")));
-        ColumnRef entityHead = new ColumnRef("company", "work_experience", "workHistory",
-                List.of(new JoinRef("profile", null, "id", "work_experience", "workHistory", "profile_id")));
-        ColumnRef toOneHead = new ColumnRef("name", "customer", "customer",
-                List.of(new JoinRef("profile", null, "customer_id", "customer", "customer", "id")));
+        ColumnRef elementHead = new ColumnRef("value", "profile_contacts", List.of(new JoinRef("profile", "id", "profile_contacts", "profile_id")));
+        ColumnRef entityHead = new ColumnRef("company", "work_experience", List.of(new JoinRef("profile", "id", "work_experience", "profile_id")));
+        ColumnRef toOneHead = new ColumnRef("name", "customer", List.of(new JoinRef("profile", "customer_id", "customer", "id")));
         ColumnRef local = new ColumnRef("full_name");
         ColumnRef embedded = new ColumnRef("address_city");
 
@@ -354,22 +349,21 @@ class SqlBuilderTest {
     @Test
     void aggregateSortTermRendersCorrelatedMinMaxSubquery() {
         TableSchema md = rootSchema("profile", List.of(new ColumnRef("id")));
-        ColumnRef asc = new ColumnRef("company", "work_experience", "workHistory",
-                List.of(new JoinRef("profile", null, "id", "work_experience", "workHistory", "profile_id")));
-        assertEquals("(SELECT MIN(\"workHistory\".\"company\") FROM \"work_experience\" \"workHistory\""
-                        + " WHERE \"workHistory\".\"profile_id\" = \"profile\".\"id\")",
+        ColumnRef asc = new ColumnRef("company", "work_experience", List.of(new JoinRef("profile", "id", "work_experience", "profile_id")));
+        assertEquals("(SELECT MIN(\"work_experience\".\"company\") FROM \"work_experience\" \"work_experience\""
+                        + " WHERE \"work_experience\".\"profile_id\" = \"profile\".\"id\")",
                 new SqlBuilder(md).aggregateSortTerm(asc, true));
-        assertEquals("(SELECT MAX(\"workHistory\".\"company\") FROM \"work_experience\" \"workHistory\""
-                        + " WHERE \"workHistory\".\"profile_id\" = \"profile\".\"id\")",
+        assertEquals("(SELECT MAX(\"work_experience\".\"company\") FROM \"work_experience\" \"work_experience\""
+                        + " WHERE \"work_experience\".\"profile_id\" = \"profile\".\"id\")",
                 new SqlBuilder(md).aggregateSortTerm(asc, false));
 
         // Deeper edges chain INSIDE the subquery (LEFT JOIN AS shape); correlation stays on the head.
-        ColumnRef deep = new ColumnRef("name", "country", "country", List.of(
-                new JoinRef("profile", null, "id", "work_experience", "workHistory", "profile_id"),
-                new JoinRef("work_experience", "workHistory", "country_id", "country", "country", "id")));
-        assertEquals("(SELECT MIN(\"country\".\"name\") FROM \"work_experience\" \"workHistory\""
-                        + " LEFT JOIN \"country\" AS \"country\" ON \"workHistory\".\"country_id\""
-                        + " = \"country\".\"id\" WHERE \"workHistory\".\"profile_id\" = \"profile\".\"id\")",
+        ColumnRef deep = new ColumnRef("name", "country", List.of(
+                new JoinRef("profile", "id", "work_experience", "profile_id"),
+                new JoinRef("work_experience", "country_id", "country", "id")));
+        assertEquals("(SELECT MIN(\"country\".\"name\") FROM \"work_experience\" \"work_experience\""
+                        + " LEFT JOIN \"country\" AS \"country\" ON \"work_experience\".\"country_id\""
+                        + " = \"country\".\"id\" WHERE \"work_experience\".\"profile_id\" = \"profile\".\"id\")",
                 new SqlBuilder(md).aggregateSortTerm(deep, true));
 
         // A join-free ref has nothing to aggregate: fail fast rather than emit a correlated nothing.
@@ -381,10 +375,8 @@ class SqlBuilderTest {
     @Test
     void joinClauseSkipsToManyHeadRefsForRuntimeDescriptorsOnly() {
         TypeMapping md = mixedProfile();
-        ColumnRef toMany = new ColumnRef("company", "work_experience", "workHistory",
-                List.of(new JoinRef("profile", null, "id", "work_experience", "workHistory", "profile_id")));
-        ColumnRef toOne = new ColumnRef("name", "customer", "customer",
-                List.of(new JoinRef("profile", null, "customer_id", "customer", "customer", "id")));
+        ColumnRef toMany = new ColumnRef("company", "work_experience", List.of(new JoinRef("profile", "id", "work_experience", "profile_id")));
+        ColumnRef toOne = new ColumnRef("name", "customer", List.of(new JoinRef("profile", "customer_id", "customer", "id")));
 
         String clause = new SqlBuilder(md).joinClause(List.of(toOne));
         assertThat(clause).doesNotContain("\"work_experience\"");

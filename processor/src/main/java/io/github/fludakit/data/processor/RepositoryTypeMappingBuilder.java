@@ -95,9 +95,8 @@ final class RepositoryTypeMappingBuilder {
 
             } else if (embeddedTarget(field) != null) {
                 TypeElement vo = embeddedTarget(field);
-                Prop.Embedded embedded = new Prop.Embedded(name, Names.columnName(name),
-                        embeddedOf(descriptorFor(vo)));
-                properties.add(new RepositoryProcessor.Property(name, embedded.column(), fieldTypeName,
+                Prop.Embedded embedded = new Prop.Embedded(name, embeddedOf(descriptorFor(vo)));
+                properties.add(new RepositoryProcessor.Property(name, Names.columnName(name), fieldTypeName,
                         embedded, valueObjectModel(vo)));
                 props.add(embedded);
 
@@ -118,7 +117,7 @@ final class RepositoryTypeMappingBuilder {
 
             } else if (entityTypeElement(field) != null) {
                 TypeElement child = entityTypeElement(field);
-                props.add(new Prop.EntityList(name, entityOf(descriptorFor(child)), null, null));
+                props.add(new Prop.EntityCollection(name, entityOf(descriptorFor(child)), null, null));
 
             } else {
                 Prop.Scalar scalar = new Prop.Scalar(name, Names.columnName(name), fieldType);
@@ -143,12 +142,12 @@ final class RepositoryTypeMappingBuilder {
                 : new EntityTypeMapping(ownerKind, typeNameString, table, idProp, props);
         List<Prop> resolved = new ArrayList<>(props.size());
         for (Prop prop : props) {
-            if (prop instanceof Prop.EntityList entityList && entityList.targetTypeName() != null) {
-                TypeElement childElement = elements.getTypeElement(entityList.targetTypeName());
+            if (prop instanceof Prop.EntityCollection entityCollection && entityCollection.targetTypeName() != null) {
+                TypeElement childElement = elements.getTypeElement(entityCollection.targetTypeName());
                 EntityTypeMapping<?> child = childElement != null
                         ? entityOf(descriptorFor(childElement)) : null;
                 String inverse = child != null ? findInverseName(self, child) : null;
-                resolved.add(new Prop.EntityList(entityList.name(), entityList.target(),
+                resolved.add(new Prop.EntityCollection(entityCollection.name(), entityCollection.target(),
                         inverse, inverse == null ? null : Names.fkColumn(inverse)));
             } else {
                 resolved.add(prop);
@@ -234,7 +233,7 @@ final class RepositoryTypeMappingBuilder {
         String childTable = Names.childTable(parentTable, field);
         String parentFk = Names.fkColumn(parentTable);
         ElementCollectionValueObjectMapping<?> target = valueObjectMetadata(valueObject, childTable, parentFk);
-        Prop.ElementList element = new Prop.ElementList(field, target, target.columns());
+        Prop.ElementCollection element = new Prop.ElementCollection(field, target, target.columns());
         return new RepositoryProcessor.ElementCollection(field,
                 TypeName.get(types.erasure(valueObject.asType())), element, target);
     }

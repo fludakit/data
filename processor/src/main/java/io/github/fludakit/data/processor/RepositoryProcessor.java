@@ -25,6 +25,7 @@ import io.github.fludakit.data.qbn.ParsedMethodName;
 import io.github.fludakit.data.qbn.QueryByMethodNameParser;
 import io.github.fludakit.data.query.Action;
 import io.github.fludakit.data.query.Connector;
+import io.github.fludakit.data.query.LimitSpec;
 import io.github.fludakit.data.query.Operation;
 import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.PagingMode;
@@ -163,6 +164,8 @@ public class RepositoryProcessor extends AbstractProcessor {
             ClassName.get("io.github.fludakit.data.query", "ResultKind");
     private static final ClassName Q_PAGING_MODE =
             ClassName.get("io.github.fludakit.data.query", "PagingMode");
+    private static final ClassName Q_LIMIT_SPEC =
+            ClassName.get("io.github.fludakit.data.query", "LimitSpec");
     private static final ClassName Q_PREDICATE =
             ClassName.get("io.github.fludakit.data.query", "Predicate");
     private static final ClassName Q_SORT_SPEC =
@@ -424,18 +427,18 @@ public class RepositoryProcessor extends AbstractProcessor {
             // Java 17 safety: instanceof, never a pattern switch. MANY_TO_ONE is a composing
             // Reference; an external @Association (composition=false) is not hydrated here.
             boolean manyToOne = a instanceof Prop.Reference ref && ref.composition();
-            boolean oneToMany = a instanceof Prop.EntityList;
+            boolean oneToMany = a instanceof Prop.EntityCollection;
             if (!manyToOne && !oneToMany) {
                 continue;
             }
-            if (oneToMany && ((Prop.EntityList) a).inverseName() == null) {
+            if (oneToMany && ((Prop.EntityCollection) a).inverseName() == null) {
                 processingEnv.getMessager().printMessage(Diagnostic.Kind.NOTE,
                         "relationship '" + a.name() + "' on " + entityElement.getQualifiedName()
                                 + ": one-to-many inverse is unresolved on the target — left unmapped on read",
                         entityElement);
                 continue;
             }
-            String targetFqn = a instanceof Prop.EntityList el
+            String targetFqn = a instanceof Prop.EntityCollection el
                     ? el.targetTypeName() : ((Prop.Reference) a).targetTypeName();
             TypeElement targetElement = targetFqn == null ? null : elements.getTypeElement(targetFqn);
             ClassName targetMapper = null;
@@ -459,7 +462,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         // "collection of associated objects" whose lifecycle is NOT bound, so a replace-all
         // there would silently DELETE associated child rows. Non-root owners therefore get NO write
         // cascade at all — their read hydration loaders (the scan above) are untouched.
-        // Write-gate decoupling: membership is computed from EVERY EntityList on the descriptor,
+        // Write-gate decoupling: membership is computed from EVERY EntityCollection on the descriptor,
         // NOT from the read-gate-passed hydratedRelationships, mirroring the element-collection write
         // path (appendUpdateStatements "iterates EVERY collection"): the cascade INSERT/DELETE constants
         // are plain SQL driven by the child's OWN table metadata + generated-key-coercible id
@@ -470,7 +473,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         List<EntityRelationship> cascadeRelationships = new ArrayList<>();
         if (kindOf(entityElement) == TypeMapping.Kind.AGGREGATE_ROOT) {
             for (Prop a : entity.metadata().props()) {
-                if (!(a instanceof Prop.EntityList list)) {
+                if (!(a instanceof Prop.EntityCollection list)) {
                     continue;
                 }
                 String targetFqn = list.targetTypeName();
@@ -577,16 +580,16 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     /**
      * Emits the generated query-metadata holder: {@code public final class <Repository>Queries} with one
-     * nested {@code public static final class <Method>Query implements QueryDefinition} per
-     * query-by-names method. Every accessor returns a literal built over logical query records,
-     * so the published structure describes the plan rendered into the SQL constant in
-     * {@code <Repository>Impl} — introspectable without reflection, and re-emitted per build so it
-     * can never drift. The holder is documentation and metadata: nothing at runtime reads it.
+     * {@code public static final QueryDefinition <FIELD>} per query-by-names method. Each field is a
+     * record literal built over logical query records, so the published structure describes the plan
+     * rendered into the SQL constant in {@code <Repository>Impl} — introspectable without reflection,
+     * and re-emitted per build so it can never drift. The holder is documentation and metadata:
+     * nothing at runtime reads it.
      */
     private void generateRepositoryQueries(TypeElement repository, String packageName, String queriesSimpleName,
                                            List<QueryDefinitionSpec> queryDefinitions) {
         TypeSpec.Builder holder = TypeSpec.classBuilder(queriesSimpleName)
-                .addJavadoc("Generated query definitions for {@code $L}: one nested {@code <Method>Query} per"
+                .addJavadoc("Generated query definitions for {@code $L}: one {@code QueryDefinition} field per"
                         + " query-by-names method. The rendered SQL literals live in {@code $LImpl};"
                         + " this holder publishes logical paths and query semantics used to render them."
                         + " Generated — do not edit.\n",
@@ -595,54 +598,30 @@ public class RepositoryProcessor extends AbstractProcessor {
                 .addModifiers(Modifier.PUBLIC, Modifier.FINAL);
         holder.addMethod(MethodSpec.constructorBuilder().addModifiers(Modifier.PRIVATE).build());
         for (QueryDefinitionSpec definition : queryDefinitions) {
-            holder.addType(queryDefinitionType(definition));
+            holder.addField(queryDefinitionField(definition));
         }
         writeSourceFile(packageName + "." + queriesSimpleName, repository,
                 JavaFile.builder(packageName, holder.build()).skipJavaLangImports(true).build());
     }
 
-    /** One nested {@code <Method>Query} class serialising the {@link QueryDefinition}
-     *  accessors of {@code definition}; its {@code typeName} names the nested class — it is not an
-     *  accessor. */
-    private TypeSpec queryDefinitionType(QueryDefinitionSpec definition) {
-        ClassName self = ClassName.bestGuess(definition.typeName());
-        TypeSpec.Builder query = TypeSpec.classBuilder(definition.typeName())
-                .addModifiers(Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
-                .addSuperinterface(Q_QUERY_DEFINITION);
-        query.addField(FieldSpec.builder(self, "INSTANCE", Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
-                .initializer("new $T()", self).build());
-        query.addMethod(MethodSpec.constructorBuilder().addModifiers(Modifier.PRIVATE).build());
-        query.addMethod(scalarAccessor("operation", Q_OPERATION,
-                CodeBlock.of("$T.$L", Q_OPERATION, definition.operation().name())));
-        query.addMethod(scalarAccessor("resultKind", Q_RESULT_KIND,
-                CodeBlock.of("$T.$L", Q_RESULT_KIND, definition.resultKind().name())));
-        CodeBlock.Builder preds = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
+    /** One {@code public static final QueryDefinition <FIELD> = new QueryDefinition(...)} literal. */
+    private FieldSpec queryDefinitionField(QueryDefinitionSpec definition) {
+        CodeBlock.Builder predicates = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
         for (int i = 0; i < definition.predicates().size(); i++) {
             if (i > 0) {
-                preds.add(", ");
+                predicates.add(", ");
             }
-            preds.add(predicateLiteral(definition.predicates().get(i)));
+            predicates.add(predicateLiteral(definition.predicates().get(i)));
         }
-        preds.add(")");
-        query.addMethod(scalarAccessor("predicates",
-                ParameterizedTypeName.get(ClassName.get(java.util.List.class), Q_PREDICATE),
-                preds.build()));
-        CodeBlock.Builder sortLiterals = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
+        predicates.add(")");
+        CodeBlock.Builder sorts = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
         for (int i = 0; i < definition.sorts().size(); i++) {
             if (i > 0) {
-                sortLiterals.add(", ");
+                sorts.add(", ");
             }
-            sortLiterals.add(sortLiteral(definition.sorts().get(i)));
+            sorts.add(sortLiteral(definition.sorts().get(i)));
         }
-        sortLiterals.add(")");
-        query.addMethod(scalarAccessor("sorts",
-                ParameterizedTypeName.get(ClassName.get(java.util.List.class), Q_SORT_SPEC),
-                sortLiterals.build()));
-        query.addMethod(scalarAccessor("paging", Q_PAGING_MODE,
-                CodeBlock.of("$T.$L", Q_PAGING_MODE, definition.paging().name())));
-        query.addMethod(MethodSpec.methodBuilder("limit").addModifiers(Modifier.PUBLIC)
-                .addAnnotation(Override.class).returns(int.class)
-                .addStatement("return $L", definition.limit()).build());
+        sorts.add(")");
         CodeBlock.Builder seeks = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
         for (int i = 0; i < definition.seekTerms().size(); i++) {
             if (i > 0) {
@@ -652,8 +631,6 @@ public class RepositoryProcessor extends AbstractProcessor {
             seeks.add("new $T($L, $L)", Q_SEEK_TERM, columnRefLiteral(term.ref()), term.ascending());
         }
         seeks.add(")");
-        query.addMethod(scalarAccessor("seekTerms",
-                ParameterizedTypeName.get(ClassName.get(java.util.List.class), Q_SEEK_TERM), seeks.build()));
         CodeBlock.Builder params = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
         for (int i = 0; i < definition.paramBindings().size(); i++) {
             if (i > 0) {
@@ -663,13 +640,20 @@ public class RepositoryProcessor extends AbstractProcessor {
             params.add("new $T($L, $S)", Q_PARAM_BINDING, binding.argIndex(), binding.paramName());
         }
         params.add(")");
-        query.addMethod(scalarAccessor("paramBindings",
-                ParameterizedTypeName.get(ClassName.get(java.util.List.class), Q_PARAM_BINDING),
-                params.build()));
-        query.addMethod(MethodSpec.methodBuilder("distinct").addModifiers(Modifier.PUBLIC)
-                .addAnnotation(Override.class).returns(boolean.class)
-                .addStatement("return $L", definition.distinct()).build());
-        return query.build();
+        CodeBlock initializer = CodeBlock.builder()
+                .add("new $T($T.$L, $T.$L, $L, $L, $T.$L, new $T($L, $L), $L, $L, $L)",
+                        Q_QUERY_DEFINITION,
+                        Q_OPERATION, definition.operation().name(),
+                        Q_RESULT_KIND, definition.resultKind().name(),
+                        predicates.build(), sorts.build(),
+                        Q_PAGING_MODE, definition.paging().name(),
+                        Q_LIMIT_SPEC, definition.limit().limit(), definition.limit().offset(),
+                        seeks.build(), params.build(),
+                        definition.distinct())
+                .build();
+        return FieldSpec.builder(Q_QUERY_DEFINITION, upperSnake(definition.typeName()),
+                        Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
+                .initializer(initializer).build();
     }
 
     /** {@code @Override public X name() { return <literal>; }}. */
@@ -690,15 +674,13 @@ public class RepositoryProcessor extends AbstractProcessor {
                 joins.add(", ");
             }
             JoinRef join = ref.joins().get(i);
-            joins.add("new $T($L, $L, $S, $S, $S, $S)", MD_JOIN_EDGE,
+            joins.add("new $T($L, $S, $S, $S)", MD_JOIN_EDGE,
                     join.ownerTableName() == null ? CodeBlock.of("null") : CodeBlock.of("$S", join.ownerTableName()),
-                    join.ownerAlias() == null ? CodeBlock.of("null") : CodeBlock.of("$S", join.ownerAlias()),
-                    join.ownerColumn(), join.childTableName(), join.childAlias(), join.childColumn());
+                    join.ownerColumn(), join.childTableName(), join.childColumn());
         }
         joins.add(")");
-        return CodeBlock.of("new $T($S, $L, $L, $L)", MD_COLUMN_REF, ref.column(),
+        return CodeBlock.of("new $T($S, $L, $L)", MD_COLUMN_REF, ref.column(),
                 ref.ownerTableName() == null ? CodeBlock.of("null") : CodeBlock.of("$S", ref.ownerTableName()),
-                ref.ownerAlias() == null ? CodeBlock.of("null") : CodeBlock.of("$S", ref.ownerAlias()),
                 joins.build());
     }
 
@@ -730,16 +712,16 @@ public class RepositoryProcessor extends AbstractProcessor {
                     reference.name(), reference.fkColumn(), reference.targetTypeName(), reference.composition());
         }
         if (p instanceof Prop.Embedded embedded) {
-            return CodeBlock.of("new $T($S, $S, null)", prop.nestedClass("Embedded"),
-                    embedded.name(), embedded.column());
+            return CodeBlock.of("new $T($S, null)", prop.nestedClass("Embedded"),
+                    embedded.name());
         }
-        if (p instanceof Prop.EntityList entityList) {
-            return CodeBlock.of("new $T($S, null, $S, $S)", prop.nestedClass("EntityList"),
-                    entityList.name(), entityList.inverseName(), entityList.inverseFkColumn());
+        if (p instanceof Prop.EntityCollection entityCollection) {
+            return CodeBlock.of("new $T($S, null, $S, $S)", prop.nestedClass("EntityCollection"),
+                    entityCollection.name(), entityCollection.inverseName(), entityCollection.inverseFkColumn());
         }
-        if (p instanceof Prop.ElementList elementList) {
-            return CodeBlock.of("new $T($S, null, $L)", prop.nestedClass("ElementList"),
-                    elementList.name(), columnRefList(elementList.elementColumns()));
+        if (p instanceof Prop.ElementCollection elementCollection) {
+            return CodeBlock.of("new $T($S, null, $L)", prop.nestedClass("ElementCollection"),
+                    elementCollection.name(), columnRefList(elementCollection.elementColumns()));
         }
         throw new IllegalStateException("unknown property kind: " + p.getClass().getName());
     }
@@ -868,8 +850,8 @@ public class RepositoryProcessor extends AbstractProcessor {
             }
             for (ColumnRef leaf : embedded.target().columns()) {
                 builder.addField(stringConstant(
-                        Names.toSnakeCase(embedded.column() + "_" + leaf.column()).toUpperCase(),
-                        embedded.column() + "_" + leaf.column()));
+                        Names.toSnakeCase(Names.columnName(embedded.name()) + "_" + leaf.column()).toUpperCase(),
+                        Names.columnName(embedded.name()) + "_" + leaf.column()));
             }
         }
 
@@ -914,7 +896,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         List<NavCase> navs = navCases(entityElement, entity);
         Map<String, CodeBlock> mappedAttributes = new LinkedHashMap<>();
         Map<String, ColumnRef> pathMappings = new LinkedHashMap<>();
-        for (Map.Entry<String, ColumnRef> mapping : entity.metadata().localAttributeRefs().entrySet()) {
+        for (Map.Entry<String, ColumnRef> mapping : entity.metadata().localColumnRefs().entrySet()) {
             mappedAttributes.put(mapping.getKey(), CodeBlock.of("$S", mapping.getKey()));
             pathMappings.put(mapping.getKey(), mapping.getValue());
         }
@@ -963,7 +945,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * {@code switch} over exactly the dot paths {@code columnRef} resolves at the depth
      * {@link #resolveCompilePath} walks — the flattened {@code columns()} view (identifier, scalars,
      * to-one heads, embedded leaves), the one-hop leaves of every {@link Prop.Reference} target, and the
-     * mapped child values of every {@link Prop.EntityList}/{@link Prop.ElementList}. Bodies are JavaPoet
+     * mapped child values of every {@link Prop.EntityCollection}/{@link Prop.ElementCollection}. Bodies are JavaPoet
      * getter chains, method references and stream lambdas only (never reflection), each hop null-guarded
      * and each to-many container guarded to an EMPTY list. A path whose accessor cannot be resolved is
      * left out with a NOTE and the round continues; an unknown path fails fast with
@@ -1011,10 +993,9 @@ public class RepositoryProcessor extends AbstractProcessor {
             boolean toOne = p instanceof Prop.Reference;
             TypeMapping<?> localTarget;
             JoinRef join;
-            if (p instanceof Prop.ElementList elementList) {
-                localTarget = elementList.target();
-                join = new JoinRef(mapping.tableName(), null, mapping.idColumn(),
-                        elementList.childTable(), elementList.name(), elementList.parentFkColumn());
+            if (p instanceof Prop.ElementCollection elementCollection) {
+                localTarget = elementCollection.target();
+                join = new JoinRef(mapping.tableName(), mapping.idColumn(), elementCollection.childTable(), elementCollection.parentFkColumn());
             } else {
                 localTarget = target;
                 join = referenceOrListJoin(mapping, target, p);
@@ -1022,7 +1003,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                     continue; // unbuildable join: the compile paths unresolvedRelation drop
                 }
             }
-            for (Map.Entry<String, ColumnRef> leaf : localTarget.localAttributeRefs().entrySet()) {
+            for (Map.Entry<String, ColumnRef> leaf : localTarget.localColumnRefs().entrySet()) {
                 if (!leaf.getValue().joins().isEmpty()) continue;
                 out.add(new NavCase(p.name() + "." + leaf.getKey(),
                         leaf.getValue().through(join), targetElement, localTarget, head, toOne));
@@ -1247,7 +1228,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         for (MmMember m : members) {
             Prop p = m.prop();
             boolean navigable = p instanceof Prop.Embedded || p instanceof Prop.Reference
-                    || p instanceof Prop.EntityList || p instanceof Prop.ElementList;
+                    || p instanceof Prop.EntityCollection || p instanceof Prop.ElementCollection;
             ClassName navType = navigable
                     ? generateNav(entityElement, packageName, owner, m, generatedTypeNames, units)
                     : null;
@@ -1286,11 +1267,11 @@ public class RepositoryProcessor extends AbstractProcessor {
             return embeddedNav(origin, packageName, owner, navSimple, m.path(),
                     m.column() + "_", embedded, claimed, units);
         }
-        if (p instanceof Prop.Reference || p instanceof Prop.EntityList) {
+        if (p instanceof Prop.Reference || p instanceof Prop.EntityCollection) {
             return relationNav(origin, packageName, owner, navSimple, m, claimed, units);
         }
         return elementCollectionNav(origin, packageName, owner, navSimple, m.path(),
-                (Prop.ElementList) p, claimed, units);
+                (Prop.ElementCollection) p, claimed, units);
     }
 
     /**
@@ -1379,18 +1360,18 @@ public class RepositoryProcessor extends AbstractProcessor {
     /**
      * The navigable class for an ELEMENT_COLLECTION member: implements
      * {@code ListAttribute<owner, element>} with owner-typed leaf fields for the element
-     * value object's columns (mirroring {@link Prop.ElementList#elementColumns()}). The child-table
+     * value object's columns (mirroring {@link Prop.ElementCollection#elementColumns()}). The child-table
      * placement lives in the descriptor's {@code columnRefs()} literal, not on the attribute.
      */
     private ClassName elementCollectionNav(TypeElement origin, String packageName, TypeName owner,
-                                           String navSimple, String path, Prop.ElementList elementList,
+                                           String navSimple, String path, Prop.ElementCollection elementCollection,
                                            Set<String> claimed, List<NavUnit> units) {
         String fqn = packageName + "." + navSimple;
         if (!claimed.add(fqn)) {
             navCollision(origin, fqn, path);
             return null;
         }
-        String targetFqn = elementList.elementTypeName();
+        String targetFqn = elementCollection.elementTypeName();
         TypeName targetType = classArgOf(targetFqn);
         TypeSpec.Builder builder = TypeSpec.classBuilder(navSimple)
                 .addModifiers(Modifier.PUBLIC, Modifier.FINAL)
@@ -1401,7 +1382,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         if (relationTargetResolved(targetFqn, true)) {
             TypeElement elementElement = elements.getTypeElement(stripGenerics(targetFqn));
             if (elementElement != null) {
-                for (Prop ep : elementList.target().props()) {
+                for (Prop ep : elementCollection.target().props()) {
                     addRelationLeaf(builder, taken, origin, owner, path, "", ep);
                 }
             }
@@ -1425,7 +1406,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         if (p instanceof Prop.Embedded embedded) {
             String childNav = parentNav + capitalize(p.name());
             ClassName nav = embeddedNav(origin, packageName, owner, childNav, path,
-                    columnPrefix + embedded.column() + "_", embedded, claimed, units);
+                    columnPrefix + Names.columnName(embedded.name()) + "_", embedded, claimed, units);
             if (nav != null) {
                 addNavField(builder, taken, origin, owner, childNav, p.name(), nav,
                         CodeBlock.of("new $T()", nav));
@@ -1434,7 +1415,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
         String column = memberColumn(p);
         if (column == null) {
-            return; // EntityList / ElementList inside a value object: no column on this table.
+            return; // EntityCollection / ElementCollection inside a value object: no column on this table.
         }
         addLeafField(builder, taken, origin, owner, parentNav, p.name(), path, columnPrefix + column, p);
     }
@@ -1450,7 +1431,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         String path = parentPath + "." + p.name();
         // Java 17 safety: instanceof chain, never a pattern switch.
         if (p instanceof Prop.Embedded embedded) {
-            String prefix = columnPrefix + embedded.column() + "_";
+            String prefix = columnPrefix + Names.columnName(embedded.name()) + "_";
             EmbeddedValueObjectMapping<?> vo = embedded.target();
             if (vo != null && vo.id() != null) {
                 addRelationLeaf(builder, taken, origin, owner, path, prefix, vo.id());
@@ -1462,8 +1443,8 @@ public class RepositoryProcessor extends AbstractProcessor {
             } else {
                 // unresolved (or empty) cycle target: one plain leaf at the container column
                 addLeafField(builder, taken, origin, owner, parentPath, embedded.name(), path,
-                        columnPrefix + embedded.column(),
-                        new Prop.Scalar(embedded.name(), embedded.column(), null));
+                        columnPrefix + Names.columnName(embedded.name()),
+                        new Prop.Scalar(embedded.name(), Names.columnName(embedded.name()), null));
             }
             return;
         }
@@ -1605,12 +1586,12 @@ public class RepositoryProcessor extends AbstractProcessor {
             return scalar.column();
         }
         if (p instanceof Prop.Embedded embedded) {
-            return embedded.column();
+            return Names.columnName(embedded.name());
         }
         if (p instanceof Prop.Reference reference) {
             return reference.fkColumn();
         }
-        return null; // EntityList / ElementList: no column on this table
+        return null; // EntityCollection / ElementCollection: no column on this table
     }
 
     /** The relationship/element target FQN for a descriptor-carrying prop, {@code null} otherwise. */
@@ -1621,11 +1602,11 @@ public class RepositoryProcessor extends AbstractProcessor {
         if (p instanceof Prop.Reference reference) {
             return reference.targetTypeName();
         }
-        if (p instanceof Prop.EntityList entityList) {
-            return entityList.targetTypeName();
+        if (p instanceof Prop.EntityCollection entityCollection) {
+            return entityCollection.targetTypeName();
         }
-        if (p instanceof Prop.ElementList elementList) {
-            return elementList.elementTypeName();
+        if (p instanceof Prop.ElementCollection elementCollection) {
+            return elementCollection.elementTypeName();
         }
         return null;
     }
@@ -1684,7 +1665,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         if (p instanceof Prop.Reference) {
             return ParameterizedTypeName.get(FM_FK, owner, classArgOf(memberTargetFqn(p)));
         }
-        if (p instanceof Prop.EntityList) {
+        if (p instanceof Prop.EntityCollection) {
             return ParameterizedTypeName.get(FM_OTM, owner, classArgOf(memberTargetFqn(p)));
         }
         return ParameterizedTypeName.get(FM_EC, owner, classArgOf(memberTargetFqn(p)));
@@ -1718,7 +1699,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         if (p instanceof Prop.Reference) {
             return CodeBlock.of("new $T$L($L, $L)", FM_FK_RECORD, typeArgs, name, path);
         }
-        if (p instanceof Prop.EntityList) {
+        if (p instanceof Prop.EntityCollection) {
             return CodeBlock.of("new $T$L($L, $L)", FM_OTM_RECORD, typeArgs, name, path);
         }
         return CodeBlock.of("new $T$L($L, $L)", FM_EC_RECORD, typeArgs, name, path);
@@ -2061,12 +2042,12 @@ public class RepositoryProcessor extends AbstractProcessor {
                                     Property embedded, String entityName) {
         List<String> presence = new ArrayList<>();
         readEmbeddedLeaves(mapRow, ownerMetadata, embedded.embeddedModel(),
-                embedded.column(), embedded.name(), presence, entityName);
+                Names.columnName(embedded.name()), embedded.name(), presence, entityName);
         boolean guarded = !presence.isEmpty();
         if (guarded) {
             mapRow.beginControlFlow("if ($L)", String.join(" || ", presence));
         }
-        buildEmbeddedValue(mapRow, embedded.embeddedModel(), embedded.column(), embedded.name());
+        buildEmbeddedValue(mapRow, embedded.embeddedModel(), Names.columnName(embedded.name()), embedded.name());
         mapRow.addStatement("entity.$L($L)", setter(embedded.name()), embedded.name());
         if (guarded) {
             mapRow.endControlFlow();
@@ -2476,7 +2457,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      */
     private void appendEntityCollectionInsert(MethodSpec.Builder builder, String value, EntityModel entity,
                                               EntityRelationship relationship, Map<String, String> constants) {
-        Prop.EntityList list = (Prop.EntityList) relationship.attribute();
+        Prop.EntityCollection list = (Prop.EntityCollection) relationship.attribute();
         EntityModel target = relationship.targetModel();
         TypeMapping<?> mapping = target.metadata();
         String inverseFk = list.inverseFkColumn();
@@ -2515,7 +2496,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * table, keyed on the inverse fk column. Routed through {@link #addConstant} so the replace-all
      * update and {@code deleteById} share one field.
      */
-    private String entityChildDeleteConstant(Map<String, String> constants, Prop.EntityList list) {
+    private String entityChildDeleteConstant(Map<String, String> constants, Prop.EntityCollection list) {
         return addConstant(constants, "SQL_DELETE_" + upperSnake(list.name()),
                 childDeleteSql(list.targetTable(), list.inverseFkColumn()));
     }
@@ -2523,7 +2504,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     /** Emits {@code jdbcClient.sql(SQL_DELETE_<FIELD>).param(<inverseFk>, entity.getId()).update()}. */
     private void appendEntityCollectionDelete(MethodSpec.Builder builder, String value, EntityModel entity,
                                               EntityRelationship relationship, Map<String, String> constants) {
-        Prop.EntityList list = (Prop.EntityList) relationship.attribute();
+        Prop.EntityCollection list = (Prop.EntityCollection) relationship.attribute();
         appendChildDelete(builder, value, entity,
                 entityChildDeleteConstant(constants, list), list.inverseFkColumn());
     }
@@ -2580,10 +2561,10 @@ public class RepositoryProcessor extends AbstractProcessor {
         insert.add(".param($S, $L.$L())", collection.parentFk(), value, getter(entity.id().name()));
         // Child-table placeholders stay COLUMN-named: the hand-rendered INSERT above lists the
         // element-collection columns (:product_id, :quantity), so the params must match them. The
-        // authoritative flat child-column list is {@link Prop.ElementList#elementColumns()} — one
+        // authoritative flat child-column list is {@link Prop.ElementCollection#elementColumns()} — one
         // source of truth — while the value still walks the descriptor path through boundValue so
         // fk-bearing children bind their id exactly like the previous property-driven loop did.
-        for (Map.Entry<String, ColumnRef> entry : collection.descriptor().localAttributeRefs().entrySet()) {
+        for (Map.Entry<String, ColumnRef> entry : collection.descriptor().localColumnRefs().entrySet()) {
             insert.add(".param($S, $L)", entry.getValue().column(),
                     boundValue(collection.descriptor(), "item", entry.getKey(), entry.getValue()));
         }
@@ -2626,10 +2607,10 @@ public class RepositoryProcessor extends AbstractProcessor {
                     continue;
                 }
                 for (ColumnRef leaf : embedded.target().columns()) {
-                    sb.append(", ").append(sqlDialect.quoteIdentifier(embedded.column() + "_" + leaf.column()));
+                    sb.append(", ").append(sqlDialect.quoteIdentifier(Names.columnName(embedded.name()) + "_" + leaf.column()));
                 }
             }
-            // Reference / EntityList / ElementList: no read column on this child table.
+            // Reference / EntityCollection / ElementCollection: no read column on this child table.
         }
         return sb.toString();
     }
@@ -2862,7 +2843,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         // the composition lifecycle is bound to the root — entity-collection children are
         // deleted from the CHILD's own table by the inverse fk, same children-first order.
         for (EntityRelationship relationship : cascades) {
-            Prop.EntityList list = (Prop.EntityList) relationship.attribute();
+            Prop.EntityCollection list = (Prop.EntityCollection) relationship.attribute();
             String childConstant = entityChildDeleteConstant(constants, list);
             builder.addStatement("jdbcClient.sql($L).param($S, $L).update()", childConstant,
                     list.inverseFkColumn(), value);
@@ -3336,7 +3317,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         boolean annotatedParams = parameters.stream().anyMatch(p -> p.getAnnotation(By.class) != null);
         boolean declaredProperties = parsed != null || annotatedParams;
         // resolve every method-name predicate property through the compile model, so a path
-        // that traverses a relation (Reference / EntityList / ElementList) resolves at compile time,
+        // that traverses a relation (Reference / EntityCollection / ElementCollection) resolves at compile time,
         // a to-one head contributing a LEFT JOIN and a to-many head an EXISTS semi-join.
         // Local and embedded paths resolve to plain unqualified refs.
         List<PathResolution> predicatePaths = resolveCompilePaths(entity.metadata(),
@@ -3425,7 +3406,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                         0, bindings, parameters, distinct));
                 String constant = addConstant(constants, "SQL_" + upperSnake(name),
                         new SqlBuilder(entity.metadata(), entity.metadata(),
-                                queryDefinitions.get(queryDefinitions.size() - 1))
+                                queryDefinitions.get(queryDefinitions.size() - 1).definition())
                                 .dialect(sqlDialect).count());
                 CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
                 appendBoundParameters(call, bindings, parameters);
@@ -3464,7 +3445,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                         0, bindings, parameters, distinct));
                 String constant = addConstant(constants, "SQL_" + upperSnake(name),
                         new SqlBuilder(entity.metadata(), entity.metadata(),
-                                queryDefinitions.get(queryDefinitions.size() - 1))
+                                queryDefinitions.get(queryDefinitions.size() - 1).definition())
                                 .dialect(sqlDialect).delete());
                 CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
                 appendBoundParameters(call, bindings, parameters);
@@ -3533,7 +3514,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                         pagedSortRefs, pagedExistentialSorts, 0, bindings, parameters, distinct));
                 String constant = addConstant(constants, "SQL_" + upperSnake(name),
                         new SqlBuilder(entity.metadata(), entity.metadata(),
-                                queryDefinitions.get(queryDefinitions.size() - 1))
+                                queryDefinitions.get(queryDefinitions.size() - 1).definition())
                                 .dialect(sqlDialect).select());
                 emitPaged(builder, entity, pageRequest, methodSorts, constant, constants, bindings, parameters,
                         kind == Kind.CURSORED_PAGE, mapperType, hydrate);
@@ -3568,7 +3549,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                     predicates, predicateRefs, methodSorts, sortRefs, existentialSorts,
                     parsed != null ? parsed.limit() : 0,
                     bindings, parameters, distinct));
-            QueryDefinitionSpec queryDefinition = queryDefinitions.get(queryDefinitions.size() - 1);
+            QueryDefinition queryDefinition = queryDefinitions.get(queryDefinitions.size() - 1).definition();
             String sql = new SqlBuilder(entity.metadata(), entity.metadata(), queryDefinition)
                     .dialect(sqlDialect).select(extraProjection);
             String constant = addConstant(constants, "SQL_" + upperSnake(name), sql);
@@ -3627,7 +3608,7 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     /**
      * The distinct {@link Prop.Reference} heads whose resolved predicate/sort refs carry a join (i.e. the
-     * path traversed a Reference rather than an {@code EntityList}/{@code ElementList}). A joined ref's
+     * path traversed a Reference rather than an {@code EntityCollection}/{@code ElementCollection}). A joined ref's
      * path is {@code <head>.<leafPath>} (set by {@code withPrefix}); the head names the traversed
      * property. Composition and association references both qualify — the field is filled from the join
      * either way. Deduped by property name so one traversal of a shared head yields one projection.
@@ -3641,12 +3622,17 @@ public class RepositoryProcessor extends AbstractProcessor {
             if (ref.joins().isEmpty()) {
                 continue;
             }
-            String head = ref.joins().get(0).childAlias();
-            Prop prop = propOrNull(mapping, head);
-            if (prop instanceof Prop.Reference reference) {
-                boolean seen = out.stream().anyMatch(r -> r.name().equals(reference.name()));
-                if (!seen) {
-                    out.add(reference);
+            // The head join's child table is the referenced entity's table; recover the matching
+            // Prop.Reference from it (the JoinRef no longer carries the property name).
+            String childTable = ref.joins().get(0).childTableName();
+            for (Prop prop : mapping.props()) {
+                if (prop instanceof Prop.Reference reference
+                        && childTable.equals(reference.targetTable())) {
+                    boolean seen = out.stream().anyMatch(r -> r.name().equals(reference.name()));
+                    if (!seen) {
+                        out.add(reference);
+                    }
+                    break;
                 }
             }
         }
@@ -3667,7 +3653,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                 continue;
             }
             EntityModel targetModel = entityModel(target);
-            for (Map.Entry<String, ColumnRef> entry : targetModel.metadata().localAttributeRefs().entrySet()) {
+            for (Map.Entry<String, ColumnRef> entry : targetModel.metadata().localColumnRefs().entrySet()) {
                 ColumnRef column = entry.getValue();
                 if (!column.joins().isEmpty()) continue;
                 String head = entry.getKey().contains(".")
@@ -3769,13 +3755,13 @@ public class RepositoryProcessor extends AbstractProcessor {
         }
         String childVar = var + capitalize(embedded.name());
         List<String> presence = new ArrayList<>();
-        readJoinedEmbeddedLeaves(m, vo, alias + "_join_" + embedded.column(), childVar, presence,
+        readJoinedEmbeddedLeaves(m, vo, alias + "_join_" + Names.columnName(embedded.name()), childVar, presence,
                 ownerName + "." + alias + "." + embedded.name());
         boolean guarded = !presence.isEmpty();
         if (guarded) {
             m.beginControlFlow("if ($L)", String.join(" || ", presence));
         }
-        buildJoinedEmbeddedValue(m, vo, alias + "_join_" + embedded.column(), childVar);
+        buildJoinedEmbeddedValue(m, vo, alias + "_join_" + Names.columnName(embedded.name()), childVar);
         m.addStatement("$L.$L($L)", var, setter(embedded.name()), childVar);
         if (guarded) {
             m.endControlFlow();
@@ -3842,7 +3828,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * more joins (rejected with a NOTE), and {@code unresolvedRelation} flags a path whose relation head
      * names a target that could not be resolved (degraded with a NOTE). Both degrade the caller back to
      * the legacy unqualified rendering; neither aborts the compile. {@code existential} marks a ref
-     * whose single head is a to-many {@link Prop.EntityList}/{@link Prop.ElementList}: the caller
+     * whose single head is a to-many {@link Prop.EntityCollection}/{@link Prop.ElementCollection}: the caller
      * renders it as an {@link SqlBuilder#existsConjunct(io.github.fludakit.data.metadata.TableSchema, Predicate, ColumnRef) EXISTS
      * semi-join} conjunct and splices NO join.
      */
@@ -3919,7 +3905,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      *   <li>local scan — a dots-stripped, case-insensitive match against each entity-rooted mapping key
      *       (this keeps flat scalars and flattened embedded leaves byte-identical to today);</li>
      *   <li>relation descent — the shortest head that is a {@link Prop.Reference}/
-     *       {@link Prop.EntityList}/{@link Prop.ElementList}, with the remainder resolved as a LEAF in the
+     *       {@link Prop.EntityCollection}/{@link Prop.ElementCollection}, with the remainder resolved as a LEAF in the
      *       target (or against the element columns), contributing exactly one join.</li>
      * </ol>
      * A remainder that would itself need a relation yields {@link PathResolution#multiHop()}; a head whose
@@ -3954,17 +3940,16 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     private PathResolution resolveRelationHead(TypeMapping<?> mapping, Prop prop, String remainder, Set<String> visited) {
-        if (prop instanceof Prop.ElementList elementList) {
-            ColumnRef leaf = localColumnRef(elementList.target().localAttributeRefs(), remainder);
+        if (prop instanceof Prop.ElementCollection elementCollection) {
+            ColumnRef leaf = localColumnRef(elementCollection.target().localColumnRefs(), remainder);
             if (leaf == null) {
                 return PathResolution.unresolved();
             }
-            JoinRef join = new JoinRef(mapping.tableName(), null, mapping.idColumn(),
-                    elementList.childTable(), elementList.name(), elementList.parentFkColumn());
+            JoinRef join = new JoinRef(mapping.tableName(), mapping.idColumn(), elementCollection.childTable(), elementCollection.parentFkColumn());
             return PathResolution.existentialRef(leaf.through(join));
         }
         String targetFqn = prop instanceof Prop.Reference reference
-                ? reference.targetTypeName() : ((Prop.EntityList) prop).targetTypeName();
+                ? reference.targetTypeName() : ((Prop.EntityCollection) prop).targetTypeName();
         if (!visited.add(targetFqn)) {
             return PathResolution.relationUnresolved(); // cyclic relationship: degrade, don't recurse forever
         }
@@ -3976,10 +3961,10 @@ public class RepositoryProcessor extends AbstractProcessor {
         if (join == null) {
             return PathResolution.relationUnresolved();
         }
-        ColumnRef leaf = localColumnRef(target.localAttributeRefs(), remainder);
+        ColumnRef leaf = localColumnRef(target.localColumnRefs(), remainder);
         if (leaf != null) {
             ColumnRef traversed = leaf.through(join);
-            return prop instanceof Prop.EntityList
+            return prop instanceof Prop.EntityCollection
                     ? PathResolution.existentialRef(traversed)
                     : PathResolution.resolved(traversed);
         }
@@ -3993,7 +3978,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                     return inner;
                 }
                 ColumnRef chained = inner.ref().prepend(join);
-                return prop instanceof Prop.EntityList
+                return prop instanceof Prop.EntityCollection
                         ? PathResolution.existentialRef(chained)
                         : PathResolution.resolved(chained);
             }
@@ -4004,21 +3989,19 @@ public class RepositoryProcessor extends AbstractProcessor {
         return PathResolution.unresolved();
     }
 
-    /** The LEFT JOIN edge for a Reference / EntityList traversal; {@code null} when unbuildable. */
+    /** The LEFT JOIN edge for a Reference / EntityCollection traversal; {@code null} when unbuildable. */
     private static JoinRef referenceOrListJoin(TypeMapping<?> root, TypeMapping<?> target, Prop prop) {
         if (prop instanceof Prop.Reference reference) {
             if (reference.targetTable() == null || target.idColumn() == null) {
                 return null;
             }
-            return new JoinRef(root.tableName(), null, reference.fkColumn(),
-                    reference.targetTable(), reference.name(), target.idColumn());
+            return new JoinRef(root.tableName(), reference.fkColumn(), reference.targetTable(), target.idColumn());
         }
-        if (prop instanceof Prop.EntityList list) {
+        if (prop instanceof Prop.EntityCollection list) {
             if (list.targetTable() == null || list.inverseFkColumn() == null) {
                 return null;
             }
-            return new JoinRef(root.tableName(), null, root.idColumn(),
-                    list.targetTable(), list.name(), list.inverseFkColumn());
+            return new JoinRef(root.tableName(), root.idColumn(), list.targetTable(), list.inverseFkColumn());
         }
         return null;
     }
@@ -4067,7 +4050,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     }
 
     private static boolean isTraversable(Prop prop) {
-        return prop instanceof Prop.Reference || prop instanceof Prop.EntityList || prop instanceof Prop.ElementList;
+        return prop instanceof Prop.Reference || prop instanceof Prop.EntityCollection || prop instanceof Prop.ElementCollection;
     }
 
     /**
@@ -4327,7 +4310,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      */
     private MethodSpec appendOneToManyHydration(Map<String, String> constants, EntityModel entity,
                                                 EntityRelationship relationship) {
-        Prop.EntityList a = (Prop.EntityList) relationship.attribute();
+        Prop.EntityCollection a = (Prop.EntityCollection) relationship.attribute();
         EntityModel targetModel = relationship.targetModel();
         String inverseFk = Names.fkColumn(a.inverseName());
         String selectConst = addConstant(constants, "SQL_SELECT_" + upperSnake(a.name()),
@@ -4582,7 +4565,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     /**
      * A relationship carried into emission: either a READ hydration loader member (it cleared the
      * managed-target gate: attribute, target's compile-time model, generated row mapper — every such
-     * instance is loader-emittable) or a WRITE cascade member from {@link #generate}'s EntityList scan
+     * instance is loader-emittable) or a WRITE cascade member from {@link #generate}'s EntityCollection scan
      * (the plain-SQL child INSERT/DELETE uses only attribute/targetModel, so a cascade member may
      * carry a {@code null} {@code targetMapper} — the child's row mapper is irrelevant to writes).
      */
@@ -4812,7 +4795,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             }
         }
         return new QueryDefinitionSpec(typeName, operation, resultKind,
-                List.copyOf(logicalPredicates), List.copyOf(logicalSorts), paging, limit,
+                List.copyOf(logicalPredicates), List.copyOf(logicalSorts), paging, new LimitSpec(limit, 0),
                 List.copyOf(seekTerms), List.copyOf(paramBindings), distinct);
     }
 
@@ -4859,14 +4842,14 @@ public class RepositoryProcessor extends AbstractProcessor {
                     EntityModel embeddedModel) { }
 
     /**
-     * A {@code List<@ValueObject>} element collection. {@code element} (the {@link Prop.ElementList}
+     * A {@code List<@ValueObject>} element collection. {@code element} (the {@link Prop.ElementCollection}
      * that is also this collection's entry in the parent's props) is the single source of truth for the
      * child table and parent fk; {@code descriptor} (the value object's flattened column view) drives
      * the param bindings, so fk-bearing children resolve through the same {@link #boundValue} walk as
      * parent-entity paths.
      */
     record ElementCollection(String field, TypeName valueObjectType,
-                             Prop.ElementList element, ElementCollectionValueObjectMapping<?> descriptor) {
+                             Prop.ElementCollection element, ElementCollectionValueObjectMapping<?> descriptor) {
         String childTable() {
             return element.childTable();
         }

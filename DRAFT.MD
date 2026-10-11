@@ -49,9 +49,10 @@ containers. `AttributePathResolver.columnRefs()` indexes SQL-resolvable leaves b
 path string, including flattened embedded leaves and supported relation paths.
 Generated metadata preserves declaration order in this index; the default `columns()` view filters
 out joined or qualified mappings to expose the root table's physical columns without duplicating
-mapping state. `ColumnRef` contains only `(column, ownerTableName, ownerAlias, joins)`: the logical
+mapping state. `ColumnRef` contains only `(column, ownerTableName, joins)`: the logical
 path remains in the resolver's key and is never duplicated in this table-placement value. Each
-`JoinRef` contains `(ownerTableName, ownerAlias, ownerColumn, childTableName, childAlias, childColumn)`.
+`JoinRef` contains `(ownerTableName, ownerColumn, childTableName, childColumn)`. SQL aliases are
+not stored on either value: `SqlBuilder` aliases every joined table by its physical table name.
 
 This is not a compile-time processor model and should not move into the processor module.
 
@@ -78,8 +79,8 @@ present), and flattened `ColumnRef` list. Properties use sealed `TypeMapping.Pro
 | `Id` / `Scalar` | Identifier or ordinary column-bearing property |
 | `Embedded` | Embedded value object whose leaves flatten into the current table |
 | `Reference` | To-one foreign-key reference to another entity model |
-| `EntityList` | To-many entity relation stored in the target entity table |
-| `ElementList` | Value-object collection stored in an external child table |
+| `EntityCollection` | To-many entity relation stored in the target entity table |
+| `ElementCollection` | Value-object collection stored in an external child table |
 
 Flattening preserves declaration order: the identifier comes first, followed by scalar and
 foreign-key columns and then embedded leaves. Embedded physical column names use the embedded

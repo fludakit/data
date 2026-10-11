@@ -15,8 +15,8 @@ public interface AttributePathResolver {
     }
 
     /** Resolves an entity-rooted path to the leaf column and its table/join placement. */
-    ColumnRef columnRef(String attributePath);
+    ColumnRef columnRef(String path);
 
     /** Returns whether this entity-rooted path starts with a to-many relation or collection. */
-    boolean isToManyPath(String attributePath);
+    boolean isToManyPath(String path);
 }

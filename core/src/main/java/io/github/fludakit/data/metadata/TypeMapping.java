@@ -1,5 +1,7 @@
 package io.github.fludakit.data.metadata;
 
+import io.github.fludakit.data.Names;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -34,10 +36,6 @@ public interface TypeMapping<T> extends TableSchema, AttributePathResolver {
     /** Properties other than the identifier, in declaration order. */
     List<Prop> props();
 
-    default boolean isValueObject() {
-        return kind() == Kind.VALUE_OBJECT;
-    }
-
     default String idColumn() {
         return id() == null ? null : id().column();
     }
@@ -66,12 +64,12 @@ public interface TypeMapping<T> extends TableSchema, AttributePathResolver {
     }
 
     /** Returns whether the named property is a to-many relation or element collection. */
-    default boolean isToManyPath(String attributePath) {
-        int dot = attributePath.indexOf('.');
-        String pathHead = dot < 0 ? attributePath : attributePath.substring(0, dot);
+    default boolean isToManyPath(String path) {
+        int dot = path.indexOf('.');
+        String pathHead = dot < 0 ? path : path.substring(0, dot);
         for (Prop p : props()) {
             if (p.name().equals(pathHead)) {
-                return p instanceof Prop.EntityList || p instanceof Prop.ElementList;
+                return p instanceof Prop.EntityCollection || p instanceof Prop.ElementCollection;
             }
         }
         return false;
@@ -80,7 +78,7 @@ public interface TypeMapping<T> extends TableSchema, AttributePathResolver {
     /**
      * Column references for every resolvable attribute path, including leaves reached through one
      * or more relationships. To-one {@link Prop.Reference} chains traverse transitively (arbitrary
-     * depth); to-many heads ({@link Prop.EntityList}/{@link Prop.ElementList}) stay depth-1 over the
+     * depth); to-many heads ({@link Prop.EntityCollection}/{@link Prop.ElementCollection}) stay depth-1 over the
      * element/entity's local columns. This is the compile-time mapping source used by
      * {@code SqlBuilder}; the query plan itself carries logical paths only.
      */
@@ -90,7 +88,7 @@ public interface TypeMapping<T> extends TableSchema, AttributePathResolver {
     }
 
     private Map<String, ColumnRef> columnRefs(Set<String> inProgress) {
-        Map<String, ColumnRef> refs = new LinkedHashMap<>(localAttributeRefs());
+        Map<String, ColumnRef> refs = new LinkedHashMap<>(localColumnRefs());
         if (!inProgress.add(typeName())) {
             return Collections.unmodifiableMap(refs); // cycle: stop traversing here
         }
@@ -106,7 +104,7 @@ public interface TypeMapping<T> extends TableSchema, AttributePathResolver {
                 }
                 Map<String, ColumnRef> targetRefs = prop instanceof Prop.Reference
                         ? target.columnRefs(inProgress)
-                        : target.localAttributeRefs();
+                        : target.localColumnRefs();
                 for (Map.Entry<String, ColumnRef> entry : targetRefs.entrySet()) {
                     ColumnRef chained = entry.getValue().joins().isEmpty()
                             ? entry.getValue().through(join)
@@ -127,24 +125,24 @@ public interface TypeMapping<T> extends TableSchema, AttributePathResolver {
                     || reference.targetIdColumn() == null) {
                 return null;
             }
-            return new JoinRef(tableName(), null, reference.fkColumn(),
-                    reference.targetTable(), reference.name(), reference.targetIdColumn());
+            return new JoinRef(tableName(), reference.fkColumn(),
+                    reference.targetTable(), reference.targetIdColumn());
         }
-        if (prop instanceof Prop.EntityList entityList) {
-            if (entityList.target() == null || entityList.targetTable() == null
-                    || entityList.inverseFkColumn() == null || idColumn() == null) {
+        if (prop instanceof Prop.EntityCollection entityCollection) {
+            if (entityCollection.target() == null || entityCollection.targetTable() == null
+                    || entityCollection.inverseFkColumn() == null || idColumn() == null) {
                 return null;
             }
-            return new JoinRef(tableName(), null, idColumn(),
-                    entityList.targetTable(), entityList.name(), entityList.inverseFkColumn());
+            return new JoinRef(tableName(), idColumn(),
+                    entityCollection.targetTable(), entityCollection.inverseFkColumn());
         }
-        if (prop instanceof Prop.ElementList elementList) {
-            if (elementList.target() == null || elementList.childTable() == null
-                    || elementList.parentFkColumn() == null || idColumn() == null) {
+        if (prop instanceof Prop.ElementCollection elementCollection) {
+            if (elementCollection.target() == null || elementCollection.childTable() == null
+                    || elementCollection.parentFkColumn() == null || idColumn() == null) {
                 return null;
             }
-            return new JoinRef(tableName(), null, idColumn(),
-                    elementList.childTable(), elementList.name(), elementList.parentFkColumn());
+            return new JoinRef(tableName(), idColumn(),
+                    elementCollection.childTable(), elementCollection.parentFkColumn());
         }
         return null;
     }
@@ -152,15 +150,15 @@ public interface TypeMapping<T> extends TableSchema, AttributePathResolver {
     /** The compile-time model a relation property targets, or {@code null} for non-relations. */
     private static TypeMapping<?> relationTarget(Prop prop) {
         if (prop instanceof Prop.Reference reference) return reference.target();
-        if (prop instanceof Prop.EntityList entityList) return entityList.target();
-        if (prop instanceof Prop.ElementList elementList) return elementList.target();
+        if (prop instanceof Prop.EntityCollection entityCollection) return entityCollection.target();
+        if (prop instanceof Prop.ElementCollection elementCollection) return elementCollection.target();
         return null;
     }
 
     /** Local table-column bindings, excluding every relation traversal. */
-    default Map<String, ColumnRef> localAttributeRefs() {
+    default Map<String, ColumnRef> localColumnRefs() {
         Map<String, ColumnRef> refs = new LinkedHashMap<>();
-        addLocalAttributeRefs(refs, tableName(), id(), props(), "", "");
+        addLocalColumnRefs(refs, tableName(), id(), props(), "", "");
         return Collections.unmodifiableMap(refs);
     }
 
@@ -193,15 +191,15 @@ public interface TypeMapping<T> extends TableSchema, AttributePathResolver {
                             + " has an embedded property '" + embedded.name() + "' whose target is unresolved");
                 }
                 for (ColumnRef leaf : embedded.target().columns()) {
-                    out.add(new ColumnRef(embedded.column() + "_" + leaf.column(), ownerTableName));
+                    out.add(new ColumnRef(Names.columnName(embedded.name()) + "_" + leaf.column(), ownerTableName));
                 }
             }
-            // Prop.Id handled above; EntityList / ElementList carry no column on this table.
+            // Prop.Id handled above; EntityCollection / ElementCollection carry no column on this table.
         }
         return out;
     }
 
-    private static void addLocalAttributeRefs(Map<String, ColumnRef> refs, String ownerTableName,
+    private static void addLocalColumnRefs(Map<String, ColumnRef> refs, String ownerTableName,
                                               Prop.Id id, List<Prop> props,
                                               String pathPrefix, String columnPrefix) {
         if (id != null) {
@@ -216,8 +214,8 @@ public interface TypeMapping<T> extends TableSchema, AttributePathResolver {
                 refs.put(pathPrefix + reference.name(),
                         new ColumnRef(columnPrefix + reference.fkColumn(), ownerTableName));
             } else if (prop instanceof Prop.Embedded embedded && embedded.target() != null) {
-                addLocalAttributeRefs(refs, ownerTableName, null, embedded.target().props(),
-                        pathPrefix + embedded.name() + ".", columnPrefix + embedded.column() + "_");
+                addLocalColumnRefs(refs, ownerTableName, null, embedded.target().props(),
+                        pathPrefix + embedded.name() + ".", columnPrefix + Names.columnName(embedded.name()) + "_");
             }
         }
     }
@@ -238,7 +236,7 @@ public interface TypeMapping<T> extends TableSchema, AttributePathResolver {
          * Embedded value object whose leaves flatten into this table. A {@code null} target marks
          * an unresolved model during processor analysis.
          */
-        record Embedded(String name, String column, EmbeddedValueObjectMapping<?> target) implements Prop { }
+        record Embedded(String name, EmbeddedValueObjectMapping<?> target) implements Prop { }
 
         /**
          * To-one foreign-key reference. The target name remains available while a cyclic target
@@ -263,7 +261,7 @@ public interface TypeMapping<T> extends TableSchema, AttributePathResolver {
          * To-many entity relation stored in the target table. Inverse details may be {@code null}
          * until relation resolution completes.
          */
-        record EntityList(String name, EntityTypeMapping<?> target,
+        record EntityCollection(String name, EntityTypeMapping<?> target,
                            String inverseName, String inverseFkColumn) implements Prop {
 
             /** Target entity type, or {@code null} until resolved. */
@@ -281,10 +279,10 @@ public interface TypeMapping<T> extends TableSchema, AttributePathResolver {
          * Value-object element collection stored in a child table. {@code elementColumns} contains
          * the flattened element columns in write order.
          */
-        record ElementList(String name, ElementCollectionValueObjectMapping<?> target,
+        record ElementCollection(String name, ElementCollectionValueObjectMapping<?> target,
                            List<ColumnRef> elementColumns) implements Prop {
 
-            public ElementList {
+            public ElementCollection {
                 elementColumns = elementColumns == null
                         ? List.of() : List.copyOf(elementColumns);
             }

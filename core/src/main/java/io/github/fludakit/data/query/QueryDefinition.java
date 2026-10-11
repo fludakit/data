@@ -10,37 +10,21 @@ import java.util.List;
  * physical placement while a {@code TableSchema} supplies the root table shape. This definition does
  * not depend on an entity mapping or Java type, and does not contain SQL text.</p>
  */
-public interface QueryDefinition {
+public record QueryDefinition(
+        Operation operation,
+        ResultKind resultKind,
+        List<Predicate> predicates,
+        List<SortSpec> sorts,
+        PagingMode paging,
+        LimitSpec limit,
+        List<SeekTerm> seekTerms,
+        List<ParamBinding> paramBindings,
+        boolean distinct) {
 
-    /** Requested data operation. */
-    Operation operation();
-
-    /** Declared result shape. */
-    ResultKind resultKind();
-
-    /** Logical WHERE terms, in emission order. */
-    List<Predicate> predicates();
-
-    /** Logical ORDER BY terms, in declaration order. */
-    List<SortSpec> sorts();
-
-    /** Paging strategy used by the method. */
-    PagingMode paging();
-
-    /** Static row cap, or {@code 0} when there is none. */
-    int limit();
-
-    /** Resolved keyset ordering terms used when constructing cursor predicates. */
-    List<SeekTerm> seekTerms();
-
-    /** Method argument slots mapped to named SQL parameters. */
-    List<ParamBinding> paramBindings();
-
-    /**
-     * Whether the method name carried the {@code Distinct} subject keyword. A default keeps this
-     * additive: definitions built before distinct support, and hand-written ones, are not distinct.
-     */
-    default boolean distinct() {
-        return false;
+    public QueryDefinition {
+        predicates = List.copyOf(predicates);
+        sorts = List.copyOf(sorts);
+        seekTerms = List.copyOf(seekTerms);
+        paramBindings = List.copyOf(paramBindings);
     }
 }

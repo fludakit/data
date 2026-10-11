@@ -393,9 +393,8 @@ class RepositoryProcessorTest {
                 "a Distinct count must count distinct identifiers:" + System.lineSeparator() + impl);
 
         String queries = sqlFlat(generatedDir.resolve("distinctq/MemosQueries.java"));
-        // Pin the accessor body, not a bare "return true;": that literal appears in ANY boolean
-        // accessor in this file, so it would still pass if distinct() regressed to return false.
-        assertTrue(queries.contains("boolean distinct() { return true; }"),
+        // The distinct keyword is the trailing boolean component of the QueryDefinition record.
+        assertTrue(queries.contains(", true);"),
                 "the published query metadata must report distinct:" + System.lineSeparator() + queries);
     }
 
@@ -1181,10 +1180,10 @@ class RepositoryProcessorTest {
 
         // The @Association field must appear as an fk column (author_id), never as flattened embedded leaves.
         String md = Files.readString(generatedDir.resolve("cls/BookMetadata.java"));
-        assertTrue(md.contains("mappings.put(\"author\", new ColumnRef(\"author_id\", \"book\", null, List.of()))"),
+        assertTrue(md.contains("mappings.put(\"author\", new ColumnRef(\"author_id\", \"book\", List.of()))"),
                 "association must contribute its fk column to the descriptor's typed mapping index:"
                         + System.lineSeparator() + md);
-        assertTrue(md.contains("mappings.put(\"title\", new ColumnRef(\"title\", \"book\", null, List.of()))"),
+        assertTrue(md.contains("mappings.put(\"title\", new ColumnRef(\"title\", \"book\", List.of()))"),
                 "scalar column must be present:" + System.lineSeparator() + md);
         assertTrue(!md.replace(" ", "").contains("\"author_name\""),
                 "an @Association must NOT flatten the target's fields into the owner's columns:"
@@ -1314,8 +1313,8 @@ class RepositoryProcessorTest {
         // The descriptor derives its table-local column view from the typed mapping index.
         String mflat = Files.readString(generatedDir.resolve("meta/BookMetadata.java")).replaceAll("\\s+", "");
         assertTrue(mflat.contains("mappings=newLinkedHashMap<>();")
-                        && mflat.contains("mappings.put(\"id\",newColumnRef(\"id\",\"book\",null,List.of()))")
-                        && mflat.contains("mappings.put(\"title\",newColumnRef(\"title\",\"book\",null,List.of()))")
+                        && mflat.contains("mappings.put(\"id\",newColumnRef(\"id\",\"book\",List.of()))")
+                        && mflat.contains("mappings.put(\"title\",newColumnRef(\"title\",\"book\",List.of()))")
                         && mflat.contains("columns(){"),
                 "the descriptor emits columns() and the string-keyed index:" + System.lineSeparator() + mflat);
         // The id() accessor returns the compile-time Prop.Id literal.
@@ -1412,19 +1411,19 @@ class RepositoryProcessorTest {
         String vflat = Files.readString(voMetadata).replaceAll("\\s+", "");
         assertTrue(vflat.contains("props(){returnList.of("
                         + "newTypeMapping.Prop.Scalar(\"city\",\"city\",\"java.lang.String\"),"
-                        + "newTypeMapping.Prop.Embedded(\"point\",\"point\",null));}"),
+                        + "newTypeMapping.Prop.Embedded(\"point\",null));}"),
                 "VO props() must list root members once, without flattened leaves:"
                         + System.lineSeparator() + vflat);
         // D3: attributes navigate by name; the nested value object is referenced through the
         // record's TYPE ARGUMENTS (the INSTANCE plumbing went with column()). Transitive VO
         // generation is still pinned by the GeoPointMetadata existence check below.
-        assertTrue(vmd.contains("new TypeMapping.Prop.Embedded(\"point\", \"point\", null)"),
+        assertTrue(vmd.contains("new TypeMapping.Prop.Embedded(\"point\", null)"),
                 "embedded attribute must still name the nested value object type:" + System.lineSeparator() + vmd);
-        assertTrue(vflat.contains("newTypeMapping.Prop.Embedded(\"point\",\"point\",null)"),
+        assertTrue(vflat.contains("newTypeMapping.Prop.Embedded(\"point\",null)"),
                 "the embedded literal must carry the VO type arguments:" + System.lineSeparator() + vflat);
         // ... and the VO's flattened leaves are indexed as PathAttributes.
         assertTrue(vflat.contains("mappings=newLinkedHashMap<>();")
-                        && vflat.contains("mappings.put(\"point.lat\",newColumnRef(\"point_lat\",null,null,List.of()))")
+                        && vflat.contains("mappings.put(\"point.lat\",newColumnRef(\"point_lat\",null,List.of()))")
                         && vflat.contains("columns(){"),
                 "VO leaves must be indexed by PathAttribute:" + System.lineSeparator() + vflat);
         // ... which must itself have been generated (transitive EMBEDDED tree walk).
@@ -1437,11 +1436,11 @@ class RepositoryProcessorTest {
         // The owner's descriptor lists the root metamodel members (scalar + embedded nav) once, and
         // the navigable member classes carry the flattened leaves as owner-typed fields.
         String cmd = Files.readString(generatedDir.resolve("emb/ContactMetadata.java")).replaceAll("\\s+", " ");
-        assertTrue(cmd.contains("return List.of(new TypeMapping.Prop.Scalar(\"name\", \"name\", \"java.lang.String\"), new TypeMapping.Prop.Embedded(\"address\", \"address\", null));"),
+        assertTrue(cmd.contains("return List.of(new TypeMapping.Prop.Scalar(\"name\", \"name\", \"java.lang.String\"), new TypeMapping.Prop.Embedded(\"address\", null));"),
                 "props() must expose containers once, no flattened leaves:" + System.lineSeparator() + cmd);
         String cflat = Files.readString(generatedDir.resolve("emb/ContactMetadata.java")).replaceAll("\\s+", "");
-        assertTrue(cflat.contains("mappings.put(\"address.city\",newColumnRef(\"address_city\",\"contact\",null,List.of()))")
-                        && cflat.contains("mappings.put(\"address.point.lat\",newColumnRef(\"address_point_lat\",\"contact\",null,List.of()))")
+        assertTrue(cflat.contains("mappings.put(\"address.city\",newColumnRef(\"address_city\",\"contact\",List.of()))")
+                        && cflat.contains("mappings.put(\"address.point.lat\",newColumnRef(\"address_point_lat\",\"contact\",List.of()))")
                         && cflat.contains("columns(){"),
                 "the typed index flattens the embedded chain and derives root columns:"
                         + System.lineSeparator() + cflat);
@@ -2073,7 +2072,7 @@ class RepositoryProcessorTest {
     }
 
     @Test
-    void bareEntityFieldAndEntityListClassifyAsManyToOneAndOneToManyWithResolvedInverse() throws Exception {
+    void bareEntityFieldAndEntityCollectionClassifyAsManyToOneAndOneToManyWithResolvedInverse() throws Exception {
         Path sourceDir = Files.createDirectories(workspace.resolve("src/rel"));
         Path classesDir = Files.createDirectories(workspace.resolve("classes-rel"));
         Path generatedDir = Files.createDirectories(workspace.resolve("generated-rel"));
@@ -2162,17 +2161,17 @@ class RepositoryProcessorTest {
         assertTrue(otmNav.contains("publicStringpath(){return\"children\";}"), otmNav);
         assertTrue(otmNav.contains("IdAttribute<Parent>id=newIdAttributeRecord<>(\"id\",\"children.id\");"), otmNav);
         String pmd = Files.readString(generatedDir.resolve("rel/ParentMetadata.java")).replaceAll("\\s+", "");
-        assertTrue(pmd.contains("mappings.put(\"primary.id\",newColumnRef(\"id\",\"child\",\"primary\",List.of(newJoinRef(\"parent\",null,\"primary_id\",\"child\",\"primary\",\"id\"))))"),
+        assertTrue(pmd.contains("mappings.put(\"primary.id\",newColumnRef(\"id\",\"child\",List.of(newJoinRef(\"parent\",\"primary_id\",\"child\",\"id\"))))"),
                 "columnRefs must pin the FK join verbatim:" + System.lineSeparator() + pmd);
-        assertTrue(pmd.contains("mappings.put(\"children.id\",newColumnRef(\"id\",\"child\",\"children\",List.of(newJoinRef(\"parent\",null,\"id\",\"child\",\"children\",\"owner_id\"))))"),
+        assertTrue(pmd.contains("mappings.put(\"children.id\",newColumnRef(\"id\",\"child\",List.of(newJoinRef(\"parent\",\"id\",\"child\",\"owner_id\"))))"),
                 "columnRefs must pin the one-to-many inverse join verbatim:" + System.lineSeparator() + pmd);
 
         String md = Files.readString(generatedDir.resolve("rel/ParentMetadata.java")).replaceAll("\\s+", " ");
         assertTrue(md.contains("public List<TypeMapping.Prop> props()"),
                 "props() must list the root members:" + System.lineSeparator() + md);
         String mflat = Files.readString(generatedDir.resolve("rel/ParentMetadata.java")).replaceAll("\\s+", "");
-        assertTrue(mflat.contains("mappings.put(\"name\",newColumnRef(\"name\",\"parent\",null,List.of()))")
-                        && mflat.contains("mappings.put(\"primary\",newColumnRef(\"primary_id\",\"parent\",null,List.of()))")
+        assertTrue(mflat.contains("mappings.put(\"name\",newColumnRef(\"name\",\"parent\",List.of()))")
+                        && mflat.contains("mappings.put(\"primary\",newColumnRef(\"primary_id\",\"parent\",List.of()))")
                         && mflat.contains("columns(){"),
                 "typed mappings list the local table's columns; the one-to-many contributes none:"
                         + System.lineSeparator() + mflat);
@@ -2471,7 +2470,7 @@ class RepositoryProcessorTest {
                 "flattened embedded leaf must get a column constant:" + System.lineSeparator() + vmd);
         // D3: attributes navigate by name; the nested value object survives as the record's
         // type argument instead of the removed embedded-INSTANCE plumbing.
-        assertTrue(vmd.contains("new TypeMapping.Prop.Embedded(\"point\", \"point\", null)"),
+        assertTrue(vmd.contains("new TypeMapping.Prop.Embedded(\"point\", null)"),
                 "the EMBEDDED attribute must still reference the nested value object:" + System.lineSeparator() + vmd);
         Path inner = generatedDir.resolve("phantom/GeoPointMetadata.java");
         assertTrue(Files.exists(inner), "Expected generated " + inner);
@@ -2539,8 +2538,8 @@ class RepositoryProcessorTest {
         assertTrue(Files.exists(generatedDir.resolve("mmbook/BookMetadata.java")),
                 "the internal <Entity>Metadata must still be generated");
         String mdb = Files.readString(generatedDir.resolve("mmbook/BookMetadata.java")).replaceAll("\\s+", "");
-        assertTrue(mdb.contains("mappings.put(\"id\",newColumnRef(\"id\",\"book\",null,List.of()))")
-                        && mdb.contains("mappings.put(\"title\",newColumnRef(\"title\",\"book\",null,List.of()))")
+        assertTrue(mdb.contains("mappings.put(\"id\",newColumnRef(\"id\",\"book\",List.of()))")
+                        && mdb.contains("mappings.put(\"title\",newColumnRef(\"title\",\"book\",List.of()))")
                         && mdb.contains("columns(){"), mdb);
     }
 
@@ -2645,12 +2644,12 @@ class RepositoryProcessorTest {
 
         // The owner descriptor: root members once, explicit flattened columns in legacy order.
         String cmd = Files.readString(generatedDir.resolve("mmgp/ProfileMetadata.java")).replaceAll("\\s+", " ");
-        assertTrue(cmd.contains("return List.of(new TypeMapping.Prop.Embedded(\"address\", \"address\", null));"), cmd);
+        assertTrue(cmd.contains("return List.of(new TypeMapping.Prop.Embedded(\"address\", null));"), cmd);
         String cmdFlat = Files.readString(generatedDir.resolve("mmgp/ProfileMetadata.java")).replaceAll("\\s+", "");
         assertTrue(cmdFlat.contains("mappings=newLinkedHashMap<>();")
                         && cmdFlat.contains("columns(){"), cmdFlat);
-        assertTrue(cmdFlat.contains("mappings.put(\"address.city\",newColumnRef(\"address_city\",\"profile\",null,List.of()))")
-                        && cmdFlat.contains("mappings.put(\"address.point.lat\",newColumnRef(\"address_point_lat\",\"profile\",null,List.of()))"),
+        assertTrue(cmdFlat.contains("mappings.put(\"address.city\",newColumnRef(\"address_city\",\"profile\",List.of()))")
+                        && cmdFlat.contains("mappings.put(\"address.point.lat\",newColumnRef(\"address_point_lat\",\"profile\",List.of()))"),
                 "columnRefs should index embedded leaves by their generated PathAttribute instances:"
                         + System.lineSeparator() + cmdFlat);
     }
@@ -2989,7 +2988,7 @@ class RepositoryProcessorTest {
         // D3/D4: the chained-column and fk-placement facts moved into the descriptor's generated
         // columnRefs() literals — pin the TARGET-LOCAL chained column and the join there.
         String lmd = Files.readString(generatedDir.resolve("navleaf/LoadMetadata.java")).replaceAll("\\s+", "");
-        assertTrue(lmd.contains("mappings.put(\"depot.addr.street\",newColumnRef(\"addr_street\",\"depot\",\"depot\",List.of(newJoinRef(\"load\",null,\"depot_id\",\"depot\",\"depot\",\"id\"))))"),
+        assertTrue(lmd.contains("mappings.put(\"depot.addr.street\",newColumnRef(\"addr_street\",\"depot\",List.of(newJoinRef(\"load\",\"depot_id\",\"depot\",\"id\"))))"),
                 "columnRefs must pin the target-local chained column and the FK join:" + System.lineSeparator() + lmd);
 
         // (b) EC nav: leaves rebuilt from the element VO props must carry the elementColumns
@@ -3000,7 +2999,7 @@ class RepositoryProcessorTest {
         assertTrue(ecNav.contains("publicfinalclass_LoadTagsimplementsListAttribute<Load,Tags>"), ecNav);
         assertTrue(ecNav.contains("TextScalarAttribute<Load>sku=newTextScalarAttributeRecord<>(\"sku\",\"tags.sku\");"), ecNav);
         assertTrue(ecNav.contains("SortableScalarAttribute<Load>qty=newSortableScalarAttributeRecord<>(\"qty\",\"tags.qty\");"), ecNav);
-        assertTrue(lmd.contains("mappings.put(\"tags.sku\",newColumnRef(\"sku\",\"load_tags\",\"tags\",List.of(newJoinRef(\"load\",null,\"id\",\"load_tags\",\"tags\",\"load_id\"))))"),
+        assertTrue(lmd.contains("mappings.put(\"tags.sku\",newColumnRef(\"sku\",\"load_tags\",List.of(newJoinRef(\"load\",\"id\",\"load_tags\",\"load_id\"))))"),
                 "element-collection navigation must pin the child table and parent fk through the join:" + System.lineSeparator() + lmd);
     }
 
@@ -3079,13 +3078,13 @@ class RepositoryProcessorTest {
         // D3: targetDescriptor() plumbing is gone; the FK target resolution rides the descriptor's
         // generated columnRefs() literals.
         String pmd = Files.readString(generatedDir.resolve("mmrel/ParentMetadata.java")).replaceAll("\\s+", "");
-        assertTrue(pmd.contains("mappings.put(\"primary.id\",newColumnRef(\"id\",\"child\",\"primary\",List.of(newJoinRef(\"parent\",null,\"primary_id\",\"child\",\"primary\",\"id\"))))"),
+        assertTrue(pmd.contains("mappings.put(\"primary.id\",newColumnRef(\"id\",\"child\",List.of(newJoinRef(\"parent\",\"primary_id\",\"child\",\"id\"))))"),
                 "the generated columnRefs must carry the FK join:" + System.lineSeparator() + pmd);
         String otmNav = Files.readString(generatedDir.resolve("mmrel/_ParentChildren.java")).replaceAll("\\s+", "");
         assertTrue(otmNav.contains("publicfinalclass_ParentChildrenimplementsListAttribute<Parent,Child>"), otmNav);
         assertTrue(otmNav.contains("ScalarAttribute<Parent>owner=newScalarAttributeRecord<>(\"owner\",\"children.owner\");"),
                 "the child's own FK column path must flatten into the collection nav:" + System.lineSeparator() + otmNav);
-        assertTrue(pmd.contains("mappings.put(\"children.id\",newColumnRef(\"id\",\"child\",\"children\",List.of(newJoinRef(\"parent\",null,\"id\",\"child\",\"children\",\"owner_id\"))))"),
+        assertTrue(pmd.contains("mappings.put(\"children.id\",newColumnRef(\"id\",\"child\",List.of(newJoinRef(\"parent\",\"id\",\"child\",\"owner_id\"))))"),
                 "one-to-many navigation must join via the child table and the inverse fk:" + System.lineSeparator() + pmd);
         String cm = Files.readString(generatedDir.resolve("mmrel/_Child.java")).replaceAll("\\s+", "");
         assertTrue(cm.contains("_ChildOwnerowner=new_ChildOwner();"), cm);
@@ -3140,13 +3139,13 @@ class RepositoryProcessorTest {
 
         String md = Files.readString(generatedDir.resolve("mmrel/HolderMetadata.java"))
                 .replaceAll("\\s+", "");
-        assertTrue(md.contains("newColumnRef(\"loc_city\",\"holder\",null,List.of())"),
+        assertTrue(md.contains("newColumnRef(\"loc_city\",\"holder\",List.of())"),
                 "embedded leaf path must resolve to its flattened column:" + System.lineSeparator() + md);
-        assertTrue(md.contains("newColumnRef(\"loc_zip\",\"holder\",null,List.of())"),
+        assertTrue(md.contains("newColumnRef(\"loc_zip\",\"holder\",List.of())"),
                 "embedded leaf path must resolve to its flattened column:" + System.lineSeparator() + md);
         assertTrue(!md.contains("newColumnRef(\"loc\","),
                 "no container column for an EMBEDDED property:" + System.lineSeparator() + md);
-        assertTrue(md.contains("newColumnRef(\"id\",\"holder\",null,List.of())"),
+        assertTrue(md.contains("newColumnRef(\"id\",\"holder\",List.of())"),
                 "the id column must remain:" + System.lineSeparator() + md);
         String impl = Files.readString(generatedDir.resolve("mmrel/HoldersImpl.java"));
         assertTrue(impl.contains("return HolderMetadata.INSTANCE.columnRef(property)"),
@@ -3242,9 +3241,9 @@ class RepositoryProcessorTest {
     }
 
     @Test
-    void valueObjectEntityListIsOneToManyNotElementCollection() throws Exception {
+    void valueObjectEntityCollectionIsOneToManyNotElementCollection() throws Exception {
         // Requirements Lock item 3: a @ValueObject may hold entity collections; a List<@Entity> inside a
-        // VO classifies as a one-to-many (Prop.EntityList), never an element collection. Driven through
+        // VO classifies as a one-to-many (Prop.EntityCollection), never an element collection. Driven through
         // an aggregate-root owner (the same idiom the embedded VO tests use to force VO model generation).
         Path sourceDir = Files.createDirectories(workspace.resolve("src/voel"));
         Path classesDir = Files.createDirectories(workspace.resolve("classes-voel"));
@@ -3318,7 +3317,7 @@ class RepositoryProcessorTest {
         // pin the one-to-many inverse-fk join). What stays pinned here: a List<@Entity> in a
         // value object exposes the navigable list attribute with the ENTITY element type and
         // never contributes a column of its own.
-        assertTrue(vmd.contains("new TypeMapping.Prop.EntityList(\"things\", null, null, null)"),
+        assertTrue(vmd.contains("new TypeMapping.Prop.EntityCollection(\"things\", null, null, null)"),
                 "a List<@Entity> in a value object must expose a navigable entity-typed list attribute:"
                         + System.lineSeparator() + vmd);
         assertTrue(!vmd.contains("new ColumnRef(\"things"),
@@ -3516,7 +3515,7 @@ class RepositoryProcessorTest {
 
     @Test
     void aggregateWritesCascadeEntityCollectionChildren() throws Exception {
-        // R-T11a: the composition lifecycle is bound to the aggregate root. An EntityList whose target
+        // R-T11a: the composition lifecycle is bound to the aggregate root. An EntityCollection whose target
         // clears the managed-target gate is now ALSO written: root insert runs the CHILD's own
         // generated-key insert per member with the inverse fk bound from the root id and backfills the
         // child id; root update replaces all (DELETE by inverse fk + re-insert); deleteById removes
@@ -3587,7 +3586,7 @@ class RepositoryProcessorTest {
         // incl. the inverse fk), byte-equal to what PartRepository would emit for the same descriptor.
         assertTrue(impl.contains("SQL_INSERT_PARTS = \"INSERT INTO \"part\" (\"label\", \"owner_id\") VALUES (:label, :owner)\""),
                 "the cascade must reuse the child's own insert over its full column set:" + System.lineSeparator() + impl);
-        // Child DELETE constant: child's own table keyed by the inverse fk (ElementList delete shape).
+        // Child DELETE constant: child's own table keyed by the inverse fk (ElementCollection delete shape).
         assertTrue(impl.contains("SQL_DELETE_PARTS = \"DELETE FROM \"part\" WHERE \"owner_id\" = :owner_id\""),
                 "the cascade needs a by-fk DELETE on the child table:" + System.lineSeparator() + impl);
         // Insert cascade: per-member child insert binding the fk from the ROOT id (the bare inverse is
@@ -3613,7 +3612,7 @@ class RepositoryProcessorTest {
     @Test
     void entityOwnerDoesNotCascadeEntityCollectionWrites() throws Exception {
         // Fix-round 2 I-1 (Requirements Lock md:33/md:34): the composition lifecycle is bound to the
-        // root ONLY for @AggregateRoot owners. Inside an @Entity an EntityList is a collection of
+        // root ONLY for @AggregateRoot owners. Inside an @Entity an EntityCollection is a collection of
         // ASSOCIATED objects — the READ hydration loader stays, but save/insert/update/deleteById must
         // emit NO child cascade: a replace-all on an association owner would silently delete rows the
         // owner does not own (the planned Team→@Entity conversion landmine).
@@ -3678,7 +3677,7 @@ class RepositoryProcessorTest {
         String impl = Files.readString(generatedDir.resolve("cascnone/DeviceRepositoryImpl.java"))
                 .replace("\\\"", "\"").replaceAll("\\s+", " ");
 
-        // Read side UNCHANGED: the managed/mapped EntityList still gets its hydration loader.
+        // Read side UNCHANGED: the managed/mapped EntityCollection still gets its hydration loader.
         assertTrue(impl.contains("private void hydrateModules"),
                 "an @Entity owner keeps its read hydration loader:" + System.lineSeparator() + impl);
         // Write side: NO child INSERT constant, NO child DELETE constant, no cascade loops anywhere.
@@ -3872,7 +3871,7 @@ class RepositoryProcessorTest {
     }
 
     @Test
-    void pagedSortThroughEntityListOrdersByAggregateSortTermAndIdTiebreak() throws Exception {
+    void pagedSortThroughEntityCollectionOrdersByAggregateSortTermAndIdTiebreak() throws Exception {
         // Task 6 (S-2 part 2): the findAllPage runtime sort through a to-many head must NOT splice a
         // fanning LEFT JOIN. Its ORDER BY term renders through the descriptor-driven aggregate
         // subquery helper, the query picks the ROOT-QUALIFIED plain select (no join), and the keyset
@@ -3951,7 +3950,7 @@ class RepositoryProcessorTest {
     }
 
     @Test
-    void pagedFinderSortThroughElementListDescendsToMaxSubqueryWithIdTiebreak() throws Exception {
+    void pagedFinderSortThroughElementCollectionDescendsToMaxSubqueryWithIdTiebreak() throws Exception {
         // Task 6: the compile-time sort side (a CursoredPage finder under @OrderBy) resolves a to-many
         // head to the SAME pre-rendered aggregate term used verbatim in ORDER BY and seekWhereTerms,
         // grows props/dirs/cols with the id tiebreak, and switches the cursor keys to the descriptor
@@ -4008,8 +4007,8 @@ class RepositoryProcessorTest {
         compile(sourceDir, classesDir, generatedDir, "Contact.java", "Profile.java", "Profiles.java");
 
         String impl = sqlFlat(generatedDir.resolve("t6el/ProfilesImpl.java"));
-        assertTrue(impl.contains("ORDER BY (SELECT MAX(\"contacts\".\"value\") FROM"
-                        + " \"profile_contacts\" \"contacts\" WHERE \"contacts\".\"profile_id\" ="
+        assertTrue(impl.contains("ORDER BY (SELECT MAX(\"profile_contacts\".\"value\") FROM"
+                        + " \"profile_contacts\" \"profile_contacts\" WHERE \"profile_contacts\".\"profile_id\" ="
                         + " \"profile\".\"id\") DESC, \"profile\".\"id\" ASC"),
                 "the paged finder ORDER BY must be the MAX subquery term plus the id tiebreak:"
                         + System.lineSeparator() + impl);
@@ -4178,32 +4177,30 @@ class RepositoryProcessorTest {
 
         assertTrue(queries.contains("public final class WidgetsQueries"),
                 "holder:" + System.lineSeparator() + queries);
-        // one nested query definition per query-by-names method, in declaration order, overload suffixed
-        assertTrue(queries.contains("public static final class FindByStatusQuery implements QueryDefinition"),
+        // one query-definition field per query-by-names method, in declaration order, overload suffixed
+        assertTrue(queries.contains("public static final QueryDefinition FIND_BY_STATUS_QUERY = new QueryDefinition("),
                 "find query definition:" + System.lineSeparator() + queries);
-        assertTrue(queries.contains("public static final class FindByStatusQuery2 implements QueryDefinition"),
+        assertTrue(queries.contains("public static final QueryDefinition FIND_BY_STATUS_QUERY2 = new QueryDefinition("),
                 "paged overload must be suffixed:" + System.lineSeparator() + queries);
-        assertTrue(queries.contains("public static final class CountByStatusQuery implements QueryDefinition"),
+        assertTrue(queries.contains("public static final QueryDefinition COUNT_BY_STATUS_QUERY = new QueryDefinition("),
                 "count query definition:" + System.lineSeparator() + queries);
-        assertTrue(queries.contains("public static final FindByStatusQuery INSTANCE = new FindByStatusQuery();"),
-                "INSTANCE constant:" + System.lineSeparator() + queries);
         // query metadata retains logical paths; SqlBuilder resolves them against the schema.
         assertTrue(queries.contains("Predicate.of(\"status\", Operator.EQ, \"status\", Connector.AND, false)"),
                 "logical predicate:" + System.lineSeparator() + queries);
-        assertTrue(queries.contains("return Operation.FIND;"), "operation:" + System.lineSeparator() + queries);
-        assertTrue(queries.contains("return Operation.COUNT;"), "count operation:"
+        assertTrue(queries.contains("Operation.FIND,"), "operation:" + System.lineSeparator() + queries);
+        assertTrue(queries.contains("Operation.COUNT,"), "count operation:"
                 + System.lineSeparator() + queries);
-        assertTrue(queries.contains("return ResultKind.PAGE;"), "paged result kind:"
+        assertTrue(queries.contains("ResultKind.PAGE,"), "paged result kind:"
                 + System.lineSeparator() + queries);
-        assertTrue(queries.contains("return PagingMode.OFFSET;"), "paged mode:"
+        assertTrue(queries.contains("PagingMode.OFFSET,"), "paged mode:"
                 + System.lineSeparator() + queries);
-        assertTrue(queries.contains("return PagingMode.NONE;"), "plain mode:" + System.lineSeparator() + queries);
+        assertTrue(queries.contains("PagingMode.NONE,"), "plain mode:" + System.lineSeparator() + queries);
         assertTrue(queries.contains("new ParamBinding(0, \"status\")"), "param binding:"
                 + System.lineSeparator() + queries);
         // the paged model declares no ORDER BY sorts of its own here, and its seek terms are the
         // id-ascending default the runtime cursor uses
         assertTrue(queries.contains("new SeekTerm(")
-                        && queries.contains("new ColumnRef(\"id\", null, null, List.of()), true)"),
+                        && queries.contains("new ColumnRef(\"id\", null, List.of()), true)"),
                 "default cursor seek term:" + System.lineSeparator() + queries);
         // the impl must not have changed shape in this task
         String impl = Files.readString(generatedDir.resolve("qmd/WidgetsImpl.java"));
@@ -4253,9 +4250,9 @@ class RepositoryProcessorTest {
                 .replaceAll("\\s+", " ");
         String impl = Files.readString(generatedDir.resolve("queryoverride/WidgetsImpl.java"))
                 .replaceAll("\\s+", " ");
-        assertTrue(queries.contains("class FindByStatusQuery implements QueryDefinition"), queries);
-        assertTrue(!queries.contains("FindByStatusQuery2"), "override must not look like an overload: " + queries);
-        assertTrue(occurrences(queries, "class FindByStatusQuery implements QueryDefinition") == 1,
+        assertTrue(queries.contains("QueryDefinition FIND_BY_STATUS_QUERY = new QueryDefinition("), queries);
+        assertTrue(!queries.contains("FIND_BY_STATUS_QUERY2"), "override must not look like an overload: " + queries);
+        assertTrue(occurrences(queries, "QueryDefinition FIND_BY_STATUS_QUERY = new QueryDefinition(") == 1,
                 "one query definition per effective method: " + queries);
         assertTrue(occurrences(impl, "List<Widget> findByStatus(String status)") == 1,
                 "one implementation method per effective method: " + impl);
@@ -4404,9 +4401,9 @@ class RepositoryProcessorTest {
         // JavaPoet soft wrap cannot break the byte pin.
         String impl = sqlFlat(generatedDir.resolve("relpath/OrdersImpl.java"));
         assertTrue(impl.contains("FROM \"order\" WHERE EXISTS (SELECT 1 FROM \"order_order_items\" "
-                        + "\"orderItems\" WHERE \"orderItems\".\"order_id\" = \"order\".\"id\" "
-                        + "AND \"orderItems\".\"quantity\" > :quantity)"),
-                "element-collection predicate must render EXISTS with the aliased child table:"
+                        + "\"order_order_items\" WHERE \"order_order_items\".\"order_id\" = \"order\".\"id\" "
+                        + "AND \"order_order_items\".\"quantity\" > :quantity)"),
+                "element-collection predicate must render EXISTS with the child table as its own alias:"
                         + System.lineSeparator() + impl);
         assertTrue(!impl.contains("LEFT JOIN"),
                 "a to-many predicate must NOT splice a LEFT JOIN:" + System.lineSeparator() + impl);
@@ -4450,7 +4447,7 @@ class RepositoryProcessorTest {
     }
 
     /**
-     * Writes the Task 5 EntityList fixture (package {@code exa}): {@code Order} is an
+     * Writes the Task 5 EntityCollection fixture (package {@code exa}): {@code Order} is an
      * {@code @AggregateRoot} carrying {@code List<Line> lines}; {@code Line} is a MANAGED
      * {@code @Entity} (its own {@code LineRepository}, Decision 7) with {@code String product} and
      * a back-reference {@code Order order}, so the one-to-many inverse resolves to the fk column
@@ -4503,8 +4500,8 @@ class RepositoryProcessorTest {
     }
 
     @Test
-    void predicateThroughEntityListRendersExistsNotJoin() throws Exception {
-        // Task 5: findByLinesProduct - the head "lines" is a Prop.EntityList (to-many). The predicate
+    void predicateThroughEntityCollectionRendersExistsNotJoin() throws Exception {
+        // Task 5: findByLinesProduct - the head "lines" is a Prop.EntityCollection (to-many). The predicate
         // renders as an EXISTS semi-join over the target table, aliased by the relation PROPERTY name,
         // and the statement carries NO LEFT JOIN, so the root row cannot fan out. The bound parameter
         // stays the JAVA PARAMETER NAME ("product"), exactly like the join version rendered.
@@ -4529,7 +4526,7 @@ class RepositoryProcessorTest {
         String impl = sqlFlat(generatedDir.resolve("exa/OrdersImpl.java"));
         assertTrue(impl.contains("SQL_FIND_BY_LINES_PRODUCT"),
                 "constant name should follow the method name:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("EXISTS (SELECT 1 FROM \"line\" \"lines\" WHERE \"lines\".\"order_id\" = \"order\".\"id\" AND \"lines\".\"product\" = :product)"),
+        assertTrue(impl.contains("EXISTS (SELECT 1 FROM \"line\" \"line\" WHERE \"line\".\"order_id\" = \"order\".\"id\" AND \"line\".\"product\" = :product)"),
                 "entity-list predicate must render EXISTS, alias-qualified by the relation property:"
                         + System.lineSeparator() + impl);
         assertTrue(!impl.contains("LEFT JOIN"),
@@ -4564,7 +4561,7 @@ class RepositoryProcessorTest {
 
         String impl = sqlFlat(generatedDir.resolve("exa/OrdersImpl.java"));
         // Mode 1 (qualified == false, no join spliced): the bare root projection.
-        assertTrue(impl.contains("SELECT \"id\", \"status\" FROM \"order\" WHERE EXISTS (SELECT 1 FROM \"line\" \"lines\" WHERE \"lines\".\"order_id\" = \"order\".\"id\" AND \"lines\".\"product\" = :product)"),
+        assertTrue(impl.contains("SELECT \"id\", \"status\" FROM \"order\" WHERE EXISTS (SELECT 1 FROM \"line\" \"line\" WHERE \"line\".\"order_id\" = \"order\".\"id\" AND \"line\".\"product\" = :product)"),
                 "the no-join helper mode must keep the bare root projection:" + System.lineSeparator() + impl);
         // Mode 2 (qualified == true, no join spliced by the constant itself): the findAll constant.
         assertTrue(impl.contains("SELECT \"order\".\"id\", \"order\".\"status\" FROM \"order\""),
@@ -4572,8 +4569,8 @@ class RepositoryProcessorTest {
     }
 
     @Test
-    void predicateThroughElementListRendersExistsNotJoin() throws Exception {
-        // Task 5: findByContactsValue - the head "contacts" is a Prop.ElementList; the EXISTS renders
+    void predicateThroughElementCollectionRendersExistsNotJoin() throws Exception {
+        // Task 5: findByContactsValue - the head "contacts" is a Prop.ElementCollection; the EXISTS renders
         // over the element child table ("profile_contacts"), aliased by the relation property name and
         // keyed by the parent fk column ("profile_id"). No LEFT JOIN anywhere.
         Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-exe"));
@@ -4625,7 +4622,7 @@ class RepositoryProcessorTest {
         compile(sourceDir, classesDir, generatedDir, "Contact.java", "Profile.java", "Profiles.java");
 
         String impl = sqlFlat(generatedDir.resolve("exv/ProfilesImpl.java"));
-        assertTrue(impl.contains("EXISTS (SELECT 1 FROM \"profile_contacts\" \"contacts\" WHERE \"contacts\".\"profile_id\" = \"profile\".\"id\" AND \"contacts\".\"value\" = :contactsValue)"),
+        assertTrue(impl.contains("EXISTS (SELECT 1 FROM \"profile_contacts\" \"profile_contacts\" WHERE \"profile_contacts\".\"profile_id\" = \"profile\".\"id\" AND \"profile_contacts\".\"value\" = :contactsValue)"),
                 "element-list predicate must render EXISTS over the child table:"
                         + System.lineSeparator() + impl);
         assertTrue(!impl.contains("LEFT JOIN"),
@@ -4665,7 +4662,7 @@ class RepositoryProcessorTest {
     @Test
     void mixedToOneAndToManyPredicatesConjoinJoinAndExists() throws Exception {
         // RB3 (plan "to-many + to-one mixed paths", final-review pin): ONE finder declaring BOTH a
-        // to-one predicate (Reference head "customer") and a to-many predicate (ElementList head
+        // to-one predicate (Reference head "customer") and a to-many predicate (ElementCollection head
         // "orderItems") must render the mixed shapes CONJUNCTED - the LEFT JOIN splice for the
         // to-one traversal AND the EXISTS semi-join for the to-many traversal, AND-ed in one WHERE
         // (SqlBuilder.build emits the non-existential conjuncts first). Each shape alone is pinned
@@ -4689,7 +4686,7 @@ class RepositoryProcessorTest {
                 "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "MixedOrd.java");
 
         String impl = sqlFlat(generatedDir.resolve("relpath/MixedOrdImpl.java"));
-        assertTrue(impl.contains("FROM \"order\" LEFT JOIN \"customer\" AS \"customer\" ON \"order\".\"customer_id\" = \"customer\".\"id\" WHERE \"customer\".\"name\" = :name AND EXISTS (SELECT 1 FROM \"order_order_items\" \"orderItems\" WHERE \"orderItems\".\"order_id\" = \"order\".\"id\" AND \"orderItems\".\"quantity\" > :quantity)"),
+        assertTrue(impl.contains("FROM \"order\" LEFT JOIN \"customer\" AS \"customer\" ON \"order\".\"customer_id\" = \"customer\".\"id\" WHERE \"customer\".\"name\" = :name AND EXISTS (SELECT 1 FROM \"order_order_items\" \"order_order_items\" WHERE \"order_order_items\".\"order_id\" = \"order\".\"id\" AND \"order_order_items\".\"quantity\" > :quantity)"),
                 "RB3: the to-one LEFT JOIN and the to-many EXISTS must BOTH appear, conjuncted with AND:"
                         + System.lineSeparator() + impl);
         assertTrue(impl.contains("SQL_FIND_BY_CUSTOMER_NAME_AND_ORDER_ITEMS_QUANTITY_GREATER_THAN"),
@@ -4701,7 +4698,7 @@ class RepositoryProcessorTest {
     }
 
     @Test
-    void countThroughEntityListUsesExistsAndStaysUnjoinedTotal() throws Exception {
+    void countThroughEntityCollectionUsesExistsAndStaysUnjoinedTotal() throws Exception {
         // Task 5: countByLinesProduct keeps the COUNT(*) projection, renders the same EXISTS conjunct
         // and carries NO LEFT JOIN anywhere - the total counts ROOT rows, not root-child pairs.
         Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-exc"));
@@ -4722,8 +4719,8 @@ class RepositoryProcessorTest {
                 "Line.java", "Order.java", "LineRepository.java", "CountOrders.java");
 
         String impl = sqlFlat(generatedDir.resolve("exa/CountOrdersImpl.java"));
-        assertTrue(impl.contains("SELECT COUNT(*) FROM \"order\" WHERE EXISTS (SELECT 1 FROM \"line\" \"lines\" WHERE \"lines\".\"order_id\" = \"order\".\"id\" AND \"lines\".\"product\" = :product)"),
-                "countBy through an EntityList must render EXISTS on the unjoined COUNT(*) total:"
+        assertTrue(impl.contains("SELECT COUNT(*) FROM \"order\" WHERE EXISTS (SELECT 1 FROM \"line\" \"line\" WHERE \"line\".\"order_id\" = \"order\".\"id\" AND \"line\".\"product\" = :product)"),
+                "countBy through an EntityCollection must render EXISTS on the unjoined COUNT(*) total:"
                         + System.lineSeparator() + impl);
         assertTrue(!impl.contains("LEFT JOIN"),
                 "no LEFT JOIN anywhere:" + System.lineSeparator() + impl);
@@ -4924,7 +4921,7 @@ class RepositoryProcessorTest {
                 "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "CountOrders.java");
 
         String impl = sqlFlat(generatedDir.resolve("relpath/CountOrdersImpl.java"));
-        assertTrue(impl.contains("SELECT COUNT(*) FROM \"order\" WHERE EXISTS (SELECT 1 FROM \"order_order_items\" \"orderItems\" WHERE \"orderItems\".\"order_id\" = \"order\".\"id\" AND \"orderItems\".\"quantity\" > :quantity)"),
+        assertTrue(impl.contains("SELECT COUNT(*) FROM \"order\" WHERE EXISTS (SELECT 1 FROM \"order_order_items\" \"order_order_items\" WHERE \"order_order_items\".\"order_id\" = \"order\".\"id\" AND \"order_order_items\".\"quantity\" > :quantity)"),
                 "countBy through a to-many must render EXISTS on the unjoined COUNT(*) total:"
                         + System.lineSeparator() + impl);
         assertTrue(!impl.contains("LEFT JOIN"),
@@ -5019,7 +5016,7 @@ class RepositoryProcessorTest {
                 "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "Delete2Orders.java");
         String impl = sqlFlat(generatedDir.resolve("relpath/Delete2OrdersImpl.java"));
 
-        assertTrue(impl.contains("DELETE FROM \"order\" WHERE EXISTS (SELECT 1 FROM \"order_order_items\" \"orderItems\" WHERE \"orderItems\".\"order_id\" = \"order\".\"id\" AND \"orderItems\".\"quantity\" > :quantity)"),
+        assertTrue(impl.contains("DELETE FROM \"order\" WHERE EXISTS (SELECT 1 FROM \"order_order_items\" \"order_order_items\" WHERE \"order_order_items\".\"order_id\" = \"order\".\"id\" AND \"order_order_items\".\"quantity\" > :quantity)"),
                 "deleteBy through a to-many must render the to-many EXISTS conjunct:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("DELETE FROM \"order\" WHERE \"status\" = :status AND EXISTS (SELECT 1 FROM \"customer\" \"customer\" WHERE \"customer\".\"id\" = \"order\".\"customer_id\" AND \"customer\".\"name\" = :name)"),
                 "mixed delete: bare local conjunct first, reversed-edge EXISTS conjunct second:" + System.lineSeparator() + impl);
@@ -5485,7 +5482,7 @@ class RepositoryProcessorTest {
     }
 
     @Test
-    void nonPagedSortThroughElementListRendersAggregateAndNoTiebreak() throws Exception {
+    void nonPagedSortThroughElementCollectionRendersAggregateAndNoTiebreak() throws Exception {
         // C-4.1/C-4.2 (plan B parked minor): the NON-paged SqlBuilder.build emission of a to-many
         // sort head renders the same aggregate term verbatim in ORDER BY, splices NO LEFT JOIN for
         // the collection, and gains NO root-id tiebreak — tiebreaking is a paged-cursor concern (seek
@@ -5512,7 +5509,7 @@ class RepositoryProcessorTest {
                 "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "SortOrd.java");
 
         String impl = sqlFlat(generatedDir.resolve("relpath/SortOrdImpl.java"));
-        assertTrue(impl.contains("ORDER BY (SELECT MAX(\"orderItems\".\"quantity\") FROM \"order_order_items\" \"orderItems\" WHERE \"orderItems\".\"order_id\" = \"order\".\"id\") DESC"),
+        assertTrue(impl.contains("ORDER BY (SELECT MAX(\"order_order_items\".\"quantity\") FROM \"order_order_items\" \"order_order_items\" WHERE \"order_order_items\".\"order_id\" = \"order\".\"id\") DESC"),
                 "the non-paged ORDER BY must carry the aggregate term verbatim:" + System.lineSeparator() + impl);
         assertTrue(!impl.contains("LEFT JOIN"),
                 "no to-many join may be spliced by the non-paged emission:" + System.lineSeparator() + impl);

@@ -13,10 +13,10 @@ public interface OrderRepository extends CrudRepository<Order, Long> {
     @Find
     List<Order> findByAmount(@By("amount") BigDecimal amount);
 
-    // Task 10: predicate through the @Association customer -> target's name; the qbn-parsed camel
-    // path "CustomerName" descends the relation head and contributes one join (mapRow_full_ path).
+    // Task 10: predicate through the @Association customer -> target's name; @By declares the
+    // traversal and the resolver descends the relation head, contributing one join (mapRow_full_ path).
     @Find
-    List<Order> findByCustomerName(String name);
+    List<Order> findByCustomerName(@By("customer.name") String name);
 
     // Plan C C-1: method-name DELETE through a relation, rendered as correlated EXISTS semi-joins.
     void deleteByCustomerName(String name);

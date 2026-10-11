@@ -1,10 +1,10 @@
 package io.github.fludakit.data.qbn;
 
+import io.github.fludakit.data.query.Action;
+import io.github.fludakit.data.query.Connector;
 import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.SortSpec;
-import org.antlr.v4.runtime.tree.TerminalNode;
-
 import java.util.ArrayList;
 import java.util.List;
 
@@ -12,7 +12,10 @@ public class QbnMethodNameVisitor extends QbnBaseVisitor<ParsedMethodName> {
 
     @Override
     public ParsedMethodName visitMethodName(QbnParser.MethodNameContext ctx) {
-        String action = ctx.action().getText();
+        Action action = Action.of(ctx.action().getText());
+        if (action == null) {
+            throw new IllegalArgumentException("Unknown action: " + ctx.action().getText());
+        }
         int limit = 0;
         if (ctx.first() != null) {
             // FIRST token text is "First" optionally followed by the max-results digits.
@@ -23,26 +26,30 @@ public class QbnMethodNameVisitor extends QbnBaseVisitor<ParsedMethodName> {
         List<Predicate> predicates = new ArrayList<>();
         List<SortSpec> sorts = new ArrayList<>();
         if (ctx.conditionList() != null) {
-            for (QbnParser.ConditionContext c : ctx.conditionList().condition()) {
-                predicates.add(predicate(c));
+            List<QbnParser.ConnectorContext> connectors = ctx.conditionList().connector();
+            List<QbnParser.ConditionContext> conditions = ctx.conditionList().condition();
+            for (int i = 0; i < conditions.size(); i++) {
+                // Condition i is preceded by connector i-1; the first predicate's connector is ignored.
+                Connector connector = i == 0 ? Connector.AND
+                        : connectors.get(i - 1).OR() != null ? Connector.OR : Connector.AND;
+                predicates.add(predicate(conditions.get(i), connector));
             }
         }
         if (ctx.orderList() != null) {
             for (QbnParser.OrderItemContext o : ctx.orderList().orderItem()) {
                 boolean asc = o.DESC() == null;
-                sorts.add(SortSpec.of(propertyName(o.property()), asc, false));
+                sorts.add(SortSpec.of(propertyName(o.property()), asc, o.IGNORE_CASE() != null));
             }
         }
-        return new ParsedMethodName(action, predicates, sorts, limit);
+        return new ParsedMethodName(action, ctx.DISTINCT() != null, predicates, sorts, limit);
     }
 
-    private Predicate predicate(QbnParser.ConditionContext ctx) {
+    private Predicate predicate(QbnParser.ConditionContext ctx, Connector connector) {
         String prop = propertyName(ctx.property());
-        return Predicate.of(prop, operator(ctx), prop);
+        return Predicate.of(prop, operator(ctx), prop, connector, ctx.IGNORE_CASE() != null);
     }
 
     private Operator operator(QbnParser.ConditionContext ctx) {
-        boolean ignoreCase = ctx.IGNORE_CASE() != null;
         boolean not = ctx.NOT() != null;
         QbnParser.OperatorContext op = ctx.operator();
 
@@ -65,22 +72,39 @@ public class QbnMethodNameVisitor extends QbnBaseVisitor<ParsedMethodName> {
         else base = Operator.EQ;
 
         if (not) {
-            if (base == Operator.LIKE) base = Operator.NOT_LIKE;
-            else if (base == Operator.IS_NULL) base = Operator.IS_NOT_NULL;
-            else base = Operator.NOT_EQ;
+            base = negate(base);
         }
-        if (ignoreCase && base == Operator.EQ) base = Operator.IGNORE_CASE_EQ;
+        // Case folding is an orthogonal modifier: it rides on the predicate, not on the operator, so
+        // it composes with every operator rather than only with equality.
         return base;
     }
 
+    /**
+     * The spec's negated form of a predicate operator. Only the operators the spec composes with
+     * {@code Not} are mapped — anything else is rejected rather than silently degraded to {@code <>},
+     * which is what {@code findByNameNotIn} used to render.
+     */
+    private static Operator negate(Operator base) {
+        return switch (base) {
+            case EQ -> Operator.NOT_EQ;
+            case LIKE -> Operator.NOT_LIKE;
+            case CONTAINS -> Operator.NOT_CONTAINS;
+            case STARTS_WITH -> Operator.NOT_STARTS_WITH;
+            case ENDS_WITH -> Operator.NOT_ENDS_WITH;
+            case IN -> Operator.NOT_IN;
+            case BETWEEN -> Operator.NOT_BETWEEN;
+            case IS_NULL -> Operator.IS_NOT_NULL;
+            default -> throw new IllegalArgumentException("Not cannot be combined with " + base);
+        };
+    }
+
+    /**
+     * The condition/order property as written, minus the leading capital: the whole rule text is
+     * taken verbatim so underscore separators survive ({@code address_street} stays
+     * {@code address_street}, not {@code addressstreet}).
+     */
     private String propertyName(QbnParser.PropertyContext ctx) {
-        List<TerminalNode> humps = ctx.HUMP();
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < humps.size(); i++) {
-            String h = humps.get(i).getText();
-            if (i == 0) sb.append(Character.toLowerCase(h.charAt(0))).append(h.substring(1));
-            else sb.append(h);
-        }
-        return sb.toString();
+        String text = ctx.getText();
+        return Character.toLowerCase(text.charAt(0)) + text.substring(1);
     }
 }

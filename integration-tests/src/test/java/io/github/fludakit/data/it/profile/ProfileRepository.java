@@ -1,5 +1,6 @@
 package io.github.fludakit.data.it.profile;
 
+import jakarta.data.repository.By;
 import jakarta.data.repository.CrudRepository;
 import jakarta.data.repository.Find;
 import jakarta.data.repository.OrderBy;
@@ -18,9 +19,11 @@ public interface ProfileRepository extends CrudRepository<Profile, Long> {
 
     // Task 7: predicate THROUGH the composition entity collection (camel path head "workHistory"
     // (EntityList) + leaf "company"), rendering the Task 5 EXISTS semi-join on both the root list
-    // and the unjoined COUNT(*) total — the root can never fan out with the children.
+    // and the unjoined COUNT(*) total — the root can never fan out with the children. The @Find
+    // overload declares the path with @By; the COUNT below is unannotated, so it stays a
+    // query-by-method name and is resolved from the method name.
     @Find
-    List<Profile> findByWorkHistoryCompany(String company);
+    List<Profile> findByWorkHistoryCompany(@By("workHistory.company") String company);
 
     long countByWorkHistoryCompany(String company);
 }

@@ -73,7 +73,7 @@ final class RepositoryTypeMappingBuilder {
                 continue;
             }
             String fieldType = field.asType().toString();
-            TypeName fieldTypeName = safeFieldType(field.asType());
+            TypeName fieldTypeName = resolveFieldTypeName(field);
             boolean identityAnnotated = field.getAnnotation(Identity.class) != null;
 
             if (valueObject && identityAnnotated) {
@@ -127,6 +127,12 @@ final class RepositoryTypeMappingBuilder {
             }
         }
         if (!valueObject && id == null) {
+            // Inventing an identifier silently produced a row mapper calling setId(...) on an entity
+            // that has no such method — an uncompilable generated source with no hint of the cause.
+            // Report it; the placeholder below only keeps this round from failing with an NPE.
+            messager.printMessage(Diagnostic.Kind.ERROR,
+                    "entity '" + element.getSimpleName() + "' declares no identifier; annotate one field with"
+                            + " @Identity (or name it 'id')", element);
             idProp = new Prop.Id("id", Names.columnName("id"), "java.lang.Long");
             id = new RepositoryProcessor.Property("id", idProp.column(),
                     ClassName.get(Long.class), idProp, null);
@@ -226,17 +232,26 @@ final class RepositoryTypeMappingBuilder {
     private RepositoryProcessor.ElementCollection buildCollection(
             String parentTable, String field, TypeElement valueObject) {
         String childTable = Names.childTable(parentTable, field);
-        String parentFk = parentTable + "_id";
+        String parentFk = Names.fkColumn(parentTable);
         ElementCollectionValueObjectMapping target = valueObjectMetadata(valueObject, childTable, parentFk);
         Prop.ElementList element = new Prop.ElementList(field, target, target.columns());
         return new RepositoryProcessor.ElementCollection(field,
                 TypeName.get(types.erasure(valueObject.asType())), element, target);
     }
 
-    private static TypeName safeFieldType(TypeMirror type) {
+    /**
+     * Maps a field's type to the {@link TypeName} the generated row mapper declares for it. A type
+     * JavaPoet cannot represent (a wildcard, intersection, or unresolvable type argument) would
+     * otherwise silently read/write the field as {@code Object} — report it instead, and keep the
+     * placeholder so this round does not fail with an NPE.
+     */
+    private TypeName resolveFieldTypeName(VariableElement field) {
         try {
-            return TypeName.get(type);
-        } catch (IllegalArgumentException e) {
+            return TypeName.get(field.asType());
+        } catch (IllegalArgumentException unmappable) {
+            messager.printMessage(Diagnostic.Kind.ERROR,
+                    "field '" + field.getSimpleName() + "' has type '" + field.asType()
+                            + "' that cannot be mapped to a generated row-mapper type", field);
             return TypeName.OBJECT;
         }
     }

@@ -134,17 +134,17 @@ structural plan, not SQL text, and has no entity type parameter or dependency on
 | `paramBindings()` | Method argument slots mapped to named SQL parameters |
 
 The processor's `TypeMapping` carries the mapping from each resolvable logical attribute path to a
-`ColumnRef`, including its physical column and any relationship joins. `SqlBuilder.build(TableSchema,
-AttributePathResolver, QueryDefinition)` combines those views with each logical predicate and sort. It chooses a normal
+`ColumnRef`, including its physical column and any relationship joins. The `SqlBuilder(TableSchema,
+AttributePathResolver, QueryDefinition)` constructor combines those views with each logical predicate and sort. It chooses a normal
 join, an `EXISTS` predicate, or aggregate sorting based on the mapped relationship shape; the query
 plan does not duplicate physical mappings.
 
-For a structured query, `SqlBuilder.build(TableSchema, AttributePathResolver, QueryDefinition)` combines the schema, resolver, and plan
-to render SQL. The processor bakes that SQL into the generated implementation. When applicable,
+For a structured query, the `SqlBuilder(TableSchema, AttributePathResolver, QueryDefinition)` constructor combines the schema, resolver, and plan
+to render SQL (`.select()`, `.count()`, `.delete()`). The processor bakes that SQL into the generated implementation. When applicable,
 The processor also generates `<Repository>Queries` with one nested `QueryDefinition` implementation per
 query-by-name method and structured `@Find` finder. That published metadata represents the plan the
 SQL was rendered from; it is not a runtime hook for rendering SQL. Cursor execution has additional
-generated logic; `SqlBuilder.build` does not consume `seekTerms()`.
+generated logic; `SqlBuilder` does not consume `seekTerms()`.
 
 ## Repository processing
 

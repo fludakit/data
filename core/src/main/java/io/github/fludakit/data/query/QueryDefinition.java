@@ -35,4 +35,12 @@ public interface QueryDefinition {
 
     /** Method argument slots mapped to named SQL parameters. */
     List<ParamBinding> paramBindings();
+
+    /**
+     * Whether the method name carried the {@code Distinct} subject keyword. A default keeps this
+     * additive: definitions built before distinct support, and hand-written ones, are not distinct.
+     */
+    default boolean distinct() {
+        return false;
+    }
 }

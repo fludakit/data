@@ -143,10 +143,12 @@ class TeamEntityTest {
         players.save(player("Navas", falcons));
         players.save(player("Ramos", eagles));
 
+        // The keyset is the two-term [aggregate sort key, appended root-id tiebreak] shape, so the
+        // cursor must carry two keys; a one-key cursor is a keyset/request mismatch, not a short read.
         PageRequest beyond = PageRequest.ofPage(1).size(10)
-                .afterCursor(PageRequest.Cursor.forKey("Zzz"));
+                .afterCursor(PageRequest.Cursor.forKey("Zzz", 0L));
         CursoredPage<Team> page = teams.orderedByPlayerName(beyond);
-        // Cursor beyond the whole keyset: the qualified ("player"."name" > :cursor0) predicate ran
+        // Cursor beyond the whole keyset: the qualified ("player"."name" > :cursor0) conjunct ran
         // without the ambiguity error and matched nothing.
         assertThat(page.content()).isEmpty();
     }

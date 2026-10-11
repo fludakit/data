@@ -1,47 +1,20 @@
-package io.github.fludakit.data.page;
+package io.github.fludakit.data.sql;
 
-import io.github.fludakit.data.Names;
 import io.github.fludakit.data.metadata.EntityMetadata;
 import jakarta.data.page.PageRequest;
 
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 
-public final class CursorSupport {
+/**
+ * Builds keyset-paging cursor keys from materialized entities.
+ *
+ * <p>This is the only cursor helper a generated repository needs at runtime. The seek predicate
+ * itself is rendered once at compile time by {@link SqlBuilder#seekClause} and baked into a SQL
+ * literal, so no cursor SQL is assembled per query.
+ */
+public final class CursorKeys {
 
-    private CursorSupport() {}
-
-    /** Lexicographic seek WHERE clause over the given snake_case columns/directions. {@code forward} true = CURSOR_NEXT. */
-    public static String seekWhere(List<String> columns, List<Boolean> ascending, PageRequest.Cursor cursor, boolean forward) {
-        return seekWhereTerms(columns.stream().map(Names::quote).toList(), ascending, cursor, forward);
-    }
-
-    /**
-     * Lexicographic seek WHERE clause over PRE-RENDERED terms (each used verbatim, already quoted and —
-     * for relation-sorted paged reads — table-qualified, e.g. {@code "profile"."id"}). {@code seekWhere}
-     * quotes bare column names itself, which cannot carry a table qualifier without double-quoting;
-     * generated paging code uses this variant when its refs may join (Task 11 fix, parked M-1).
-     */
-    public static String seekWhereTerms(List<String> terms, List<Boolean> ascending, PageRequest.Cursor cursor, boolean forward) {
-        StringBuilder sb = new StringBuilder("(");
-        for (int i = 0; i < terms.size(); i++) {
-            if (i > 0) sb.append(" OR ");
-            sb.append("(");
-            for (int j = 0; j <= i; j++) {
-                if (j > 0) sb.append(" AND ");
-                String op = (ascending.get(j) == forward) ? ">" : "<";
-                sb.append(terms.get(j)).append(" ").append(op).append(" :cursor").append(j);
-            }
-            sb.append(")");
-        }
-        return sb.append(")").toString();
-    }
-
-    public static Map<String, Object> cursorParams(PageRequest.Cursor cursor) {
-        Map<String, Object> out = new LinkedHashMap<>();
-        for (int i = 0; i < cursor.size(); i++) out.put("cursor" + i, cursor.get(i));
-        return out;
+    private CursorKeys() {
     }
 
     /**
@@ -56,8 +29,12 @@ public final class CursorSupport {
      * @param md         the entity's generated metadata
      * @param entity     the root object the cursor continues from
      */
-    public static <T> PageRequest.Cursor cursorFor(List<String> properties, List<Boolean> ascending,
+    public static <T> PageRequest.Cursor forEntity(List<String> properties, List<Boolean> ascending,
                                                    EntityMetadata<T> md, T entity) {
+        if (properties.size() != ascending.size()) {
+            throw new IllegalArgumentException("cursor key requires one direction per property: "
+                    + properties.size() + " properties, " + ascending.size() + " directions");
+        }
         Object[] key = new Object[properties.size()];
         for (int i = 0; i < properties.size(); i++) {
             Object value = md.navigate(properties.get(i), entity);
@@ -75,7 +52,7 @@ public final class CursorSupport {
                 continue;
             }
             if (!(value instanceof Comparable)) {
-                // Task 6 note-7: a value list whose elements carry no natural order (e.g.
+                // A value list whose elements carry no natural order (e.g.
                 // value("workHistory.profile") -> List<Profile>) cannot produce a cursor edge — fail
                 // fast at cursor-build time instead of casting blind and surfacing a CCE mid-page.
                 throw new IllegalArgumentException("cursor sort on non-comparable path element: "

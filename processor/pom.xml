@@ -17,9 +17,13 @@
             <groupId>io.github.fludakit</groupId>
             <artifactId>fluda-data-core</artifactId>
         </dependency>
+        <!-- Optional: query-by-method-name parsing. A repository using findBy.../countBy.../deleteBy...
+             names must add fluda-data-qbn to its annotation processor path; without it the processor
+             reports a compile error naming this dependency rather than generating a predicate-less query. -->
         <dependency>
             <groupId>io.github.fludakit</groupId>
             <artifactId>fluda-data-qbn</artifactId>
+            <optional>true</optional>
         </dependency>
         <dependency>
             <groupId>jakarta.data</groupId>

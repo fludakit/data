@@ -4,6 +4,7 @@ import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.JoinRef;
 import io.github.fludakit.data.metadata.TableSchema;
 import io.github.fludakit.data.metadata.AttributePathResolver;
+import io.github.fludakit.data.query.Connector;
 import io.github.fludakit.data.query.Operation;
 import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.PagingMode;
@@ -22,11 +23,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * The SQL rendering table: {@link SqlBuilder#build(TableSchema, AttributePathResolver, QueryDefinition, String)} is the one
- * SQL layout renderer, so every shape {@code RepositoryProcessor.methodSql} used to assemble by hand
- * is pinned here byte-for-byte against the strings the processor pins already lock. The legacy
- * delegation, the joined shell, the EXISTS conjunct, the aggregate sort term, delete mode and the
- * paged base constant are each a case; a change to any byte of this table is a SQL change.
+ * The SQL rendering table: {@link SqlBuilder}'s structured-query terminals ({@link SqlBuilder#select()},
+ * {@link SqlBuilder#count()}, {@link SqlBuilder#delete()}) are the one SQL layout renderer, so every
+ * shape the processor used to assemble by hand is pinned here byte-for-byte against the strings the
+ * processor pins already lock. The legacy delegation, the joined shell, the EXISTS conjunct, the
+ * aggregate sort term, delete mode and the paged base constant are each a case; a change to any byte
+ * of this table is a SQL change.
  */
 class SqlBuilderBuildTest {
 
@@ -82,7 +84,11 @@ class SqlBuilderBuildTest {
 
     /** The rendering-under-test as a QueryDefinition view: the interface, not a record. */
     private record Model(Operation operation, List<Predicate> predicates, List<SortSpec> sorts,
-                         PagingMode paging, int limit) implements QueryDefinition {
+                         PagingMode paging, int limit, boolean distinct) implements QueryDefinition {
+        Model(Operation operation, List<Predicate> predicates, List<SortSpec> sorts,
+              PagingMode paging, int limit) {
+            this(operation, predicates, sorts, paging, limit, false);
+        }
         Model {
             predicates = List.copyOf(predicates);
             sorts = List.copyOf(sorts);
@@ -92,8 +98,70 @@ class SqlBuilderBuildTest {
         @Override public List<ParamBinding> paramBindings() { return List.of(); }
     }
 
+    @Test
+    void distinctFindSelectsDistinctRows() {
+        String sql = new SqlBuilder(ORDER, ATTRIBUTES, new Model(Operation.FIND,
+                List.of(pred(Predicate.of("status", Operator.EQ, "status"))),
+                List.of(), PagingMode.NONE, 0, true)).select();
+        assertEquals("SELECT DISTINCT \"id\", \"status\", \"customer_id\" FROM \"order_table\""
+                + " WHERE \"status\" = :status", sql);
+    }
+
+    @Test
+    void distinctCountCountsDistinctIdentifiers() {
+        // COUNT(DISTINCT *) is not valid SQL, so the row identity column carries the DISTINCT.
+        String sql = new SqlBuilder(ORDER, ATTRIBUTES, new Model(Operation.COUNT,
+                List.of(pred(Predicate.of("status", Operator.EQ, "status"))),
+                List.of(), PagingMode.NONE, 0, true)).count();
+        assertEquals("SELECT COUNT(DISTINCT \"id\") FROM \"order_table\" WHERE \"status\" = :status", sql);
+    }
+
+    @Test
+    void nonDistinctDefinitionsRenderUnchanged() {
+        assertEquals("SELECT COUNT(*) FROM \"order_table\" WHERE \"status\" = :status",
+                build(Operation.COUNT,
+                        List.of(pred(Predicate.of("status", Operator.EQ, "status"))),
+                        List.of(), PagingMode.NONE, 0));
+    }
+
     private static Predicate pred(Predicate predicate) {
         return predicate;
+    }
+
+    @Test
+    void orConnectorRendersOrBetweenLocalPredicates() {
+        assertEquals("SELECT \"id\", \"status\", \"customer_id\" FROM \"order_table\""
+                        + " WHERE \"status\" = :status OR \"customer_id\" = :customer_id",
+                build(Operation.FIND,
+                        List.of(pred(Predicate.of("status", Operator.EQ, "status")),
+                                pred(Predicate.of("customer_id", Operator.EQ, "customer_id", Connector.OR))),
+                        List.of(), PagingMode.NONE, 0));
+    }
+
+    @Test
+    void mixedConnectorsKeepDeclarationOrder() {
+        // a AND b OR c is (a AND b) OR c by SQL precedence, so the terms render in the declared order.
+        assertEquals("SELECT \"id\", \"status\", \"customer_id\" FROM \"order_table\""
+                        + " WHERE \"status\" = :a AND \"customer_id\" = :b OR \"status\" = :c",
+                build(Operation.FIND,
+                        List.of(pred(Predicate.of("status", Operator.EQ, "a")),
+                                pred(Predicate.of("customer_id", Operator.EQ, "b")),
+                                pred(Predicate.of("status", Operator.EQ, "c", Connector.OR))),
+                        List.of(), PagingMode.NONE, 0));
+    }
+
+    @Test
+    void orWithAnExistentialPredicateKeepsTheExistentialInPlace() {
+        // The all-AND path reorders existential conjuncts to the end; under OR that would change the
+        // meaning, so an OR-bearing query renders every conjunct in declaration order.
+        String sql = build(Operation.FIND,
+                List.of(pred(Predicate.of("tags.label", Operator.EQ, "label", Connector.OR)),
+                        pred(Predicate.of("status", Operator.EQ, "status"))),
+                List.of(), PagingMode.NONE, 0);
+        assertEquals("SELECT \"id\", \"status\", \"customer_id\" FROM \"order_table\""
+                + " WHERE EXISTS (SELECT 1 FROM \"order_tags\" \"tags\""
+                + " WHERE \"tags\".\"order_id\" = \"order_table\".\"id\" AND \"tags\".\"label\" = :label)"
+                + " AND \"status\" = :status", sql);
     }
 
     private static String build(Operation operation, List<Predicate> predicates,

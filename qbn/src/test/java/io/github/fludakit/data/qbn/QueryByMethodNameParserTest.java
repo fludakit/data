@@ -1,9 +1,14 @@
 package io.github.fludakit.data.qbn;
 
+import io.github.fludakit.data.query.Action;
+import io.github.fludakit.data.query.Connector;
 import io.github.fludakit.data.query.Operator;
+import io.github.fludakit.data.query.Predicate;
+import io.github.fludakit.data.query.SortSpec;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class QueryByMethodNameParserTest {
 
@@ -12,7 +17,7 @@ class QueryByMethodNameParserTest {
     @Test
     void parsesSimpleEquality() {
         var p = parser.parse("findByName");
-        assertThat(p.action()).isEqualTo("find");
+        assertThat(p.action()).isEqualTo(Action.FIND);
         assertThat(p.predicates()).hasSize(1);
         assertThat(p.predicates().get(0).property()).isEqualTo("name");
         assertThat(p.predicates().get(0).operator()).isEqualTo(Operator.EQ);
@@ -34,7 +39,27 @@ class QueryByMethodNameParserTest {
     void parsesIgnoreCaseAndFirst() {
         var p = parser.parse("findFirst10ByNameIgnoreCase");
         assertThat(p.limit()).isEqualTo(10);
-        assertThat(p.predicates().get(0).operator()).isEqualTo(Operator.IGNORE_CASE_EQ);
+        // IgnoreCase is a predicate flag, not a distinct operator, so it composes with any operator.
+        assertThat(p.predicates().get(0).operator()).isEqualTo(Operator.EQ);
+        assertThat(p.predicates().get(0).ignoreCase()).isTrue();
+    }
+
+    @Test
+    void ignoreCaseComposesWithNonEqualityOperators() {
+        // Spec example: countByStatusIgnoreCaseNotLike. IgnoreCase used to be dropped unless the
+        // operator was plain equality.
+        var negated = parser.parse("countByStatusIgnoreCaseNotLike");
+        assertThat(negated.action()).isEqualTo(Action.COUNT);
+        assertThat(negated.predicates().get(0).operator()).isEqualTo(Operator.NOT_LIKE);
+        assertThat(negated.predicates().get(0).ignoreCase()).isTrue();
+
+        assertThat(op("findByNameIgnoreCaseContains")).isEqualTo(Operator.CONTAINS);
+        assertThat(parser.parse("findByNameIgnoreCaseContains").predicates().get(0).ignoreCase()).isTrue();
+    }
+
+    @Test
+    void predicatesAreCaseSensitiveByDefault() {
+        assertThat(parser.parse("findByName").predicates().get(0).ignoreCase()).isFalse();
     }
 
     @Test
@@ -63,10 +88,32 @@ class QueryByMethodNameParserTest {
 
     @Test
     void parsesOrCondition() {
+        // The connector used to be discarded, so this rendered as AND. The original test asserted
+        // only the property names and never noticed.
         var p = parser.parse("findByNameOrEmail");
         assertThat(p.predicates()).hasSize(2);
         assertThat(p.predicates().get(0).property()).isEqualTo("name");
         assertThat(p.predicates().get(1).property()).isEqualTo("email");
+        assertThat(p.predicates().get(0).connector()).isEqualTo(Connector.AND);
+        assertThat(p.predicates().get(1).connector()).isEqualTo(Connector.OR);
+    }
+
+    @Test
+    void parsesMixedAndOrConnectorsInDeclarationOrder() {
+        // Spec: And binds tighter than Or, and SQL has the same precedence, so the declared order is
+        // rendered as written — a AND b OR c means (a AND b) OR c.
+        var p = parser.parse("findByNameAndStatusOrEmail");
+        assertThat(p.predicates()).extracting(Predicate::property)
+                .containsExactly("name", "status", "email");
+        assertThat(p.predicates()).extracting(Predicate::connector)
+                .containsExactly(Connector.AND, Connector.AND, Connector.OR);
+    }
+
+    @Test
+    void parsesAndChainAsAllAndConnectors() {
+        var p = parser.parse("findByCategoryNameAndPriceLessThan");
+        assertThat(p.predicates()).extracting(Predicate::connector)
+                .containsExactly(Connector.AND, Connector.AND);
     }
 
     @Test
@@ -75,5 +122,101 @@ class QueryByMethodNameParserTest {
         assertThat(p.predicates()).hasSize(1);
         assertThat(p.predicates().get(0).property()).isEqualTo("name");
         assertThat(p.predicates().get(0).operator()).isEqualTo(Operator.NOT_LIKE);
+    }
+
+    @Test
+    void composesNotWithEveryNegatableOperator() {
+        // Not used to collapse everything except Like and Null into NOT_EQ, so NotIn rendered as <>.
+        assertThat(op("findByNameNotIn")).isEqualTo(Operator.NOT_IN);
+        assertThat(op("findByPriceNotBetween")).isEqualTo(Operator.NOT_BETWEEN);
+        assertThat(op("findByNameNotContains")).isEqualTo(Operator.NOT_CONTAINS);
+        assertThat(op("findByNameNotStartsWith")).isEqualTo(Operator.NOT_STARTS_WITH);
+        assertThat(op("findByNameNotEndsWith")).isEqualTo(Operator.NOT_ENDS_WITH);
+        assertThat(op("findByNameNotLike")).isEqualTo(Operator.NOT_LIKE);
+        assertThat(op("findByNameNotNull")).isEqualTo(Operator.IS_NOT_NULL);
+        assertThat(op("findByNameNot")).isEqualTo(Operator.NOT_EQ);
+    }
+
+    @Test
+    void rejectsNotOnAnOperatorTheSpecDoesNotNegate() {
+        // findByNameNotIn used to silently render <>. An unsupported composition now fails the parse,
+        // which the validator turns into a compile error rather than a wrong query.
+        assertThatThrownBy(() -> parser.parse("findByPriceNotLessThan"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasRootCauseMessage("Not cannot be combined with LESS_THAN");
+    }
+
+    @Test
+    void parsesIgnoreCaseInTheOrderClause() {
+        // Spec example: findByZipcodeOrderByStreetIgnoreCaseAscHouseNumAsc
+        var p = parser.parse("findByZipcodeOrderByStreetIgnoreCaseAscHouseNumAsc");
+        assertThat(p.sorts()).extracting(SortSpec::property).containsExactly("street", "houseNum");
+        assertThat(p.sorts().get(0).ignoreCase()).isTrue();
+        assertThat(p.sorts().get(0).ascending()).isTrue();
+        assertThat(p.sorts().get(1).ignoreCase()).isFalse();
+    }
+
+    @Test
+    void orderClauseDefaultsToCaseSensitiveAscending() {
+        var p = parser.parse("findByNameOrderByTextDesc");
+        assertThat(p.sorts().get(0).ignoreCase()).isFalse();
+        assertThat(p.sorts().get(0).ascending()).isFalse();
+    }
+
+    @Test
+    void parsesDistinctSubjectKeyword() {
+        assertThat(parser.parse("findDistinctByName").distinct()).isTrue();
+        assertThat(parser.parse("findFirst10DistinctByName").distinct()).isTrue();
+        assertThat(parser.parse("findByName").distinct()).isFalse();
+    }
+
+    @Test
+    void rejectsUnsupportedSubjectText() {
+        // The subject clause carries only First and Distinct. It used to be an unvalidated sink that
+        // absorbed arbitrary text, so findTop5ByName parsed and silently behaved like findAllByName.
+        assertThatThrownBy(() -> parser.parse("findTop5ByName"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Not a query method name");
+        assertThatThrownBy(() -> parser.parse("findAllByName"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Not a query method name");
+    }
+
+    private Operator op(String name) {
+        return parser.parse(name).predicates().get(0).operator();
+    }
+
+    @Test
+    void parsesPropertiesContainingDigits() {
+        // DIGITS used to beat HUMP on the lexer length tie, and no parser rule referenced it —
+        // a property with a digit run failed to lex as a property at all.
+        var street = parser.parse("findByStreet2");
+        assertThat(street.predicates().get(0).property()).isEqualTo("street2");
+
+        var zip = parser.parse("findByZipCode4");
+        assertThat(zip.predicates().get(0).property()).isEqualTo("zipCode4");
+    }
+
+    @Test
+    void preservesUnderscoresInPropertyNames() {
+        // The visitor used to concatenate humps and drop the UNDERSCORE tokens, turning
+        // address_street into addressstreet.
+        var p = parser.parse("findByAddress_street");
+        assertThat(p.predicates().get(0).property()).isEqualTo("address_street");
+    }
+
+    @Test
+    void parsesEveryActionPrefix() {
+        assertThat(parser.parse("findByName").action()).isEqualTo(Action.FIND);
+        assertThat(parser.parse("countByName").action()).isEqualTo(Action.COUNT);
+        assertThat(parser.parse("deleteByName").action()).isEqualTo(Action.DELETE);
+        assertThat(parser.parse("existsByName").action()).isEqualTo(Action.EXISTS);
+    }
+
+    @Test
+    void actionPrefixIsCaseSensitive() {
+        // The spec spells the prefixes lowercase; "Count…" is not a query-by-method name.
+        assertThat(Action.of("CountByName")).isNull();
+        assertThat(Action.of("FindByName")).isNull();
     }
 }

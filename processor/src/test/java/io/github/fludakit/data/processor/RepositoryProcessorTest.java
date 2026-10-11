@@ -15,8 +15,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.stream.Collectors;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RepositoryProcessorTest {
@@ -73,6 +73,82 @@ class RepositoryProcessorTest {
         assertTrue(impl.contains("void registerAll(List<Customer> customers)"), impl);
         assertTrue(impl.contains("List<Customer> saveAllCustomers(List<Customer> customers)"), impl);
         assertTrue(impl.contains("Customer[] updateAllCustomers(Customer[] customers)"), impl);
+    }
+
+    /**
+     * Characterization: the LIKE-family operators all render the SAME SQL text, so the SQL pin alone
+     * cannot tell them apart — only the `%` wrapping distinguishes CONTAINS from STARTS_WITH from
+     * ENDS_WITH. Before this test nothing exercised these operators through the processor at all
+     * (grep for "Contains"/"StartsWith"/"EndsWith" returned zero hits), so a swap between, say,
+     * STARTS_WITH and ENDS_WITH would have produced identical compiled SQL and identical tests.
+     */
+    @Test
+    void pinsStringOperatorSqlAndPercentWrapping() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/strop"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-strop"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-strop"));
+
+        Files.writeString(sourceDir.resolve("Note.java"), """
+                package strop;
+                public class Note {
+                    public Long id;
+                    public String text;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getText() { return text; }
+                    public void setText(String text) { this.text = text; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Notes.java"), """
+                package strop;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.List;
+                @Repository
+                public interface Notes extends CrudRepository<Note, Long> {
+                    List<Note> findByTextContains(String text);
+                    List<Note> findByTextStartsWith(String text);
+                    List<Note> findByTextEndsWith(String text);
+                    List<Note> findByTextNotContains(String text);
+                    List<Note> findByTextNotStartsWith(String text);
+                    List<Note> findByTextNotEndsWith(String text);
+                    List<Note> findByTextLike(String text);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Note.java", "Notes.java");
+
+        String impl = sqlFlat(generatedDir.resolve("strop/NotesImpl.java"));
+
+        // Every LIKE-family operator renders the same PREDICATE text ("... LIKE :text"), so pinning the
+        // SQL string alone cannot tell them apart. Pair each constant with its own binding line: that
+        // pairing is the only thing that distinguishes a correct CONTAINS from a swapped STARTS_WITH.
+        assertPinned(impl, "SQL_FIND_BY_TEXT_CONTAINS", "\"%\" + text + \"%\"");
+        assertPinned(impl, "SQL_FIND_BY_TEXT_STARTS_WITH", "text + \"%\"");
+        assertPinned(impl, "SQL_FIND_BY_TEXT_ENDS_WITH", "\"%\" + text");
+        assertPinned(impl, "SQL_FIND_BY_TEXT_LIKE", "text");
+        // The negated forms must carry the same wrapping — they are separate switch arms in
+        // boundValue, and a forgotten arm would bind the bare value and silently match nothing.
+        assertPinned(impl, "SQL_FIND_BY_TEXT_NOT_CONTAINS", "\"%\" + text + \"%\"");
+        assertPinned(impl, "SQL_FIND_BY_TEXT_NOT_STARTS_WITH", "text + \"%\"");
+        assertPinned(impl, "SQL_FIND_BY_TEXT_NOT_ENDS_WITH", "\"%\" + text");
+
+        // ...and NOT LIKE must actually be rendered for the negated constants, not LIKE. sqlFlat strips
+        // the generated source's \" escapes, so the expected text carries plain quotes.
+        for (String negated : new String[]{"NOT_CONTAINS", "NOT_STARTS_WITH", "NOT_ENDS_WITH"}) {
+            assertTrue(impl.contains("SQL_FIND_BY_TEXT_" + negated + " = \"SELECT \"id\", \"text\""
+                            + " FROM \"note\" WHERE \"text\" NOT LIKE :text\""),
+                    negated + " must render NOT LIKE:" + System.lineSeparator() + impl);
+        }
+    }
+
+    /**
+     * Pins that the method using {@code constant} binds its parameter with exactly {@code binding}.
+     * Asserting the two together is what stops a same-SQL operator from passing on the wrong binding.
+     */
+    private static void assertPinned(String impl, String constant, String binding) {
+        assertTrue(impl.contains("sql(" + constant + ").param(\"text\", " + binding + ")"),
+                constant + " must bind `" + binding + "`:" + System.lineSeparator() + impl);
     }
 
     @Test
@@ -155,6 +231,460 @@ class RepositoryProcessorTest {
         assertTrue(impl.contains("int removeBookByTitle(String title)"), impl);
         assertTrue(impl.contains("DELETE FROM \"book\"\";"), impl);
         assertTrue(impl.contains("void clear()"), impl);
+    }
+
+    @Test
+    void rejectsPredicatePropertyThatDoesNotResolve() throws Exception {
+        // The bare fallback used to snake-case the property into a column with no diagnostic, so a
+        // typo produced SQL against a column that does not exist.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/unresolved-path"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-unresolved-path"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-unresolved-path"));
+
+        Files.writeString(sourceDir.resolve("Memo.java"), """
+                package unresolvedpath;
+                public class Memo {
+                    public Long id;
+                    public String text;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getText() { return text; }
+                    public void setText(String text) { this.text = text; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Memos.java"), """
+                package unresolvedpath;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.List;
+                @Repository
+                public interface Memos extends CrudRepository<Memo, Long> {
+                    List<Memo> findByBogusField(String value);
+                }
+                """);
+
+        TaskResult result = runTask(sourceDir, classesDir, generatedDir, "Memo.java", "Memos.java");
+
+        assertFalse(result.success(), "an unresolvable method-name property must be rejected");
+        assertTrue(result.diagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR
+                        && d.getMessage(Locale.ROOT).contains("does not resolve on entity")),
+                "expected the unresolved-property diagnostic:" + System.lineSeparator() + result.diagnostics());
+    }
+
+    @Test
+    void rejectsNonSpecKeywordSuffixThatLexesIntoThePropertyName() throws Exception {
+        // `IsNull` is not a Jakarta Data keyword: it lexes as property `nameIs` plus the Null operator.
+        // The strict resolution check is the net that catches this mis-spelling.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/isnull-suffix"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-isnull-suffix"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-isnull-suffix"));
+
+        Files.writeString(sourceDir.resolve("Memo.java"), """
+                package isnullsuffix;
+                public class Memo {
+                    public Long id;
+                    public String name;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getName() { return name; }
+                    public void setName(String name) { this.name = name; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Memos.java"), """
+                package isnullsuffix;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.List;
+                @Repository
+                public interface Memos extends CrudRepository<Memo, Long> {
+                    List<Memo> findByNameIsNull();
+                }
+                """);
+
+        TaskResult result = runTask(sourceDir, classesDir, generatedDir, "Memo.java", "Memos.java");
+
+        assertFalse(result.success(), "findByNameIsNull must not silently query a 'name_is' column");
+        assertTrue(result.diagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR
+                        && d.getMessage(Locale.ROOT).contains("does not resolve on entity")),
+                "expected the unresolved-property diagnostic:" + System.lineSeparator() + result.diagnostics());
+    }
+
+    @Test
+    void rendersOrAndIgnoreCaseInTheGeneratedSql() throws Exception {
+        // End-to-end proof that the parse reaches the baked SQL: the connector and the case flag used
+        // to be dropped between the method-name parse and emission, so an Or finder rendered AND.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/or-sql"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-or-sql"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-or-sql"));
+
+        Files.writeString(sourceDir.resolve("Memo.java"), """
+                package orsql;
+                public class Memo {
+                    public Long id;
+                    public String text;
+                    public String tag;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getText() { return text; }
+                    public void setText(String text) { this.text = text; }
+                    public String getTag() { return tag; }
+                    public void setTag(String tag) { this.tag = tag; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Memos.java"), """
+                package orsql;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.List;
+                @Repository
+                public interface Memos extends CrudRepository<Memo, Long> {
+                    List<Memo> findByTextOrTag(String text, String tag);
+                    List<Memo> findByTextIgnoreCaseLike(String text);
+                    List<Memo> findByTextNull();
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Memo.java", "Memos.java");
+
+        String impl = sqlFlat(generatedDir.resolve("orsql/MemosImpl.java"));
+        assertTrue(impl.contains("FROM \"memo\" WHERE \"text\" = :text OR \"tag\" = :tag"),
+                "an Or finder must render OR:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("WHERE LOWER(\"text\") LIKE LOWER(:text)"),
+                "an IgnoreCase finder must fold both sides:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("WHERE \"text\" IS NULL"),
+                "a nullary operator binds no argument:" + System.lineSeparator() + impl);
+    }
+
+    @Test
+    void distinctSubjectKeywordRendersSelectDistinct() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/distinct"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-distinct"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-distinct"));
+
+        Files.writeString(sourceDir.resolve("Memo.java"), """
+                package distinctq;
+                public class Memo {
+                    public Long id;
+                    public String text;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getText() { return text; }
+                    public void setText(String text) { this.text = text; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Memos.java"), """
+                package distinctq;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.List;
+                @Repository
+                public interface Memos extends CrudRepository<Memo, Long> {
+                    List<Memo> findDistinctByText(String text);
+                    long countDistinctByText(String text);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Memo.java", "Memos.java");
+
+        String impl = sqlFlat(generatedDir.resolve("distinctq/MemosImpl.java"));
+        assertTrue(impl.contains("SELECT DISTINCT \"id\", \"text\" FROM \"memo\" WHERE \"text\" = :text"),
+                "a Distinct find must select distinct rows:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("SELECT COUNT(DISTINCT \"id\") FROM \"memo\" WHERE \"text\" = :text"),
+                "a Distinct count must count distinct identifiers:" + System.lineSeparator() + impl);
+
+        String queries = sqlFlat(generatedDir.resolve("distinctq/MemosQueries.java"));
+        // Pin the accessor body, not a bare "return true;": that literal appears in ANY boolean
+        // accessor in this file, so it would still pass if distinct() regressed to return false.
+        assertTrue(queries.contains("boolean distinct() { return true; }"),
+                "the published query metadata must report distinct:" + System.lineSeparator() + queries);
+    }
+
+    @Test
+    void materializesASetReturnIntoALinkedHashSet() throws Exception {
+        // A Set return used to emit .list(), which does not compile against the declaration.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/set-return"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-set-return"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-set-return"));
+
+        Files.writeString(sourceDir.resolve("Memo.java"), """
+                package setreturn;
+                public class Memo {
+                    public Long id;
+                    public String text;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getText() { return text; }
+                    public void setText(String text) { this.text = text; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Memos.java"), """
+                package setreturn;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.Set;
+                @Repository
+                public interface Memos extends CrudRepository<Memo, Long> {
+                    Set<Memo> findByText(String text);
+                }
+                """);
+
+        // compile() also compiles the generated sources, so success proves the return type is honoured.
+        compile(sourceDir, classesDir, generatedDir, "Memo.java", "Memos.java");
+
+        String impl = sqlFlat(generatedDir.resolve("setreturn/MemosImpl.java"));
+        // Pin the CALL SHAPE, not a bare "LinkedHashSet": that word also matches an unused import or
+        // any incidental mention. The Materialize terminal is what actually satisfies the declaration.
+        assertTrue(impl.contains(".list().stream().collect(Collectors.toCollection(LinkedHashSet::new))"),
+                "a Set return must be materialized into a LinkedHashSet:"
+                        + System.lineSeparator() + impl);
+    }
+
+    @Test
+    void rejectsEntityWithoutAnIdentifier() throws Exception {
+        // Inventing an identifier produced a row mapper calling setId(...) on an entity with no such
+        // method: an uncompilable generated source with no hint of the real cause.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/no-identity"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-no-identity"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-no-identity"));
+
+        Files.writeString(sourceDir.resolve("Tag.java"), """
+                package noidentity;
+                import io.github.fludakit.data.annotation.Entity;
+                @Entity
+                public class Tag {
+                    String label;
+                    public String getLabel() { return label; }
+                    public void setLabel(String label) { this.label = label; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Tags.java"), """
+                package noidentity;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Tags extends CrudRepository<Tag, Long> {
+                }
+                """);
+
+        TaskResult result = runTask(sourceDir, classesDir, generatedDir, "Tag.java", "Tags.java");
+
+        assertFalse(result.success(), "an entity with no identifier must be rejected");
+        assertTrue(result.diagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR
+                        && d.getMessage(Locale.ROOT).contains("declares no identifier")),
+                "expected the missing-identity diagnostic:" + System.lineSeparator() + result.diagnostics());
+    }
+
+    @Test
+    void byAnnotationGovernsThePredicateAndTheMethodNameIsNotResolved() throws Exception {
+        // @By carries no operator, so the implied operator is equality and the name is not parsed:
+        // a `Like` keyword in the method name must NOT override the annotation.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/by-governs"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-by-governs"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-by-governs"));
+
+        Files.writeString(sourceDir.resolve("Note.java"), """
+                package bygoverns;
+                public class Note {
+                    public Long id;
+                    public String title;
+                    public String body;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getTitle() { return title; }
+                    public void setTitle(String title) { this.title = title; }
+                    public String getBody() { return body; }
+                    public void setBody(String body) { this.body = body; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Notes.java"), """
+                package bygoverns;
+                import jakarta.data.repository.By;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Find;
+                import jakarta.data.repository.Repository;
+                import java.util.List;
+                @Repository
+                public interface Notes extends CrudRepository<Note, Long> {
+                    @Find List<Note> findByTitleLike(@By("title") String pattern);
+                    @Find List<Note> findByBodyIn(@By("body") String body);
+                    // No @By and a name that is not a query-by-method name at all: both are irrelevant.
+                    @Find List<Note> searchTitleLike(String marker);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Note.java", "Notes.java");
+
+        String impl = sqlFlat(generatedDir.resolve("bygoverns/NotesImpl.java"));
+        assertTrue(impl.contains("FROM \"note\" WHERE \"title\" = :pattern"),
+                "the @By property with the implied equality must win over the name's Like:"
+                        + System.lineSeparator() + impl);
+        assertTrue(impl.contains("FROM \"note\" WHERE \"body\" = :body"),
+                "the @By property with the implied equality must win over the name's In:"
+                        + System.lineSeparator() + impl);
+        // Without @By the criteria are the PARAMETER NAMES, with the implied equality: the name's
+        // "TitleLike" contributes nothing, so the property is "marker" and the operator is "=".
+        assertTrue(impl.contains("FROM \"note\" WHERE \"marker\" = :marker"),
+                "without @By the parameter name is the property:" + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("\"title\" LIKE") && !impl.contains("\"title\" IN"),
+                "an annotated method's name must never be analyzed for a property or an operator:"
+                        + System.lineSeparator() + impl);
+    }
+
+    @Test
+    void lifecycleAnnotationIsDecidedByNameIndependentSignature() throws Exception {
+        // Tier 1: a lifecycle annotation defines the write by signature alone, so the method name is
+        // irrelevant. "store"/"persist" are neither built-in names nor query-by-method names.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/lifecycle-free-name"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-lifecycle-free-name"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-lifecycle-free-name"));
+
+        Files.writeString(sourceDir.resolve("Note.java"), """
+                package lifecyclefreename;
+                public class Note {
+                    public Long id;
+                    public String title;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getTitle() { return title; }
+                    public void setTitle(String title) { this.title = title; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Notes.java"), """
+                package lifecyclefreename;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import jakarta.data.repository.Insert;
+                import jakarta.data.repository.Save;
+                @Repository
+                public interface Notes extends CrudRepository<Note, Long> {
+                    @Insert void store(Note note);
+                    @Save Note persist(Note note);
+                    @Save java.util.List<Note> persistAll(java.util.List<Note> notes);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Note.java", "Notes.java");
+
+        String impl = sqlFlat(generatedDir.resolve("lifecyclefreename/NotesImpl.java"));
+        assertTrue(impl.contains("public void store(Note note)"),
+                "a lifecycle method named freely must be generated:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("public Note persist(Note note)"),
+                "a lifecycle method named freely must be generated:" + System.lineSeparator() + impl);
+    }
+
+    @Test
+    void builtInNameWinsOverItsOwnFindAnnotation() throws Exception {
+        // Tier 2 before tier 3: CrudRepository.findAll carries @Find, but it is a built-in and must be
+        // matched by name — otherwise the query-by-method-name parser is handed "findAll" and rejects
+        // it as an unsupported subject.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/builtin-findall"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-builtin-findall"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-builtin-findall"));
+
+        Files.writeString(sourceDir.resolve("Note.java"), """
+                package builtinfindall;
+                public class Note {
+                    public Long id;
+                    public String title;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getTitle() { return title; }
+                    public void setTitle(String title) { this.title = title; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Notes.java"), """
+                package builtinfindall;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.stream.Stream;
+                @Repository
+                public interface Notes extends CrudRepository<Note, Long> {
+                    Stream<Note> findAll();
+                    boolean existsById(Long id);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Note.java", "Notes.java");
+
+        String impl = sqlFlat(generatedDir.resolve("builtinfindall/NotesImpl.java"));
+        assertTrue(impl.contains("public Stream<Note> findAll()"),
+                "a built-in findAll must be generated:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("public boolean existsById(Long id)"),
+                "a built-in existsById must be generated:" + System.lineSeparator() + impl);
+    }
+
+    @Test
+    void rejectsLifecycleMethodWithUnsupportedSignature() throws Exception {
+        // A lifecycle annotation pins the method to a write. Without this check the emitter falls
+        // through to the query path and silently generates a predicate-less SELECT over the table.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/lifecycle-shape"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-lifecycle-shape"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-lifecycle-shape"));
+
+        Files.writeString(sourceDir.resolve("Note.java"), """
+                package lifecycleshape;
+                public class Note {
+                    public Long id;
+                    public String title;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getTitle() { return title; }
+                    public void setTitle(String title) { this.title = title; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Notes.java"), """
+                package lifecycleshape;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import jakarta.data.repository.Save;
+                @Repository
+                public interface Notes extends CrudRepository<Note, Long> {
+                    @Save void publish(String title);
+                }
+                """);
+
+        TaskResult result = runTask(sourceDir, classesDir, generatedDir, "Note.java", "Notes.java");
+
+        assertFalse(result.success(), "a lifecycle method with a non-entity parameter must be rejected");
+        assertTrue(result.diagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR
+                        && d.getMessage(Locale.ROOT).contains("carries a lifecycle annotation and must accept")),
+                "expected the lifecycle shape diagnostic:" + System.lineSeparator() + result.diagnostics());
+    }
+
+    @Test
+    void rejectsUnparseableQueryByNameMethod() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/qbn-unparseable"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-qbn-unparseable"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-qbn-unparseable"));
+
+        Files.writeString(sourceDir.resolve("Memo.java"), """
+                package qbnunparseable;
+                public class Memo {
+                    public Long id;
+                    public String text;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getText() { return text; }
+                    public void setText(String text) { this.text = text; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Memos.java"), """
+                package qbnunparseable;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.List;
+                @Repository
+                public interface Memos extends CrudRepository<Memo, Long> {
+                    List<Memo> findByTextAnd(String text);
+                }
+                """);
+
+        TaskResult result = runTask(sourceDir, classesDir, generatedDir, "Memo.java", "Memos.java");
+
+        assertFalse(result.success(), "an unparseable query-by-method name must not silently compile");
+        assertTrue(result.diagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR
+                        && d.getMessage(Locale.ROOT).contains("not a valid query-by-method name")),
+                "expected the unparseable-name diagnostic:" + System.lineSeparator() + result.diagnostics());
     }
 
     @Test
@@ -3490,13 +4020,14 @@ class RepositoryProcessorTest {
                         + " \"profile\".\"id\") DESC, \"profile\".\"id\" ASC"),
                 "the paged finder ORDER BY must be the MAX subquery term plus the id tiebreak:"
                         + System.lineSeparator() + impl);
-        assertTrue(impl.contains("CursorSupport.seekWhereTerms(java.util.List.of(\"(SELECT MAX("),
-                "the seek predicate must switch to the verbatim terms loop with the aggregate term:"
+        assertTrue(impl.contains("SQL_FIND_BY_SEEK_NEXT = \"SELECT \"id\", \"full_name\" FROM \"profile\""
+                        + " WHERE (((SELECT MAX("),
+                "the forward seek constant must bake the aggregate term into its WHERE clause:"
                         + System.lineSeparator() + impl);
-        assertTrue(impl.contains("\", \"\"profile\".\"id\"\"), java.util.List.of(false, true), cursor"),
-                "the seek terms must end with the root-qualified id term and the grown dirs list:"
+        assertTrue(impl.contains("IS NULL AND :cursor0 IS NULL)) AND \"profile\".\"id\" > :cursor1))"),
+                "the composite seek must pin the preceding key with NULL-safe equality before the id tiebreak:"
                         + System.lineSeparator() + impl);
-        assertTrue(impl.contains("CursorSupport.cursorFor(java.util.List.of(\"contacts.value\", \"id\")"
+        assertTrue(impl.contains("CursorKeys.forEntity(java.util.List.of(\"contacts.value\", \"id\")"
                         + ", java.util.List.of(false, true), ProfileMetadata.INSTANCE, e)"),
                 "cursor keys must ride the grown props/dirs lists through the descriptor overload:"
                         + System.lineSeparator() + impl);
@@ -3538,12 +4069,13 @@ class RepositoryProcessorTest {
         assertTrue(!impl.contains("customer_id\" ASC, \"") && !impl.contains("customer_id\" ASC, "),
                 "no term may follow the legacy to-one ORDER BY (no tiebreak gained):"
                         + System.lineSeparator() + impl);
-        assertTrue(impl.contains("CursorSupport.seekWhere(java.util.List.of(\"customer_id\"),"
-                        + " java.util.List.of(true), cursor"),
-                "the legacy bare-columns seekWhere call must stay:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("SQL_FIND_BY_SEEK_NEXT = \"SELECT \"id\", \"status\", \"customer_id\""
+                        + " FROM \"order\" WHERE ((\"customer_id\" > :cursor0)) ORDER BY \"customer_id\" ASC LIMIT \""),
+                "the forward seek constant must bake the legacy bare-column seek clause:"
+                        + System.lineSeparator() + impl);
         assertTrue(!impl.contains("ORDER BY (SELECT"),
                 "no aggregate sort term may appear for a to-one sort:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("CursorSupport.cursorFor(java.util.List.of(\"customer\"),"
+        assertTrue(impl.contains("CursorKeys.forEntity(java.util.List.of(\"customer\"),"
                         + " java.util.List.of(true), OrderMetadata.INSTANCE, e)"),
                 "cursor keys keep the UNGROWN props list on the descriptor overload:"
                         + System.lineSeparator() + impl);
@@ -3592,14 +4124,16 @@ class RepositoryProcessorTest {
                         + System.lineSeparator() + impl);
         assertTrue(impl.contains("jdbcClient.sql(SQL_FIND_ALL + joins + (orderBy.length() > 0"),
                 "the legacy OFFSET splice must stay:" + System.lineSeparator() + impl);
-        assertTrue(!impl.contains("(SELECT") && !impl.contains("seekWhereTerms"),
-                "no aggregate term or verbatim-terms seek for local sorts:" + System.lineSeparator() + impl);
+        assertTrue(!impl.contains("(SELECT") && !impl.contains("CursorSupport"),
+                "no aggregate term and no runtime cursor helper for local sorts:"
+                        + System.lineSeparator() + impl);
         assertTrue(impl.contains("ORDER BY \"text\" ASC"),
                 "legacy orderBy term for a local sort:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("CursorSupport.seekWhere(java.util.List.of(\"text\"),"
-                        + " java.util.List.of(true), cursor"),
-                "legacy finder seekWhere:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("CursorSupport.cursorFor(java.util.List.of(\"text\"),"
+        assertTrue(impl.contains("SQL_FIND_BY_SEEK_NEXT = \"SELECT \"id\", \"text\" FROM \"memo\""
+                        + " WHERE ((\"text\" > :cursor0)) ORDER BY \"text\" ASC LIMIT \""),
+                "the forward seek constant must bake the legacy local-sort seek clause:"
+                        + System.lineSeparator() + impl);
+        assertTrue(impl.contains("CursorKeys.forEntity(java.util.List.of(\"text\"),"
                         + " java.util.List.of(true), MemoMetadata.INSTANCE, e)"),
                 "cursored-finder cursor keys ride the descriptor overload:" + System.lineSeparator() + impl);
     }
@@ -3661,7 +4195,7 @@ class RepositoryProcessorTest {
         assertTrue(queries.contains("public static final FindByStatusQuery INSTANCE = new FindByStatusQuery();"),
                 "INSTANCE constant:" + System.lineSeparator() + queries);
         // query metadata retains logical paths; SqlBuilder resolves them against the schema.
-        assertTrue(queries.contains("Predicate.of(\"status\", Operator.EQ, \"status\")"),
+        assertTrue(queries.contains("Predicate.of(\"status\", Operator.EQ, \"status\", Connector.AND, false)"),
                 "logical predicate:" + System.lineSeparator() + queries);
         assertTrue(queries.contains("return Operation.FIND;"), "operation:" + System.lineSeparator() + queries);
         assertTrue(queries.contains("return Operation.COUNT;"), "count operation:"
@@ -3890,16 +4424,18 @@ class RepositoryProcessorTest {
     }
 
     @Test
-    void methodNamePredicateThroughAssociationEmitsLeftJoin() throws Exception {
-        // findByCustomerName → Reference head "customer": the join ON clause binds the root's fk
-        // column to the target's id column (customer.country_id… style, here "order"."customer_id"
-        // = "customer"."id") and the WHERE column is alias-qualified.
+    void annotatedPredicateThroughAssociationEmitsLeftJoin() throws Exception {
+        // @By("customer.name") → Reference head "customer": the join ON clause binds the root's fk
+        // column to the target's id column ("order"."customer_id" = "customer"."id") and the WHERE
+        // column is alias-qualified. The traversal is declared by @By, not read off the method name:
+        // @Find is annotation-driven, so the name is never analyzed.
         Path sourceDir = Files.createDirectories(workspace.resolve("src/rp-ref"));
         Path classesDir = Files.createDirectories(workspace.resolve("classes-rp-ref"));
         Path generatedDir = Files.createDirectories(workspace.resolve("generated-rp-ref"));
         writeRelationFixture(sourceDir);
         Files.writeString(sourceDir.resolve("Ord.java"), """
                 package relpath;
+                import jakarta.data.repository.By;
                 import jakarta.data.repository.CrudRepository;
                 import jakarta.data.repository.Find;
                 import jakarta.data.repository.Repository;
@@ -3907,7 +4443,7 @@ class RepositoryProcessorTest {
                 @Repository
                 public interface Ord extends CrudRepository<Order, Long> {
                     @Find
-                    Stream<Order> findByCustomerName(String name);
+                    Stream<Order> findByCustomerName(@By("customer.name") String name);
                 }
                 """);
 
@@ -4011,8 +4547,7 @@ class RepositoryProcessorTest {
     @Test
     void qualifiedRootSelectParityGuardPinsBothHelperCallShapes() throws Exception {
         // S-1 parity guard. The SQL_FIND_ALL_QUALIFIED emission and the joined-find branch now
-        // render through ONE SqlBuilder.qualifiedRootSelect helper, reached via
-        // SqlBuilder.build(TableSchema, QueryDefinition[, String]). The two intentional modes of that
+        // render through ONE SqlBuilder.qualifiedRootSelect helper. The two intentional modes of that
         // helper are both unpinned by the existing suite for THIS descriptor: the EXISTS-only find (no
         // join spliced) keeps the BARE root projection, while the same descriptor's qualified findAll
         // constant lists every root column as \"order\".\"col\". Locked byte-for-byte here.

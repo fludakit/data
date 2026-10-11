@@ -1,18 +1,18 @@
 grammar Qbn;
 
 methodName
-    : action first? ignored? (BY conditionList)? (ORDER_BY orderList)? EOF
+    : action first? DISTINCT? (BY conditionList)? (ORDER_BY orderList)? EOF
     ;
 
 action: FIND | DELETE | COUNT | EXISTS;
 
 first: FIRST;
 
-ignored: HUMP+;
-
 conditionList
-    : condition ((AND | OR) condition)*
+    : condition (connector condition)*
     ;
+
+connector: AND | OR;
 
 condition
     : property IGNORE_CASE? NOT? operator?
@@ -33,7 +33,7 @@ orderList
     ;
 
 orderItem
-    : property (ASC | DESC)?
+    : property IGNORE_CASE? (ASC | DESC)?
     ;
 
 // --- lexer ---
@@ -43,6 +43,9 @@ COUNT: 'count';
 EXISTS: 'exists';
 BY: 'By';
 FIRST: 'First' [0-9]*;
+// 'Distinct' must be declared before HUMP: both match the 8-char run, and on a length tie the
+// first-declared rule wins.
+DISTINCT: 'Distinct';
 AND: 'And';
 OR: 'Or';
 ORDER_BY: 'OrderBy';
@@ -66,6 +69,5 @@ IS_TRUE: 'True';
 IS_FALSE: 'False';
 
 UNDERSCORE: '_';
-DIGITS: [0-9]+;
 HUMP: [a-z0-9]+ | [A-Z][a-z0-9]*;
 WS: [ \t\r\n]+ -> skip;

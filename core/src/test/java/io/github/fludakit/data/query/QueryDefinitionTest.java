@@ -25,7 +25,7 @@ class QueryDefinitionTest {
     void queryPlanCarriesLogicalTermsWithoutPhysicalPlacement() {
         ColumnRef joined = new ColumnRef("name", "customer", "customer",
                 List.of(new JoinRef("order", null, "customer_id", "customer", "customer", "id")));
-        Predicate p = new Predicate("customer.name", Operator.EQ, "customer_name");
+        Predicate p = Predicate.of("customer.name", Operator.EQ, "customer_name");
         SortSpec sort = new SortSpec("customer.name", true, false);
         assertEquals("customer.name", p.property());
         assertEquals("customer.name", sort.property());
@@ -45,9 +45,9 @@ class QueryDefinitionTest {
         assertEquals(new SeekTerm(ref, true), new SeekTerm(ref, true));
         assertNotEquals(new SeekTerm(ref, true), new SeekTerm(ref, false));
         assertEquals(new ParamBinding(0, "a"), new ParamBinding(0, "a"));
-        Predicate p = new Predicate("id", Operator.EQ, "id");
+        Predicate p = Predicate.of("id", Operator.EQ, "id");
         SortSpec s = new SortSpec("id", true, false);
-        assertEquals(new Predicate("id", Operator.EQ, "id"), new Predicate("id", Operator.EQ, "id"));
+        assertEquals(Predicate.of("id", Operator.EQ, "id"), Predicate.of("id", Operator.EQ, "id"));
         assertEquals(new SortSpec("id", true, false), new SortSpec("id", true, false));
     }
 

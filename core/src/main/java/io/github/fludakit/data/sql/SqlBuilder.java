@@ -6,6 +6,7 @@ import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.EntityMetadata;
 import io.github.fludakit.data.metadata.JoinRef;
 import io.github.fludakit.data.metadata.TableSchema;
+import io.github.fludakit.data.query.Connector;
 import io.github.fludakit.data.query.Operation;
 import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.PagingMode;
@@ -108,7 +109,7 @@ public final class SqlBuilder {
 
     /** Renders a classic no-join COUNT over the builder's schema. */
     public String countBy(List<Predicate> predicates) {
-        return countBy(schema, predicates);
+        return countBy(schema, predicates, false);
     }
 
     /** Renders a classic no-join DELETE over the builder's schema. */
@@ -167,6 +168,59 @@ public final class SqlBuilder {
         return ref.column();
     }
 
+    /**
+     * Renders the keyset (cursor) seek predicate over PRE-RENDERED sort terms, expanded as
+     * {@code (t0 > :cursor0) OR (t0 = :cursor0 AND t1 > :cursor1) OR ...}.
+     *
+     * <p>Every PRECEDING key must compare with {@code =}, never with the direction operator: using
+     * {@code >} there makes each disjunct a subset of the previous one, so the whole predicate
+     * degenerates to {@code t0 > :cursor0} and every row sharing the leading key becomes unreachable
+     * from page two onward. Preceding keys use NULL-safe equality because a cursor key is
+     * legitimately null (an empty or all-null to-many list reduces to a null edge) and
+     * {@code t = NULL} is UNKNOWN, not true.
+     *
+     * <p>Callers pass the same terms {@link #orderBy(List)} renders, so seek and sort agree
+     * byte-for-byte; terms are already quoted (and, for a relation-sorted read, table-qualified or an
+     * aggregate subquery), so they are spliced verbatim.
+     *
+     * @param terms     the rendered sort terms, in cursor-key order
+     * @param ascending the sort direction of each key
+     * @param forward   {@code true} for {@code CURSOR_NEXT}, {@code false} for {@code CURSOR_PREVIOUS}
+     * @return the parenthesised predicate, binding {@code :cursor0 .. :cursorN-1}
+     */
+    public String seekClause(List<String> terms, List<Boolean> ascending, boolean forward) {
+        if (terms.isEmpty()) {
+            throw new IllegalArgumentException("seek clause requires at least one cursor key");
+        }
+        if (terms.size() != ascending.size()) {
+            throw new IllegalArgumentException("seek clause requires one direction per key: "
+                    + terms.size() + " terms, " + ascending.size() + " directions");
+        }
+        StringBuilder sb = new StringBuilder("(");
+        for (int i = 0; i < terms.size(); i++) {
+            if (i > 0) {
+                sb.append(" OR ");
+            }
+            sb.append('(');
+            for (int j = 0; j <= i; j++) {
+                if (j > 0) {
+                    sb.append(" AND ");
+                }
+                sb.append(seekComparison(terms.get(j), j, i, ascending.get(j), forward));
+            }
+            sb.append(')');
+        }
+        return sb.append(')').toString();
+    }
+
+    private static String seekComparison(String term, int index, int last, boolean ascending, boolean forward) {
+        String param = ":cursor" + index;
+        if (index < last) {
+            return "(" + term + " = " + param + " OR (" + term + " IS NULL AND " + param + " IS NULL))";
+        }
+        return term + (ascending == forward ? " > " : " < ") + param;
+    }
+
     /** Whether the first segment of an entity-rooted path is a to-many relation or collection. */
     public boolean isToManyPath(String path) {
         return requireResolver().isToManyPath(path);
@@ -201,6 +255,28 @@ public final class SqlBuilder {
         return path.replace('.', '_');
     }
 
+    /**
+     * How many values an operator binds: none for the nullary ones, two for {@code BETWEEN}, one
+     * otherwise. Callers that allocate method arguments to predicates must use this so the tokens
+     * rendered by {@link #renderOperator} and the values bound at runtime stay in step.
+     */
+    public static int parameterCount(Operator operator) {
+        return switch (operator) {
+            case IS_NULL, IS_NOT_NULL, TRUE, FALSE -> 0;
+            case BETWEEN, NOT_BETWEEN -> 2;
+            default -> 1;
+        };
+    }
+
+    /** The named-parameter tokens {@code operator} renders for {@code param}, in binding order. */
+    public static List<String> paramNames(Operator operator, String param) {
+        return switch (operator) {
+            case IS_NULL, IS_NOT_NULL, TRUE, FALSE -> List.of();
+            case BETWEEN, NOT_BETWEEN -> List.of(param + "_0", param + "_1");
+            default -> List.of(param);
+        };
+    }
+
     // --------------------------------------------------------------- internal rendering
 
     private QueryDefinition requireModel() {
@@ -219,18 +295,30 @@ public final class SqlBuilder {
         return resolver;
     }
 
-    private String selectBy(TableSchema md, List<Predicate> predicates, List<SortSpec> sorts, int limit, String cursorClause) {
+    private String selectBy(TableSchema md, List<Predicate> predicates, List<SortSpec> sorts, int limit,
+                            String cursorClause) {
+        return selectBy(md, predicates, sorts, limit, cursorClause, false);
+    }
+
+    private String selectBy(TableSchema md, List<Predicate> predicates, List<SortSpec> sorts, int limit,
+                            String cursorClause, boolean distinct) {
         String cols = md.columns().stream().map(c -> dialect.quoteIdentifier(c.column())).collect(Collectors.joining(", "));
-        StringBuilder sb = new StringBuilder("SELECT ").append(cols).append(" FROM ")
-                .append(dialect.quoteIdentifier(md.tableName()));
+        StringBuilder sb = new StringBuilder(distinct ? "SELECT DISTINCT " : "SELECT ").append(cols)
+                .append(" FROM ").append(dialect.quoteIdentifier(md.tableName()));
         appendWhere(sb, predicates, cursorClause);
         sb.append(orderBy(md, sorts));
         if (limit > 0) sb.append(dialect.limitClause(Integer.toString(limit)));
         return sb.toString();
     }
 
-    private String countBy(TableSchema md, List<Predicate> predicates) {
-        StringBuilder sb = new StringBuilder("SELECT COUNT(*) FROM ").append(dialect.quoteIdentifier(md.tableName()));
+    private String countBy(TableSchema md, List<Predicate> predicates, boolean distinct) {
+        // Distinct counts the distinct results: a root row is identified by its id, so the count
+        // collapses to COUNT(DISTINCT <id>) — COUNT(DISTINCT *) is not valid SQL.
+        String projection = distinct && md.idColumn() != null
+                ? "COUNT(DISTINCT " + dialect.quoteIdentifier(md.idColumn()) + ")"
+                : "COUNT(*)";
+        StringBuilder sb = new StringBuilder("SELECT ").append(projection).append(" FROM ")
+                .append(dialect.quoteIdentifier(md.tableName()));
         appendWhere(sb, predicates, null);
         return sb.toString();
     }
@@ -315,105 +403,171 @@ public final class SqlBuilder {
      * {@link #qualifiedRootSelect}) and rides FIND shells only — count and delete ignore it.
      */
     private String build(QueryDefinition model, String extraProjection) {
-        TableSchema md = schema;
-        AttributePathResolver<?> attributes = requireResolver();
-        Operation operation = model.operation();
-        boolean deleteMode = operation == Operation.DELETE;
-        boolean countMode = operation == Operation.COUNT || operation == Operation.EXISTS;
-        List<Predicate> predicates = model.predicates();
-        List<SortSpec> sorts = model.paging() == PagingMode.NONE
-                ? model.sorts() : List.of();
-        int limit = model.paging() == PagingMode.NONE ? model.limit() : 0;
+        return new StructuredStatement(model, extraProjection).run();
+    }
 
-        List<ColumnRef> joinRefs = new ArrayList<>();
-        List<Integer> existentialIndices = new ArrayList<>();
-        List<Predicate> plain = new ArrayList<>(predicates.size());
-        List<ColumnRef> predicateRefs = new ArrayList<>(predicates.size());
-        boolean legacyCompatible = true;
-        for (int i = 0; i < predicates.size(); i++) {
-            Predicate predicate = predicates.get(i);
-            ColumnRef ref = resolveColumnRef(md, attributes, predicate.property());
-            plain.add(predicate);
-            predicateRefs.add(ref);
-            legacyCompatible &= legacyCompatible(ref, predicate.property(), md);
-            if (isExistential(attributes, predicate.property()) || (deleteMode && !ref.joins().isEmpty())) {
-                existentialIndices.add(i);
-            } else {
-                joinRefs.add(ref);
+    /**
+     * One pass over a logical query model: resolves and classifies every predicate and sort ref,
+     * then renders the whole statement — shell, WHERE, ORDER BY and LIMIT. The layout rules live on
+     * {@link #build}; this method object exists only to keep that one pass readable.
+     */
+    private final class StructuredStatement {
+        private final QueryDefinition model;
+        private final String extraProjection;
+        private final TableSchema md = schema;
+        private final AttributePathResolver<?> attributes = requireResolver();
+        private final Operation operation;
+        private final boolean deleteMode;
+        private final boolean countMode;
+        private final List<Predicate> predicates;
+        private final List<SortSpec> sorts;
+        private final int limit;
+
+        private final List<ColumnRef> joinRefs = new ArrayList<>();
+        private final List<Integer> existentialIndices = new ArrayList<>();
+        private final List<Predicate> plain;
+        private final List<ColumnRef> predicateRefs;
+        private final List<ColumnRef> sortRefs;
+        private final List<Boolean> existentialSorts;
+        private boolean legacyCompatible = true;
+
+        StructuredStatement(QueryDefinition model, String extraProjection) {
+            this.model = model;
+            this.extraProjection = extraProjection;
+            this.operation = model.operation();
+            this.deleteMode = operation == Operation.DELETE;
+            this.countMode = operation == Operation.COUNT || operation == Operation.EXISTS;
+            this.predicates = model.predicates();
+            this.sorts = model.paging() == PagingMode.NONE ? model.sorts() : List.of();
+            this.limit = model.paging() == PagingMode.NONE ? model.limit() : 0;
+            this.plain = new ArrayList<>(predicates.size());
+            this.predicateRefs = new ArrayList<>(predicates.size());
+            this.sortRefs = new ArrayList<>(sorts.size());
+            this.existentialSorts = new ArrayList<>(sorts.size());
+        }
+
+        String run() {
+            classify();
+            if (existentialIndices.isEmpty() && !existentialSorts.contains(Boolean.TRUE)
+                    && !hasJoins(joinRefs) && legacyCompatible) {
+                return legacyStatement();
+            }
+            StringBuilder sb = new StringBuilder();
+            renderShell(sb);
+            renderWhere(sb);
+            renderOrderBy(sb);
+            if (limit > 0) {
+                sb.append(dialect.limitClause(Integer.toString(limit)));
+            }
+            return sb.toString();
+        }
+
+        /** Resolves and classifies every predicate and sort ref, filling the join/EXISTS lists and {@code legacyCompatible}. */
+        private void classify() {
+            for (int i = 0; i < predicates.size(); i++) {
+                Predicate predicate = predicates.get(i);
+                ColumnRef ref = resolveColumnRef(md, attributes, predicate.property());
+                plain.add(predicate);
+                predicateRefs.add(ref);
+                legacyCompatible &= legacyCompatible(ref, predicate.property(), md);
+                if (isExistential(attributes, predicate.property()) || (deleteMode && !ref.joins().isEmpty())) {
+                    existentialIndices.add(i);
+                } else {
+                    joinRefs.add(ref);
+                }
+            }
+            for (SortSpec sort : sorts) {
+                ColumnRef ref = resolveColumnRef(md, attributes, sort.property());
+                boolean existential = isExistential(attributes, sort.property());
+                sortRefs.add(ref);
+                existentialSorts.add(existential);
+                legacyCompatible &= legacyCompatible(ref, sort.property(), md);
+                if (!existential) {
+                    joinRefs.add(ref);
+                }
             }
         }
-        List<ColumnRef> sortRefs = new ArrayList<>(sorts.size());
-        List<Boolean> existentialSorts = new ArrayList<>(sorts.size());
-        for (SortSpec sort : sorts) {
-            ColumnRef ref = resolveColumnRef(md, attributes, sort.property());
-            boolean existential = isExistential(attributes, sort.property());
-            sortRefs.add(ref);
-            existentialSorts.add(existential);
-            legacyCompatible &= legacyCompatible(ref, sort.property(), md);
-            if (!existential) {
-                joinRefs.add(ref);
-            }
-        }
-        if (existentialIndices.isEmpty() && !existentialSorts.contains(Boolean.TRUE)
-                && !hasJoins(joinRefs) && legacyCompatible) {
+
+        /** The pre-join classic statement, valid only when nothing joins and nothing needs an EXISTS or aggregate. */
+        private String legacyStatement() {
             if (countMode) {
-                return countBy(md, plain);
+                return countBy(md, plain, model.distinct());
             }
             if (deleteMode) {
                 return deleteBy(md, plain);
             }
-            return selectBy(md, plain, sorts, limit, null);
+            return selectBy(md, plain, sorts, limit, null, model.distinct());
         }
-        boolean spliceJoins = hasJoins(joinRefs);
-        StringBuilder sb = new StringBuilder();
-        if (countMode) {
-            sb.append("SELECT COUNT(*) FROM ").append(dialect.quoteIdentifier(md.tableName()))
-                    .append(joinClause(dialect, joinRefs));
-        } else if (deleteMode) {
-            sb.append("DELETE FROM ").append(dialect.quoteIdentifier(md.tableName()))
-                    .append(joinClause(dialect, joinRefs));
-        } else {
-            // Joined find: every root column is qualified by the root table. Unqualified bare names
-            // become ambiguous the moment a join adds a table sharing a column name (e.g. the target's
-            // own "id"), and a full-materialisation read joins exactly such a table. Qualifying keeps
-            // each label = its physical column, so the generated row mapper still reads it by name.
-            sb.append(qualifiedRootSelect(dialect, schema, joinRefs, spliceJoins, extraProjection));
-        }
-        List<String> conjuncts = new ArrayList<>();
-        for (int i = 0; i < plain.size(); i++) {
-            if (!existentialIndices.contains(i)) {
-                conjuncts.add(render(dialect, plain.get(i), predicateRefs.get(i),
-                        md.tableName(), spliceJoins));
+
+        private void renderShell(StringBuilder sb) {
+            boolean spliceJoins = hasJoins(joinRefs);
+            if (countMode) {
+                sb.append("SELECT COUNT(*) FROM ").append(dialect.quoteIdentifier(md.tableName()))
+                        .append(joinClause(dialect, joinRefs));
+            } else if (deleteMode) {
+                sb.append("DELETE FROM ").append(dialect.quoteIdentifier(md.tableName()))
+                        .append(joinClause(dialect, joinRefs));
+            } else {
+                // Joined find: every root column is qualified by the root table. Unqualified bare names
+                // become ambiguous the moment a join adds a table sharing a column name (e.g. the target's
+                // own "id"), and a full-materialisation read joins exactly such a table. Qualifying keeps
+                // each label = its physical column, so the generated row mapper still reads it by name.
+                sb.append(qualifiedRootSelect(dialect, schema, joinRefs, spliceJoins, extraProjection,
+                        model.distinct()));
             }
         }
-        for (int i : existentialIndices) {
-            conjuncts.add(existsConjunct(dialect, plain.get(i), predicateRefs.get(i)));
+
+        private void renderWhere(StringBuilder sb) {
+            boolean spliceJoins = hasJoins(joinRefs);
+            List<String> conjuncts = new ArrayList<>();
+            List<Boolean> ors = new ArrayList<>();
+            if (plain.stream().anyMatch(p -> Connector.isOr(p.connector()))) {
+                // With any OR the declaration order is load-bearing, so each predicate renders in place —
+                // and its shape decides the renderer. The all-AND branch below may reorder freely.
+                for (int i = 0; i < plain.size(); i++) {
+                    conjuncts.add(existentialIndices.contains(i)
+                            ? existsConjunct(dialect, plain.get(i), predicateRefs.get(i))
+                            : render(dialect, plain.get(i), predicateRefs.get(i), md.tableName(), spliceJoins));
+                    ors.add(i > 0 && Connector.isOr(plain.get(i).connector()));
+                }
+            } else {
+                for (int i = 0; i < plain.size(); i++) {
+                    if (!existentialIndices.contains(i)) {
+                        conjuncts.add(render(dialect, plain.get(i), predicateRefs.get(i),
+                                md.tableName(), spliceJoins));
+                        ors.add(false);
+                    }
+                }
+                for (int i : existentialIndices) {
+                    conjuncts.add(existsConjunct(dialect, plain.get(i), predicateRefs.get(i)));
+                    ors.add(false);
+                }
+            }
+            if (!conjuncts.isEmpty()) {
+                sb.append(" WHERE ").append(joinConjuncts(conjuncts, ors));
+            }
         }
-        if (!conjuncts.isEmpty()) {
-            sb.append(" WHERE ").append(String.join(" AND ", conjuncts));
-        }
-        if (!sorts.isEmpty()) {
+
+        private void renderOrderBy(StringBuilder sb) {
+            if (sorts.isEmpty()) {
+                return;
+            }
             StringBuilder orderBy = new StringBuilder();
             for (int i = 0; i < sorts.size(); i++) {
                 SortSpec sort = sorts.get(i);
                 ColumnRef ref = sortRefs.get(i);
                 String term = Boolean.TRUE.equals(existentialSorts.get(i))
                         ? aggregateSortTerm(dialect, schema, ref, sort.ascending())
-                        : ref.joins().isEmpty() && ref.ownerAlias() == null
-                                && (ref.ownerTableName() == null || ref.ownerTableName().equals(md.tableName()))
+                        : isLocalTo(ref, md.tableName())
                                 ? dialect.quoteIdentifier(ref.column())
                                 : qualify(dialect, ref, md.tableName());
                 if (orderBy.length() > 0) {
                     orderBy.append(", ");
                 }
-                orderBy.append(term).append(sort.ascending() ? " ASC" : " DESC");
+                orderBy.append(orderTerm(term, sort, Boolean.TRUE.equals(existentialSorts.get(i))));
             }
             sb.append(" ORDER BY ").append(orderBy);
         }
-        if (limit > 0) {
-            sb.append(dialect.limitClause(Integer.toString(limit)));
-        }
-        return sb.toString();
     }
 
     private ColumnRef resolveColumnRef(TableSchema schema, AttributePathResolver<?> attributes, String path) {
@@ -425,9 +579,14 @@ public final class SqlBuilder {
     }
 
     private boolean legacyCompatible(ColumnRef ref, String path, TableSchema schema) {
-        return ref.joins().isEmpty() && ref.ownerAlias() == null
-                && (ref.ownerTableName() == null || ref.ownerTableName().equals(schema.tableName()))
+        return isLocalTo(ref, schema.tableName())
                 && ref.column().equals(Names.columnName(path));
+    }
+
+    /** Whether {@code ref} is a column local to {@code table}: unjoined, unaliased, and owned by no table or by that table. */
+    private static boolean isLocalTo(ColumnRef ref, String table) {
+        return ref.joins().isEmpty() && ref.ownerAlias() == null
+                && (ref.ownerTableName() == null || ref.ownerTableName().equals(table));
     }
 
     private static boolean isExistential(AttributePathResolver<?> attributes, String path) {
@@ -446,9 +605,21 @@ public final class SqlBuilder {
     private String orderBy(TableSchema table, List<SortSpec> sorts) {
         if (sorts.isEmpty()) return "";
         return " ORDER BY " + sorts.stream()
-                .map(s -> dialect.quoteIdentifier(s.property().replace('.', '_'))
-                        + (s.ascending() ? " ASC" : " DESC"))
+                .map(s -> orderTerm(dialect.quoteIdentifier(s.property().replace('.', '_')), s, false))
                 .collect(Collectors.joining(", "));
+    }
+
+    /**
+     * One ORDER BY term: the rendered column, {@code LOWER(...)}-wrapped when the sort asks for
+     * case-insensitive ordering, then the direction. An existential sort wraps an aggregate subquery
+     * whose MIN/MAX already picked a case-sensitive edge — and the runtime cursor key reduces the
+     * same value list case-sensitively — so folding there would order by something the seek cannot
+     * reproduce; the processor rejects that combination instead.
+     */
+    private static String orderTerm(String renderedColumn, SortSpec sort, boolean existentialSort) {
+        boolean fold = sort.ignoreCase() && !existentialSort;
+        return (fold ? "LOWER(" + renderedColumn + ")" : renderedColumn)
+                + (sort.ascending() ? " ASC" : " DESC");
     }
 
     /**
@@ -469,6 +640,11 @@ public final class SqlBuilder {
         return dialect.quoteIdentifier(qualifier) + "." + dialect.quoteIdentifier(ref.column());
     }
 
+    /** The name an owner is referenced by in a join condition: its alias, or its table name when unaliased. */
+    private static String ownerQualifier(JoinRef join) {
+        return join.ownerAlias() == null ? join.ownerTableName() : join.ownerAlias();
+    }
+
     /**
      * The deduplicated {@code LEFT JOIN} chain these refs require. Each edge carries its own owner
      * and child table/alias, so rendering does not infer table identity from list position.
@@ -482,9 +658,7 @@ public final class SqlBuilder {
         for (ColumnRef ref : refs) {
             for (JoinRef join : ref.joins()) {
                 if (byAlias.putIfAbsent(join.childAlias(), join) != null) continue;
-                String ownerQualifier = join.ownerAlias() == null
-                        ? join.ownerTableName() : join.ownerAlias();
-                String owner = dialect.quoteIdentifier(ownerQualifier);
+                String owner = dialect.quoteIdentifier(ownerQualifier(join));
                 String alias = dialect.quoteIdentifier(join.childAlias());
                 sb.append(" LEFT JOIN ").append(dialect.quoteIdentifier(join.childTableName()))
                         .append(" AS ").append(alias)
@@ -496,22 +670,43 @@ public final class SqlBuilder {
     }
 
     private void appendWhere(StringBuilder sb, List<Predicate> predicates, String cursorClause) {
+        boolean hasOr = predicates.stream().anyMatch(p -> Connector.isOr(p.connector()));
+        boolean hasCursor = cursorClause != null && !cursorClause.isBlank();
         StringBuilder where = new StringBuilder();
         if (!predicates.isEmpty()) {
-            for (Predicate p : predicates) {
-                if (where.length() > 0) where.append(" AND ");
-                where.append(render(p));
+            List<String> conjuncts = new ArrayList<>(predicates.size());
+            List<Boolean> ors = new ArrayList<>(predicates.size());
+            for (int i = 0; i < predicates.size(); i++) {
+                conjuncts.add(render(predicates.get(i)));
+                ors.add(i > 0 && Connector.isOr(predicates.get(i).connector()));
             }
+            String userExpression = joinConjuncts(conjuncts, ors);
+            // The cursor conjunct is joined with AND and must not bind to the caller's last OR term,
+            // so an OR-bearing user expression is grouped before the cursor clause is appended.
+            where.append(hasOr && hasCursor ? "(" + userExpression + ")" : userExpression);
         }
-        if (cursorClause != null && !cursorClause.isBlank()) {
+        if (hasCursor) {
             if (where.length() > 0) where.append(" AND ");
             where.append(cursorClause);
         }
         if (where.length() > 0) sb.append(" WHERE ").append(where);
     }
 
+    /** Joins rendered conjuncts with each one's connector; entry 0's flag is ignored. */
+    private static String joinConjuncts(List<String> conjuncts, List<Boolean> ors) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < conjuncts.size(); i++) {
+            if (i > 0) {
+                sb.append(Boolean.TRUE.equals(ors.get(i)) ? " OR " : " AND ");
+            }
+            sb.append(conjuncts.get(i));
+        }
+        return sb.toString();
+    }
+
     private String render(Predicate p) {
-        return renderOperator(p.operator(), dialect.quoteIdentifier(Names.columnName(p.property())), p.param());
+        return renderOperator(p.operator(), dialect.quoteIdentifier(Names.columnName(p.property())), p.param(),
+                p.ignoreCase());
     }
 
     /**
@@ -523,17 +718,16 @@ public final class SqlBuilder {
                 && ref.ownerTableName() == null
                 ? dialect.quoteIdentifier(ref.column())
                 : qualify(dialect, ref, null);
-        return renderOperator(p.operator(), col, p.param());
+        return renderOperator(p.operator(), col, p.param(), p.ignoreCase());
     }
 
     private static String render(SqlDialect dialect, Predicate predicate, ColumnRef ref,
                                  String rootTable, boolean qualifyRoot) {
-        boolean localRootColumn = ref.joins().isEmpty() && ref.ownerAlias() == null
-                && (ref.ownerTableName() == null || rootTable.equals(ref.ownerTableName()));
+        boolean localRootColumn = isLocalTo(ref, rootTable);
         String col = localRootColumn && !qualifyRoot
                 ? dialect.quoteIdentifier(ref.column())
                 : qualify(dialect, ref, rootTable);
-        return renderOperator(predicate.operator(), col, predicate.param());
+        return renderOperator(predicate.operator(), col, predicate.param(), predicate.ignoreCase());
     }
 
     /**
@@ -546,11 +740,11 @@ public final class SqlBuilder {
      */
     private static String existsConjunct(SqlDialect dialect, Predicate p, ColumnRef ref) {
         JoinRef join = ref.joins().get(ref.joins().size() - 1);
-        String ownerQualifier = join.ownerAlias() == null ? join.ownerTableName() : join.ownerAlias();
+        String owner = ownerQualifier(join);
         return "EXISTS (SELECT 1 FROM " + dialect.quoteIdentifier(join.childTableName()) + " "
                 + dialect.quoteIdentifier(join.childAlias())
                 + " WHERE " + dialect.quoteIdentifier(join.childAlias()) + "." + dialect.quoteIdentifier(join.childColumn())
-                + " = " + dialect.quoteIdentifier(ownerQualifier) + "." + dialect.quoteIdentifier(join.ownerColumn())
+                + " = " + dialect.quoteIdentifier(owner) + "." + dialect.quoteIdentifier(join.ownerColumn())
                 + " AND " + render(dialect, p, ref) + ")";
     }
 
@@ -586,7 +780,7 @@ public final class SqlBuilder {
                     "aggregate sort term requires a relation path");
         }
         JoinRef head = ref.joins().get(0);
-        String ownerQualifier = head.ownerAlias() == null ? head.ownerTableName() : head.ownerAlias();
+        String owner = ownerQualifier(head);
         StringBuilder sb = new StringBuilder("(SELECT ")
                 .append(ascending ? "MIN(" : "MAX(")
                 .append(qualify(dialect, ref, md.tableName()))
@@ -594,7 +788,7 @@ public final class SqlBuilder {
                 .append(' ').append(dialect.quoteIdentifier(head.childAlias()));
         for (int i = 1; i < ref.joins().size(); i++) {
             JoinRef join = ref.joins().get(i);
-            String joinOwner = join.ownerAlias() == null ? join.ownerTableName() : join.ownerAlias();
+            String joinOwner = ownerQualifier(join);
             sb.append(" LEFT JOIN ").append(dialect.quoteIdentifier(join.childTableName()))
                     .append(" AS ").append(dialect.quoteIdentifier(join.childAlias()))
                     .append(" ON ").append(dialect.quoteIdentifier(joinOwner)).append('.')
@@ -604,7 +798,7 @@ public final class SqlBuilder {
         }
         sb.append(" WHERE ").append(dialect.quoteIdentifier(head.childAlias())).append('.')
                 .append(dialect.quoteIdentifier(head.childColumn()))
-                .append(" = ").append(dialect.quoteIdentifier(ownerQualifier)).append('.')
+                .append(" = ").append(dialect.quoteIdentifier(owner)).append('.')
                 .append(dialect.quoteIdentifier(head.ownerColumn()))
                 .append(')');
         return sb.toString();
@@ -624,11 +818,16 @@ public final class SqlBuilder {
      */
     private static String qualifiedRootSelect(SqlDialect dialect, TableSchema md, List<ColumnRef> traversedToOne,
                                               boolean qualified, String extraProjection) {
+        return qualifiedRootSelect(dialect, md, traversedToOne, qualified, extraProjection, false);
+    }
+
+    private static String qualifiedRootSelect(SqlDialect dialect, TableSchema md, List<ColumnRef> traversedToOne,
+                                              boolean qualified, String extraProjection, boolean distinct) {
         if (!qualified && extraProjection != null && !extraProjection.isEmpty()) {
             throw new IllegalStateException("bare projection cannot carry extraProjection");
         }
         StringBuilder sb = new StringBuilder();
-        sb.append("SELECT ").append(md.columns().stream()
+        sb.append(distinct ? "SELECT DISTINCT " : "SELECT ").append(md.columns().stream()
                 .map(c -> qualified ? qualifiedColumn(dialect, md.tableName(), c.column())
                         : dialect.quoteIdentifier(c.column()))
                 .collect(Collectors.joining(", ")));
@@ -644,6 +843,28 @@ public final class SqlBuilder {
         return dialect.quoteIdentifier(qualifier) + "." + dialect.quoteIdentifier(column);
     }
 
+    private static String renderOperator(Operator op, String col, String param, boolean ignoreCase) {
+        return ignoreCase ? renderIgnoreCase(op, col, param) : renderOperator(op, col, param);
+    }
+
+    /**
+     * The case-folding form of an operator, wrapping both sides in {@code LOWER(...)}. Only the
+     * operators where folding changes the comparison are listed; {@code In}/{@code NotIn} fall through
+     * (their argument is a collection, so folding one bound token would be wrong) as do the nullary
+     * and range operators, for which case is meaningless.
+     */
+    private static String renderIgnoreCase(Operator op, String col, String param) {
+        String lowerCol = "LOWER(" + col + ")";
+        String lowerParam = "LOWER(:" + param + ")";
+        return switch (op) {
+            case EQ, IGNORE_CASE_EQ -> lowerCol + " = " + lowerParam;
+            case NOT_EQ -> lowerCol + " <> " + lowerParam;
+            case LIKE, CONTAINS, STARTS_WITH, ENDS_WITH -> lowerCol + " LIKE " + lowerParam;
+            case NOT_LIKE, NOT_CONTAINS, NOT_STARTS_WITH, NOT_ENDS_WITH -> lowerCol + " NOT LIKE " + lowerParam;
+            default -> renderOperator(op, col, param);
+        };
+    }
+
     private static String renderOperator(Operator op, String col, String param) {
         return switch (op) {
             case EQ -> col + " = :" + param;
@@ -653,8 +874,15 @@ public final class SqlBuilder {
             case GREATER_THAN -> col + " > :" + param;
             case GREATER_THAN_EQUAL -> col + " >= :" + param;
             case LIKE, CONTAINS, STARTS_WITH, ENDS_WITH -> col + " LIKE :" + param;
-            case NOT_LIKE -> col + " NOT LIKE :" + param;
-            case BETWEEN -> col + " BETWEEN :" + param + "_0 AND :" + param + "_1";
+            case NOT_LIKE, NOT_CONTAINS, NOT_STARTS_WITH, NOT_ENDS_WITH -> col + " NOT LIKE :" + param;
+            case BETWEEN -> {
+                List<String> bounds = paramNames(op, param);
+                yield col + " BETWEEN :" + bounds.get(0) + " AND :" + bounds.get(1);
+            }
+            case NOT_BETWEEN -> {
+                List<String> bounds = paramNames(op, param);
+                yield col + " NOT BETWEEN :" + bounds.get(0) + " AND :" + bounds.get(1);
+            }
             case IN -> col + " IN (:" + param + ")";
             case NOT_IN -> col + " NOT IN (:" + param + ")";
             case IS_NULL -> col + " IS NULL";

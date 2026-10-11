@@ -69,6 +69,13 @@
                             <artifactId>fluda-data-processor</artifactId>
                             <version>${project.version}</version>
                         </path>
+                        <!-- Query-by-method-name support is an OPTIONAL processor dependency: a
+                             repository using findBy.../countBy.../deleteBy... names must declare it. -->
+                        <path>
+                            <groupId>io.github.fludakit</groupId>
+                            <artifactId>fluda-data-qbn</artifactId>
+                            <version>${project.version}</version>
+                        </path>
                         <!-- The processor references @ApplicationScoped/@Inject at runtime; its own
                              cdi-api dependency is `provided`, so it is not resolved transitively here. -->
                         <path>

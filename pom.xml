@@ -116,7 +116,13 @@
     </build>
 
     <profiles>
-        <!-- Module-specific profiles can be added here -->
+        <!--
+          Module-specific profiles can be added here.
+
+          The Jakarta Data TCK runner is not part of this reactor: it lives in tck-runner/, which is
+          git-ignored and run standalone when someone wants to verify against the TCK. See
+          tck-runner/README.md.
+        -->
     </profiles>
 
     <distributionManagement>

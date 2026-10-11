@@ -17,7 +17,7 @@ public interface CustomerRepository extends CrudRepository<Customer, Long> {
 
     @Find
     @OrderBy("name")
-    List<Customer> findByEmailLike(@By("email") String emailPattern);
+    List<Customer> findByEmail(@By("email") String email);
 
     @Find
     @OrderBy("id")

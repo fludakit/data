@@ -32,11 +32,17 @@ class CustomerRepositoryTest {
         assertThat(ana.getId()).isNotNull();
         assertThat(customers.findById(ana.getId())).isPresent();
         assertThat(customers.findByName("Ana")).hasSize(1);
-        assertThat(customers.findByEmailLike("%example.com")).hasSize(1);
+        assertThat(customers.findByEmail("ana@example.com")).hasSize(1);
 
         Product book = products.insert(product("DDD", new BigDecimal("39.99")));
         assertThat(products.findByName("DDD")).hasSize(1);
         assertThat(products.findByPriceGreaterThan(new BigDecimal("10"))).hasSize(1);
+        // BETWEEN binds both bounds — before the fix only :low_0 was bound and the query failed at
+        // execution time.
+        assertThat(products.findByPriceBetween(new BigDecimal("30"), new BigDecimal("50")))
+                .extracting(Product::getName).containsExactly("DDD");
+        assertThat(products.findByPriceBetween(new BigDecimal("40"), new BigDecimal("50"))).isEmpty();
+        assertThat(products.findByNameLike("%DD%")).extracting(Product::getName).containsExactly("DDD");
     }
 
     @Test

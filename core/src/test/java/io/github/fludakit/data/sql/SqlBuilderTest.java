@@ -11,6 +11,7 @@ import io.github.fludakit.data.metamodel.ListAttributeRecord;
 import io.github.fludakit.data.metamodel.PathAttribute;
 import io.github.fludakit.data.metamodel.PathAttributeRecord;
 import io.github.fludakit.data.metamodel.TextScalarAttributeRecord;
+import io.github.fludakit.data.query.Connector;
 import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.SortSpec;
@@ -115,6 +116,55 @@ class SqlBuilderTest {
                         new ColumnRef("address_city", "profile"));
             }
         };
+    }
+
+    @Test
+    void rendersNegatedPredicateOperators() {
+        assertThat(render(Predicate.of("name", Operator.NOT_IN, "name")))
+                .isEqualTo("SELECT \"id\", \"name\" FROM \"customer\" WHERE \"name\" NOT IN (:name)");
+        assertThat(render(Predicate.of("name", Operator.NOT_BETWEEN, "name")))
+                .isEqualTo("SELECT \"id\", \"name\" FROM \"customer\""
+                        + " WHERE \"name\" NOT BETWEEN :name_0 AND :name_1");
+        for (Operator negated : List.of(Operator.NOT_LIKE, Operator.NOT_CONTAINS,
+                Operator.NOT_STARTS_WITH, Operator.NOT_ENDS_WITH)) {
+            assertThat(render(Predicate.of("name", negated, "name")))
+                    .describedAs("%s must render as NOT LIKE", negated)
+                    .isEqualTo("SELECT \"id\", \"name\" FROM \"customer\" WHERE \"name\" NOT LIKE :name");
+        }
+    }
+
+    @Test
+    void orderByFoldsCaseWhenTheSortAsksForIt() {
+        assertThat(new SqlBuilder(customer()).selectBy(List.of(),
+                List.of(SortSpec.of("name", true, true)), 0, null))
+                .isEqualTo("SELECT \"id\", \"name\" FROM \"customer\" ORDER BY LOWER(\"name\") ASC");
+        assertThat(new SqlBuilder(customer()).selectBy(List.of(),
+                List.of(SortSpec.of("name", true, false)), 0, null))
+                .isEqualTo("SELECT \"id\", \"name\" FROM \"customer\" ORDER BY \"name\" ASC");
+    }
+
+    private static String render(Predicate predicate) {
+        return new SqlBuilder(customer()).selectBy(List.of(predicate), List.of(), 0, null);
+    }
+
+    @Test
+    void rendersIgnoreCasePredicatesByFoldingBothSides() {
+        assertThat(render(Predicate.of("name", Operator.EQ, "name", Connector.AND, true)))
+                .isEqualTo("SELECT \"id\", \"name\" FROM \"customer\" WHERE LOWER(\"name\") = LOWER(:name)");
+        assertThat(render(Predicate.of("name", Operator.NOT_LIKE, "name", Connector.AND, true)))
+                .isEqualTo("SELECT \"id\", \"name\" FROM \"customer\" WHERE LOWER(\"name\") NOT LIKE LOWER(:name)");
+        assertThat(render(Predicate.of("name", Operator.CONTAINS, "name", Connector.AND, true)))
+                .isEqualTo("SELECT \"id\", \"name\" FROM \"customer\" WHERE LOWER(\"name\") LIKE LOWER(:name)");
+    }
+
+    @Test
+    void ignoreCaseLeavesOperatorsWhereCaseIsMeaninglessAlone() {
+        // A range and the nullary operators are not case-sensitive comparisons; folding them would
+        // produce nonsense, so they render unchanged.
+        assertThat(render(Predicate.of("id", Operator.GREATER_THAN, "id", Connector.AND, true)))
+                .isEqualTo("SELECT \"id\", \"name\" FROM \"customer\" WHERE \"id\" > :id");
+        assertThat(render(Predicate.of("name", Operator.IS_NULL, "name", Connector.AND, true)))
+                .isEqualTo("SELECT \"id\", \"name\" FROM \"customer\" WHERE \"name\" IS NULL");
     }
 
     @Test

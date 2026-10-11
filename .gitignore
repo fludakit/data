@@ -29,3 +29,7 @@ target/
 site
 .mvn/target/
 docs/
+
+# The Jakarta Data TCK runner is a local verification module, enabled through the opt-in `tck`
+# profile in pom.xml (-Drundatatck). It is not tracked.
+tck-runner/

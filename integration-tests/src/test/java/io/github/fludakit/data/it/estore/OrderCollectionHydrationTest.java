@@ -19,10 +19,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * hydration: reads (findById, findAll, paged) materialize the parents then group children onto each
  * one; update replaces the whole child set (delete + re-insert); delete cascades the children.
  *
- * <p>Contract lock (Decision 8): in this iteration hydration covers element collections only — the
- * {@code @Association} header target ({@code Order.getCustomer()}) and the {@code @Association} child
- * target ({@code OrderItem.getProduct()}) are NEVER populated on read; they stay {@code null}. Task 4
- * widens hydration to many-to-one / one-to-many.</p>
+ * <p>Contract lock: hydration covers element collections only — the {@code @Association} header
+ * target ({@code Order.getCustomer()}) and the {@code @Association} child target
+ * ({@code OrderItem.getProduct()}) are never fully populated by the collection loader; an
+ * {@code @Association} reference reached that way stays {@code null} rather than being hydrated. The
+ * relationship kinds are exercised by the {@code it/team} corpus instead.</p>
  */
 @EnableAutoWeld
 @AddPackages(Order.class)
@@ -50,8 +51,9 @@ class OrderCollectionHydrationTest {
         Order found = orders.findById(saved.getId()).orElseThrow();
         assertThat(found.getOrderItems()).hasSize(2);
         assertThat(found.getOrderItems()).extracting(OrderItem::getQuantity).containsExactlyInAnyOrder(2, 5);
-        // Task 9 partial materialisation covers entity ROW-MAPPER reads only; association fields on
-        // children materialized by the collection loader stay null (deferred to the estore task).
+        // Partial materialisation covers entity row-mapper reads only: there an @Association target
+        // is rebuilt as an id-only partial, whereas children rebuilt by the element-collection
+        // loader leave their association field untouched, i.e. null.
         assertThat(found.getOrderItems()).allSatisfy(i -> assertThat(i.getProduct()).isNull());
         assertThat(found.getCustomer()).isNotNull();
         assertThat(found.getCustomer().getId()).isEqualTo(ana.getId());
@@ -79,8 +81,8 @@ class OrderCollectionHydrationTest {
 
     @Test
     void findByAmountHydratesOrderItems() {
-        // I-2: a hydrated LIST @Find must run the umbrella — the returned orders carry hydrated
-        // orderItems (and the Decision 8 @Association child target stays null through this read too).
+        // A hydrated LIST @Find must run the umbrella loader, so the returned orders carry hydrated
+        // orderItems — while the @Association child target still stays null through this read too.
         Customer ana = customers.save(customer("Ana", "ana@example.com"));
         Product widget = products.save(product("Widget", new BigDecimal("1.00")));
         Order order = new Order(ana);

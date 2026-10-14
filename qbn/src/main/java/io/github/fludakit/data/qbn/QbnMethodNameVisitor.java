@@ -1,6 +1,5 @@
 package io.github.fludakit.data.qbn;
 
-import io.github.fludakit.data.query.Action;
 import io.github.fludakit.data.query.Connector;
 import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.Predicate;
@@ -12,22 +11,36 @@ public class QbnMethodNameVisitor extends QbnBaseVisitor<ParsedMethodName> {
 
     @Override
     public ParsedMethodName visitMethodName(QbnParser.MethodNameContext ctx) {
-        Action action = Action.of(ctx.action().getText());
+        // "find" is the only action with a limit and an order; delete/count/exists have neither, so
+        // the two live on separate rules rather than on one rule with optional parts.
+        QbnParser.FindQueryContext find = ctx.findQuery();
+        String actionText = find != null ? find.FIND().getText() : ctx.actionQuery().action().getText();
+        Action action = Action.of(actionText);
         if (action == null) {
-            throw new IllegalArgumentException("Unknown action: " + ctx.action().getText());
+            throw new IllegalArgumentException("Unknown action: " + actionText);
+        }
+        boolean distinct = find != null ? find.DISTINCT() != null : ctx.actionQuery().DISTINCT() != null;
+        if (distinct && action != Action.FIND && action != Action.COUNT) {
+            // De-duplicating rows the statement neither selects nor counts has no meaning, so the
+            // name is rejected rather than parsed and quietly stripped of its Distinct.
+            throw new IllegalArgumentException(
+                    "Distinct is only meaningful for find and count, not for " + action.prefix());
         }
         int limit = 0;
-        if (ctx.first() != null) {
+        if (find != null && find.first() != null) {
             // FIRST token text is "First" optionally followed by the max-results digits.
-            String digits = ctx.first().FIRST().getText().substring("First".length());
+            String digits = find.first().FIRST().getText().substring("First".length());
             limit = digits.isEmpty() ? 1 : Integer.parseInt(digits);
         }
 
         List<Predicate> predicates = new ArrayList<>();
         List<SortSpec> sorts = new ArrayList<>();
-        if (ctx.conditionList() != null) {
-            List<QbnParser.ConnectorContext> connectors = ctx.conditionList().connector();
-            List<QbnParser.ConditionContext> conditions = ctx.conditionList().condition();
+        QbnParser.RestrictionContext restriction =
+                find != null ? find.restriction() : ctx.actionQuery().restriction();
+        if (restriction != null) {
+            QbnParser.ConditionListContext list = restriction.conditionList();
+            List<QbnParser.ConnectorContext> connectors = list.connector();
+            List<QbnParser.ConditionContext> conditions = list.condition();
             for (int i = 0; i < conditions.size(); i++) {
                 // Condition i is preceded by connector i-1; the first predicate's connector is ignored.
                 Connector connector = i == 0 ? Connector.AND
@@ -35,13 +48,13 @@ public class QbnMethodNameVisitor extends QbnBaseVisitor<ParsedMethodName> {
                 predicates.add(predicate(conditions.get(i), connector));
             }
         }
-        if (ctx.orderList() != null) {
-            for (QbnParser.OrderItemContext o : ctx.orderList().orderItem()) {
+        if (find != null && find.order() != null) {
+            for (QbnParser.OrderItemContext o : find.order().orderList().orderItem()) {
                 boolean asc = o.DESC() == null;
                 sorts.add(SortSpec.of(propertyName(o.property()), asc, o.IGNORE_CASE() != null));
             }
         }
-        return new ParsedMethodName(action, ctx.DISTINCT() != null, predicates, sorts, limit);
+        return new ParsedMethodName(action, distinct, predicates, sorts, limit);
     }
 
     private Predicate predicate(QbnParser.ConditionContext ctx, Connector connector) {
@@ -50,33 +63,45 @@ public class QbnMethodNameVisitor extends QbnBaseVisitor<ParsedMethodName> {
     }
 
     private Operator operator(QbnParser.ConditionContext ctx) {
-        boolean not = ctx.NOT() != null;
-        QbnParser.OperatorContext op = ctx.operator();
-
-        Operator base;
-        if (op == null) {
-            base = Operator.EQ;
-        } else if (op.BETWEEN() != null) base = Operator.BETWEEN;
-        else if (op.CONTAINS() != null) base = Operator.CONTAINS;
-        else if (op.STARTS_WITH() != null) base = Operator.STARTS_WITH;
-        else if (op.ENDS_WITH() != null) base = Operator.ENDS_WITH;
-        else if (op.LESS_THAN_EQUAL() != null) base = Operator.LESS_THAN_EQUAL;
-        else if (op.GREATER_THAN_EQUAL() != null) base = Operator.GREATER_THAN_EQUAL;
-        else if (op.LESS_THAN() != null) base = Operator.LESS_THAN;
-        else if (op.GREATER_THAN() != null) base = Operator.GREATER_THAN;
-        else if (op.LIKE() != null) base = Operator.LIKE;
-        else if (op.IN() != null) base = Operator.IN;
-        else if (op.IS_NULL() != null) base = Operator.IS_NULL;
-        else if (op.IS_TRUE() != null) base = Operator.TRUE;
-        else if (op.IS_FALSE() != null) base = Operator.FALSE;
-        else base = Operator.EQ;
-
-        if (not) {
+        // An absent operator token is equality — findByName means name = ?. That is a DIFFERENT case
+        // from an operator token this visitor does not map, which is rejected in operatorOf.
+        Operator base = ctx.operator() == null ? Operator.EQ : operatorOf(ctx.operator());
+        if (ctx.NOT() != null) {
             base = negate(base);
         }
         // Case folding is an orthogonal modifier: it rides on the predicate, not on the operator, so
         // it composes with every operator rather than only with equality.
         return base;
+    }
+
+    /**
+     * The operator a condition's {@code operator} token stands for.
+     *
+     * <p>A SWITCH over the token type rather than a chain of {@code op.X() != null} tests, because
+     * the grammar's {@code operator} rule is a single token drawn from twelve: the mapping is a
+     * table, and a table is what it should read as. The chain could not say so — its last {@code
+     * else} fell back to {@code Operator.EQ}, so an operator the grammar grew into without this
+     * method noticing rendered as {@code =} instead of failing, which is the one thing {@link
+     * #negate} refuses to do on principle. The {@code default} arm is that same refusal, now the
+     * switch's terminus rather than a tail that reads like a default.</p>
+     */
+    private static Operator operatorOf(QbnParser.OperatorContext op) {
+        return switch (op.getStart().getType()) {
+            case QbnLexer.BETWEEN -> Operator.BETWEEN;
+            case QbnLexer.CONTAINS -> Operator.CONTAINS;
+            case QbnLexer.STARTS_WITH -> Operator.STARTS_WITH;
+            case QbnLexer.ENDS_WITH -> Operator.ENDS_WITH;
+            case QbnLexer.LESS_THAN_EQUAL -> Operator.LESS_THAN_EQUAL;
+            case QbnLexer.GREATER_THAN_EQUAL -> Operator.GREATER_THAN_EQUAL;
+            case QbnLexer.LESS_THAN -> Operator.LESS_THAN;
+            case QbnLexer.GREATER_THAN -> Operator.GREATER_THAN;
+            case QbnLexer.LIKE -> Operator.LIKE;
+            case QbnLexer.IN -> Operator.IN;
+            case QbnLexer.IS_NULL -> Operator.IS_NULL;
+            case QbnLexer.IS_TRUE -> Operator.TRUE;
+            case QbnLexer.IS_FALSE -> Operator.FALSE;
+            default -> throw new IllegalArgumentException("Unmapped operator '" + op.getText() + "'");
+        };
     }
 
     /**

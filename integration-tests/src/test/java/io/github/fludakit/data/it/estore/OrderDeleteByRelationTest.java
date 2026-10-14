@@ -13,7 +13,7 @@ import java.math.BigDecimal;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Plan C C-1: executes the compile-side EXISTS rendering against H2. A {@code deleteBy} whose
+ * Executes the compile-side EXISTS rendering against H2. A {@code deleteBy} whose
  * predicate traverses one relation is emitted as a correlated EXISTS semi-join (never a joined
  * {@code DELETE ... LEFT JOIN}, which is invalid SQL), in both head directions: the many-to-one
  * ({@code customer.name}) and the element-collection ({@code orderItems.quantity}).

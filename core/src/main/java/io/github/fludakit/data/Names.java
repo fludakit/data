@@ -3,10 +3,10 @@ package io.github.fludakit.data;
 public final class Names {
     private Names() {}
 
-    public static String toSnakeCase(String s) {
+    public static String toSnakeCase(String javaName) {
         StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
+        for (int i = 0; i < javaName.length(); i++) {
+            char c = javaName.charAt(i);
             if (Character.isUpperCase(c)) {
                 if (i > 0) sb.append('_');
                 sb.append(Character.toLowerCase(c));
@@ -17,10 +17,22 @@ public final class Names {
         return sb.toString();
     }
 
-    public static String columnName(String property) { return toSnakeCase(property); }
+    /**
+     * The snake-cased BASE a property contributes to a column — not the whole column for a
+     * composite path. For a plain scalar the base IS the column ({@code lastName → last_name});
+     * for an embedded path it is only the leading segment, and the CALLER completes it
+     * ({@code address} + {@code "_"} + {@code city}), which is what the flattening in
+     * {@code TypeMapping} does.
+     *
+     * <p>Named for the base rather than the column because the two are NOT the same and the
+     * difference is invisible at a call site — both are {@code Names.columnBase(property)}, so a
+     * caller cannot tell from the call which one it got. A dotted path is not a column either:
+     * {@code toSnakeCase} leaves the {@code '.'} alone, so {@code address.city} does not become
+     * {@code address_city}, and a caller holding a dotted path has to flatten it first.
+     */
+    public static String columnBase(String property) { return toSnakeCase(property); }
     public static String fkColumn(String property) { return toSnakeCase(property) + "_id"; }
     public static String tableName(Class<?> type) { return tableName(type.getSimpleName()); }
     public static String tableName(String simpleName) { return toSnakeCase(simpleName); }
     public static String childTable(String parentTable, String field) { return parentTable + "_" + toSnakeCase(field); }
-    public static String quote(String identifier) { return "\"" + identifier + "\""; }
 }

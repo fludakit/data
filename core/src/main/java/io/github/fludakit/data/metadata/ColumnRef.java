@@ -1,57 +1,53 @@
 package io.github.fludakit.data.metadata;
 
 /**
- * A physical column placement in the aggregate tree, classified by its relation role.
+ * Where a column physically lives: <em>which column, on which table</em>. Nothing else.
  *
- * <p>Each case carries the information {@code SqlBuilder} needs to qualify and join the column; the
- * SQL alias for a table is always the table name itself, applied at assembly time.</p>
+ * <p>This is deliberately the whole of it. A {@code ColumnRef} carries NO table-to-table
+ * relationship knowledge — that is {@link JoinEdge}'s job — and no notion of how a column was
+ * reached — that is {@link ColumnPlacement}'s. It used to carry all three, which is why it needed
+ * {@code targetTable}/{@code childTable}/{@code ownerColumn} fields a column placement has no
+ * business knowing about, and why {@code table()} answered two different questions depending on
+ * which case you held.</p>
+ *
+ * <p>Both cases are placements ON the table named by {@link #table()}; they differ only in what the
+ * column MEANS, not in where it is or how it is rendered. {@link ForeignKey} exists so a caller can
+ * tell "this column is a to-one reference's own FK" from "this column is a scalar" without a
+ * name-shape guess, and so the generated {@code resolve} can hand back {@code author} as a
+ * placement with no edge to cross — reading the FK needs no join.</p>
  */
 public sealed interface ColumnRef {
 
     /** The physical column name. */
     String column();
 
-    /** The physical table the column lives on. */
+    /** The physical table the column lives on, or {@code null} for a table-less value object. */
     String table();
 
     /**
-     * A plain column on its own table: an identifier, scalar, or a flattened embedded value-object
-     * leaf. Carries no relation edge.
+     * An ordinary column: identifier, scalar, or a flattened embedded value-object leaf.
      *
      * @param column     the physical column name
      * @param ownerTable the physical table containing the column
      */
     record Simple(String column, String ownerTable) implements ColumnRef {
-        @Override public String table() { return ownerTable; }
+        @Override
+        public String table() {
+            return ownerTable;
+        }
     }
 
     /**
-     * The to-one foreign-key column in the OWNER table referencing an external entity. Doubles as the
-     * join edge {@code ownerTable.fkColumn = targetTable.targetIdColumn} when a path traverses it.
+     * A to-one foreign key — physically ON this table, so reading it needs no join. Traversing it
+     * does, and that traversal is a {@link JoinEdge}, not part of this placement.
      *
-     * @param fkColumn       the FK column in the owner table
-     * @param ownerTable     the table carrying the FK
-     * @param targetTable    the referenced entity's table
-     * @param targetIdColumn the referenced entity's identifier column
+     * @param column     the physical FK column name
+     * @param ownerTable the physical table carrying the FK
      */
-    record Reference(String fkColumn, String ownerTable, String targetTable,
-                     String targetIdColumn) implements ColumnRef {
-        @Override public String column() { return fkColumn; }
-        @Override public String table() { return ownerTable; }
-    }
-
-    /**
-     * The to-many foreign-key column in a CHILD table pointing back to the owner. Encodes the join
-     * edge {@code ownerTable.ownerIdColumn = childTable.fkColumn}.
-     *
-     * @param fkColumn      the FK column in the child table
-     * @param childTable    the child table carrying the FK
-     * @param ownerTable    the owner table referenced by the FK
-     * @param ownerIdColumn the owner table's identifier column
-     */
-    record Collection(String fkColumn, String childTable, String ownerTable,
-                      String ownerIdColumn) implements ColumnRef {
-        @Override public String column() { return fkColumn; }
-        @Override public String table() { return childTable; }
+    record ForeignKey(String column, String ownerTable) implements ColumnRef {
+        @Override
+        public String table() {
+            return ownerTable;
+        }
     }
 }

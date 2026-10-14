@@ -11,17 +11,17 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Round-trips the two entity-relationship kinds through the generated hydration (Task 4): the
+ * Round-trips the two entity-relationship kinds through the generated hydration: the
  * one-to-many {@code Team.players} loader groups rows read from the player's own table by the
- * {@code team_id} inverse fk; since Task 12 both classes are {@code @Entity}, so the many-to-one
- * {@code Player.team} side is an association materialised id-only by the player row mapper
- * (Task 9 partial rule) rather than the former two-phase fetch.
+ * {@code team_id} inverse fk. Both fixture classes are {@code @Entity}, so the many-to-one
+ * {@code Player.team} side is an association, materialised id-only by the player row mapper
+ * rather than eagerly hydrated in a second phase.
  *
- * <p>Contract locks (ruling 6, Task-12 @Entity amendment): hydration stays depth-1 — hydrated
- * children carry their back-reference as an id-only PARTIAL (non-composing Reference inside an
- * {@code @Entity} owner, Task 9 row-mapper rule: non-null id, null name, empty collections) — and a
- * partial parent reference does NOT cascade on update: replace-all applies to element collections
- * only (Decision 5), and composition write cascades are gated on {@code @AggregateRoot} (I-1).</p>
+ * <p>Contract locks: hydration stays depth-1 — hydrated children carry their back-reference as an
+ * id-only PARTIAL (a non-composing Reference reached from an {@code @Entity} owner materialises with
+ * a non-null id, a null name and empty collections) — and a partial parent reference does NOT
+ * cascade on update: replace-all applies to element collections only, and composition write
+ * cascades require {@code @AggregateRoot}.</p>
  */
 @EnableAutoWeld
 @AddPackages(Team.class)
@@ -52,7 +52,7 @@ class TeamPlayerHydrationTest {
         assertThat(found.getPlayers()).extracting(Player::getName)
                 .containsExactlyInAnyOrder("Ramos", "Navas");
         // depth-1 the one way: the child row mapper materialises the non-composing team Reference
-        // as an id-only partial (Task 9 @Entity-owner rule) — no nested hydration beneath it.
+        // as an id-only partial — no nested hydration beneath it.
         assertThat(found.getPlayers()).allSatisfy(p -> {
             assertThat(p.getTeam()).isNotNull();
             assertThat(p.getTeam().getId()).isEqualTo(savedTeam.getId());
@@ -61,8 +61,8 @@ class TeamPlayerHydrationTest {
         });
 
         Player foundPlayer = players.findById(striker.getId()).orElseThrow();
-        // Task 12: Player is @Entity, so the bare `team` field is an ASSOCIATION (non-composing
-        // Reference), not composition — direct reads materialise it id-only, not fully hydrated.
+        // Player is @Entity rather than @AggregateRoot, so the bare `team` field is an ASSOCIATION
+        // (non-composing Reference), not a composition — direct reads materialise it id-only.
         assertThat(foundPlayer.getTeam()).isNotNull();
         assertThat(foundPlayer.getTeam().getId()).isEqualTo(savedTeam.getId());
         assertThat(foundPlayer.getTeam().getName())
@@ -74,7 +74,7 @@ class TeamPlayerHydrationTest {
         players.update(foundPlayer);
         assertThat(teams.findById(savedTeam.getId()).orElseThrow().getName()).isEqualTo("Falcons");
         // ^ documents that a partial MANY_TO_ONE target is NOT cascaded on update — replace-all
-        //   applies to element collections only (Decision 5) and composition cascades are gated on
-        //   @AggregateRoot (I-1); this assertion locks that boundary.
+        //   applies to element collections only, and composition cascades require @AggregateRoot;
+        //   this assertion locks that boundary.
     }
 }

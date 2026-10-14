@@ -17,9 +17,10 @@ public interface ProfileRepository extends CrudRepository<Profile, Long> {
     @OrderBy("address.city")
     List<Profile> orderedByCity();
 
-    // Task 7: predicate THROUGH the composition entity collection (camel path head "workHistory"
-    // (EntityCollection) + leaf "company"), rendering the Task 5 EXISTS semi-join on both the root list
-    // and the unjoined COUNT(*) total — the root can never fan out with the children. The @Find
+    // Predicate THROUGH the composition entity collection: the camel path resolves its head
+    // "workHistory" (the EntityCollection) and its leaf "company" (a plain column of
+    // WorkExperience), and renders an EXISTS semi-join — never a LEFT JOIN — on both the root list
+    // and the unjoined COUNT(*) total, so a root can never fan out with its children. The @Find
     // overload declares the path with @By; the COUNT below is unannotated, so it stays a
     // query-by-method name and is resolved from the method name.
     @Find

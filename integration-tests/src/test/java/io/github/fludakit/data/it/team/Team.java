@@ -11,10 +11,11 @@ import java.util.List;
  * it classifies ONE_TO_MANY ({@code Prop.EntityCollection}) with the inverse resolved to {@code Player.team},
  * and the generated read loader groups rows from the player's OWN table by the {@code team_id} fk.
  *
- * <p>Task 12: {@code @Entity} (not {@code @AggregateRoot}) — the read loader is stereotype-independent,
- * but the composition WRITE cascade is gated on {@code @AggregateRoot} (I-1): children are managed
- * explicitly through {@link PlayerRepository} and {@code teams.save/update/delete} never insert, replace
- * or delete player rows. This is the directive's "collections of associated objects" case.</p>
+ * <p>{@code @Entity} rather than {@code @AggregateRoot}: the read loader behaves the same for both
+ * stereotypes, but the composition WRITE cascade is reserved for {@code @AggregateRoot} — children
+ * are managed explicitly through {@link PlayerRepository} and {@code teams.save/update/delete} never
+ * insert, replace or delete player rows. This is the directive's "collections of associated
+ * objects" case.</p>
  */
 @Entity
 public class Team {

@@ -13,12 +13,14 @@ public interface OrderRepository extends CrudRepository<Order, Long> {
     @Find
     List<Order> findByAmount(@By("amount") BigDecimal amount);
 
-    // Task 10: predicate through the @Association customer -> target's name; @By declares the
-    // traversal and the resolver descends the relation head, contributing one join (mapRow_full_ path).
+    // Predicate through the @Association reference {@code customer} and on to the target's name:
+    // @By declares the traversal and the resolver descends the relation head, contributing one join
+    // (the mapRow_full_ path).
     @Find
     List<Order> findByCustomerName(@By("customer.name") String name);
 
-    // Plan C C-1: method-name DELETE through a relation, rendered as correlated EXISTS semi-joins.
+    // Method-name DELETE through a relation: emitted as correlated EXISTS semi-joins, because a
+    // joined DELETE ... LEFT JOIN is not valid SQL.
     void deleteByCustomerName(String name);
 
     void deleteByOrderItemsQuantityGreaterThan(int quantity);

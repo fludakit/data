@@ -1,6 +1,7 @@
 package io.github.fludakit.data.it.estore;
 
 import io.github.fludakit.data.it.DataSourceProducer;
+import io.github.fludakit.jdbc.JdbcClient;
 
 import jakarta.data.page.CursoredPage;
 import jakarta.data.page.Page;
@@ -37,7 +38,7 @@ class CustomerRepositoryTest {
         Product book = products.insert(product("DDD", new BigDecimal("39.99")));
         assertThat(products.findByName("DDD")).hasSize(1);
         assertThat(products.findByPriceGreaterThan(new BigDecimal("10"))).hasSize(1);
-        // BETWEEN binds both bounds — before the fix only :low_0 was bound and the query failed at
+        // BETWEEN binds both bounds — before the fix only :low_from was bound and the query failed at
         // execution time.
         assertThat(products.findByPriceBetween(new BigDecimal("30"), new BigDecimal("50")))
                 .extracting(Product::getName).containsExactly("DDD");
@@ -97,7 +98,7 @@ class CustomerRepositoryTest {
         assertThat(saved.getId()).isNotNull();
 
         Order reloaded = orders.findById(saved.getId()).orElseThrow();
-        // Task 9: a @Association field materializes as an id-only partial in the row mapper.
+        // An @Association reference target materializes as an id-only partial in the row mapper.
         assertThat(reloaded.getCustomer()).isNotNull();
         assertThat(reloaded.getCustomer().getId()).isEqualTo(ana.getId());
         assertThat(reloaded.getCustomer().getName()).isNull();
@@ -117,6 +118,23 @@ class CustomerRepositoryTest {
             CursoredPage<Customer> second = (CursoredPage<Customer>) customers.paged(first.nextPageRequest());
             assertThat(second.content()).isNotEmpty();
         }
+    }
+
+    @Test
+    void exposesTheInjectedJdbcClientThroughADeclaredAccessor() {
+        // CustomerRepository declares `JdbcClient getJdbcClient();` like any other method, and the
+        // generated CustomerRepositoryImpl answers it with the client its own generated methods run
+        // through. An ad-hoc statement proves it is the SAME connection, not a second one: the rows
+        // counted are the rows this repository just inserted.
+        customers.insert(customer("Ana", "ana@example.com"));
+        customers.insert(customer("Bo", "bo@example.com"));
+
+        JdbcClient client = customers.getJdbcClient();
+        assertThat(client).isNotNull();
+        assertThat(client.sql("SELECT COUNT(*) FROM \"customer\"").singleValue(Long.class)).isEqualTo(2L);
+        // A statement the repository would never generate itself — which is the point of the hatch.
+        assertThat(client.sql("SELECT name FROM \"customer\" ORDER BY name").query(String.class).list())
+                .containsExactly("Ana", "Bo");
     }
 
     private static Customer customer(String name, String email) {

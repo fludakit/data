@@ -24,13 +24,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  * both through an embedded VO ({@code _Profile.address.city}) and through an entity collection
  * ({@code _Profile.workHistory.company}).
  *
- * <p>The two framework gaps surfaced while writing this flagship IT are CLOSED in the fix round
- * (R-T11a / R-T11c): aggregate {@code save}/{@code update}/{@code deleteById} now cascade composition
- * entity collections (insert children with the inverse fk from the root id; update replaces all child
- * rows like element collections), and the paged {@code findAll} join chain is spliced onto a
- * root-table-QUALIFIED find constant so a joined target sharing the {@code id} column name is no
- * longer ambiguous. The supported child-repo + inverse-fk write path stays covered by
- * {@link #aggregateRoundTripsAllCollections}.</p>
+ * <p>Two framework gaps this flagship IT surfaced are closed: aggregate {@code save}/
+ * {@code update}/{@code deleteById} now cascade composition entity collections (insert children with
+ * the inverse fk taken from the root id; update replaces all child rows like element collections),
+ * and the paged {@code findAll} join chain is spliced onto a root-table-QUALIFIED find constant so a
+ * joined target sharing the {@code id} column name is no longer ambiguous. The supported child-repo +
+ * inverse-fk write path stays covered by {@link #aggregateRoundTripsAllCollections}.</p>
  */
 @EnableAutoWeld
 @AddPackages(Profile.class)
@@ -93,10 +92,10 @@ class ProfileCvTest {
 
     @Test
     void aggregateSaveCascadesCompositionEntityCollections() {
-        // R-T11a: @AggregateRoot composition lifecycle is bound to the root — save() cascades the
-        // entity collections (insert with the inverse fk filled from the root id), mirroring the
-        // element-collection machinery. update() replaces all child rows (delete by fk + re-insert,
-        // child ids regenerated), same replace-all parity as element collections.
+        // The @AggregateRoot composition lifecycle is bound to the root: save() cascades the entity
+        // collections, inserting each child row with the inverse fk filled from the root id, exactly
+        // as element collections do. update() replaces all child rows (delete by fk + re-insert,
+        // with fresh child ids), same replace-all parity as element collections.
         Profile p = new Profile();
         p.setFullName("Ada Lovelace");
         p.getWorkHistory().add(new WorkExperience("Analytical Engines", 1842, 1843));
@@ -130,12 +129,12 @@ class ProfileCvTest {
 
     @Test
     void sortThroughCollectionPathContributesJoin() {
-        // GAP-2 fixed (R-T11c): the paged findAll now keeps TWO find constants — the plain
-        // SQL_FIND_ALL and a root-table-QUALIFIED join variant — and picks the qualified one at
-        // runtime when the resolved sort refs contribute a LEFT JOIN, so the joined table's own
-        // "id" column can no longer make the root select list ambiguous.
-        // The children ride the aggregate: save() cascades them through the new entity-collection
-        // write path (R-T11a) — no explicit child-repo saves (that would double-insert).
+        // A joined sort target shares the "id" column name with the root, so the paged findAll keeps
+        // TWO find constants — the plain SQL_FIND_ALL and a root-table-QUALIFIED join variant — and
+        // picks the qualified one at runtime whenever the resolved sort refs contribute a LEFT JOIN.
+        // Without the qualified variant the root select list is ambiguous and the read fails.
+        // The children ride the aggregate: save() cascades them through the entity-collection write
+        // path, so there are no explicit child-repo saves (those would double-insert).
         Profile ada = profile("Ada", "London");
         ada.getWorkHistory().add(new WorkExperience("Zeta Corp", 1842, 1843));
         Profile grace = profile("Grace", "New York");
@@ -173,11 +172,11 @@ class ProfileCvTest {
 
     @Test
     void toManySortAndPredicateReturnEachRootOnce() {
-        // Task 7 (S-3 acceptance): Ada's two companies straddle Grace's single one — the MIN(company)
-        // aggregate sort keys are "alpha" (Ada) and "Beta" (Grace) — and the EXISTS predicate under
-        // the root list must return each profile exactly ONCE. Pre-Task-5/6 the LEFT JOIN fan-out
-        // gave three join rows ([Grace, Ada, Ada] ordered by joined row), duplicating the two-child
-        // root in both the sorted read and the child-matched finder.
+        // Ada's two companies straddle Grace's single one, so the MIN(company) aggregate sort keys
+        // are "alpha" (Ada) and "Beta" (Grace), while the EXISTS predicate under the root list must
+        // return each profile exactly ONCE. A LEFT JOIN here would fan out to three join rows
+        // ([Grace, Ada, Ada] ordered by joined row) and duplicate the two-child root in both the
+        // sorted read and the child-matched finder.
         Profile ada = profile("Ada", "London");
         ada.getWorkHistory().add(new WorkExperience("alpha", 1842, 1843));
         ada.getWorkHistory().add(new WorkExperience("zeta", 1843, 1844));
@@ -207,9 +206,9 @@ class ProfileCvTest {
 
     @Test
     void countThroughToManyPredicateIsDistinctRootTotal() {
-        // Task 7 (S-2 acceptance, Task 5 unjoined COUNT): three matching CHILD rows across two
-        // roots ("alpha" twice on Ada, once on Grace) — the COUNT must stay 2 distinct ROOTS, not
-        // the row fan-out of 3 that the old joined WHERE produced.
+        // Three matching CHILD rows across two roots ("alpha" twice on Ada, once on Grace), so the
+        // COUNT must stay 2 distinct ROOTS and not the row fan-out of 3 that a joined WHERE would
+        // produce. The total therefore runs unjoined, with the child match as an EXISTS semi-join.
         Profile ada = profile("Ada", "London");
         ada.getWorkHistory().add(new WorkExperience("alpha", 1842, 1843));
         ada.getWorkHistory().add(new WorkExperience("alpha", 1843, 1844));

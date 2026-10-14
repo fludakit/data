@@ -7,10 +7,11 @@ import io.github.fludakit.data.annotation.Identity;
  * Many-to-one side of the hydration IT: the bare {@code Team team} field maps to the {@code team_id}
  * column; writes bind the fk from {@code team.getId()} either way.
  *
- * <p>Task 12: {@code @Entity} (not {@code @AggregateRoot}) — with an {@code @Entity} owner the bare
- * entity field is a NON-composing {@code Reference} (association), so direct row-mapper reads
- * (findById and friends) materialise it as an id-only partial (Task 9 {@code partial_<Target>} rule,
- * same shape as {@code WorkExperience.profile}), instead of the former two-phase eager hydration.</p>
+ * <p>{@code @Entity} rather than {@code @AggregateRoot}: with an {@code @Entity} owner the bare
+ * entity field is a NON-composing {@code Reference} (an association), so direct row-mapper reads
+ * (findById and friends) fill only its identifier and leave every other column null, the same shape
+ * the {@code it.profile} fixture produces for {@code WorkExperience.profile} — there is no second
+ * eager fetch to complete the target.</p>
  */
 @Entity
 public class Player {

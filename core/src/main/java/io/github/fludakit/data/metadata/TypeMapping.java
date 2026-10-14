@@ -16,16 +16,46 @@ import java.util.Set;
  *
  * <p>The mapping has no compiler API or reflection dependencies. Its variants describe table-backed
  * entities, embedded value objects, and value-object element collections. It also implements
- * {@link TableSchema} and {@link AttributePathResolver} separately: physical columns describe one
- * table, while entity-rooted paths are walked through the aggregate tree by {@link #visit}.</p>
+ * {@link TableSchema} and {@link ColumnResolver} separately: physical columns describe one table,
+ * while entity-rooted paths are resolved through the aggregate tree by {@link #resolve(String)}.</p>
+ *
+ * <p>The domain role of a mapping is expressed by WHICH implementation it is, not by a flag: an
+ * aggregate root is an {@link AggregateTypeMapping}, a plain entity an {@link EntityTypeMapping}, and
+ * a value object a {@link ValueObjectMapping}. The interface is deliberately NOT {@code sealed}:
+ * the processor generates one {@code <Entity>Metadata implements TypeMapping<T>} descriptor per
+ * mapped type, and a sealed permits list could not name those. The hierarchy still buys the real
+ * benefit — distinct types instead of a flag — and {@link #ownsAggregateLifecycle()} answers the one
+ * behavioural question callers actually ask.</p>
  */
-public interface TypeMapping<T> extends TableSchema, AttributePathResolver {
+public interface TypeMapping<T> extends TableSchema, ColumnResolver {
 
-    /** Domain role of the mapped type: entity, value object, or aggregate root. */
-    enum Kind { ENTITY, VALUE_OBJECT, AGGREGATE_ROOT }
+    /**
+     * Whether this mapping owns the lifecycle of everything inside it.
+     *
+     * <p>True only for {@link AggregateTypeMapping}. This is the aggregate-root gate: it drives the
+     * write-side cascade and, per {@code docs/AGGREGATE-SEMANTICS.md}, the read-side eager/lazy
+     * decision too. A plain entity never cascades its own relations — only a root synchronises the
+     * whole aggregate.</p>
+     */
+    default boolean ownsAggregateLifecycle() {
+        return false;
+    }
 
-    /** Domain role of the mapped type. */
-    Kind kind();
+    /**
+     * Whether this mapping is a value object (embedded or element-collection).
+     *
+     * <p>Value objects have no identity and never own relations. Table-backed
+     * {@link #tableBacked()} is NOT the same question: an element-collection value object lives in
+     * its own child table, so it is table-backed without being an entity.</p>
+     */
+    default boolean isValueObject() {
+        return false;
+    }
+
+    /** Whether this mapping has its own table (entity or element-collection value object). */
+    default boolean tableBacked() {
+        return tableName() != null;
+    }
 
     /** Fully qualified Java type name. */
     String typeName();
@@ -40,11 +70,15 @@ public interface TypeMapping<T> extends TableSchema, AttributePathResolver {
         return id() == null ? null : id().column();
     }
 
-    /** Finds a property by name, including the identifier. */
+    /**
+     * Finds a property by name, including the identifier.
+     *
+     * @throws UnknownAttributePathException when no property carries that name
+     */
     default Prop prop(String name) {
         Prop p = propOrNull(name);
         if (p == null) {
-            throw new IllegalArgumentException("Unknown property '" + name + "' on " + typeName());
+            throw new UnknownAttributePathException(name, typeName());
         }
         return p;
     }
@@ -64,11 +98,26 @@ public interface TypeMapping<T> extends TableSchema, AttributePathResolver {
     /**
      * The entity's own table columns by logical path: the identifier, scalars, forward to-one
      * foreign keys, and flattened embedded leaves. Write-only back-references are omitted, as are
-     * every relation-traversal leaf (those are resolved by {@link #visit}).
+     * every relation-traversal leaf (those are resolved by {@link #resolve}).
+     *
+     * <p>Placements only. A generated descriptor overrides it with a literal map; nothing here
+     * describes how to REACH a column, because a column that needs an edge is reached through
+     * {@link #resolve} instead.</p>
      */
     @Override
     default Map<String, ColumnRef> columnRefs() {
         return ownColumns(false);
+    }
+
+    /**
+     * The entity's own resolvable columns, keyed by logical path.
+     *
+     * <p>Alias of {@link #columnRefs()}, kept because generated code and the
+     * processor both refer to the read view by this name; the distinction from
+     * {@link #writeColumnRefs()} is the meaningful one.
+     */
+    default Map<String, ColumnRef> localColumnRefs() {
+        return columnRefs();
     }
 
     /**
@@ -87,76 +136,89 @@ public interface TypeMapping<T> extends TableSchema, AttributePathResolver {
     }
 
     /**
-     * Walks an entity-rooted dot path through the aggregate tree, reporting each relation edge and
-     * the terminal column to {@code visitor}. A to-one {@link Prop.Reference} chain traverses
-     * transitively; a to-many head is depth-1 over the child's own columns. A write-only
-     * back-reference, a cycle, or an unknown property throws without reporting a leaf.
+     * Resolves an entity-rooted dot path through the aggregate tree to its placement. A to-one
+     * {@link Prop.Reference} chain traverses transitively; a to-many head is depth-1 over the
+     * child's own columns. A write-only back-reference, a cycle, or an unknown property throws.
+     *
+     * <p>This is the GENERIC walk, and it is the default rather than the only implementation:
+     * a mapped type's navigation list is fixed at compile time, so the processor emits a
+     * {@code switch} that returns each path's placement directly. This walk remains for the mappings
+     * that have no generated descriptor — value objects and the processor's own compile-time models,
+     * which cannot use a descriptor that does not exist yet.</p>
      */
     @Override
-    default void visit(String path, AttributePathVisitor visitor) {
-        visit(path, visitor, new HashSet<>());
+    default ColumnPlacement resolve(String path) {
+        return resolve(this, path, new HashSet<>());
     }
 
-    private void visit(String path, AttributePathVisitor visitor, Set<String> inProgress) {
-        ColumnRef local = columnRefs().get(path);
+    private static ColumnPlacement resolve(TypeMapping<?> mapping, String path, Set<String> inProgress) {
+        ColumnRef local = mapping.columnRefs().get(path);
         if (local != null) {
-            visitor.leaf(local);
-            return;
+            return new ColumnPlacement(local);
         }
         int dot = path.indexOf('.');
         if (dot < 0) {
-            throw new IllegalArgumentException("Unknown property '" + path + "' on " + typeName());
+            throw new UnknownAttributePathException(path, mapping.typeName());
         }
         String head = path.substring(0, dot);
         String tail = path.substring(dot + 1);
-        Prop prop = propOrNull(head);
+        Prop prop = mapping.propOrNull(head);
         if (prop instanceof Prop.Embedded embedded && embedded.target() != null) {
             // Embedded leaves flatten into this table; continue the walk in the embedded target.
-            TypeMapping<?> embeddedTarget = embedded.target();
-            embeddedTarget.visit(tail, visitor, inProgress);
-            return;
+            return resolve(embedded.target(), tail, inProgress);
         }
-        ColumnRef edge = relationEdge(prop);
+        JoinEdge edge = relationEdge(mapping, prop);
         TypeMapping<?> target = relationTarget(prop);
         if (edge == null || target == null || !inProgress.add(target.typeName())) {
-            throw new IllegalArgumentException("Unknown property '" + path + "' on " + typeName());
+            throw new UnknownAttributePathException(path, mapping.typeName());
         }
-        visitor.edge(edge);
-        if (prop instanceof Prop.Reference) {
-            target.visit(tail, visitor, inProgress);
-        } else {
-            ColumnRef leaf = target.columnRefs().get(tail);
-            if (leaf == null) {
-                throw new IllegalArgumentException("Unknown property '" + path + "' on " + typeName());
-            }
-            visitor.leaf(leaf);
+        ColumnPlacement tailPlacement = prop instanceof Prop.Reference
+                ? resolve(target, tail, inProgress)
+                : childLeaf(target, tail, path, mapping.typeName());
+        List<JoinEdge> edges = new ArrayList<>();
+        edges.add(edge);
+        edges.addAll(tailPlacement.edges());
+        return new ColumnPlacement(tailPlacement.leaf(), edges);
+    }
+
+    /** A to-many head resolves to one of the child's own columns; deeper paths are not traversable. */
+    private static ColumnPlacement childLeaf(TypeMapping<?> target, String tail, String path, String ownerTypeName) {
+        ColumnRef leaf = target.columnRefs().get(tail);
+        if (leaf == null) {
+            throw new UnknownAttributePathException(path, ownerTypeName);
         }
+        return new ColumnPlacement(leaf);
     }
 
     /** The join edge a traversable relation property contributes, or {@code null} when unbuildable. */
-    private ColumnRef relationEdge(Prop prop) {
+    private static JoinEdge relationEdge(TypeMapping<?> owner, Prop prop) {
         if (prop instanceof Prop.Reference reference && !reference.backReference()) {
             if (reference.targetTable() == null || reference.targetIdColumn() == null) {
                 return null;
             }
-            return new ColumnRef.Reference(reference.fkColumn(), tableName(),
-                    reference.targetTable(), reference.targetIdColumn());
+            return new JoinEdge.ToOne(
+                    new ColumnRef.ForeignKey(reference.fkColumn(), owner.tableName()),
+                    new ColumnRef.Simple(reference.targetIdColumn(), reference.targetTable()));
         }
         if (prop instanceof Prop.EntityCollection entityCollection) {
             if (entityCollection.targetTable() == null || entityCollection.inverseFkColumn() == null
-                    || idColumn() == null) {
+                    || owner.idColumn() == null) {
                 return null;
             }
-            return new ColumnRef.Collection(entityCollection.inverseFkColumn(),
-                    entityCollection.targetTable(), tableName(), idColumn());
+            return new JoinEdge.ToMany(
+                    new ColumnRef.Simple(owner.idColumn(), owner.tableName()),
+                    new ColumnRef.ForeignKey(entityCollection.inverseFkColumn(),
+                            entityCollection.targetTable()));
         }
         if (prop instanceof Prop.ElementCollection elementCollection) {
             if (elementCollection.childTable() == null || elementCollection.parentFkColumn() == null
-                    || idColumn() == null) {
+                    || owner.idColumn() == null) {
                 return null;
             }
-            return new ColumnRef.Collection(elementCollection.parentFkColumn(),
-                    elementCollection.childTable(), tableName(), idColumn());
+            return new JoinEdge.ToMany(
+                    new ColumnRef.Simple(owner.idColumn(), owner.tableName()),
+                    new ColumnRef.ForeignKey(elementCollection.parentFkColumn(),
+                            elementCollection.childTable()));
         }
         return null;
     }
@@ -181,6 +243,7 @@ public interface TypeMapping<T> extends TableSchema, AttributePathResolver {
         return null;
     }
 
+
     /**
      * Flattens table columns in declaration order. Embedded leaves receive the embedded column
      * prefix; to-many properties do not add owner-table columns. Back-reference foreign keys stay,
@@ -204,7 +267,7 @@ public interface TypeMapping<T> extends TableSchema, AttributePathResolver {
                 }
                 for (ColumnRef leaf : embedded.target().columns()) {
                     out.add(new ColumnRef.Simple(
-                            Names.columnName(embedded.name()) + "_" + leaf.column(), ownerTableName));
+                            Names.columnBase(embedded.name()) + "_" + leaf.column(), ownerTableName));
                 }
             }
             // Prop.Id handled above; EntityCollection / ElementCollection carry no column on this table.
@@ -232,12 +295,11 @@ public interface TypeMapping<T> extends TableSchema, AttributePathResolver {
                     }
                 } else {
                     refs.put(pathPrefix + reference.name(),
-                            new ColumnRef.Reference(columnPrefix + reference.fkColumn(), ownerTableName,
-                                    reference.targetTable(), reference.targetIdColumn()));
+                            new ColumnRef.ForeignKey(columnPrefix + reference.fkColumn(), ownerTableName));
                 }
             } else if (prop instanceof Prop.Embedded embedded && embedded.target() != null) {
                 addLocalColumnRefs(refs, ownerTableName, null, embedded.target().props(),
-                        pathPrefix + embedded.name() + ".", columnPrefix + Names.columnName(embedded.name()) + "_",
+                        pathPrefix + embedded.name() + ".", columnPrefix + Names.columnBase(embedded.name()) + "_",
                         includeBackReferences);
             }
         }
@@ -258,17 +320,24 @@ public interface TypeMapping<T> extends TableSchema, AttributePathResolver {
         /**
          * Embedded value object whose leaves flatten into this table. A {@code null} target marks
          * an unresolved model during processor analysis.
+         *
+         * <p>Typed as {@link ValueObjectMapping} — the shared parent of both value-object storage
+         * shapes — because a {@code null} placeholder is not necessarily an embedded one.</p>
          */
-        record Embedded(String name, EmbeddedValueObjectMapping<?> target) implements Prop { }
+        record Embedded(String name, ValueObjectMapping<?> target) implements Prop { }
 
         /**
          * To-one foreign-key reference. The target name remains available while a cyclic target
          * model is being resolved; {@code composition} distinguishes root-owned references from
          * external associations, and {@code backReference} marks the inverse FK of a parent
          * {@code EntityCollection} — a write-only column that is not a queryable path.
+         *
+         * <p>The target is typed as {@link TypeMapping} rather than {@link EntityTypeMapping} so an
+         * aggregate root can be a traversal target: a root and a plain entity differ in relationship
+         * contract, not in storage, and both are valid to-one destinations.</p>
          */
         record Reference(String name, String fkColumn, String targetTypeName,
-                         EntityTypeMapping<?> target, boolean composition,
+                         TypeMapping<?> target, boolean composition,
                          boolean backReference) implements Prop {
 
             /** Referenced table, or {@code null} until the target is resolved. */
@@ -284,9 +353,10 @@ public interface TypeMapping<T> extends TableSchema, AttributePathResolver {
 
         /**
          * To-many entity relation stored in the target table. Inverse details may be {@code null}
-         * until relation resolution completes.
+         * until relation resolution completes. The target is a {@link TypeMapping} so an aggregate
+         * root can be the collection's element type.
          */
-        record EntityCollection(String name, EntityTypeMapping<?> target,
+        record EntityCollection(String name, TypeMapping<?> target,
                                 String inverseName, String inverseFkColumn) implements Prop {
 
             /** Target entity type, or {@code null} until resolved. */

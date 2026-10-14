@@ -1,6 +1,5 @@
 package io.github.fludakit.data.qbn;
 
-import io.github.fludakit.data.query.Action;
 import io.github.fludakit.data.query.Connector;
 import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.Predicate;
@@ -9,6 +8,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 
 class QueryByMethodNameParserTest {
 
@@ -141,9 +141,13 @@ class QueryByMethodNameParserTest {
     void rejectsNotOnAnOperatorTheSpecDoesNotNegate() {
         // findByNameNotIn used to silently render <>. An unsupported composition now fails the parse,
         // which the validator turns into a compile error rather than a wrong query.
+        //
+        // hasMessage, not hasRootCauseMessage: the reason IS the message now. It used to be buried as
+        // the cause of a generic "Not a query method name" wrapper, and every caller read only the
+        // wrapper — so the one place the rejection was computed was the one place it was discarded.
         assertThatThrownBy(() -> parser.parse("findByPriceNotLessThan"))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasRootCauseMessage("Not cannot be combined with LESS_THAN");
+                .hasMessage("Not cannot be combined with LESS_THAN");
     }
 
     @Test
@@ -164,22 +168,88 @@ class QueryByMethodNameParserTest {
     }
 
     @Test
-    void parsesDistinctSubjectKeyword() {
-        assertThat(parser.parse("findDistinctByName").distinct()).isTrue();
-        assertThat(parser.parse("findFirst10DistinctByName").distinct()).isTrue();
-        assertThat(parser.parse("findByName").distinct()).isFalse();
+    void discardsTheIgnoredTextBetweenTheActionAndBy() {
+        // Jakarta Data's subject clause is "limit? ignoredText?", so findAllByName is "find" + the
+        // ignored text "All" + "ByName" and parses as findByName. ("Distinct" is the one piece of
+        // subject text we do NOT discard — it is a keyword here, see below.)
+        var p = parser.parse("findAllByName");
+        assertThat(p.action()).isEqualTo(Action.FIND);
+        assertThat(p.distinct()).isFalse();
+        assertThat(p.predicates()).extracting(Predicate::property).containsExactly("name");
+        assertThat(p.limit()).isZero();
+
+        // Discarded, not interpreted: a subject that LOOKS like a limit contributes no limit, because
+        // only "First<n>" does. This is what the spec's ignoredText means — and the hazard it carries.
+        var top = parser.parse("findTop5ByName");
+        assertThat(top.predicates()).extracting(Predicate::property).containsExactly("name");
+        assertThat(top.limit()).isZero();
     }
 
     @Test
-    void rejectsUnsupportedSubjectText() {
-        // The subject clause carries only First and Distinct. It used to be an unvalidated sink that
-        // absorbed arbitrary text, so findTop5ByName parsed and silently behaved like findAllByName.
-        assertThatThrownBy(() -> parser.parse("findTop5ByName"))
+    void parsesDistinctSubjectKeyword() {
+        // A deliberate superset of the BNF: "Distinct" is a keyword, not ignored text, so the name
+        // states the de-duplication instead of losing it.
+        assertThat(parser.parse("findDistinctByName").distinct()).isTrue();
+        assertThat(parser.parse("findFirst10DistinctByName").distinct()).isTrue();
+        assertThat(parser.parse("findByName").distinct()).isFalse();
+        assertDoesNotThrow(() -> parser.parse("countDistinctByStatus"));
+    }
+
+    @Test
+    void limitPrecedesTheDistinctKeyword() {
+        // BNF order with our keyword spliced in: find "First"<n> "Distinct"? ignoredText? ...
+        var p = parser.parse("findFirst10DistinctByName");
+        assertThat(p.limit()).isEqualTo(10);
+        assertThat(p.distinct()).isTrue();
+        assertThat(p.predicates()).extracting(Predicate::property).containsExactly("name");
+    }
+
+    @Test
+    void rejectsDistinctOnAnActionThatNeitherSelectsNorCounts() {
+        // De-duplicating rows a DELETE removes or an EXISTS tests has no meaning, so the name is
+        // rejected rather than parsed with its Distinct quietly dropped.
+        // The visitor's own reason, not the wrapper: the name parses, so "Not a query method name"
+        // is the wrong thing to say about it — the query it states is what is wrong.
+        assertThatThrownBy(() -> parser.parse("deleteDistinctByName"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Distinct is only meaningful for find and count, not for delete");
+        assertThatThrownBy(() -> parser.parse("existsDistinctByName"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Distinct is only meaningful for find and count, not for exists");
+    }
+
+    @Test
+    void ignoredTextAppliesToEveryAction() {
+        // BNF: action : ("delete" | "count" | "exists") ignoredText? restriction?
+        var p = parser.parse("countAllByStatus");
+        assertThat(p.action()).isEqualTo(Action.COUNT);
+        assertThat(p.predicates()).extracting(Predicate::property).containsExactly("status");
+    }
+
+    @Test
+    void rejectsALimitOrAnOrderOnANonFindAction() {
+        // BNF: only "find" carries a limit and an order. count/delete/exists take ignoredText? and a
+        // restriction and nothing else — a First<n> or an OrderBy on those three is not a query
+        // method name. The grammar used to allow both on every action and then drop the limit.
+        assertThatThrownBy(() -> parser.parse("countFirst10ByName"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Not a query method name");
-        assertThatThrownBy(() -> parser.parse("findAllByName"))
+        assertThatThrownBy(() -> parser.parse("deleteByNameOrderByNameDesc"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Not a query method name");
+        assertThatThrownBy(() -> parser.parse("existsByNameOrderByNameDesc"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Not a query method name");
+    }
+
+    @Test
+    void findKeepsItsLimitAndOrder() {
+        // The same two clauses the other three actions lose.
+        var p = parser.parse("findFirst3ByNameOrderByNameDesc");
+        assertThat(p.limit()).isEqualTo(3);
+        assertThat(p.predicates()).extracting(Predicate::property).containsExactly("name");
+        assertThat(p.sorts()).extracting(SortSpec::property).containsExactly("name");
+        assertThat(p.sorts().get(0).ascending()).isFalse();
     }
 
     private Operator op(String name) {

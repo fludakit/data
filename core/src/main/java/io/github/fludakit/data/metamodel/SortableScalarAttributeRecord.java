@@ -1,22 +1,14 @@
 package io.github.fludakit.data.metamodel;
 
-import jakarta.data.Sort;
-
-/** Record implementation of {@link SortableScalarAttribute}. */
+/**
+ * Record implementation of {@link SortableScalarAttribute}. The {@code Sort} terms are that
+ * interface's defaults.
+ */
 public record SortableScalarAttributeRecord<T>(String name, String path)
         implements SortableScalarAttribute<T> {
 
+    /** A single-segment attribute: its path is its name. */
     public SortableScalarAttributeRecord(String name) {
         this(name, name);
-    }
-
-    @Override
-    public Sort<T> asc() {
-        return Sort.asc(path);
-    }
-
-    @Override
-    public Sort<T> desc() {
-        return Sort.desc(path);
     }
 }

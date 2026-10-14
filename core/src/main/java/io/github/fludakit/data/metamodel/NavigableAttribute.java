@@ -16,6 +16,13 @@ package io.github.fludakit.data.metamodel;
 public sealed interface NavigableAttribute<T, U> extends PathAttribute<T>
         permits EntityAttribute, EmbeddableAttribute, ListAttribute {
 
+    /**
+     * Re-declared abstract rather than inherited: {@link PathAttribute#path()} defaults to
+     * {@code name()}, which is right for a single-segment attribute and WRONG here. A navigable
+     * attribute's path is multi-segment ({@code "address.city"}) while its name is the last segment
+     * ({@code "city"}), so the inherited default would silently publish a path that does not resolve.
+     * Every implementation must therefore supply the real path.
+     */
     @Override
     String path();
 }

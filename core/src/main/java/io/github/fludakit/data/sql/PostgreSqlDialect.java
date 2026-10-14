@@ -32,4 +32,10 @@ public final class PostgreSqlDialect implements SqlDialect {
     public String offsetClause(String offsetExpression) {
         return " OFFSET " + Objects.requireNonNull(offsetExpression, "offsetExpression");
     }
+
+    /** PostgreSQL spells an upsert {@code INSERT ... ON CONFLICT (<id>) DO UPDATE SET ...}. */
+    @Override
+    public UpsertForm upsertForm() {
+        return UpsertForm.ON_CONFLICT;
+    }
 }

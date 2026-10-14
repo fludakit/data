@@ -14,12 +14,13 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Task 10: the estore models are {@code @Entity}. Pins the read semantics of the
- * {@code @Association} header target {@code Order.customer} in that world:
+ * The estore models are {@code @Entity}. Pins the read semantics of the {@code @Association} header
+ * target {@code Order.customer} in that world:
  *
  * <ul>
- *   <li>a plain entity read (findById) materialises the association as an id-only partial
- *       (Task 9 rule; the stereotype swap keeps it because {@code @Association} is explicit);</li>
+ *   <li>a plain entity read (findById) materialises the association target as an id-only partial —
+ *       an explicit {@code @Association} reference stays a partial even when the owner is an
+ *       {@code @Entity} rather than an {@code @AggregateRoot};</li>
  *   <li>a method-name finder whose predicate traverses the association
  *       ({@code findByCustomerName}) is the join-aware read ({@code mapRow_full_} path) and
  *       returns the traversed association FULLY populated — first end-to-end IT of that path.</li>

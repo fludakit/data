@@ -25,7 +25,7 @@ class SqlBuilderSeekClauseTest {
 
         @Override
         public List<ColumnRef> columns() {
-            return List.of(new ColumnRef("id"), new ColumnRef("name"));
+            return List.of(new ColumnRef.Simple("id", "widget"), new ColumnRef.Simple("name", "widget"));
         }
     };
 

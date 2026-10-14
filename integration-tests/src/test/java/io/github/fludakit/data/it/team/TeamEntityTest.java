@@ -17,22 +17,24 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Task 12: the team fixture is {@code @Entity} — pins the directive's read/write semantics for
- * {@code @Entity} owners end-to-end:
+ * The team fixture classes are annotated {@code @Entity} rather than {@code @AggregateRoot} — this
+ * test pins what that stereotype means for reads and writes end-to-end:
  *
  * <ul>
- *   <li>the bare entity field {@code Player.team} is a NON-composing Reference (association):
- *       direct reads materialise it as an id-only partial (Task 9 {@code partial_<Target>} rule);</li>
+ *   <li>the bare entity field {@code Player.team} is a NON-composing Reference (an association):
+ *       direct reads materialise it through the generated {@code PlayerRowMapper.partial_Team}
+ *       helper as an id-only partial, with every other column left null;</li>
  *   <li>the entity collection {@code Team.players} keeps its stereotype-independent read loader —
  *       pinned to the ACTUAL materialisation the framework returns;</li>
- *   <li>{@code @Entity} owners get NO composition write cascade (I-1 gate): {@code teams.update} with
- *       an empty in-memory collection must leave player rows untouched;</li>
- *   <li>runtime {@code Order} through the collection ({@code _Team.players.name}) contributes the
- *       aggregate-subquery sort (Task 6), a method-name finder predicate traverses the same relation
- *       as an EXISTS semi-join (Task 5), a CURSOR-mode paged read executes the join-QUALIFIED seek
- *       predicate (R-T12 M-1), and the cursor WALK completes: page 2 is requested from page 1's
- *       {@code nextPageRequest()} over the MIN(player.name)+root-id keyset
- *       (Task 7, closing R-T6a).</li>
+ *   <li>{@code @Entity} owners get NO composition write cascade, because that cascade is gated on
+ *       {@code @AggregateRoot}: {@code teams.update} with an empty in-memory collection must leave
+ *       player rows untouched;</li>
+ *   <li>runtime {@code Order} through the collection ({@code _Team.players.name}) sorts by an
+ *       aggregate subquery over the relation rather than by a plain joined column, a method-name
+ *       finder predicate traverses the same relation as an EXISTS semi-join so the root row cannot
+ *       fan out, a CURSOR-mode paged read executes the join-QUALIFIED seek predicate, and the cursor
+ *       WALK completes: page 2 is requested from page 1's {@code nextPageRequest()} over the
+ *       MIN(player.name)+root-id keyset.</li>
  * </ul>
  */
 @EnableAutoWeld
@@ -67,8 +69,8 @@ class TeamEntityTest {
         Team back = teams.findById(saved.getId()).orElseThrow();
         // Pin to ACTUAL behavior: the read loader is stereotype-independent and materialises each
         // child through PlayerRowMapper — the child's OWN columns come back FULL (id, name), while
-        // its non-composing Reference (the @Entity-owner partial rule, Task 9) rides along as an
-        // id-only partial: non-null back-reference, name null, NO nested children (depth-1).
+        // its non-composing Reference rides along as an id-only partial (non-null id, every other
+        // column null), with NO nested children beneath it (depth-1).
         assertThat(back.getPlayers()).extracting(Player::getName)
                 .containsExactlyInAnyOrder("Ramos", "Navas");
         assertThat(back.getPlayers()).allSatisfy(p -> {
@@ -84,7 +86,8 @@ class TeamEntityTest {
         Team saved = teams.save(team("Falcons"));
         Player striker = players.save(player("Ramos", saved));
 
-        // I-1 stereotype gate: an @Entity owner NEVER cascades its entity collection on write.
+        // Stereotype gate: composition write cascade is reserved for @AggregateRoot owners, and
+        // Team is @Entity, so it NEVER cascades its entity collection on write.
         // Fresh root, same id, EMPTY in-memory collection → update must not delete player rows.
         Team fresh = new Team();
         fresh.setId(saved.getId());
@@ -134,10 +137,10 @@ class TeamEntityTest {
 
     @Test
     void cursorModeRelationSortSeeksOnJoinQualifiedPredicate() {
-        // Parked Task-7 finding M-1, end-to-end proof (commit eb03752): in CURSOR mode the seek
-        // predicate must follow the same qualification rule as the select list. Both team and
-        // player carry a "name" column, so a BARE seek term on the joined path would be an
-        // ambiguous-column SQL failure at parse time — the request below must EXECUTE.
+        // End-to-end proof that the seek predicate follows the same qualification rule as the select
+        // list: in CURSOR mode both team and player carry a "name" column, so a BARE seek term on
+        // the joined path would be an ambiguous-column SQL failure at parse time — the request
+        // below must EXECUTE.
         Team falcons = teams.save(team("Falcons"));
         Team eagles = teams.save(team("Eagles"));
         players.save(player("Navas", falcons));
@@ -155,10 +158,10 @@ class TeamEntityTest {
 
     @Test
     void cursorModeRelationSortWalksTwoPages() {
-        // R-T6a: the former cursorModeRelationSortWalkGapPin is replaced by the REAL walk the fix
-        // round (Tasks 4-6) unblocked — cursor-mode page 1 materialises, its cursor is built from
-        // the aggregate MIN(player.name) key plus the root-id tiebreak, and page 2 CONTINUES from
-        // that cursor (nextPageRequest is a CURSOR_NEXT request, not an offset).
+        // The REAL cursor walk (a reworked placeholder Pin earlier stood in for it): cursor-mode
+        // page 1 materialises, its cursor is built from the aggregate MIN(player.name) key plus the
+        // root-id tiebreak, and page 2 CONTINUES from that cursor (nextPageRequest is a CURSOR_NEXT
+        // request, not an offset).
         Team falcons = teams.save(team("Falcons"));
         players.save(player("zeta", falcons));
         players.save(player("alpha", falcons));   // MIN = "alpha"

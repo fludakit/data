@@ -30,6 +30,16 @@ site
 .mvn/target/
 docs/
 
+# The spec draft is working notes, not a repository artifact: a private reading of the Jakarta Data
+# specification that REFACTOR-PLAN.md and TECH-DEBT.md cite for its §3.3 static-metamodel and §2.5
+# query-by-names rules, churning independently of the code. `docs/` above does not cover it — the
+# draft sits at the repository ROOT, where it was tracked, so it needs a rule of its own.
+/[Dd]raft.[Mm]d
+
 # The Jakarta Data TCK runner is a local verification module, enabled through the opt-in `tck`
 # profile in pom.xml (-Drundatatck). It is not tracked.
 tck-runner/
+
+# The agent workspace: session-scoped project data (memory, notes). Not a build cache —
+# deleting it loses written history — but it is not a repository artifact either.
+.workbuddy/

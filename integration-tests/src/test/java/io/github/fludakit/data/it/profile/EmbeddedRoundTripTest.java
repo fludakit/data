@@ -13,7 +13,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * Round-trips an {@code @ValueObject} embedded in an aggregate through the generated flattened
  * columns: writes bind each {@code address_*} leaf path, reads rebuild the VO tree leaf-by-leaf.
- * Presence rule (Plan C Decision 2): an embedded VO is reconstructed iff at least one flattened
+ * Presence rule: an embedded VO is reconstructed iff at least one flattened
  * boxed leaf is non-null — a NULL database row therefore maps back to a {@code null} property, not
  * an all-null VO. Note this fixture is all-boxed by design: a VO with a primitive leaf can never
  * be NULL-absent (the mapper throws on {@code wasNull()}), so its schema must supply a value.
@@ -48,8 +48,8 @@ class EmbeddedRoundTripTest {
 
     @Test
     void nestedChildWithAllNullLeavesStaysNull() {
-        // Decision 2 per-subtree presence (I-1): the address scalars are set, every point leaf is
-        // NULL — the nested GeoPoint child must stay null instead of being built from nulls.
+        // Per-subtree presence: the address scalars are set but every point leaf is NULL, so the
+        // nested GeoPoint child must stay null instead of being rebuilt from nulls.
         Profile p = new Profile();
         Address a = new Address();
         a.setCity("Springfield");

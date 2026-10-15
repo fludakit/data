@@ -18,8 +18,6 @@ import io.github.fludakit.data.metadata.UnknownAttributePathException;
 
 import io.github.fludakit.data.processor.analysis.PathResolver;
 import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
-import io.github.fludakit.data.processor.model.EntityModel;
-import io.github.fludakit.data.processor.model.Property;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.support.MemberNames;
 import javax.lang.model.element.Modifier;
@@ -80,13 +78,13 @@ public final class MetadataGenerator {
      * hit. This is the only path that writes the {@code <T>Metadata} name, so a consumer that needs
      * the descriptor to exist asks here instead of poking the registry.</p>
      */
-    public ClassName metadataFor(TypeElement element, EntityModel model) {
+    public ClassName metadataFor(TypeElement element, TypeMapping<?> model) {
         String fqn = element.getQualifiedName().toString();
         ClassName known = metadataTypes.get(fqn);
         if (known != null) {
             return known;
         }
-        generateEmbeddedDescriptors(model.metadata());
+        generateEmbeddedDescriptors(model);
         ClassName type = generateMetadata(element, model);
         metadataTypes.put(fqn, type);
         return type;
@@ -112,11 +110,11 @@ public final class MetadataGenerator {
      * a name plus a path and knows nothing about columns. The ordered
      * mapping index also supplies the inherited root-table {@code columns()} view.
      */
-    public ClassName generateMetadata(TypeElement entityElement, EntityModel entity) {
-        String packageName = entity.typeName().packageName();
+    public ClassName generateMetadata(TypeElement entityElement, TypeMapping<?> entity) {
+        String packageName = typeMappingBuilder.classNameFor(entity.typeName()).packageName();
         String simpleName = entityElement.getSimpleName() + "Metadata";
         ClassName self = ClassName.get(packageName, simpleName);
-        TypeName entityType = entity.typeName();
+        TypeName entityType = typeMappingBuilder.classNameFor(entity.typeName());
         ClassName descriptor = ClassName.get("io.github.fludakit.data.metadata", "TypeMapping");
 
         ClassName valueAccess = ClassName.get("io.github.fludakit.data.metadata", "ValueAccess");
@@ -127,21 +125,21 @@ public final class MetadataGenerator {
                 .addMethod(MethodSpec.constructorBuilder().addModifiers(Modifier.PRIVATE).build())
                 .addField(FieldSpec.builder(self, "INSTANCE", Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
                         .initializer("new $T()", self).build());
-        if (entity.metadata().tableName() != null) {
-            builder.addField(Literals.stringConstant("TABLE_NAME", entity.metadata().tableName()));
+        if (entity.tableName() != null) {
+            builder.addField(Literals.stringConstant("TABLE_NAME", entity.tableName()));
         }
         if (entity.id() != null) {
             builder.addField(Literals.stringConstant(Literals.constName(entity.id().name()), entity.id().column()));
         }
         Set<String> embeddedNames = new HashSet<>();
-        for (Prop a : entity.metadata().props()) {
+        for (Prop a : entity.props()) {
             if (a instanceof Prop.Embedded) {
                 embeddedNames.add(a.name());
             }
         }
-        for (Property p : entity.properties()) {
+        for (Prop p : entity.rowProps()) {
             if (!embeddedNames.contains(p.name())) {
-                builder.addField(Literals.stringConstant(Literals.constName(p.name()), p.column()));
+                builder.addField(Literals.stringConstant(Literals.constName(p.name()), MemberNames.memberColumn(p)));
             }
         }
         // flattened embedded leaves: one constant per physical leaf column. The
@@ -150,7 +148,7 @@ public final class MetadataGenerator {
         // <prefix>_<leaf>, e.g. an embedded "point" yields POINT_LAT = "point_lat". The constant
         // NAME derives from the leaf's COLUMN (not the attribute name) so name and value agree
         // whenever the attribute name is not the snake case of its column.
-        for (Prop a : entity.metadata().props()) {
+        for (Prop a : entity.props()) {
             if (!(a instanceof Prop.Embedded embedded) || embedded.target() == null) {
                 continue;
             }
@@ -164,18 +162,18 @@ public final class MetadataGenerator {
         // The domain role is carried by WHICH TypeMapping this descriptor implements, not by a flag:
         // a root states that it owns the aggregate lifecycle, a plain entity stays on the interface
         // default. Only a root overrides, so a plain entity never claims a lifecycle it does not have.
-        if (entity.metadata().ownsAggregateLifecycle()) {
+        if (entity.ownsAggregateLifecycle()) {
             builder.addMethod(MethodSpec.methodBuilder("ownsAggregateLifecycle").addModifiers(Modifier.PUBLIC)
                     .addAnnotation(Override.class)
                     .returns(TypeName.BOOLEAN)
                     .addStatement("return true")
                     .build());
         }
-        builder.addMethod(Literals.stringAccessor("tableName", entity.metadata().tableName()));
-        builder.addMethod(Literals.stringAccessor("typeName", entity.metadata().typeName()));
+        builder.addMethod(Literals.stringAccessor("tableName", entity.tableName()));
+        builder.addMethod(Literals.stringAccessor("typeName", entity.typeName()));
 
         ClassName propId = descriptor.nestedClass("Prop").nestedClass("Id");
-        Prop.Id idProp = entity.metadata().id();
+        Prop.Id idProp = entity.id();
         MethodSpec.Builder id = MethodSpec.methodBuilder("id").addModifiers(Modifier.PUBLIC)
                 .addAnnotation(Override.class).returns(propId);
         if (idProp == null) {
@@ -188,7 +186,7 @@ public final class MetadataGenerator {
         ClassName prop = descriptor.nestedClass("Prop");
         CodeBlock.Builder propsList = CodeBlock.builder().add("$T.of(", ClassName.get(java.util.List.class));
         boolean first = true;
-        for (Prop p : entity.metadata().props()) {
+        for (Prop p : entity.props()) {
             if (!first) {
                 propsList.add(", ");
             }
@@ -214,7 +212,7 @@ public final class MetadataGenerator {
                 .addStatement("$T<$T, $T> mappings = new $T<>()",
                         ClassName.get(java.util.Map.class), pathKey, Literals.MD_COLUMN_REF,
                         ClassName.get(java.util.LinkedHashMap.class));
-        for (Map.Entry<String, ColumnRef> mapping : entity.metadata().localColumnRefs().entrySet()) {
+        for (Map.Entry<String, ColumnRef> mapping : entity.localColumnRefs().entrySet()) {
             columnRefs.addStatement("mappings.put($S, $L)", mapping.getKey(),
                     Literals.columnRefLiteral(mapping.getValue()));
         }
@@ -233,7 +231,7 @@ public final class MetadataGenerator {
         builder.addMethod(MethodSpec.methodBuilder("columns").addModifiers(Modifier.PUBLIC)
                 .addAnnotation(Override.class)
                 .returns(ParameterizedTypeName.get(ClassName.get(java.util.List.class), Literals.MD_COLUMN_REF))
-                .addStatement("return $L", Literals.columnRefList(entity.metadata().columns()))
+                .addStatement("return $L", Literals.columnRefList(entity.columns()))
                 .build());
 
         // the read-side twin of the column view. columns()/columnRefs() answer WHERE a dot
@@ -261,7 +259,7 @@ public final class MetadataGenerator {
      * left out with a NOTE and the round continues; an unknown path fails fast with
      * {@link IllegalArgumentException}, exactly as {@code visit} does.
      */
-    private MethodSpec valueExtractor(TypeElement entityElement, EntityModel entity,
+    private MethodSpec valueExtractor(TypeElement entityElement, TypeMapping<?> entity,
                                         List<NavCase> navs) {
         try {
             return valueSwitch(entityElement, entity, navs);
@@ -306,9 +304,9 @@ public final class MetadataGenerator {
      * @return the parts, or {@code null} when the entity resolves no path at all — the interface's
      *         generic walk then stays in force
      */
-    private static ResolverParts resolverSwitch(TypeElement entityElement, EntityModel entity,
+    private static ResolverParts resolverSwitch(TypeElement entityElement, TypeMapping<?> entity,
                                                 List<NavCase> navs) {
-        Map<String, ColumnRef> own = entity.metadata().localColumnRefs();
+        Map<String, ColumnRef> own = entity.localColumnRefs();
         if (own.isEmpty() && navs.isEmpty()) {
             return null;
         }
@@ -358,8 +356,8 @@ public final class MetadataGenerator {
      *  only, and valueExtractor may omit the whole switch). Head-level guards keep the
      *  historical NOTE-degrade semantics: an unmapped target or accessor-less head drops the
      *  head from BOTH surfaces). */
-    private List<NavCase> navCases(TypeElement entityElement, EntityModel entity) {
-        TypeMapping<?> mapping = entity.metadata();
+    private List<NavCase> navCases(TypeElement entityElement, TypeMapping<?> entity) {
+        TypeMapping<?> mapping = entity;
         List<NavCase> out = new ArrayList<>();
         for (Prop p : mapping.props()) {
             if (!PathResolver.isTraversable(p)) {
@@ -400,9 +398,9 @@ public final class MetadataGenerator {
         return out;
     }
 
-    private MethodSpec valueSwitch(TypeElement entityElement, EntityModel entity,
+    private MethodSpec valueSwitch(TypeElement entityElement, TypeMapping<?> entity,
                                  List<NavCase> navs) {
-        TypeMapping<?> mapping = entity.metadata();
+        TypeMapping<?> mapping = entity;
         Map<String, CodeBlock> cases = new LinkedHashMap<>();
 
         // (1) The flattened column view this descriptor publishes: identifier, scalars, to-one heads
@@ -429,7 +427,7 @@ public final class MetadataGenerator {
         // through to the throwing default. A descriptor with no reachable path fails fast on use
         // rather than failing the whole annotation-processing round with an abstract-method error.
 
-        TypeName entityType = entity.typeName();
+        TypeName entityType = typeMappingBuilder.classNameFor(entity.typeName());
         MethodSpec.Builder navigateMethod = MethodSpec.methodBuilder("value")
                 .addModifiers(Modifier.PUBLIC)
                 .addAnnotation(Override.class)
@@ -573,10 +571,10 @@ public final class MetadataGenerator {
             if (voElement == null) {
                 continue;
             }
-            EntityModel voModel = typeMappingBuilder.valueObjectModel(voElement);
-            metadataTypes.put(voFqn, ClassName.get(voModel.typeName().packageName(),
-                    voModel.typeName().simpleName() + "Metadata"));
-            generateEmbeddedDescriptors(voModel.metadata());
+            TypeMapping<?> voModel = typeMappingBuilder.descriptorFor(voElement);
+            ClassName voName = typeMappingBuilder.classNameFor(voModel.typeName());
+            metadataTypes.put(voFqn, ClassName.get(voName.packageName(), voName.simpleName() + "Metadata"));
+            generateEmbeddedDescriptors(voModel);
             generateMetadata(voElement, voModel);
         }
     }

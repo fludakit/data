@@ -105,7 +105,7 @@ public class RoundWiring {
         // The shape questions four classes were each answering for themselves — the erased name of a
         // declared type, whether it is a List, whether it is the entity, and a method's signature in
         // the context that declares it. Owning Types once here is what lets all four drop it.
-        this.typeShapes = new TypeShapes(types);
+        this.typeShapes = new TypeShapes(types, typeMappingBuilder::elementFor);
         this.repositoryMethodValidator = new RepositoryMethodValidator(diagnostics, typeShapes);
         // The plan compiler reads a method DECLARATION, not a type: it needs the erasure tests for the
         // positional paging parameters and nothing else, so no generator and no writer is involved.
@@ -117,7 +117,7 @@ public class RoundWiring {
         AttributeTypes attributeTypes = new AttributeTypes(elements, types);
         // The write emitter is built after init() has settled the dialect, since whether a save is a
         // one-statement upsert is a property of the configured database.
-        this.writeMethodEmitter = new WriteMethodEmitter(attributeTypes, typeShapes, diagnostics, sqlDialect);
+        this.writeMethodEmitter = new WriteMethodEmitter(attributeTypes, typeMappingBuilder, typeShapes, diagnostics, sqlDialect);
         // The JOIN projection reuses the mapping builder's memo, which resolves a target from the FQN
         // its descriptor carries — so it needs no environment of its own. It writes no source file:
         // the mapper it builds is handed back to the caller.
@@ -181,11 +181,11 @@ public class RoundWiring {
         // The method compiler is built last: it reads a method DECLARATION through every collaborator
         // above (the descriptor registry for dynamic paging, the write emitter for the CRUD writes, the
         // plan compiler for query-by-names), and it emits no source of its own.
-        this.methodCompiler = new RepositoryMethodCompiler(typeShapes, diagnostics, sqlDialect,
+        this.methodCompiler = new RepositoryMethodCompiler(typeShapes, typeMappingBuilder, diagnostics, sqlDialect,
                 pathResolver, queryPlanCompiler, metadataGenerator, writeMethodEmitter, joinedProjections);
         // Like the write emitter, built after init() settled the dialect: the loader column lists are
         // quoted through it.
-        this.hydrationEmitter = new HydrationEmitter(sqlDialect, attributeTypes);
+        this.hydrationEmitter = new HydrationEmitter(sqlDialect, attributeTypes, typeMappingBuilder);
         // Built after the round pre-scan (it captures THIS round's managed-entity set) and after the
         // mapper generator (it asks for a relationship target's row mapper through it).
         this.loadPlanner = new RelationshipLoadPlanner(diagnostics, typeMappingBuilder,

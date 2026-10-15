@@ -8,9 +8,10 @@ import io.github.fludakit.data.metadata.NonLocalAttributePathException;
 import io.github.fludakit.data.metadata.UnknownAttributePathException;
 import io.github.fludakit.data.page.SimpleCursoredPage;
 import io.github.fludakit.data.page.SimplePage;
+import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
 import io.github.fludakit.data.processor.analysis.PathResolver;
 import io.github.fludakit.data.processor.model.EmissionContext;
-import io.github.fludakit.data.processor.model.EntityModel;
+import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.model.PagedRead;
 import io.github.fludakit.data.processor.model.PathResolution;
 import io.github.fludakit.data.processor.support.Diagnostics;
@@ -47,13 +48,16 @@ import java.util.List;
 public final class PagingEmitter {
 
     private final SqlDialect sqlDialect;
+    private final MappedTypeBuilder typeMappingBuilder;
     private final PathResolver pathResolver;
     private final MetadataGenerator metadataGenerator;
     private final Diagnostics diagnostics;
 
-    public PagingEmitter(SqlDialect sqlDialect, PathResolver pathResolver, MetadataGenerator metadataGenerator,
-                  Diagnostics diagnostics) {
+    public PagingEmitter(SqlDialect sqlDialect, MappedTypeBuilder typeMappingBuilder,
+                         PathResolver pathResolver, MetadataGenerator metadataGenerator,
+                         Diagnostics diagnostics) {
         this.sqlDialect = sqlDialect;
+        this.typeMappingBuilder = typeMappingBuilder;
         this.pathResolver = pathResolver;
         this.metadataGenerator = metadataGenerator;
         this.diagnostics = diagnostics;
@@ -85,13 +89,13 @@ public final class PagingEmitter {
             String column;
             ColumnPlacement aggregatePlacement = null;
             try {
-                column = new SqlBuilder(ctx.entity().metadata(), ctx.entity().metadata()).dialect(sqlDialect).resolveColumn(s.property());
+                column = new SqlBuilder(ctx.entity(), ctx.entity()).dialect(sqlDialect).resolveColumn(s.property());
             } catch (NonLocalAttributePathException crossing) {
                 // The path EXISTS but lands in another table, so the flat column view cannot express
                 // it. The compile model may still answer it as a TO-MANY head — that renders the
                 // aggregate subquery term (the same string the runtime isToManyPath/aggregateSortTerm
                 // pair produces). This is the recovery branch, not an error: a to-many sort is legal.
-                PathResolution resolution = pathResolver.resolveCompilePath(ctx.entity().metadata(), s.property());
+                PathResolution resolution = pathResolver.resolveCompilePath(ctx.entity(), s.property());
                 if (resolution.ref() != null && resolution.existential()) {
                     aggregatePlacement = resolution.placement();
                     column = null;
@@ -114,7 +118,7 @@ public final class PagingEmitter {
             properties.add(s.property());
             directions.add(Boolean.toString(s.ascending()));
             terms.add(column != null ? sqlDialect.quoteIdentifier(column)
-                    : new SqlBuilder(ctx.entity().metadata()).dialect(sqlDialect)
+                    : new SqlBuilder(ctx.entity()).dialect(sqlDialect)
                             .aggregateSortTerm(aggregatePlacement, s.ascending()));
         }
         if (toManySort && !("true".equals(directions.get(directions.size() - 1))
@@ -124,8 +128,8 @@ public final class PagingEmitter {
             // skipped only when the last sort already IS the ascending id.
             properties.add(ctx.entity().id().name());
             directions.add("true");
-            terms.add(sqlDialect.quoteIdentifier(ctx.entity().metadata().tableName()) + "."
-                    + sqlDialect.quoteIdentifier(ctx.entity().metadata().idColumn()));
+            terms.add(sqlDialect.quoteIdentifier(ctx.entity().tableName()) + "."
+                    + sqlDialect.quoteIdentifier(ctx.entity().idColumn()));
         }
         String propsExpr = "java.util.List.of(" + quoted(properties) + ")";
         String dirsExpr = "java.util.List.of(" + String.join(", ", directions) + ")";
@@ -140,20 +144,20 @@ public final class PagingEmitter {
             }
             orderBy = ob.toString();
         } else {
-            orderBy = new SqlBuilder(ctx.entity().metadata(), ctx.entity().metadata()).dialect(sqlDialect).orderBy(effective);
+            orderBy = new SqlBuilder(ctx.entity(), ctx.entity()).dialect(sqlDialect).orderBy(effective);
         }
         String wherePrefix = read.bindings().isEmpty() ? " WHERE " : " AND ";
 
         if (!read.cursored()) {
             String countConstant = SqlConstants.register(ctx.constants(), "SQL_COUNT_ALL",
-                    new SqlBuilder(ctx.entity().metadata()).dialect(sqlDialect).countBy(List.of()));
+                    new SqlBuilder(ctx.entity()).dialect(sqlDialect).countBy(List.of()));
             builder.addStatement("long offset = ($L.page() - 1) * $L.size()", read.pageRequest(), read.pageRequest());
             CodeBlock.Builder call = CodeBlock.builder()
                     .add("jdbcClient.sql($L + $S + $S + $L.size() + $S + offset)", read.findConstant(), orderBy,
                             sqlDialect.limitClause(""), read.pageRequest(), sqlDialect.offsetClause(""));
             QueryInvocations.appendBoundParameters(call, read.bindings(), read.parameters());
-            call.add(".query($L).list()", QueryInvocations.queryArg(ctx.entity(), ctx.mapperType()));
-            builder.addStatement("$T<$T> content = $L", List.class, ctx.entity().typeName(), call.build());
+            call.add(".query($L).list()", QueryInvocations.queryArg(typeMappingBuilder.classNameFor(ctx.entity().typeName()), ctx.mapperType()));
+            builder.addStatement("$T<$T> content = $L", List.class, typeMappingBuilder.classNameFor(ctx.entity().typeName()), call.build());
             builder.addStatement("long total = $L.requestTotal() ? jdbcClient.sql($L).singleValue($T.class) : -1L",
                     read.pageRequest(), countConstant, Long.class);
             if (ctx.hydrate()) {
@@ -169,13 +173,13 @@ public final class PagingEmitter {
                 .add("jdbcClient.sql($L + $S + $S + $L.size())", read.findConstant(), orderBy,
                         sqlDialect.limitClause(""), read.pageRequest());
         QueryInvocations.appendBoundParameters(offsetCall, read.bindings(), read.parameters());
-        offsetCall.add(".query($L).list()", QueryInvocations.queryArg(ctx.entity(), ctx.mapperType()));
-        builder.addStatement("$T<$T> content = $L", List.class, ctx.entity().typeName(), offsetCall.build());
+        offsetCall.add(".query($L).list()", QueryInvocations.queryArg(typeMappingBuilder.classNameFor(ctx.entity().typeName()), ctx.mapperType()));
+        builder.addStatement("$T<$T> content = $L", List.class, typeMappingBuilder.classNameFor(ctx.entity().typeName()), offsetCall.build());
         if (ctx.hydrate()) {
             builder.addStatement("$L", QueryInvocations.hydrationCall("content"));
         }
         builder.addStatement("$T<$T.Cursor> cursors = new $T<>()", List.class, PageRequest.class, ArrayList.class);
-        builder.beginControlFlow("for ($T e : content)", ctx.entity().typeName());
+        builder.beginControlFlow("for ($T e : content)", typeMappingBuilder.classNameFor(ctx.entity().typeName()));
         builder.addStatement("cursors.add($T.forEntity($L, $L, $T.INSTANCE, e))",
                 CursorKeys.class, propsExpr, dirsExpr, metadataClass);
         builder.endControlFlow();
@@ -199,8 +203,8 @@ public final class PagingEmitter {
         for (int i = 0; i < terms.size(); i++) {
             seekCall.add(".param($S, cursor.get($L))", "cursor" + i, i);
         }
-        seekCall.add(".query($L).list()", QueryInvocations.queryArg(ctx.entity(), ctx.mapperType()));
-        builder.addStatement("$T<$T> content = $L", List.class, ctx.entity().typeName(), seekCall.build());
+        seekCall.add(".query($L).list()", QueryInvocations.queryArg(typeMappingBuilder.classNameFor(ctx.entity().typeName()), ctx.mapperType()));
+        builder.addStatement("$T<$T> content = $L", List.class, typeMappingBuilder.classNameFor(ctx.entity().typeName()), seekCall.build());
         builder.addStatement("boolean hasMore = content.size() > $L.size()", read.pageRequest());
         builder.beginControlFlow("if (hasMore)");
         builder.addStatement("content = content.subList(0, $L.size())", read.pageRequest());
@@ -209,7 +213,7 @@ public final class PagingEmitter {
             builder.addStatement("$L", QueryInvocations.hydrationCall("content"));
         }
         builder.addStatement("$T<$T.Cursor> cursors = new $T<>()", List.class, PageRequest.class, ArrayList.class);
-        builder.beginControlFlow("for ($T e : content)", ctx.entity().typeName());
+        builder.beginControlFlow("for ($T e : content)", typeMappingBuilder.classNameFor(ctx.entity().typeName()));
         builder.addStatement("cursors.add($T.forEntity($L, $L, $T.INSTANCE, e))",
                 CursorKeys.class, propsExpr, dirsExpr, metadataClass);
         builder.endControlFlow();
@@ -217,8 +221,8 @@ public final class PagingEmitter {
     }
 
     /** The keyset seek predicate for {@code terms} in the given direction, rendered by {@link SqlBuilder}. */
-    private String seek(EntityModel entity, List<String> terms, List<Boolean> ascending, boolean forward) {
-        return new SqlBuilder(entity.metadata()).dialect(sqlDialect).seekClause(terms, ascending, forward);
+    private String seek(TypeMapping<?> entity, List<String> terms, List<Boolean> ascending, boolean forward) {
+        return new SqlBuilder(entity).dialect(sqlDialect).seekClause(terms, ascending, forward);
     }
 
     private String quoted(List<String> values) {

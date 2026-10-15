@@ -7,7 +7,7 @@ import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
-import io.github.fludakit.data.processor.model.EntityModel;
+import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
 import io.github.fludakit.data.processor.model.EntityRelationship;
 import io.github.fludakit.data.processor.model.WriteCascade;
 import io.github.fludakit.data.processor.support.MemberNames;
@@ -41,10 +41,11 @@ public final class ChildCascadeEmitter {
     private final SqlDialect sqlDialect;
     private final RowWrites rowWrites;
     private final AttributeTypes attributeTypes;
+    private final MappedTypeBuilder typeMappingBuilder;
 
     /**
      * No {@code Elements} and no {@code Types} of its own: every member this emitter writes was
-     * already resolved into the {@link EntityModel} or the {@link Prop.ElementCollection} prop it is
+     * already resolved into the {@link TypeMapping} or the {@link Prop.ElementCollection} prop it is
      * handed — the child tables come from {@link Names#childTable(String, String)} and the target
      * models from {@link WriteCascade#compositions()}.
      *
@@ -53,10 +54,11 @@ public final class ChildCascadeEmitter {
      * collaborator that owns that lookup, so this class still holds no environment service.</p>
      */
     public ChildCascadeEmitter(SqlDialect sqlDialect, RowWrites rowWrites,
-                               AttributeTypes attributeTypes) {
+                               AttributeTypes attributeTypes, MappedTypeBuilder typeMappingBuilder) {
         this.sqlDialect = sqlDialect;
         this.rowWrites = rowWrites;
         this.attributeTypes = attributeTypes;
+        this.typeMappingBuilder = typeMappingBuilder;
     }
 
     /** The element type of a {@code List<@ValueObject>} collection: what the generated loop declares. */
@@ -64,14 +66,14 @@ public final class ChildCascadeEmitter {
         return attributeTypes.classArgOf(collection.elementTypeName());
     }
 
-    public void appendCompositionWrites(MethodSpec.Builder builder, String value, EntityModel entity,
+    public void appendCompositionWrites(MethodSpec.Builder builder, String value, TypeMapping<?> entity,
                                          WriteCascade cascade, Map<String, String> constants) {
         for (EntityRelationship relationship : cascade.compositions()) {
             Prop.Reference reference = (Prop.Reference) relationship.attribute();
-            EntityModel target = relationship.targetModel();
+            TypeMapping<?> target = relationship.targetModel();
             String base = "SQL_" + MemberNames.upperSnake(reference.name());
             String targetVar = "target_" + reference.name();
-            builder.addStatement("$T $L = $L.$L()", target.typeName(), targetVar, value,
+            builder.addStatement("$T $L = $L.$L()", typeMappingBuilder.classNameFor(target.typeName()), targetVar, value,
                     MemberNames.getter(reference.name()));
             builder.beginControlFlow("if ($L != null)", targetVar);
             rowWrites.appendRowWrite(builder, targetVar, target, constants, base + "_INSERT", base + "_UPSERT",
@@ -80,28 +82,30 @@ public final class ChildCascadeEmitter {
         }
     }
 
-    public static String entityCollectionWriteBlocker(EntityModel target) {
+    public static String entityCollectionWriteBlocker(TypeMapping<?> target,
+                                                      MappedTypeBuilder typeMappingBuilder) {
         if (target.id() == null) {
             return "target has no identity property";
         }
-        if (target.metadata().tableName() == null) {
+        if (target.tableName() == null) {
             return "target table metadata is unresolved";
         }
-        if (RowWrites.idKeyCoercion(target.id().type()) == null) {
-            return "target id type " + target.id().type().box() + " is not generated-key coercible";
+        if (RowWrites.idKeyCoercion(typeMappingBuilder.memberType(target.typeName(), target.id().name())) == null) {
+            return "target id type " + typeMappingBuilder.memberType(target.typeName(), target.id().name()).box() + " is not generated-key coercible";
         }
         return null;
     }
 
-    public void appendEntityCollectionInsert(MethodSpec.Builder builder, String value, EntityModel entity,
+    public void appendEntityCollectionInsert(MethodSpec.Builder builder, String value, TypeMapping<?> entity,
                                               EntityRelationship relationship, Map<String, String> constants) {
         Prop.EntityCollection list = (Prop.EntityCollection) relationship.attribute();
-        EntityModel target = relationship.targetModel();
-        TypeMapping<?> mapping = target.metadata();
+        TypeMapping<?> target = relationship.targetModel();
+        TypeMapping<?> mapping = target;
         String inverseFk = list.inverseFkColumn();
         String constant = SqlConstants.register(constants, "SQL_INSERT_" + MemberNames.upperSnake(list.name()),
                 new SqlBuilder(mapping, mapping).dialect(sqlDialect).insert(false));
-        builder.beginControlFlow("for ($T item : $L.$L())", target.typeName(), value, MemberNames.getter(list.name()));
+        builder.beginControlFlow("for ($T item : $L.$L())", typeMappingBuilder.classNameFor(target.typeName()),
+                value, MemberNames.getter(list.name()));
         builder.beginControlFlow("if (item != null)");
         builder.addStatement("$T childKeys = new $T()", GeneratedKeyHolder.class, GeneratedKeyHolder.class);
         CodeBlock.Builder sql = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
@@ -122,7 +126,7 @@ public final class ChildCascadeEmitter {
         builder.addStatement("$L", sql.build());
         builder.beginControlFlow("if (childKeys.getKey() != null)");
         builder.addStatement("item.$L((($T) childKeys.getKey()).$L())", MemberNames.setter(target.id().name()),
-                Number.class, RowWrites.idKeyCoercion(target.id().type()));
+                Number.class, RowWrites.idKeyCoercion(typeMappingBuilder.memberType(target.typeName(), target.id().name())));
         builder.endControlFlow();
         builder.endControlFlow();
         builder.endControlFlow();
@@ -133,24 +137,24 @@ public final class ChildCascadeEmitter {
                 childDeleteSql(list.targetTable(), list.inverseFkColumn()));
     }
 
-    public void appendEntityCollectionDelete(MethodSpec.Builder builder, String value, EntityModel entity,
+    public void appendEntityCollectionDelete(MethodSpec.Builder builder, String value, TypeMapping<?> entity,
                                               EntityRelationship relationship, Map<String, String> constants) {
         Prop.EntityCollection list = (Prop.EntityCollection) relationship.attribute();
         appendChildDelete(builder, value, entity,
                 entityChildDeleteConstant(constants, list), list.inverseFkColumn());
     }
 
-    public void appendChildDelete(MethodSpec.Builder builder, String value, EntityModel entity,
+    public void appendChildDelete(MethodSpec.Builder builder, String value, TypeMapping<?> entity,
                                    String constant, String fkColumn) {
         builder.addStatement("jdbcClient.sql($L).param($S, $L.$L()).update()", constant, fkColumn,
                 value, MemberNames.getter(entity.id().name()));
     }
 
-    public void appendElementCollectionInsert(MethodSpec.Builder builder, String value, EntityModel entity,
+    public void appendElementCollectionInsert(MethodSpec.Builder builder, String value, TypeMapping<?> entity,
                                                Prop.ElementCollection collection,
                                                Map<String, String> constants) {
         // the child-table column list must iterate the SAME flattened descriptor columns the
-        // params below bind. The old list walked {@code collection.properties()} while the params
+        // params below bind. The old list walked {@code collection.rowProps()} while the params
         // walked {@code descriptor().columns()}; the two diverge for a collection VO that embeds
         // another VO (one column per property vs one per flattened leaf). Iterating the descriptor
         // here keeps columns and params aligned. Byte-stable for a flat VO (no nested embedded).
@@ -198,9 +202,9 @@ public final class ChildCascadeEmitter {
         return columns;
     }
 
-    public void appendChildSyncStatements(MethodSpec.Builder builder, String value, EntityModel entity,
+    public void appendChildSyncStatements(MethodSpec.Builder builder, String value, TypeMapping<?> entity,
                                            Map<String, String> constants, WriteCascade cascade) {
-        for (Prop.ElementCollection collection : entity.collections()) {
+        for (Prop.ElementCollection collection : entity.elementCollections()) {
             appendElementCollectionDelete(builder, value, entity, collection, constants);
             appendElementCollectionInsert(builder, value, entity, collection, constants);
         }
@@ -217,14 +221,14 @@ public final class ChildCascadeEmitter {
         }
     }
 
-    public void appendEntityCollectionUpsert(MethodSpec.Builder builder, String value, EntityModel entity,
+    public void appendEntityCollectionUpsert(MethodSpec.Builder builder, String value, TypeMapping<?> entity,
                                               EntityRelationship relationship, Map<String, String> constants) {
         Prop.EntityCollection list = (Prop.EntityCollection) relationship.attribute();
-        EntityModel target = relationship.targetModel();
-        TypeMapping<?> mapping = target.metadata();
+        TypeMapping<?> target = relationship.targetModel();
+        TypeMapping<?> mapping = target;
         String inverseFk = list.inverseFkColumn();
         String base = MemberNames.upperSnake(list.name());
-        TypeName idType = target.id().type().box();
+        TypeName idType = typeMappingBuilder.memberType(target.typeName(), target.id().name()).box();
         String keys = "keys_" + list.name();
 
         String idsSelect = SqlConstants.register(constants, "SQL_SELECT_IDS_" + base,
@@ -242,7 +246,8 @@ public final class ChildCascadeEmitter {
         builder.addStatement("$T<$T> $L = new $T<>($L)", List.class, idType, keys, ArrayList.class,
                 select.build());
 
-        builder.beginControlFlow("for ($T item : $L.$L())", target.typeName(), value, MemberNames.getter(list.name()));
+        builder.beginControlFlow("for ($T item : $L.$L())", typeMappingBuilder.classNameFor(target.typeName()),
+                value, MemberNames.getter(list.name()));
         builder.beginControlFlow("if (item != null)");
         builder.beginControlFlow("if (item.$L() != null)", MemberNames.getter(target.id().name()));
         CodeBlock.Builder upsertSql = CodeBlock.builder().add("jdbcClient.sql($L)", upsert);
@@ -260,7 +265,7 @@ public final class ChildCascadeEmitter {
         builder.addStatement("$L", insertSql.build());
         builder.beginControlFlow("if (childKeys.getKey() != null)");
         builder.addStatement("item.$L((($T) childKeys.getKey()).$L())", MemberNames.setter(target.id().name()),
-                Number.class, RowWrites.idKeyCoercion(target.id().type()));
+                Number.class, RowWrites.idKeyCoercion(typeMappingBuilder.memberType(target.typeName(), target.id().name())));
         builder.endControlFlow();
         builder.endControlFlow();
         // A child the upsert/insert gave a key is not an orphan — remove it from the doomed set.
@@ -300,7 +305,7 @@ public final class ChildCascadeEmitter {
                 + " WHERE " + sqlDialect.quoteIdentifier(fkColumn) + " = :" + fkColumn;
     }
 
-    public void appendElementCollectionDelete(MethodSpec.Builder builder, String value, EntityModel entity,
+    public void appendElementCollectionDelete(MethodSpec.Builder builder, String value, TypeMapping<?> entity,
                                                Prop.ElementCollection collection,
                                                Map<String, String> constants) {
         appendChildDelete(builder, value, entity,

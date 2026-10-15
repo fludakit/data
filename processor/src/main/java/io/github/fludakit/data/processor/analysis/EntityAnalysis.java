@@ -6,7 +6,7 @@ import io.github.fludakit.data.processor.emit.MetadataGenerator;
 import io.github.fludakit.data.processor.emit.MetamodelGenerator;
 import io.github.fludakit.data.processor.emit.RepositoryGenerator;
 import io.github.fludakit.data.processor.emit.RowMapperGenerator;
-import io.github.fludakit.data.processor.model.EntityModel;
+import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.support.GeneratedArtifactRegistry;
 import javax.lang.model.element.TypeElement;
 
@@ -43,7 +43,7 @@ public class EntityAnalysis {
         this.registry = registry;
     }
 
-    public EntityModel buildEntity(TypeElement element) {
+    public TypeMapping<?> buildEntity(TypeElement element) {
         return typeMappingBuilder.buildEntity(element);
     }
 
@@ -56,7 +56,7 @@ public class EntityAnalysis {
      * metamodel field instances; value objects have no metamodel and their metadata falls back to
      * record literals.
      */
-    public void ensureDescriptorArtifacts(TypeElement entityElement, EntityModel entity, boolean withMetadata) {
+    public void ensureDescriptorArtifacts(TypeElement entityElement, TypeMapping<?> entity, boolean withMetadata) {
         String fqn = entityElement.getQualifiedName().toString();
         boolean needMetamodel = !typeMappingBuilder.isValueObjectType(entityElement) && !registry.hasMetamodel(fqn);
         boolean needMetadata = withMetadata && !registry.hasMetadata(fqn);
@@ -64,7 +64,7 @@ public class EntityAnalysis {
             return;
         }
         if (needMetamodel) {
-            String entityPackage = entity.typeName().packageName();
+            String entityPackage = typeMappingBuilder.classNameFor(entity.typeName()).packageName();
             registry.rememberMetamodel(fqn, ClassName.get(entityPackage, "_" + entityElement.getSimpleName()));
             metamodelGenerator.generateStaticMetamodel(entityElement, entity);
         }
@@ -82,7 +82,7 @@ public class EntityAnalysis {
      * however the repositories are ordered. A target failing the reflection-free gate yields
      * {@code null}: the caller records the gate NOTE and leaves the reference unmapped (no loader).
      */
-    public ClassName ensureEntityRowMapper(TypeElement targetElement, EntityModel targetModel) {
+    public ClassName ensureEntityRowMapper(TypeElement targetElement, TypeMapping<?> targetModel) {
         String targetFqn = targetElement.getQualifiedName().toString();
         ClassName cached = registry.rowMapper(targetFqn);
         if (cached != null) {
@@ -92,7 +92,7 @@ public class EntityAnalysis {
             return null;
         }
         if (!registry.hasMetadata(targetFqn)) {
-            metadataGenerator.generateEmbeddedDescriptors(targetModel.metadata());
+            metadataGenerator.generateEmbeddedDescriptors(targetModel);
             ensureDescriptorArtifacts(targetElement, targetModel, true);
         }
         ClassName mapper = rowMapperGenerator.generateRowMapper(targetElement, targetModel,

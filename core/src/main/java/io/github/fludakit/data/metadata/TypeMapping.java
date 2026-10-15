@@ -85,6 +85,29 @@ public interface TypeMapping<T> extends TableSchema, ColumnResolver {
         return p;
     }
 
+    /**
+     * The properties that have a column on this type's OWN row: everything but the two to-many
+     * shapes. An {@link Prop.EntityCollection} is reached through a join and an
+     * {@link Prop.ElementCollection} through its child table, so neither has a column here — which
+     * is the same split {@link #isToManyPath} answers one property at a time.
+     */
+    default List<Prop> rowProps() {
+        return props().stream()
+                .filter(p -> !(p instanceof Prop.EntityCollection) && !(p instanceof Prop.ElementCollection))
+                .toList();
+    }
+
+    /**
+     * The {@code List<@ValueObject>} element collections, in declaration order: the to-many shape
+     * that is not reached through a join but through its own child table.
+     */
+    default List<Prop.ElementCollection> elementCollections() {
+        return props().stream()
+                .filter(Prop.ElementCollection.class::isInstance)
+                .map(Prop.ElementCollection.class::cast)
+                .toList();
+    }
+
     /** Returns whether the named property is a to-many relation or element collection. */
     default boolean isToManyPath(String path) {
         int dot = path.indexOf('.');

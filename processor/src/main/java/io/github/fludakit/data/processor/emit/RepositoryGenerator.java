@@ -5,7 +5,7 @@ import com.squareup.javapoet.MethodSpec;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 
 import io.github.fludakit.data.processor.RoundWiring;
-import io.github.fludakit.data.processor.model.EntityModel;
+import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.model.EntityRelationship;
 import io.github.fludakit.data.processor.model.LoadPlan;
 import io.github.fludakit.data.processor.model.RepositoryEmission;
@@ -53,7 +53,7 @@ public class RepositoryGenerator {
             return;
         }
         TypeElement entityElement = (TypeElement) entityErasure.asElement();
-        EntityModel entity = wiring.entityAnalysis().buildEntity(entityElement);
+        TypeMapping<?> entity = wiring.entityAnalysis().buildEntity(entityElement);
         ClassName mapperType = ensureRowMapper(entityElement, entity);
         LoadPlan loadPlan = wiring.loadPlanner().plan(entityElement, entity);
         RepositoryEmission emission = newEmission(repository, entity, mapperType, loadPlan,
@@ -86,7 +86,7 @@ public class RepositoryGenerator {
      * dynamic paging resolves sort paths through {@code <Entity>Metadata.columnRef}, so it is a hard
      * runtime dependency that stands independent of the mapper gate.
      */
-    private ClassName ensureRowMapper(TypeElement entityElement, EntityModel entity) {
+    private ClassName ensureRowMapper(TypeElement entityElement, TypeMapping<?> entity) {
         String entityFqn = entityElement.getQualifiedName().toString();
         ClassName mapperType = null;
         boolean mapperPending = false;
@@ -106,7 +106,7 @@ public class RepositoryGenerator {
         }
         // EMBEDDED value objects carry descriptor metadata even when the owner's mapper gate skips
         // them; the generated <VO>Metadata classes are what the owner's attributes() reference.
-        wiring.metadataGenerator().generateEmbeddedDescriptors(entity.metadata());
+        wiring.metadataGenerator().generateEmbeddedDescriptors(entity);
         return mapperType;
     }
 
@@ -116,7 +116,7 @@ public class RepositoryGenerator {
      * both derived rather than passed in, because they are consequences of what the planners decided
      * and nothing outside this class needs to see them separately.
      */
-    private RepositoryEmission newEmission(TypeElement repository, EntityModel entity, ClassName mapperType,
+    private RepositoryEmission newEmission(TypeElement repository, TypeMapping<?> entity, ClassName mapperType,
                                            LoadPlan loadPlan, WriteCascade cascade) {
         boolean hydrate = wiring.hydrationEmitter().hasGeneratedHydration(mapperType,
                 loadPlan.hydratedCollections(), loadPlan.hydratedRelationships());

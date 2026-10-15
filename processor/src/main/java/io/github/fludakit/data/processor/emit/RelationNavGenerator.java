@@ -14,7 +14,6 @@ import io.github.fludakit.data.processor.RepositoryProcessor;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
 import io.github.fludakit.data.processor.analysis.PathResolver;
 import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
-import io.github.fludakit.data.processor.model.EntityModel;
 import io.github.fludakit.data.processor.model.MmMember;
 import io.github.fludakit.data.processor.model.NavUnit;
 import io.github.fludakit.data.processor.support.MemberNames;
@@ -80,8 +79,7 @@ public final class RelationNavGenerator {
         if (relationTargetResolved(targetFqn, false)) {
             // Non-null is guaranteed by the gate above, which resolved this same model by this same
             // name; the FQN-keyed form is a cache hit, so the model is built once either way.
-            TypeMapping<?> target = typeMappingBuilder.entityModel(PathResolver.stripGenerics(targetFqn))
-                    .metadata();
+            TypeMapping<?> target = typeMappingBuilder.descriptorFor(PathResolver.stripGenerics(targetFqn));
             if (target.id() != null) {
                 addRelationLeaf(builder, taken, origin, owner, member.path(), "", target.id());
             }
@@ -131,7 +129,7 @@ public final class RelationNavGenerator {
             return false;
         }
         String rawName = PathResolver.stripGenerics(targetFqn);
-        EntityModel targetModel = typeMappingBuilder.entityModel(rawName);
+        TypeMapping<?> targetModel = typeMappingBuilder.descriptorFor(rawName);
         if (targetModel == null || !rowMapperGenerator.canGenerateRowMapper(targetModel)) {
             return false;
         }

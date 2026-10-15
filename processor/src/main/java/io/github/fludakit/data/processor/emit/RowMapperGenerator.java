@@ -12,8 +12,7 @@ import io.github.fludakit.data.metadata.TypeMapping.Prop;
 
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
 import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
-import io.github.fludakit.data.processor.model.EntityModel;
-import io.github.fludakit.data.processor.model.Property;
+import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.support.MemberNames;
 import javax.lang.model.element.Element;
@@ -95,19 +94,19 @@ public final class RowMapperGenerator {
      * properties, so the recursion flattens naturally; a {@code null} embedded model (cycle guard)
      * fails closed.
      */
-    public boolean canGenerateRowMapper(EntityModel entity) {
-        if (entity.id() != null && !Literals.isJdbcSafe(entity.id().type()) && !isEnumType(entity.id().type())) {
+    public boolean canGenerateRowMapper(TypeMapping<?> entity) {
+        if (entity.id() != null && !Literals.isJdbcSafe(idType(entity)) && !isEnumType(idType(entity))) {
             return false;
         }
-        for (Property p : entity.properties()) {
-            if (p.prop() instanceof Prop.Reference) {
+        for (Prop p : entity.rowProps()) {
+            if (p instanceof Prop.Reference) {
                 continue; // FK-only, or hydrated by the relationship loaders
             }
-            if (Literals.isJdbcSafe(p.type()) || isEnumType(p.type())) {
+            if (Literals.isJdbcSafe(typeMappingBuilder.memberType(entity.typeName(), p.name())) || isEnumType(typeMappingBuilder.memberType(entity.typeName(), p.name()))) {
                 continue;
             }
-            if (p.prop() instanceof Prop.Embedded && p.embeddedModel() != null
-                    && canGenerateRowMapper(p.embeddedModel())) {
+            if (p instanceof Prop.Embedded && ((Prop.Embedded) p).target() != null
+                    && canGenerateRowMapper(((Prop.Embedded) p).target())) {
                 continue;
             }
             return false;
@@ -115,11 +114,23 @@ public final class RowMapperGenerator {
         return true;
     }
 
+    /**
+     * The id's JavaPoet type — the one member whose type the mapping names but does not render.
+     *
+     * <p>Not {@code entity.id().typeFqn()} turned back into a name: a synthesized {@code long id}
+     * resolves to {@code java.lang.Long} through {@link AttributeTypes#classArgOf} only by accident,
+     * and a primitive must stay primitive for {@code Literals.isJdbcSafe} and for the
+     * {@code wasNull()} guard to be emitted. The scan recorded it, so the scan is asked.</p>
+     */
+    private TypeName idType(TypeMapping<?> entity) {
+        return typeMappingBuilder.memberType(entity.typeName(), entity.id().name());
+    }
+
     /** Emits {@code <Entity>RowMapper implements io.github.fludakit.jdbc.RowMapper<Entity>}; reflection-free. */
-    public ClassName generateRowMapper(TypeElement entityElement, EntityModel entity, ClassName metadataType) {
-        String packageName = entity.typeName().packageName();
+    public ClassName generateRowMapper(TypeElement entityElement, TypeMapping<?> entity, ClassName metadataType) {
+        String packageName = typeMappingBuilder.classNameFor(entity.typeName()).packageName();
         String simpleName = entityElement.getSimpleName() + "RowMapper";
-        TypeName entityType = entity.typeName();
+        TypeName entityType = typeMappingBuilder.classNameFor(entity.typeName());
         ClassName rowMapperInterface = ClassName.get("io.github.fludakit.jdbc", "RowMapper");
 
         MethodSpec.Builder mapRow = MethodSpec.methodBuilder("mapRow")
@@ -132,7 +143,7 @@ public final class RowMapperGenerator {
                 .addStatement("$T entity = new $T()", entityType, entityType);
 
         if (entity.id() != null) {
-            appendPropertyRead(mapRow, entity.id().type(), metadataType, entity.id().name(),
+            appendPropertyRead(mapRow, idType(entity), metadataType, entity.id().name(),
                     entity.id().column(), entityElement.getSimpleName().toString());
         }
         // a non-composing @Association (composition=false) materializes at read time as an
@@ -141,18 +152,18 @@ public final class RowMapperGenerator {
         // One helper per distinct target simple name (deduped). A target that cannot back a partial
         // (no no-arg ctor / setId / non-JDBC-safe id) degrades to a NOTE + null field (never abort).
         Map<String, MethodSpec> partialHelpers = new LinkedHashMap<>();
-        for (Property p : entity.properties()) {
-            if (p.prop() instanceof Prop.Reference ref) {
+        for (Prop p : entity.rowProps()) {
+            if (p instanceof Prop.Reference ref) {
                 if (!ref.composition()) {
                     appendAssociationPartial(mapRow, ref, metadataType, entityElement, partialHelpers);
                 }
                 continue; // composition reference: FK-only on the mapper, hydrated by the loader
             }
-            if (p.prop() instanceof Prop.Embedded) {
-                appendEmbeddedRead(mapRow, metadataType, p, entityElement.getSimpleName().toString());
+            if (p instanceof Prop.Embedded embedded) {
+                appendEmbeddedRead(mapRow, metadataType, embedded, entityElement.getSimpleName().toString());
                 continue;
             }
-            appendPropertyRead(mapRow, p.type(), metadataType, p.name(), p.column(),
+            appendPropertyRead(mapRow, typeMappingBuilder.memberType(entity.typeName(), p.name()), metadataType, p.name(), MemberNames.memberColumn(p),
                     entityElement.getSimpleName().toString());
         }
         mapRow.addStatement("return entity");
@@ -189,14 +200,14 @@ public final class RowMapperGenerator {
                     entityElement);
             return;
         }
-        EntityModel targetModel = typeMappingBuilder.entityModel(reference.targetTypeName());
+        TypeMapping<?> targetModel = typeMappingBuilder.descriptorFor(reference.targetTypeName());
         if (targetModel == null || targetModel.id() == null) {
             // Unreachable in practice: associationPartialBlocked already rejected both. Re-checked
             // because the model is resolved a second time here, and the gate's verdict is not carried.
             return;
         }
-        TypeName idType = targetModel.id().type().box();
-        TypeName targetType = targetModel.typeName();
+        TypeName idType = typeMappingBuilder.memberType(targetModel.typeName(), targetModel.id().name()).box();
+        TypeName targetType = typeMappingBuilder.classNameFor(targetModel.typeName());
         String targetSimple = targetSimpleName(targetModel);
         // Read the FK into a local named after its physical column (customer_id), reusing the owner's
         // metadata constant for the association property (CUSTOMER -> "customer_id").
@@ -231,12 +242,15 @@ public final class RowMapperGenerator {
         if (target == null) {
             return "the target " + fqn + " could not be resolved";
         }
-        EntityModel targetModel = typeMappingBuilder.entityModel(target);
+        TypeMapping<?> targetModel = typeMappingBuilder.descriptorFor(target);
         if (targetModel.id() == null) {
             return "the target " + fqn + " has no identifier";
         }
-        if (!Literals.isJdbcSafe(targetModel.id().type().box())) {
-            return "the target " + fqn + " id type " + targetModel.id().type() + " is not JDBC-safe";
+        if (!Literals.isJdbcSafe(typeMappingBuilder.memberType(targetModel.typeName(),
+                targetModel.id().name()).box())) {
+            return "the target " + fqn + " id type "
+                + typeMappingBuilder.memberType(targetModel.typeName(), targetModel.id().name())
+                + " is not JDBC-safe";
         }
         if (!hasNoArgConstructor(target)) {
             return "the target " + fqn + " has no accessible no-argument constructor";
@@ -282,7 +296,7 @@ public final class RowMapperGenerator {
                             + "'; its children will not be hydrated.", origin);
             return null;
         }
-        EntityModel voModel = typeMappingBuilder.valueObjectModel(voElement);
+        TypeMapping<?> voModel = typeMappingBuilder.descriptorFor(voElement);
         if (!canGenerateRowMapper(voModel)) {
             diagnostics.note(
                     "Value object '" + voFqn + "' is not reflection-free mappable; its element collection"
@@ -304,11 +318,11 @@ public final class RowMapperGenerator {
      * — and {@code EMBEDDED} children are rebuilt leaf-by-leaf via
      * {@link #appendEmbeddedRead}.
      */
-    private ClassName generateValueObjectRowMapper(TypeElement voElement, EntityModel voModel,
+    private ClassName generateValueObjectRowMapper(TypeElement voElement, TypeMapping<?> voModel,
                                                   ClassName voMetadataType) {
-        String packageName = voModel.typeName().packageName();
+        String packageName = typeMappingBuilder.classNameFor(voModel.typeName()).packageName();
         String simpleName = voElement.getSimpleName() + "RowMapper";
-        TypeName voType = voModel.typeName();
+        TypeName voType = typeMappingBuilder.classNameFor(voModel.typeName());
         ClassName rowMapperInterface = ClassName.get("io.github.fludakit.jdbc", "RowMapper");
         String voName = voElement.getSimpleName().toString();
 
@@ -321,15 +335,15 @@ public final class RowMapperGenerator {
                 .addException(ClassName.get("java.sql", "SQLException"))
                 .addStatement("$T entity = new $T()", voType, voType);
 
-        for (Property p : voModel.properties()) {
-            if (p.prop() instanceof Prop.Reference) {
+        for (Prop p : voModel.rowProps()) {
+            if (p instanceof Prop.Reference) {
                 continue; // FK-only reference; left null (the relationship loaders fill it)
             }
-            if (p.prop() instanceof Prop.Embedded) {
-                appendEmbeddedRead(mapRow, voMetadataType, p, voName);
+            if (p instanceof Prop.Embedded embedded) {
+                appendEmbeddedRead(mapRow, voMetadataType, embedded, voName);
                 continue;
             }
-            appendPropertyRead(mapRow, p.type(), voMetadataType, p.name(), p.column(), voName);
+            appendPropertyRead(mapRow, typeMappingBuilder.memberType(voModel.typeName(), p.name()), voMetadataType, p.name(), MemberNames.memberColumn(p), voName);
         }
         mapRow.addStatement("return entity");
 
@@ -382,15 +396,15 @@ public final class RowMapperGenerator {
      * whole block stays reflection-free.
      */
     private void appendEmbeddedRead(MethodSpec.Builder mapRow, ClassName ownerMetadata,
-                                    Property embedded, String entityName) {
+                                    Prop.Embedded embedded, String entityName) {
         List<String> presence = new ArrayList<>();
-        readEmbeddedLeaves(mapRow, ownerMetadata, embedded.embeddedModel(),
+        readEmbeddedLeaves(mapRow, ownerMetadata, embedded.target(),
                 Names.columnBase(embedded.name()), embedded.name(), presence, entityName);
         boolean guarded = !presence.isEmpty();
         if (guarded) {
             mapRow.beginControlFlow("if ($L)", String.join(" || ", presence));
         }
-        buildEmbeddedValue(mapRow, embedded.embeddedModel(), Names.columnBase(embedded.name()), embedded.name());
+        buildEmbeddedValue(mapRow, embedded.target(), Names.columnBase(embedded.name()), embedded.name());
         mapRow.addStatement("entity.$L($L)", MemberNames.setter(embedded.name()), embedded.name());
         if (guarded) {
             mapRow.endControlFlow();
@@ -398,25 +412,25 @@ public final class RowMapperGenerator {
     }
 
     /** Reads each flattened leaf of {@code vo} into a column-named local, collecting the boxed-leaf presence terms. */
-    private void readEmbeddedLeaves(MethodSpec.Builder mapRow, ClassName ownerMetadata, EntityModel valueObject,
+    private void readEmbeddedLeaves(MethodSpec.Builder mapRow, ClassName ownerMetadata, TypeMapping<?> valueObject,
                                     String prefix, String path, List<String> presence, String entityName) {
-        for (Property p : valueObject.properties()) {
-            if (p.prop() instanceof Prop.Reference) {
+        for (Prop p : valueObject.rowProps()) {
+            if (p instanceof Prop.Reference) {
                 continue; // fk-only children stay null on read, as at owner level
             }
-            if (p.prop() instanceof Prop.Embedded) {
-                readEmbeddedLeaves(mapRow, ownerMetadata, p.embeddedModel(),
-                        prefix + "_" + p.column(), path + "." + p.name(), presence, entityName);
+            if (p instanceof Prop.Embedded) {
+                readEmbeddedLeaves(mapRow, ownerMetadata, ((Prop.Embedded) p).target(),
+                        prefix + "_" + MemberNames.memberColumn(p), path + "." + p.name(), presence, entityName);
                 continue;
             }
-            String local = prefix + "_" + p.column();
-            if (!p.type().isPrimitive()) {
-                mapRow.addStatement("$T $L = $L", p.type(), local,
-                        readExpression(p.type(), ownerMetadata, local));
+            String local = prefix + "_" + MemberNames.memberColumn(p);
+            if (!typeMappingBuilder.memberType(valueObject.typeName(), p.name()).isPrimitive()) {
+                mapRow.addStatement("$T $L = $L", typeMappingBuilder.memberType(valueObject.typeName(), p.name()), local,
+                        readExpression(typeMappingBuilder.memberType(valueObject.typeName(), p.name()), ownerMetadata, local));
                 presence.add(local + " != null");
                 continue;
             }
-            mapRow.addStatement("$T $L = rs.$L($T.$L)", p.type(), local, RowReads.primitiveGetter(path, p.type()),
+            mapRow.addStatement("$T $L = rs.$L($T.$L)", typeMappingBuilder.memberType(valueObject.typeName(), p.name()), local, RowReads.primitiveGetter(path, typeMappingBuilder.memberType(valueObject.typeName(), p.name())),
                     ownerMetadata, Literals.constName(local));
             mapRow.beginControlFlow("if (rs.wasNull())");
             mapRow.addStatement("throw new $T($S)", ClassName.get("java.sql", "SQLException"),
@@ -433,28 +447,30 @@ public final class RowMapperGenerator {
      * whose subtree holds no boxed leaf has no presence signal and is constructed unconditionally
      * under the parent's guard.
      */
-    private void buildEmbeddedValue(MethodSpec.Builder mapRow, EntityModel valueObject, String prefix, String local) {
-        mapRow.addStatement("$T $L = new $T()", valueObject.typeName(), local, valueObject.typeName());
-        for (Property p : valueObject.properties()) {
-            Prop pp = p.prop();
+    private void buildEmbeddedValue(MethodSpec.Builder mapRow, TypeMapping<?> valueObject, String prefix, String local) {
+        mapRow.addStatement("$T $L = new $T()", typeMappingBuilder.classNameFor(valueObject.typeName()), local,
+                typeMappingBuilder.classNameFor(valueObject.typeName()));
+        for (Prop p : valueObject.rowProps()) {
+            Prop pp = p;
             if (pp instanceof Prop.Reference || pp instanceof Prop.Embedded) {
                 continue;
             }
-            mapRow.addStatement("$L.$L($L)", local, MemberNames.setter(p.name()), prefix + "_" + p.column());
+            mapRow.addStatement("$L.$L($L)", local, MemberNames.setter(p.name()), prefix + "_" + MemberNames.memberColumn(p));
         }
-        for (Property p : valueObject.properties()) {
-            if (!(p.prop() instanceof Prop.Embedded)) {
+        for (Prop p : valueObject.rowProps()) {
+            if (!(p instanceof Prop.Embedded)) {
                 continue;
             }
-            String childLocal = prefix + "_" + p.column();
+            String childLocal = prefix + "_" + MemberNames.memberColumn(p);
             List<String> terms = new ArrayList<>();
-            RowReads.collectPresenceTerms(p.embeddedModel(), childLocal, terms);
+            RowReads.collectPresenceTerms(((Prop.Embedded) p).target(), childLocal, terms,
+                    typeMappingBuilder::memberType);
             if (terms.isEmpty()) {
-                buildEmbeddedValue(mapRow, p.embeddedModel(), childLocal, childLocal);
+                buildEmbeddedValue(mapRow, ((Prop.Embedded) p).target(), childLocal, childLocal);
                 mapRow.addStatement("$L.$L($L)", local, MemberNames.setter(p.name()), childLocal);
             } else {
                 mapRow.beginControlFlow("if ($L)", String.join(" || ", terms));
-                buildEmbeddedValue(mapRow, p.embeddedModel(), childLocal, childLocal);
+                buildEmbeddedValue(mapRow, ((Prop.Embedded) p).target(), childLocal, childLocal);
                 mapRow.addStatement("$L.$L($L)", local, MemberNames.setter(p.name()), childLocal);
                 mapRow.endControlFlow();
             }
@@ -472,7 +488,7 @@ public final class RowMapperGenerator {
     }
 
     /** The simple name of a target entity model, for the {@code SQL_FIND_<TARGET>_BY_IDS} constant base. */
-    private static String targetSimpleName(EntityModel targetModel) {
+    private static String targetSimpleName(TypeMapping<?> targetModel) {
         String fqn = targetModel.typeName().toString();
         int dot = fqn.lastIndexOf('.');
         return dot < 0 ? fqn : fqn.substring(dot + 1);

@@ -4,7 +4,7 @@ import io.github.fludakit.data.metadata.TypeMapping.Prop;
 
 import io.github.fludakit.data.processor.emit.ChildCascadeEmitter;
 import io.github.fludakit.data.processor.emit.WriteMethodEmitter;
-import io.github.fludakit.data.processor.model.EntityModel;
+import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.model.EntityRelationship;
 import io.github.fludakit.data.processor.model.WriteCascade;
 import io.github.fludakit.data.processor.support.Diagnostics;
@@ -53,7 +53,7 @@ public final class CascadeSavePlanner {
      * Computes the write-side scope of one repository entity. A plain {@code @Entity} — and a root
      * with no relations — comes back with two empty lists.
      */
-    public WriteCascade plan(TypeElement entityElement, EntityModel entity) {
+    public WriteCascade plan(TypeElement entityElement, TypeMapping<?> entity) {
         // Aggregate write cascade. Two rules:
         // Kind gate: the composition lifecycle is bound to the root ONLY for
         // @AggregateRoot owners; inside an @Entity an entity collection is a
@@ -69,20 +69,20 @@ public final class CascadeSavePlanner {
         // emits its own write-honest NOTE ("children will NOT be cascaded on save/update/delete") so
         // save() can never silently drop children without write-side diagnostics.
         List<EntityRelationship> cascadeRelationships = new ArrayList<>();
-        if (entity.metadata().ownsAggregateLifecycle()) {
-            for (Prop a : entity.metadata().props()) {
+        if (entity.ownsAggregateLifecycle()) {
+            for (Prop a : entity.props()) {
                 if (!(a instanceof Prop.EntityCollection list)) {
                     continue;
                 }
                 String targetFqn = list.targetTypeName();
                 // entityModel() is a pure memo of the idempotent buildEntity — safe for targets the
                 // read gate excluded; no mapper or descriptor artifact is generated from this path.
-                EntityModel targetModel = typeMappingBuilder.entityModel(targetFqn);
+                TypeMapping<?> targetModel = typeMappingBuilder.descriptorFor(targetFqn);
                 String blocker = targetModel == null
                         ? "target type " + targetFqn + " is unresolvable"
                         : list.inverseName() == null
                                 ? "one-to-many inverse is unresolved on the target"
-                                : ChildCascadeEmitter.entityCollectionWriteBlocker(targetModel);
+                                : ChildCascadeEmitter.entityCollectionWriteBlocker(targetModel, typeMappingBuilder);
                 if (blocker != null) {
                     diagnostics.note(
                             "entity collection '" + list.name() + "' on " + entityElement.getQualifiedName()
@@ -105,17 +105,17 @@ public final class CascadeSavePlanner {
         //   - backReference=true: the inverse FK of the root's own EntityCollection, a write-only
         //     mirror of a column the child already owns — it is not a target, and it has no row.
         List<EntityRelationship> compositionRelationships = new ArrayList<>();
-        if (entity.metadata().ownsAggregateLifecycle()) {
-            for (Prop a : entity.metadata().props()) {
+        if (entity.ownsAggregateLifecycle()) {
+            for (Prop a : entity.props()) {
                 if (!(a instanceof Prop.Reference reference)
                         || !reference.composition() || reference.backReference()) {
                     continue;
                 }
                 String targetFqn = reference.targetTypeName();
-                EntityModel targetModel = typeMappingBuilder.entityModel(targetFqn);
+                TypeMapping<?> targetModel = typeMappingBuilder.descriptorFor(targetFqn);
                 String blocker = targetModel == null
                         ? "target type " + targetFqn + " is unresolvable"
-                        : ChildCascadeEmitter.entityCollectionWriteBlocker(targetModel);
+                        : ChildCascadeEmitter.entityCollectionWriteBlocker(targetModel, typeMappingBuilder);
                 if (blocker != null) {
                     diagnostics.note(
                             "composition reference '" + reference.name() + "' on "

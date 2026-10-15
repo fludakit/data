@@ -6,8 +6,9 @@ import com.squareup.javapoet.TypeName;
 import com.squareup.javapoet.TypeVariableName;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
+import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
 import io.github.fludakit.data.processor.analysis.TypeShapes;
-import io.github.fludakit.data.processor.model.EntityModel;
+import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.model.EntityRelationship;
 import io.github.fludakit.data.processor.model.WriteCascade;
 import io.github.fludakit.data.processor.support.Diagnostics;
@@ -50,9 +51,10 @@ public final class WriteMethodEmitter {
     /**
      * Handed down to {@link RowWrites}, which asks whether a property's declared type is an
      * {@code enum} to decide how the row binds it. This emitter resolves no type itself: everything
-     * it writes comes from the {@link EntityModel} it is handed.
+     * it writes comes from the {@link TypeMapping} it is handed.
      */
     private final AttributeTypes attributeTypes;
+    private final MappedTypeBuilder typeMappingBuilder;
     private final TypeShapes typeShapes;
     private final Diagnostics diagnostics;
     private final SqlDialect sqlDialect;
@@ -61,24 +63,25 @@ public final class WriteMethodEmitter {
     /** The child-cascade statements: element collections, owned entity collections, compositions. */
     private final ChildCascadeEmitter childCascade;
 
-    public WriteMethodEmitter(AttributeTypes attributeTypes, TypeShapes typeShapes, Diagnostics diagnostics,
-                       SqlDialect sqlDialect) {
+    public WriteMethodEmitter(AttributeTypes attributeTypes, MappedTypeBuilder typeMappingBuilder,
+                       TypeShapes typeShapes, Diagnostics diagnostics, SqlDialect sqlDialect) {
         this.attributeTypes = attributeTypes;
+        this.typeMappingBuilder = typeMappingBuilder;
         this.typeShapes = typeShapes;
         this.diagnostics = diagnostics;
         this.sqlDialect = sqlDialect;
-        this.rowWrites = new RowWrites(attributeTypes, sqlDialect);
-        this.childCascade = new ChildCascadeEmitter(sqlDialect, rowWrites, attributeTypes);
+        this.rowWrites = new RowWrites(attributeTypes, sqlDialect, typeMappingBuilder);
+        this.childCascade = new ChildCascadeEmitter(sqlDialect, rowWrites, attributeTypes, typeMappingBuilder);
     }
 
     public void emitSave(MethodSpec.Builder builder, ExecutableElement method, String value,
-                          EntityModel entity, Map<String, String> constants,
+                          TypeMapping<?> entity, Map<String, String> constants,
                           WriteCascade cascade) {
-        if (RowWrites.idKeyCoercion(entity.id().type()) == null) {
+        if (RowWrites.idKeyCoercion(typeMappingBuilder.memberType(entity.typeName(), entity.id().name())) == null) {
             // The null-id discrimination routes an application-assigned entity with no id yet into an
             // INSERT that would bind NULL into the identity column — warn and keep compiling.
             diagnostics.note(
-                    "id type " + entity.id().type().box() + " requires application-assigned identifiers",
+                    "id type " + typeMappingBuilder.memberType(entity.typeName(), entity.id().name()).box() + " requires application-assigned identifiers",
                     method);
         }
         appendUpsertStatements(builder, value, entity, constants, cascade);
@@ -87,7 +90,7 @@ public final class WriteMethodEmitter {
         }
     }
 
-    private void appendUpsertStatements(MethodSpec.Builder builder, String value, EntityModel entity,
+    private void appendUpsertStatements(MethodSpec.Builder builder, String value, TypeMapping<?> entity,
                                         Map<String, String> constants, WriteCascade cascade) {
         childCascade.appendCompositionWrites(builder, value, entity, cascade, constants);
         builder.beginControlFlow("if ($L == null)", value + "." + MemberNames.getter(entity.id().name()) + "()");
@@ -110,13 +113,13 @@ public final class WriteMethodEmitter {
         builder.endControlFlow();
     }
 
-    private static boolean hasChildren(EntityModel entity, WriteCascade cascade) {
-        return !entity.collections().isEmpty() || !cascade.collections().isEmpty();
+    private static boolean hasChildren(TypeMapping<?> entity, WriteCascade cascade) {
+        return !entity.elementCollections().isEmpty() || !cascade.collections().isEmpty();
     }
 
     public void emitLifecycleBatch(MethodSpec.Builder builder, ExecutableElement method,
                                     VariableElement parameter, TypeMirror parameterType,
-                                    EntityModel entity, Map<String, String> constants,
+                                    TypeMapping<?> entity, Map<String, String> constants,
                                     WriteCascade cascade) {
         String values = MemberNames.parameterName(parameter, "entities");
         TypeMirror valueType = typeShapes.sequenceElementType(parameterType);
@@ -137,20 +140,20 @@ public final class WriteMethodEmitter {
         }
     }
 
-    public boolean isEntitySequenceParameter(TypeMirror parameterType, EntityModel entity) {
+    public boolean isEntitySequenceParameter(TypeMirror parameterType, TypeMapping<?> entity) {
         TypeMirror elementType = typeShapes.sequenceElementType(parameterType);
         return elementType != null && isEntityParameter(elementType, entity);
     }
 
-    public void appendInsertAndChildCascades(MethodSpec.Builder builder, String value, EntityModel entity,
+    public void appendInsertAndChildCascades(MethodSpec.Builder builder, String value, TypeMapping<?> entity,
                                         Map<String, String> constants, WriteCascade cascade) {
         childCascade.appendCompositionWrites(builder, value, entity, cascade, constants);
         appendRootInsertAndChildInserts(builder, value, entity, constants, cascade);
     }
 
-    private void appendRootInsertAndChildInserts(MethodSpec.Builder builder, String value, EntityModel entity,
+    private void appendRootInsertAndChildInserts(MethodSpec.Builder builder, String value, TypeMapping<?> entity,
                                                  Map<String, String> constants, WriteCascade cascade) {
-        String coercion = RowWrites.idKeyCoercion(entity.id().type());
+        String coercion = RowWrites.idKeyCoercion(typeMappingBuilder.memberType(entity.typeName(), entity.id().name()));
         if (coercion == null) {
             // An id type no GeneratedKeyHolder key can produce (String, UUID, ...) is
             // application-assigned: the identity column joins the INSERT and binds from the entity, so
@@ -168,7 +171,7 @@ public final class WriteMethodEmitter {
             builder.endControlFlow();
         }
 
-        for (Prop.ElementCollection collection : entity.collections()) {
+        for (Prop.ElementCollection collection : entity.elementCollections()) {
             childCascade.appendElementCollectionInsert(builder, value, entity, collection, constants);
         }
         // the root INSERT cascades each composition entity collection — the child's own
@@ -178,43 +181,43 @@ public final class WriteMethodEmitter {
         }
     }
 
-    private void appendRootUpsert(MethodSpec.Builder builder, String value, EntityModel entity,
+    private void appendRootUpsert(MethodSpec.Builder builder, String value, TypeMapping<?> entity,
                                   Map<String, String> constants) {
         String constant = SqlConstants.register(constants, "SQL_UPSERT",
-                new SqlBuilder(entity.metadata(), entity.metadata()).dialect(sqlDialect).upsert());
+                new SqlBuilder(entity, entity).dialect(sqlDialect).upsert());
         CodeBlock.Builder sql = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
         rowWrites.appendAllColumnParams(sql, entity, value);
         sql.add(".update()");
         builder.addStatement("$L", sql.build());
     }
 
-    public void appendUpdateStatements(MethodSpec.Builder builder, String value, EntityModel entity,
+    public void appendUpdateStatements(MethodSpec.Builder builder, String value, TypeMapping<?> entity,
                                         Map<String, String> constants, WriteCascade cascade) {
         childCascade.appendCompositionWrites(builder, value, entity, cascade, constants);
         builder.addStatement("$L", rootUpdate(value, entity, constants));
         childCascade.appendChildSyncStatements(builder, value, entity, constants, cascade);
     }
 
-    private CodeBlock rootUpdate(String value, EntityModel entity, Map<String, String> constants) {
+    private CodeBlock rootUpdate(String value, TypeMapping<?> entity, Map<String, String> constants) {
         return rowWrites.rowUpdate(value, entity, constants, "SQL_UPDATE");
     }
 
-    private void appendRootInsertWithId(MethodSpec.Builder builder, String value, EntityModel entity,
+    private void appendRootInsertWithId(MethodSpec.Builder builder, String value, TypeMapping<?> entity,
                                         Map<String, String> constants) {
         String constant = SqlConstants.register(constants, "SQL_INSERT",
-                new SqlBuilder(entity.metadata(), entity.metadata()).dialect(sqlDialect).insert(true));
+                new SqlBuilder(entity, entity).dialect(sqlDialect).insert(true));
         CodeBlock.Builder sql = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
-        sql.add(".param($S, $L.$L())", SqlBuilder.paramName(entity.metadata().id().name()),
+        sql.add(".param($S, $L.$L())", SqlBuilder.paramName(entity.id().name()),
                 value, MemberNames.getter(entity.id().name()));
         rowWrites.appendColumnParams(sql, entity, value);
         sql.add(".update()");
         builder.addStatement("$L", sql.build());
     }
 
-    private void appendInsertWithIdStatements(MethodSpec.Builder builder, String value, EntityModel entity,
+    private void appendInsertWithIdStatements(MethodSpec.Builder builder, String value, TypeMapping<?> entity,
                                               Map<String, String> constants, WriteCascade cascade) {
         appendRootInsertWithId(builder, value, entity, constants);
-        for (Prop.ElementCollection collection : entity.collections()) {
+        for (Prop.ElementCollection collection : entity.elementCollections()) {
             childCascade.appendElementCollectionInsert(builder, value, entity, collection, constants);
         }
         for (EntityRelationship relationship : cascade.collections()) {
@@ -223,10 +226,11 @@ public final class WriteMethodEmitter {
     }
 
     public void emitBatch(MethodSpec.Builder builder, ExecutableElement method, VariableElement parameter,
-                           EntityModel entity, String delegate) {
+                           TypeMapping<?> entity, String delegate) {
         TypeVariableName element = method.getTypeParameters().isEmpty()
-                ? TypeVariableName.get("S", entity.typeName())
-                : TypeVariableName.get(method.getTypeParameters().get(0).getSimpleName().toString(), entity.typeName());
+                ? TypeVariableName.get("S", typeMappingBuilder.classNameFor(entity.typeName()))
+                : TypeVariableName.get(method.getTypeParameters().get(0).getSimpleName().toString(),
+                        typeMappingBuilder.classNameFor(entity.typeName()));
         builder.addStatement("$T<$T> result = new $T<>()", List.class, element, ArrayList.class);
         builder.beginControlFlow("for ($T entity : $L)", element, MemberNames.parameterName(parameter, "entities"));
         builder.addStatement("result.add($L(entity))", delegate);
@@ -234,14 +238,14 @@ public final class WriteMethodEmitter {
         builder.addStatement("return result");
     }
 
-    public void emitDeleteById(MethodSpec.Builder builder, String value, EntityModel entity,
+    public void emitDeleteById(MethodSpec.Builder builder, String value, TypeMapping<?> entity,
                                 Map<String, String> constants, WriteCascade cascade) {
         // Children first, then the parent: the child table has no FK constraint to lean on, but the
         // order keeps the child rows from outliving their parent even for a single autocommit delete.
         // Cascade over EVERY collection (save inserts all of them), not just the gate-passed
         // hydrated ones — a child whose VO fails the mapper gate would otherwise orphan rows. The child
         // DELETE is plain SQL keyed on the child table/FK, so it needs no VO mapper (see childDeleteConstant).
-        for (Prop.ElementCollection collection : entity.collections()) {
+        for (Prop.ElementCollection collection : entity.elementCollections()) {
             String childConstant = childCascade.childDeleteConstant(constants, collection);
             builder.addStatement("jdbcClient.sql($L).param($S, $L).update()", childConstant,
                     collection.parentFkColumn(), value);
@@ -255,11 +259,11 @@ public final class WriteMethodEmitter {
                     list.inverseFkColumn(), value);
         }
         String constant = SqlConstants.register(constants, "SQL_DELETE",
-                new SqlBuilder(entity.metadata()).dialect(sqlDialect).deleteById());
+                new SqlBuilder(entity).dialect(sqlDialect).deleteById());
         builder.addStatement("jdbcClient.sql($L).param($S, $L).update()", constant, MemberNames.ID_PARAM, value);
     }
 
-    public boolean isEntityParameter(TypeMirror parameterType, EntityModel entity) {
+    public boolean isEntityParameter(TypeMirror parameterType, TypeMapping<?> entity) {
         return typeShapes.isEntity(parameterType, entity);
     }
 }

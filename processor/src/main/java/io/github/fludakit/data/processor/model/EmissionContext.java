@@ -7,6 +7,7 @@ import io.github.fludakit.data.processor.emit.CrudReadEmitter;
 import io.github.fludakit.data.processor.emit.RepositoryMethodCompiler;
 import java.util.List;
 import java.util.Map;
+import io.github.fludakit.data.metadata.TypeMapping;
 
 /**
  * The per-repository inputs every read-shape emitter reads.
@@ -26,7 +27,7 @@ import java.util.Map;
  * @param joinedReferences  those composing to-one references; they ride the parent's SELECT and get
  *                          no loader of their own
  */
-public record EmissionContext(EntityModel entity, Map<String, String> constants, ClassName mapperType,
+public record EmissionContext(TypeMapping<?> entity, Map<String, String> constants, ClassName mapperType,
                        boolean hydrate, String crudFullMapper,
                        List<Prop.Reference> joinedReferences) {
 }

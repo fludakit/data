@@ -13,7 +13,7 @@ import io.github.fludakit.data.metadata.TypeMapping.Prop;
 
 import io.github.fludakit.data.processor.RepositoryProcessor;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
-import io.github.fludakit.data.processor.model.EntityModel;
+import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
 import io.github.fludakit.data.processor.model.MmMember;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.support.MemberNames;
@@ -86,10 +86,10 @@ public final class MetamodelGenerator {
      * entity's {@code _Entity} metamodel — degrades to a NOTE and the plain attribute record (spec
      * collision handling), never to a Filer error.
      */
-    public void generateStaticMetamodel(TypeElement entityElement, EntityModel entity) {
-        List<MmMember> members = collectMembers(entityElement, entity.metadata());
-        String packageName = entity.typeName().packageName();
-        ClassName owner = ClassName.get(packageName, entityElement.getSimpleName().toString());
+    public void generateStaticMetamodel(TypeElement entityElement, TypeMapping<?> entity) {
+        List<MmMember> members = collectMembers(entityElement, entity);
+        ClassName owner = ClassName.get(entityElement);
+        String packageName = owner.packageName();
         String simpleName = "_" + entityElement.getSimpleName();
 
         TypeSpec.Builder builder = TypeSpec.interfaceBuilder(simpleName)

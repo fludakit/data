@@ -1,6 +1,6 @@
 package io.github.fludakit.data.processor.analysis;
 
-import io.github.fludakit.data.processor.model.EntityModel;
+import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.model.RepositoryFlavour;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import jakarta.data.repository.Delete;
@@ -76,7 +76,7 @@ public final class RepositoryMethodValidator {
      * @return {@code true} when the method may be implemented; {@code false} when a diagnostic was
      *         reported and no implementation must be emitted for it
      */
-    public boolean validate(ExecutableElement method, DeclaredType repositoryType, EntityModel entity,
+    public boolean validate(ExecutableElement method, DeclaredType repositoryType, TypeMapping<?> entity,
                      RepositoryFlavour flavour) {
         if (operationAnnotationCount(method) > 1) {
             error(method, "Repository method '" + method.getSimpleName()
@@ -139,7 +139,7 @@ public final class RepositoryMethodValidator {
      */
     private boolean validateLifecycle(ExecutableElement method, String name,
                                       List<? extends TypeMirror> parameterTypes,
-                                      EntityModel entity) {
+                                      TypeMapping<?> entity) {
         boolean delete = method.getAnnotation(Delete.class) != null;
         if (parameterTypes.size() == 1) {
             TypeMirror parameter = parameterTypes.get(0);
@@ -167,7 +167,7 @@ public final class RepositoryMethodValidator {
      */
     private boolean validateBuiltIn(ExecutableElement method, String name,
                                     List<? extends TypeMirror> parameterTypes,
-                                    EntityModel entity) {
+                                    TypeMapping<?> entity) {
         int arity = parameterTypes.size();
         boolean ok;
         if (ENTITY_LIFECYCLE_METHODS.contains(name)) {
@@ -291,7 +291,7 @@ public final class RepositoryMethodValidator {
      * {@link TypeShapes#sequenceElementType} — a {@code List} of something else, or a raw one, is not
      * an entity sequence however much it looks like one at the call site.
      */
-    private boolean isEntitySequence(TypeMirror parameterType, EntityModel entity) {
+    private boolean isEntitySequence(TypeMirror parameterType, TypeMapping<?> entity) {
         TypeMirror element = typeShapes.sequenceElementType(parameterType);
         return element != null && typeShapes.isEntity(element, entity);
     }

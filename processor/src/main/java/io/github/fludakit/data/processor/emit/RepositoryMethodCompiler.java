@@ -8,12 +8,13 @@ import io.github.fludakit.data.Names;
 import io.github.fludakit.data.metadata.ColumnPlacement;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.RepositoryProcessor;
+import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
 import io.github.fludakit.data.processor.analysis.PathResolver;
 import io.github.fludakit.data.processor.analysis.QueryPlanCompiler;
 import io.github.fludakit.data.processor.analysis.TypeShapes;
 import io.github.fludakit.data.processor.model.Binding;
 import io.github.fludakit.data.processor.model.EmissionContext;
-import io.github.fludakit.data.processor.model.EntityModel;
+import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.model.PagedRead;
 import io.github.fludakit.data.processor.model.PathOrigin;
 import io.github.fludakit.data.processor.model.PathResolution;
@@ -89,6 +90,7 @@ public final class RepositoryMethodCompiler {
             "java.util.Optional", "java.util.stream.Stream");
 
     private final TypeShapes typeShapes;
+    private final MappedTypeBuilder typeMappingBuilder;
     private final Diagnostics diagnostics;
     private final SqlDialect sqlDialect;
     private final PathResolver pathResolver;
@@ -111,11 +113,13 @@ public final class RepositoryMethodCompiler {
      */
     private final PagingEmitter pagingEmitter;
 
-    public RepositoryMethodCompiler(TypeShapes typeShapes, Diagnostics diagnostics, SqlDialect sqlDialect, PathResolver pathResolver,
+    public RepositoryMethodCompiler(TypeShapes typeShapes, MappedTypeBuilder typeMappingBuilder,
+                             Diagnostics diagnostics, SqlDialect sqlDialect, PathResolver pathResolver,
                              QueryPlanCompiler queryPlanCompiler, MetadataGenerator metadataGenerator,
                              WriteMethodEmitter writeMethodEmitter,
                              JoinedProjectionEmitter joinedProjections) {
         this.typeShapes = typeShapes;
+        this.typeMappingBuilder = typeMappingBuilder;
         this.diagnostics = diagnostics;
         this.sqlDialect = sqlDialect;
         this.pathResolver = pathResolver;
@@ -123,8 +127,9 @@ public final class RepositoryMethodCompiler {
         this.metadataGenerator = metadataGenerator;
         this.writeMethodEmitter = writeMethodEmitter;
         this.joinedProjections = joinedProjections;
-        this.crudReads = new CrudReadEmitter(sqlDialect, metadataGenerator, joinedProjections);
-        this.pagingEmitter = new PagingEmitter(sqlDialect, pathResolver, metadataGenerator, diagnostics);
+        this.crudReads = new CrudReadEmitter(sqlDialect, typeMappingBuilder, metadataGenerator, joinedProjections);
+        this.pagingEmitter = new PagingEmitter(sqlDialect, typeMappingBuilder, pathResolver, metadataGenerator,
+                diagnostics);
     }
 
     // ------------------------------------------------------------- method dispatch
@@ -139,7 +144,7 @@ public final class RepositoryMethodCompiler {
         int arity = parameters.size();
 
         MethodSpec.Builder builder = typeShapes.overriding(method, repositoryType);
-        rebindTypeVariables(builder, method, emission.entity().typeName());
+        rebindTypeVariables(builder, method, typeMappingBuilder.classNameFor(emission.entity().typeName()));
 
         Query query = method.getAnnotation(Query.class);
         if (query != null) {
@@ -229,7 +234,7 @@ public final class RepositoryMethodCompiler {
             return builder.build();
         }
         if (arity == 1 && name.equals("deleteAll")) {
-            builder.beginControlFlow("for ($T entity : $L)", emission.entity().typeName(), MemberNames.parameterName(parameters.get(0), "entities"));
+            builder.beginControlFlow("for ($T entity : $L)", typeMappingBuilder.classNameFor(emission.entity().typeName()), MemberNames.parameterName(parameters.get(0), "entities"));
             builder.addStatement("delete(entity)");
             builder.endControlFlow();
             return builder.build();
@@ -283,7 +288,7 @@ public final class RepositoryMethodCompiler {
     // ------------------------------------------------------------------ @Query
 
     private void emitQuery(MethodSpec.Builder builder, ExecutableElement method, Query query, TypeMirror returnMirror,
-                           EntityModel entity, Map<String, String> constants) {
+                           TypeMapping<?> entity, Map<String, String> constants) {
         String name = method.getSimpleName().toString();
         String constant = SqlConstants.register(constants, "SQL_" + MemberNames.upperSnake(name), query.value());
         CodeBlock.Builder sql = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
@@ -303,7 +308,7 @@ public final class RepositoryMethodCompiler {
             }
         }
         ResultKind kind = resultKindOf(returnMirror);
-        TypeName queryType = queryResultType(returnMirror, entity.typeName());
+        TypeName queryType = queryResultType(returnMirror, typeMappingBuilder.classNameFor(entity.typeName()));
         if (returnMirror.getKind() == TypeKind.ARRAY) {
             sql.add(".query($T.class).list().toArray($T[]::new)", queryType, queryType);
             builder.addStatement("return $L", sql.build());
@@ -396,7 +401,7 @@ public final class RepositoryMethodCompiler {
      *         {@code @By}) does not resolve — the ERROR is already reported, so the method must be skipped
      */
     private FindInput resolveFindInput(ExecutableElement method, ExecutableType resolved,
-                                       EntityModel entity, Map<String, Integer> queryDefinitionNames,
+                                       TypeMapping<?> entity, Map<String, Integer> queryDefinitionNames,
                                        boolean explicitFind, boolean explicitDelete) {
         String name = method.getSimpleName().toString();
         List<? extends VariableElement> parameters = method.getParameters();
@@ -432,7 +437,7 @@ public final class RepositoryMethodCompiler {
         // that traverses a relation (Reference / EntityCollection / ElementCollection) resolves at compile time,
         // a to-one head contributing a LEFT JOIN and a to-many head an EXISTS semi-join.
         // Local and embedded paths resolve to plain unqualified refs.
-        List<PathResolution> predicatePaths = pathResolver.resolveCompilePaths(entity.metadata(),
+        List<PathResolution> predicatePaths = pathResolver.resolveCompilePaths(entity,
                 predicates.stream().map(Predicate::property).toList(), method, origin);
         if (origin.failsOnUnresolved() && predicatePaths.stream().anyMatch(p -> p.placement() == null)) {
             // A declared (method-name or @By) property did not resolve: the ERROR is already reported,
@@ -517,11 +522,11 @@ public final class RepositoryMethodCompiler {
     
             if (operation == Operation.COUNT || operation == Operation.EXISTS) {
                 queryDefinitions.add(QueryPlanCompiler.queryDefinitionOf(queryDefinitionName, operation, kind, kind,
-                        new QueryPlan(ctx.entity().metadata(), predicates, predicateRefs, predicatePaths,
+                        new QueryPlan(ctx.entity(), predicates, predicateRefs, predicatePaths,
                                 List.of(), List.of(), List.of(), List.of(), 0, bindings, parameters),
                         distinct));
                 String constant = SqlConstants.register(ctx.constants(), "SQL_" + MemberNames.upperSnake(name),
-                        new SqlBuilder(ctx.entity().metadata(), ctx.entity().metadata(),
+                        new SqlBuilder(ctx.entity(), ctx.entity(),
                                 queryDefinitions.get(queryDefinitions.size() - 1).definition())
                                 .dialect(sqlDialect).count());
                 CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
@@ -565,11 +570,11 @@ public final class RepositoryMethodCompiler {
                         // A delete-by-criteria is a write: a void method reports nothing, anything else
                         // gets the affected-row count the .update() call already returns.
                         writeResultKindOf(returnMirror, kind, ctx.entity()),
-                        new QueryPlan(ctx.entity().metadata(), predicates, deleteRefs, deletePaths,
+                        new QueryPlan(ctx.entity(), predicates, deleteRefs, deletePaths,
                                 List.of(), List.of(), List.of(), List.of(), 0, bindings, parameters),
                         false));
                 String constant = SqlConstants.register(ctx.constants(), "SQL_" + MemberNames.upperSnake(name),
-                        new SqlBuilder(ctx.entity().metadata(), ctx.entity().metadata(),
+                        new SqlBuilder(ctx.entity(), ctx.entity(),
                                 queryDefinitions.get(queryDefinitions.size() - 1).definition())
                                 .dialect(sqlDialect).delete());
                 CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
@@ -592,7 +597,7 @@ public final class RepositoryMethodCompiler {
                     continue;
                 }
                 boolean paged = kind == ResultKind.PAGE || kind == ResultKind.CURSORED_PAGE;
-                boolean toMany = pathResolver.resolveCompilePath(ctx.entity().metadata(), sort.property()).existential();
+                boolean toMany = pathResolver.resolveCompilePath(ctx.entity(), sort.property()).existential();
                 if (paged || toMany) {
                     diagnostics.error(
                             name + ": IgnoreCase ordering is not supported for "
@@ -613,7 +618,7 @@ public final class RepositoryMethodCompiler {
                 // the runtime sort/seek wiring appends its own join chain to the base constant. A paged
                 // finder whose compile-time predicates traverse a Reference is degraded to the normal mapper
                 // (association fields stay id-only partials read by the base row mapper), with a NOTE.
-                if (!joinedProjections.collectTraversedReferences(ctx.entity().metadata(), predicateRefs, List.of()).isEmpty()) {
+                if (!joinedProjections.collectTraversedReferences(ctx.entity(), predicateRefs, List.of()).isEmpty()) {
                     diagnostics.note(
                             name + ": full materialisation through joins is not supported for paged finders;"
                                     + " association fields materialize as id-only partials", method);
@@ -622,7 +627,7 @@ public final class RepositoryMethodCompiler {
                 // paths are resolved per-emit in emitPaged (local / to-one qualified / to-many
                 // aggregate), so no sort refs are baked into this constant.
                 List<PathResolution> pagedSortPaths = methodSorts.stream()
-                        .map(s -> pathResolver.resolveCompilePath(ctx.entity().metadata(), s.property()))
+                        .map(s -> pathResolver.resolveCompilePath(ctx.entity(), s.property()))
                         .toList();
                 List<ColumnPlacement> pagedSortRefs = new ArrayList<>();
                 List<Boolean> pagedExistentialSorts = new ArrayList<>();
@@ -639,12 +644,12 @@ public final class RepositoryMethodCompiler {
                     pagedSortAttributePaths.add(ref != null ? pagedSortPaths.get(i).attributePath() : null);
                 }
                 queryDefinitions.add(QueryPlanCompiler.queryDefinitionOf(queryDefinitionName, Operation.FIND, kind, kind,
-                        new QueryPlan(ctx.entity().metadata(), predicates, predicateRefs, predicatePaths, methodSorts,
+                        new QueryPlan(ctx.entity(), predicates, predicateRefs, predicatePaths, methodSorts,
                                 pagedSortRefs, pagedSortAttributePaths, pagedExistentialSorts, 0,
                                 bindings, parameters),
                         distinct));
                 String constant = SqlConstants.register(ctx.constants(), "SQL_" + MemberNames.upperSnake(name),
-                        new SqlBuilder(ctx.entity().metadata(), ctx.entity().metadata(),
+                        new SqlBuilder(ctx.entity(), ctx.entity(),
                                 queryDefinitions.get(queryDefinitions.size() - 1).definition())
                                 .dialect(sqlDialect).select());
                 pagingEmitter.emitPaged(builder, ctx, new PagedRead(method, pageRequest, methodSorts, constant,
@@ -654,7 +659,7 @@ public final class RepositoryMethodCompiler {
             // A declared order term is part of the query too, so a property that does not resolve errors.
             PathOrigin sortOrigin = (parsed != null || method.getAnnotationsByType(OrderBy.class).length > 0)
                     ? PathOrigin.DECLARED : PathOrigin.INFERRED;
-            List<PathResolution> sortPaths = pathResolver.resolveCompilePaths(ctx.entity().metadata(),
+            List<PathResolution> sortPaths = pathResolver.resolveCompilePaths(ctx.entity(),
                     methodSorts.stream().map(SortSpec::property).toList(), method, sortOrigin);
             if (sortOrigin.failsOnUnresolved() && sortPaths.stream().anyMatch(p -> p.placement() == null)) {
                 // A declared order property did not resolve: ERROR already reported, skip the method.
@@ -668,24 +673,25 @@ public final class RepositoryMethodCompiler {
             // the SELECT carries the target's aliased flattened columns and the read uses a generated
             // per-method full mapper. Only for non-paged ctx.entity()-returning finders with a generated row
             // mapper to delegate the root columns to; otherwise the projection stays root-only (partial).
-            List<Prop.Reference> traversed = joinedProjections.collectTraversedReferences(ctx.entity().metadata(), predicateRefs, sortRefs);
+            List<Prop.Reference> traversed = joinedProjections.collectTraversedReferences(ctx.entity(), predicateRefs, sortRefs);
             boolean fullMaterialisation = !traversed.isEmpty() && ctx.mapperType() != null
                     && operation == Operation.FIND && kind != ResultKind.VOID;
-            String extraProjection = fullMaterialisation ? joinedProjections.joinedProjection(ctx.entity().metadata(), traversed) : "";
-            CodeBlock queryArgForMethod = QueryInvocations.queryArg(ctx.entity(), ctx.mapperType());
+            String extraProjection = fullMaterialisation ? joinedProjections.joinedProjection(ctx.entity(), traversed) : "";
+            CodeBlock queryArgForMethod = QueryInvocations.queryArg(
+                    typeMappingBuilder.classNameFor(ctx.entity().typeName()), ctx.mapperType());
             if (fullMaterialisation) {
                 String fullMapper = "mapRow_full_" + Names.toSnakeCase(name);
                 auxMethods.add(joinedProjections.buildFullMapper(fullMapper, ctx.entity(), ctx.mapperType(), traversed));
                 queryArgForMethod = CodeBlock.of("(rs, rowNum) -> $L(rs, rowNum)", fullMapper);
             }
             queryDefinitions.add(QueryPlanCompiler.queryDefinitionOf(queryDefinitionName, Operation.FIND, kind, kind,
-                    new QueryPlan(ctx.entity().metadata(), predicates, predicateRefs, predicatePaths, methodSorts,
+                    new QueryPlan(ctx.entity(), predicates, predicateRefs, predicatePaths, methodSorts,
                             sortRefs, sortAttributePaths, existentialSorts,
                             parsed != null ? parsed.limit() : 0, bindings, parameters),
                     distinct));
             QueryDefinition.Criteria queryDefinition =
                     queryDefinitions.get(queryDefinitions.size() - 1).definition();
-            String sql = new SqlBuilder(ctx.entity().metadata(), ctx.entity().metadata(), queryDefinition)
+            String sql = new SqlBuilder(ctx.entity(), ctx.entity(), queryDefinition)
                     .dialect(sqlDialect).select(extraProjection);
             String constant = SqlConstants.register(ctx.constants(), "SQL_" + MemberNames.upperSnake(name), sql);
             CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
@@ -696,13 +702,13 @@ public final class RepositoryMethodCompiler {
                 call.add(".query($L).list()", queryArgForMethod);
                 if (!ctx.hydrate()) {
                     builder.addStatement("return $L.toArray($T[]::new)", call.build(), queryResultType(returnMirror,
-                            ctx.entity().typeName()));
+                            typeMappingBuilder.classNameFor(ctx.entity().typeName())));
                 } else {
                     builder.addStatement("$T<$T> results = $L",
-                            List.class, ctx.entity().typeName(), call.build());
+                            List.class, typeMappingBuilder.classNameFor(ctx.entity().typeName()), call.build());
                     builder.addStatement("$L", QueryInvocations.hydrationCall("results"));
                     builder.addStatement("return results.toArray($T[]::new)",
-                            queryResultType(returnMirror, ctx.entity().typeName()));
+                            queryResultType(returnMirror, typeMappingBuilder.classNameFor(ctx.entity().typeName())));
                 }
                 return;
             }
@@ -719,19 +725,19 @@ public final class RepositoryMethodCompiler {
             switch (kind) {
                 case LIST, STREAM -> {
                     call.add(".query($L).list()", queryArgForMethod);
-                    builder.addStatement("$T<$T> results = $L", List.class, ctx.entity().typeName(), call.build());
+                    builder.addStatement("$T<$T> results = $L", List.class, typeMappingBuilder.classNameFor(ctx.entity().typeName()), call.build());
                     builder.addStatement("$L", QueryInvocations.hydrationCall("results"));
                     builder.addStatement(kind == ResultKind.STREAM ? "return results.stream()" : "return results");
                 }
                 case OPTIONAL -> {
                     call.add(".query($L).optional()", queryArgForMethod);
-                    builder.addStatement("$T<$T> found = $L", java.util.Optional.class, ctx.entity().typeName(), call.build());
+                    builder.addStatement("$T<$T> found = $L", java.util.Optional.class, typeMappingBuilder.classNameFor(ctx.entity().typeName()), call.build());
                     builder.addStatement("found.ifPresent(e -> $L)", QueryInvocations.hydrationCall("java.util.List.of(e)"));
                     builder.addStatement("return found");
                 }
                 case SINGLE -> {
                     call.add(".query($L).single()", queryArgForMethod);
-                    builder.addStatement("$T found = $L", ctx.entity().typeName(), call.build());
+                    builder.addStatement("$T found = $L", typeMappingBuilder.classNameFor(ctx.entity().typeName()), call.build());
                     builder.addStatement("$L", QueryInvocations.hydrationCall("java.util.List.of(found)"));
                     builder.addStatement("return found");
                 }
@@ -803,7 +809,7 @@ public final class RepositoryMethodCompiler {
      *       JDBC update returns.</li>
      * </ul>
      */
-    private ResultKind writeResultKindOf(TypeMirror returnType, ResultKind kind, EntityModel entity) {
+    private ResultKind writeResultKindOf(TypeMirror returnType, ResultKind kind, TypeMapping<?> entity) {
         if (kind == ResultKind.VOID) {
             return ResultKind.VOID;
         }

@@ -9,7 +9,8 @@ import io.github.fludakit.data.Names;
 import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
-import io.github.fludakit.data.processor.model.EntityModel;
+import io.github.fludakit.data.metadata.TypeMapping;
+import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
 import io.github.fludakit.data.processor.model.EntityRelationship;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.sql.SqlDialect;
@@ -38,15 +39,18 @@ public final class HydrationEmitter {
 
     private final SqlDialect sqlDialect;
     private final AttributeTypes attributeTypes;
+    private final MappedTypeBuilder typeMappingBuilder;
 
     /**
      * @param attributeTypes the one lookup this emitter needs: the element type of a collection, which
      *                       is the only fact on a {@code Prop.ElementCollection} that is an FQN and
      *                       therefore not a JavaPoet name
      */
-    public HydrationEmitter(SqlDialect sqlDialect, AttributeTypes attributeTypes) {
+    public HydrationEmitter(SqlDialect sqlDialect, AttributeTypes attributeTypes,
+                            MappedTypeBuilder typeMappingBuilder) {
         this.sqlDialect = sqlDialect;
         this.attributeTypes = attributeTypes;
+        this.typeMappingBuilder = typeMappingBuilder;
     }
 
     /**
@@ -68,14 +72,14 @@ public final class HydrationEmitter {
      * the wiring sites free of per-collection / per-relationship detail; the relationship loaders
      * (many-to-one, one-to-many) join the same dispatch.
      */
-    public MethodSpec hydrationUmbrella(EntityModel entity, List<Prop.ElementCollection> hydrated,
+    public MethodSpec hydrationUmbrella(TypeMapping<?> entity, List<Prop.ElementCollection> hydrated,
                                  List<EntityRelationship> relationships) {
         MethodSpec.Builder umbrella = MethodSpec.methodBuilder("hydrateAll")
                 .addJavadoc("Dispatches every generated hydration loader over the given parents. "
                         + "Hydration is depth-1: entities produced by a loader are not themselves hydrated.\n")
                 .addModifiers(Modifier.PRIVATE)
                 .addParameter(ParameterizedTypeName.get(ClassName.get(java.util.Collection.class),
-                        entity.typeName()), "parents");
+                        typeMappingBuilder.classNameFor(entity.typeName())), "parents");
         for (Prop.ElementCollection c : hydrated) {
             umbrella.addStatement("hydrate$L(parents)", MemberNames.capitalize(c.name()));
         }
@@ -92,7 +96,7 @@ public final class HydrationEmitter {
      * reuses; the emission is textually the original element-collection body, so a VO corpus's generated impl stays identical.
      */
     public MethodSpec appendCollectionHydration(Map<String, String> constants,
-                                         EntityModel entity, Prop.ElementCollection collection,
+                                         TypeMapping<?> entity, Prop.ElementCollection collection,
                                          ClassName voMapper) {
         String selectConst = SqlConstants.register(constants, "SQL_SELECT_" + MemberNames.upperSnake(collection.name()),
                 "SELECT " + quotedColumnList(collection) + " FROM "
@@ -112,17 +116,17 @@ public final class HydrationEmitter {
      * non-composing back-references on children materialized by this loader carry an id-only partial
      * when the child's row mapper resolves the FK, and composing references stay loader-filled.
      */
-    public MethodSpec appendOneToManyHydration(Map<String, String> constants, EntityModel entity,
+    public MethodSpec appendOneToManyHydration(Map<String, String> constants, TypeMapping<?> entity,
                                         EntityRelationship relationship) {
         Prop.EntityCollection a = (Prop.EntityCollection) relationship.attribute();
-        EntityModel targetModel = relationship.targetModel();
+        TypeMapping<?> targetModel = relationship.targetModel();
         String inverseFk = Names.fkColumn(a.inverseName());
         String selectConst = SqlConstants.register(constants, "SQL_SELECT_" + MemberNames.upperSnake(a.name()),
                 "SELECT " + entityColumnList(targetModel) + " FROM "
-                        + sqlDialect.quoteIdentifier(targetModel.metadata().tableName())
+                        + sqlDialect.quoteIdentifier(targetModel.tableName())
                         + " WHERE " + sqlDialect.quoteIdentifier(inverseFk) + " IN (");
         return appendGroupedKeyHydration(constants, entity, a.name(), selectConst, inverseFk,
-                targetModel.typeName(), relationship.targetMapper());
+                typeMappingBuilder.classNameFor(targetModel.typeName()), relationship.targetMapper());
     }
 
     /**
@@ -137,16 +141,16 @@ public final class HydrationEmitter {
      * element-collection column list (see {@link #quotedColumnList}); the association targets stay
      * {@code null}.
      */
-    private MethodSpec appendGroupedKeyHydration(Map<String, String> constants, EntityModel entity,
+    private MethodSpec appendGroupedKeyHydration(Map<String, String> constants, TypeMapping<?> entity,
                                                  String field, String selectConst, String fkLabel,
                                                  TypeName childType, ClassName childMapper) {
         ClassName sqlSpec = ClassName.get(JdbcClient.class).nestedClass("SqlSpec");
-        TypeName entityType = entity.typeName();
+        TypeName entityType = typeMappingBuilder.classNameFor(entity.typeName());
         // The parent-key / child-FK column shares the entity id's JDBC type, so derive it from
         // the id rather than hardcoding Long — an entity with an Integer (or other JDBC-safe) id would
         // otherwise emit a loader whose $T casts/getObject calls do not compile in the consumer build.
         // box() normalizes a primitive id (long -> java.lang.Long) so a Long-id corpus stays byte-identical.
-        TypeName keyType = entity.id().type().box();
+        TypeName keyType = typeMappingBuilder.memberType(entity.typeName(), entity.id().name()).box();
         TypeName parentKeyList = ParameterizedTypeName.get(ClassName.get(java.util.List.class), keyType);
         TypeName rowArrayType = ArrayTypeName.of(TypeName.OBJECT);
         TypeName rowsType = ParameterizedTypeName.get(ClassName.get(java.util.List.class), rowArrayType);
@@ -200,9 +204,9 @@ public final class HydrationEmitter {
      * columns are never selected) a one-to-many/many-to-one SELECT must carry the target's own FK
      * columns so its row mapper and, for one-to-many, the inverse grouping label are readable.
      */
-    private String entityColumnList(EntityModel entity) {
+    private String entityColumnList(TypeMapping<?> entity) {
         StringBuilder sb = new StringBuilder();
-        for (ColumnRef column : entity.metadata().columns()) {
+        for (ColumnRef column : entity.columns()) {
             if (!sb.isEmpty()) {
                 sb.append(", ");
             }

@@ -7,7 +7,7 @@ import io.github.fludakit.data.processor.RepositoryProcessor;
 import io.github.fludakit.data.processor.emit.HydrationEmitter;
 import io.github.fludakit.data.processor.emit.RepositoryMethodCompiler;
 import io.github.fludakit.data.processor.emit.RowMapperGenerator;
-import io.github.fludakit.data.processor.model.EntityModel;
+import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.model.EntityRelationship;
 import io.github.fludakit.data.processor.model.LoadPlan;
 import io.github.fludakit.data.processor.support.Diagnostics;
@@ -47,14 +47,14 @@ public final class RelationshipLoadPlanner {
     private final MappedTypeBuilder typeMappingBuilder;
     private final RowMapperGenerator rowMapperGenerator;
     /** Resolves (generating on first use) the {@code <Entity>RowMapper} of a relationship target. */
-    private final BiFunction<TypeElement, EntityModel, ClassName> targetMapperFor;
+    private final BiFunction<TypeElement, TypeMapping<?>, ClassName> targetMapperFor;
     /** Entity FQNs managed in the CURRENT round — see the pre-scan in {@link RepositoryProcessor#process}. */
     private final Set<String> managedEntities;
 
     public RelationshipLoadPlanner(Diagnostics diagnostics,
                             MappedTypeBuilder typeMappingBuilder,
                             RowMapperGenerator rowMapperGenerator,
-                            BiFunction<TypeElement, EntityModel, ClassName> targetMapperFor,
+                            BiFunction<TypeElement, TypeMapping<?>, ClassName> targetMapperFor,
                             Set<String> managedEntities) {
         this.diagnostics = diagnostics;
         this.typeMappingBuilder = typeMappingBuilder;
@@ -67,14 +67,14 @@ public final class RelationshipLoadPlanner {
      * Computes the read-side scope of one repository entity. Every rejection is reported as a NOTE
      * here rather than silently dropped, so a relationship that is unmapped on read says why.
      */
-    public LoadPlan plan(TypeElement entityElement, EntityModel entity) {
+    public LoadPlan plan(TypeElement entityElement, TypeMapping<?> entity) {
         // Element-collection hydration: resolve a generated <VO>RowMapper for each
         // List<@ValueObject> child. A child whose VO fails the mapper gate is skipped — hydration
         // then degrades to the parent's default (empty) field value rather than failing the whole
         // repository, matching the "gate fails closed" spirit of the row-mapper gate.
         List<Prop.ElementCollection> hydratedCollections = new ArrayList<>();
         Map<String, ClassName> collectionMappers = new LinkedHashMap<>();
-        for (Prop.ElementCollection c : entity.collections()) {
+        for (Prop.ElementCollection c : entity.elementCollections()) {
             ClassName voMapper = rowMapperGenerator.voRowMapperFor(c, entityElement);
             if (voMapper != null) {
                 hydratedCollections.add(c);
@@ -96,7 +96,7 @@ public final class RelationshipLoadPlanner {
         //     rows; it keeps its grouped fetch until the row-grouping work lands.
         List<Prop.Reference> joinedReferences = new ArrayList<>();
         List<EntityRelationship> hydratedRelationships = new ArrayList<>();
-        for (Prop a : entity.metadata().props()) {
+        for (Prop a : entity.props()) {
             // Java 17 safety: instanceof, never a pattern switch. MANY_TO_ONE is a composing
             // Reference; an external @Association (composition=false) is not projected here.
             boolean manyToOne = a instanceof Prop.Reference ref && ref.composition();
@@ -115,9 +115,9 @@ public final class RelationshipLoadPlanner {
                     ? el.targetTypeName() : ((Prop.Reference) a).targetTypeName();
             TypeElement targetElement = typeMappingBuilder.elementFor(targetFqn);
             ClassName targetMapper = null;
-            EntityModel targetModel = null;
+            TypeMapping<?> targetModel = null;
             if (targetElement != null && managedEntities.contains(targetFqn)) {
-                targetModel = typeMappingBuilder.entityModel(targetElement);
+                targetModel = typeMappingBuilder.descriptorFor(targetElement);
                 targetMapper = targetMapperFor.apply(targetElement, targetModel);
             }
             if (targetMapper == null) {
@@ -134,6 +134,14 @@ public final class RelationshipLoadPlanner {
             }
         }
 
+        if (true) {
+            System.err.println("LOADPLAN " + entity.typeName()
+                    + " joined=" + joinedReferences.stream().map(r -> r.name() + "/comp=" + r.composition()
+                            + "/tt=" + r.targetTable() + "/tic=" + r.targetIdColumn() + "/tgt="
+                            + (r.target() == null ? "null" : r.target().typeName())).toList()
+                    + " hydrated=" + hydratedRelationships.stream().map(r -> r.attribute().name()).toList()
+                    + " voColl=" + hydratedCollections.size());
+        }
         return new LoadPlan(hydratedCollections, collectionMappers, joinedReferences,
                 hydratedRelationships);
     }

@@ -1,11 +1,11 @@
 package io.github.fludakit.data.processor.emit;
 
 import com.squareup.javapoet.TypeName;
+import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
-
-import io.github.fludakit.data.processor.model.EntityModel;
-import io.github.fludakit.data.processor.model.Property;
+import io.github.fludakit.data.processor.support.MemberNames;
 import java.util.List;
+import java.util.function.BiFunction;
 
 /**
  * How a generated mapper reads one row: the {@code ResultSet} getter for a primitive column, and the
@@ -47,18 +47,24 @@ public final class RowReads {
      * at {@code prefix}: {@code <prefix>_<leaf> != null} per boxed leaf, recursing into nested value
      * objects. Primitives contribute nothing — a primitive leaf cannot be NULL in the database, so it
      * carries no presence signal.
+     *
+     * @param memberType the declaring type's member-type cache ({@code MappedTypeBuilder::memberType});
+     *                   the one fact needed here that the shipping descriptor cannot hold, because
+     *                   "is this leaf primitive" is a compile-time rendering of its FQN
      */
-    public static void collectPresenceTerms(EntityModel valueObject, String prefix, List<String> terms) {
-        for (Property p : valueObject.properties()) {
-            if (p.prop() instanceof Prop.Reference) {
+    public static void collectPresenceTerms(TypeMapping<?> valueObject, String prefix, List<String> terms,
+                                            BiFunction<String, String, TypeName> memberType) {
+        for (Prop p : valueObject.rowProps()) {
+            if (p instanceof Prop.Reference) {
                 continue;
             }
-            if (p.prop() instanceof Prop.Embedded) {
-                collectPresenceTerms(p.embeddedModel(), prefix + "_" + p.column(), terms);
+            if (p instanceof Prop.Embedded) {
+                collectPresenceTerms(((Prop.Embedded) p).target(), prefix + "_" + MemberNames.memberColumn(p),
+                        terms, memberType);
                 continue;
             }
-            if (!p.type().isPrimitive()) {
-                terms.add(prefix + "_" + p.column() + " != null");
+            if (!memberType.apply(valueObject.typeName(), p.name()).isPrimitive()) {
+                terms.add(prefix + "_" + MemberNames.memberColumn(p) + " != null");
             }
         }
     }

@@ -12,8 +12,6 @@ import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.RepositoryProcessor;
 import io.github.fludakit.data.processor.analysis.PathResolver;
 import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
-import io.github.fludakit.data.processor.model.EntityModel;
-import io.github.fludakit.data.processor.model.Property;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.sql.SqlDialect;
 
@@ -109,7 +107,7 @@ public final class JoinedProjectionEmitter {
     public String joinedProjection(TypeMapping<?> mapping, List<Prop.Reference> traversed) {
         StringBuilder sb = new StringBuilder();
         for (Prop.Reference ref : traversed) {
-            EntityModel targetModel = typeMappingBuilder.entityModel(ref.targetTypeName());
+            TypeMapping<?> targetModel = typeMappingBuilder.descriptorFor(ref.targetTypeName());
             if (targetModel == null) {
                 continue;
             }
@@ -119,11 +117,11 @@ public final class JoinedProjectionEmitter {
             // statement. The LABEL keeps the property name, so two references into one table still
             // produce distinct labels.
             String alias = ref.targetTable() != null ? ref.targetTable() : ref.name();
-            for (Map.Entry<String, ColumnRef> entry : targetModel.metadata().localColumnRefs().entrySet()) {
+            for (Map.Entry<String, ColumnRef> entry : targetModel.localColumnRefs().entrySet()) {
                 ColumnRef column = entry.getValue();
                 String head = entry.getKey().contains(".")
                         ? entry.getKey().substring(0, entry.getKey().indexOf('.')) : entry.getKey();
-                if (PathResolver.propOrNull(targetModel.metadata(), head) instanceof Prop.Reference) {
+                if (PathResolver.propOrNull(targetModel, head) instanceof Prop.Reference) {
                     continue; // nested association fk not selected — its target stays null (depth-1)
                 }
                 String qualified = qualifiedColumn(alias, column.column());
@@ -144,9 +142,9 @@ public final class JoinedProjectionEmitter {
      * read from the {@code <alias>_join_<column>} labels. Primitive leaves use the temp+wasNull rule.
      * Reflection-free (Java 17 instanceof-chain).
      */
-    public MethodSpec buildFullMapper(String mapperName, EntityModel entity, ClassName mapperType,
+    public MethodSpec buildFullMapper(String mapperName, TypeMapping<?> entity, ClassName mapperType,
                                List<Prop.Reference> traversed) {
-        TypeName entityType = entity.typeName();
+        TypeName entityType = typeMappingBuilder.classNameFor(entity.typeName());
         MethodSpec.Builder m = MethodSpec.methodBuilder(mapperName)
                 .addModifiers(Modifier.PRIVATE, Modifier.STATIC)
                 .returns(entityType)
@@ -155,17 +153,18 @@ public final class JoinedProjectionEmitter {
                 .addException(ClassName.get("java.sql", "SQLException"))
                 .addStatement("$T entity = new $T().mapRow(rs, rowNum)", entityType, mapperType);
         for (Prop.Reference ref : traversed) {
-            EntityModel targetModel = typeMappingBuilder.entityModel(ref.targetTypeName());
+            TypeMapping<?> targetModel = typeMappingBuilder.descriptorFor(ref.targetTypeName());
             if (targetModel == null || targetModel.id() == null) {
                 continue;
             }
-            TypeName idType = targetModel.id().type().box();
+            TypeName idType = typeMappingBuilder.memberType(targetModel.typeName(), targetModel.id().name()).box();
             String idLabel = ref.name() + "_join_" + targetModel.id().column();
             String idLocal = ref.name() + "_join_id";
             m.addStatement("$T $L = rs.getObject($S, $T.class)", idType, idLocal, idLabel, idType);
             m.beginControlFlow("if ($L != null)", idLocal);
             String var = ref.name() + "Full";
-            m.addStatement("$T $L = new $T()", targetModel.typeName(), var, targetModel.typeName());
+            m.addStatement("$T $L = new $T()", typeMappingBuilder.classNameFor(targetModel.typeName()), var,
+                    typeMappingBuilder.classNameFor(targetModel.typeName()));
             m.addStatement("$L.$L($L)", var, MemberNames.setter(targetModel.id().name()), idLocal);
             appendJoinedTargetLeaves(m, targetModel, ref.name(), var, entity.typeName().toString());
             m.addStatement("entity.$L($L)", MemberNames.setter(ref.name()), var);
@@ -181,23 +180,23 @@ public final class JoinedProjectionEmitter {
      * target's own id is skipped (already assigned). Reads use {@code <alias>_join_<column>} labels,
      * exactly matching {@link #joinedProjection}; primitives follow the temp+wasNull rule.
      */
-    private void appendJoinedTargetLeaves(MethodSpec.Builder builder, EntityModel valueObject, String alias, String targetVar,
+    private void appendJoinedTargetLeaves(MethodSpec.Builder builder, TypeMapping<?> valueObject, String alias, String targetVar,
                                           String ownerName) {
-        for (Property p : valueObject.properties()) {
-            if (p.prop() instanceof Prop.Reference) {
+        for (Prop p : valueObject.rowProps()) {
+            if (p instanceof Prop.Reference) {
                 continue;
             }
-            if (p.prop() instanceof Prop.Embedded) {
-                appendJoinedEmbedded(builder, p, alias, targetVar, ownerName);
+            if (p instanceof Prop.Embedded embedded) {
+                appendJoinedEmbedded(builder, embedded, alias, targetVar, ownerName);
                 continue;
             }
-            String label = alias + "_join_" + p.column();
-            if (!p.type().isPrimitive()) {
-                builder.addStatement("$L.$L(rs.getObject($S, $T.class))", targetVar, MemberNames.setter(p.name()), label, p.type().box());
+            String label = alias + "_join_" + MemberNames.memberColumn(p);
+            if (!typeMappingBuilder.memberType(valueObject.typeName(), p.name()).isPrimitive()) {
+                builder.addStatement("$L.$L(rs.getObject($S, $T.class))", targetVar, MemberNames.setter(p.name()), label, typeMappingBuilder.memberType(valueObject.typeName(), p.name()).box());
                 continue;
             }
-            String temp = alias + "_" + p.column() + "Value";
-            builder.addStatement("$T $L = rs.$L($S)", p.type(), temp, RowReads.primitiveGetter(alias + "." + p.name(), p.type()), label);
+            String temp = alias + "_" + MemberNames.memberColumn(p) + "Value";
+            builder.addStatement("$T $L = rs.$L($S)", typeMappingBuilder.memberType(valueObject.typeName(), p.name()), temp, RowReads.primitiveGetter(alias + "." + p.name(), typeMappingBuilder.memberType(valueObject.typeName(), p.name())), label);
             builder.beginControlFlow("if (rs.wasNull())");
             builder.addStatement("throw new $T($S)", ClassName.get("java.sql", "SQLException"),
                     "NULL value in non-nullable primitive column \"" + label + "\" mapped to "
@@ -208,9 +207,9 @@ public final class JoinedProjectionEmitter {
     }
 
     /** Reconstructs one embedded value-object of a joined target from its aliased leaf labels (per-subtree presence). */
-    private void appendJoinedEmbedded(MethodSpec.Builder builder, Property embedded, String alias, String targetVar,
+    private void appendJoinedEmbedded(MethodSpec.Builder builder, Prop.Embedded embedded, String alias, String targetVar,
                                       String ownerName) {
-        EntityModel vo = embedded.embeddedModel();
+        TypeMapping<?> vo = embedded.target();
         if (vo == null) {
             return;
         }
@@ -229,25 +228,25 @@ public final class JoinedProjectionEmitter {
         }
     }
 
-    private void readJoinedEmbeddedLeaves(MethodSpec.Builder builder, EntityModel valueObject, String prefix, String local,
+    private void readJoinedEmbeddedLeaves(MethodSpec.Builder builder, TypeMapping<?> valueObject, String prefix, String local,
                                           List<String> presence, String path) {
-        for (Property p : valueObject.properties()) {
-            if (p.prop() instanceof Prop.Reference) {
+        for (Prop p : valueObject.rowProps()) {
+            if (p instanceof Prop.Reference) {
                 continue;
             }
-            if (p.prop() instanceof Prop.Embedded) {
-                readJoinedEmbeddedLeaves(builder, p.embeddedModel(), prefix + "_" + p.column(),
+            if (p instanceof Prop.Embedded) {
+                readJoinedEmbeddedLeaves(builder, ((Prop.Embedded) p).target(), prefix + "_" + MemberNames.memberColumn(p),
                         local + MemberNames.capitalize(p.name()), presence, path + "." + p.name());
                 continue;
             }
-            String leafLocal = prefix + "_" + p.column();
-            if (!p.type().isPrimitive()) {
-                builder.addStatement("$T $L = rs.getObject($S, $T.class)", p.type().box(), leafLocal, leafLocal,
-                        p.type().box());
+            String leafLocal = prefix + "_" + MemberNames.memberColumn(p);
+            if (!typeMappingBuilder.memberType(valueObject.typeName(), p.name()).isPrimitive()) {
+                builder.addStatement("$T $L = rs.getObject($S, $T.class)", typeMappingBuilder.memberType(valueObject.typeName(), p.name()).box(), leafLocal, leafLocal,
+                        typeMappingBuilder.memberType(valueObject.typeName(), p.name()).box());
                 presence.add(leafLocal + " != null");
                 continue;
             }
-            builder.addStatement("$T $L = rs.$L($S)", p.type(), leafLocal, RowReads.primitiveGetter(path, p.type()), leafLocal);
+            builder.addStatement("$T $L = rs.$L($S)", typeMappingBuilder.memberType(valueObject.typeName(), p.name()), leafLocal, RowReads.primitiveGetter(path, typeMappingBuilder.memberType(valueObject.typeName(), p.name())), leafLocal);
             builder.beginControlFlow("if (rs.wasNull())");
             builder.addStatement("throw new $T($S)", ClassName.get("java.sql", "SQLException"),
                     "NULL value in non-nullable primitive column \"" + leafLocal + "\" mapped to " + path);
@@ -255,27 +254,29 @@ public final class JoinedProjectionEmitter {
         }
     }
 
-    private void buildJoinedEmbeddedValue(MethodSpec.Builder builder, EntityModel valueObject, String prefix, String local) {
-        builder.addStatement("$T $L = new $T()", valueObject.typeName(), local, valueObject.typeName());
-        for (Property p : valueObject.properties()) {
-            if (p.prop() instanceof Prop.Reference || p.prop() instanceof Prop.Embedded) {
+    private void buildJoinedEmbeddedValue(MethodSpec.Builder builder, TypeMapping<?> valueObject, String prefix, String local) {
+        builder.addStatement("$T $L = new $T()", typeMappingBuilder.classNameFor(valueObject.typeName()), local,
+                    typeMappingBuilder.classNameFor(valueObject.typeName()));
+        for (Prop p : valueObject.rowProps()) {
+            if (p instanceof Prop.Reference || p instanceof Prop.Embedded) {
                 continue;
             }
-            builder.addStatement("$L.$L($L)", local, MemberNames.setter(p.name()), prefix + "_" + p.column());
+            builder.addStatement("$L.$L($L)", local, MemberNames.setter(p.name()), prefix + "_" + MemberNames.memberColumn(p));
         }
-        for (Property p : valueObject.properties()) {
-            if (!(p.prop() instanceof Prop.Embedded)) {
+        for (Prop p : valueObject.rowProps()) {
+            if (!(p instanceof Prop.Embedded)) {
                 continue;
             }
             String childLocal = local + MemberNames.capitalize(p.name());
             List<String> terms = new ArrayList<>();
-            RowReads.collectPresenceTerms(p.embeddedModel(), prefix + "_" + p.column(), terms);
+            RowReads.collectPresenceTerms(((Prop.Embedded) p).target(), prefix + "_" + MemberNames.memberColumn(p),
+                    terms, typeMappingBuilder::memberType);
             if (terms.isEmpty()) {
-                buildJoinedEmbeddedValue(builder, p.embeddedModel(), prefix + "_" + p.column(), childLocal);
+                buildJoinedEmbeddedValue(builder, ((Prop.Embedded) p).target(), prefix + "_" + MemberNames.memberColumn(p), childLocal);
                 builder.addStatement("$L.$L($L)", local, MemberNames.setter(p.name()), childLocal);
             } else {
                 builder.beginControlFlow("if ($L)", String.join(" || ", terms));
-                buildJoinedEmbeddedValue(builder, p.embeddedModel(), prefix + "_" + p.column(), childLocal);
+                buildJoinedEmbeddedValue(builder, ((Prop.Embedded) p).target(), prefix + "_" + MemberNames.memberColumn(p), childLocal);
                 builder.addStatement("$L.$L($L)", local, MemberNames.setter(p.name()), childLocal);
                 builder.endControlFlow();
             }

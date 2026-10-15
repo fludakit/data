@@ -2,8 +2,10 @@ package io.github.fludakit.data.processor.emit;
 
 import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.CodeBlock;
+import com.squareup.javapoet.TypeName;
+import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
 import io.github.fludakit.data.processor.model.Binding;
-import io.github.fludakit.data.processor.model.EntityModel;
+import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.query.LikePattern;
 import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.ResultKind;
@@ -80,11 +82,14 @@ public final class QueryInvocations {
      * Returns the argument passed to {@code JdbcClient.query(...)}: an instance of the compile-time
      * generated {@code <Entity>RowMapper} when one exists, otherwise the entity class for the
      * reflective mapper.
+     *
+     * @param entityType the entity as a JavaPoet name — the mapping carries it as an FQN, and a
+     *                   {@code $T} cannot be fed a {@code String}
      */
-    public static CodeBlock queryArg(EntityModel entity, ClassName mapperType) {
+    public static CodeBlock queryArg(TypeName entityType, ClassName mapperType) {
         return mapperType != null
                 ? CodeBlock.of("new $T()", mapperType)
-                : CodeBlock.of("$T.class", entity.typeName());
+                : CodeBlock.of("$T.class", entityType);
     }
 
     /**

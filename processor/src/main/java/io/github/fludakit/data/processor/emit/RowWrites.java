@@ -7,7 +7,7 @@ import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
-import io.github.fludakit.data.processor.model.EntityModel;
+import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.sql.SqlBuilder;
 import io.github.fludakit.data.sql.SqlDialect;
@@ -37,6 +37,7 @@ public final class RowWrites {
 
     private final AttributeTypes attributeTypes;
     private final SqlDialect sqlDialect;
+    private final MappedTypeBuilder typeMappingBuilder;
 
     /**
      * @param attributeTypes for {@code isEnumProp} — whether a property's declared type is an
@@ -45,19 +46,21 @@ public final class RowWrites {
      *                       once in {@code AttributeTypes} rather than this class carrying
      *                       {@code Elements} to answer it
      */
-    public RowWrites(AttributeTypes attributeTypes, SqlDialect sqlDialect) {
+    public RowWrites(AttributeTypes attributeTypes, SqlDialect sqlDialect,
+                     MappedTypeBuilder typeMappingBuilder) {
         this.attributeTypes = attributeTypes;
         this.sqlDialect = sqlDialect;
+        this.typeMappingBuilder = typeMappingBuilder;
     }
 
     public boolean upsertsInOneStatement() {
         return sqlDialect.upsertForm() != UpsertForm.NONE;
     }
 
-    public void appendRowWrite(MethodSpec.Builder builder, String value, EntityModel model,
+    public void appendRowWrite(MethodSpec.Builder builder, String value, TypeMapping<?> model,
                                 Map<String, String> constants, String insertName, String upsertName,
                                 String updateName, String keysVar) {
-        String coercion = idKeyCoercion(model.id().type());
+        String coercion = idKeyCoercion(typeMappingBuilder.memberType(model.typeName(), model.id().name()));
         builder.beginControlFlow("if ($L == null)", value + "." + MemberNames.getter(model.id().name()) + "()");
         if (coercion == null) {
             // An id type no GeneratedKeyHolder key can produce is application-assigned: the identity
@@ -73,7 +76,7 @@ public final class RowWrites {
         builder.nextControlFlow("else");
         if (upsertsInOneStatement()) {
             String constant = SqlConstants.register(constants, upsertName,
-                    new SqlBuilder(model.metadata(), model.metadata()).dialect(sqlDialect).upsert());
+                    new SqlBuilder(model, model).dialect(sqlDialect).upsert());
             CodeBlock.Builder sql = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
             appendAllColumnParams(sql, model, value);
             sql.add(".update()");
@@ -86,19 +89,19 @@ public final class RowWrites {
         builder.endControlFlow();
     }
 
-    public void appendRowInsert(MethodSpec.Builder builder, String value, EntityModel model,
+    public void appendRowInsert(MethodSpec.Builder builder, String value, TypeMapping<?> model,
                                  Map<String, String> constants, String insertName, boolean includeId,
                                  String keysVar) {
         boolean readBackKey = !includeId && keysVar != null;
         String constant = SqlConstants.register(constants, insertName,
-                new SqlBuilder(model.metadata(), model.metadata()).dialect(sqlDialect).insert(includeId));
+                new SqlBuilder(model, model).dialect(sqlDialect).insert(includeId));
         if (readBackKey) {
             builder.addStatement("$T $L = new $T()", GeneratedKeyHolder.class, keysVar,
                     GeneratedKeyHolder.class);
         }
         CodeBlock.Builder sql = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
         if (includeId) {
-            sql.add(".param($S, $L.$L())", SqlBuilder.paramName(model.metadata().id().name()),
+            sql.add(".param($S, $L.$L())", SqlBuilder.paramName(model.id().name()),
                     value, MemberNames.getter(model.id().name()));
         }
         appendColumnParams(sql, model, value);
@@ -119,7 +122,7 @@ public final class RowWrites {
     }
 
     public void appendChildColumnParams(CodeBlock.Builder params, TypeMapping<?> mapping, String entityVar,
-                                         String inverseFk, String rootValue, EntityModel root,
+                                         String inverseFk, String rootValue, TypeMapping<?> root,
                                          boolean includeId) {
         for (Map.Entry<String, ColumnRef> entry : mapping.writeColumnRefs().entrySet()) {
             ColumnRef ref = entry.getValue();
@@ -136,8 +139,8 @@ public final class RowWrites {
         }
     }
 
-    public void appendColumnParams(CodeBlock.Builder params, EntityModel entity, String entityVar) {
-        TypeMapping<?> mapping = entity.metadata();
+    public void appendColumnParams(CodeBlock.Builder params, TypeMapping<?> entity, String entityVar) {
+        TypeMapping<?> mapping = entity;
         for (Map.Entry<String, ColumnRef> entry : mapping.writeColumnRefs().entrySet()) {
             ColumnRef ref = entry.getValue();
             if (isIdentifierColumn(mapping, ref)) {
@@ -152,8 +155,8 @@ public final class RowWrites {
         return mapping.id() != null && columnRef.column().equals(mapping.id().column());
     }
 
-    public void appendAllColumnParams(CodeBlock.Builder params, EntityModel entity, String entityVar) {
-        TypeMapping<?> mapping = entity.metadata();
+    public void appendAllColumnParams(CodeBlock.Builder params, TypeMapping<?> entity, String entityVar) {
+        TypeMapping<?> mapping = entity;
         for (Map.Entry<String, ColumnRef> entry : mapping.writeColumnRefs().entrySet()) {
             params.add(".param($S, $L)", SqlBuilder.paramName(entry.getKey()),
                     boundValue(mapping, entityVar, entry.getKey(), entry.getValue()));
@@ -202,9 +205,9 @@ public final class RowWrites {
         return attributeTypes.isEnum(fqn);
     }
 
-    public CodeBlock rowUpdate(String value, EntityModel model, Map<String, String> constants, String updateName) {
+    public CodeBlock rowUpdate(String value, TypeMapping<?> model, Map<String, String> constants, String updateName) {
         String constant = SqlConstants.register(constants, updateName,
-                new SqlBuilder(model.metadata(), model.metadata()).dialect(sqlDialect).update());
+                new SqlBuilder(model, model).dialect(sqlDialect).update());
         CodeBlock.Builder update = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
         appendColumnParams(update, model, value);
         update.add(".param($S, $L.$L())", MemberNames.ID_PARAM, value, MemberNames.getter(model.id().name()));

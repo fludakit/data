@@ -7,6 +7,7 @@ import io.github.fludakit.data.metadata.JoinEdge;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.page.SimplePage;
+import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
 import io.github.fludakit.data.processor.analysis.PathResolver;
 import io.github.fludakit.data.processor.model.EmissionContext;
 import io.github.fludakit.data.processor.support.MemberNames;
@@ -50,12 +51,15 @@ import java.util.List;
 public final class CrudReadEmitter {
 
     private final SqlDialect sqlDialect;
+    private final MappedTypeBuilder typeMappingBuilder;
     private final MetadataGenerator metadataGenerator;
     private final JoinedProjectionEmitter joinedProjections;
 
-    public CrudReadEmitter(SqlDialect sqlDialect, MetadataGenerator metadataGenerator,
-                    JoinedProjectionEmitter joinedProjections) {
+    public CrudReadEmitter(SqlDialect sqlDialect, MappedTypeBuilder typeMappingBuilder,
+                           MetadataGenerator metadataGenerator,
+                           JoinedProjectionEmitter joinedProjections) {
         this.sqlDialect = sqlDialect;
+        this.typeMappingBuilder = typeMappingBuilder;
         this.metadataGenerator = metadataGenerator;
         this.joinedProjections = joinedProjections;
     }
@@ -72,7 +76,7 @@ public final class CrudReadEmitter {
      */
     private String joinedReadSql(EmissionContext ctx, List<Predicate> predicates, List<SortSpec> sorts,
                                  int limit) {
-        TypeMapping<?> mapping = ctx.entity().metadata();
+        TypeMapping<?> mapping = ctx.entity();
         List<JoinEdge> edges = new ArrayList<>();
         for (Prop.Reference ref : ctx.joinedReferences()) {
             if (ref.targetTable() == null || ref.targetIdColumn() == null) {
@@ -95,7 +99,7 @@ public final class CrudReadEmitter {
     private CodeBlock readMapper(EmissionContext ctx) {
         return ctx.crudFullMapper() != null
                 ? CodeBlock.of("(rs, rowNum) -> $L(rs, rowNum)", ctx.crudFullMapper())
-                : QueryInvocations.queryArg(ctx.entity(), ctx.mapperType());
+                : QueryInvocations.queryArg(typeMappingBuilder.classNameFor(ctx.entity().typeName()), ctx.mapperType());
     }
 
     public void emitFindById(MethodSpec.Builder builder, String value, EmissionContext ctx, ResultKind kind) {
@@ -103,7 +107,7 @@ public final class CrudReadEmitter {
         boolean joined = ctx.crudFullMapper() != null;
         String constant = SqlConstants.register(ctx.constants(), joined ? "SQL_FIND_BY_ID_JOINED" : "SQL_FIND_BY_ID",
                 joined ? joinedReadSql(ctx, predicates, List.of(), 0)
-                        : new SqlBuilder(ctx.entity().metadata()).dialect(sqlDialect)
+                        : new SqlBuilder(ctx.entity()).dialect(sqlDialect)
                                 .selectBy(predicates, List.of(), 0, null));
         // The declared return type decides the terminal: Optional<E> keeps the empty case, a bare E
         // must not — .optional() there does not compile against the declaration.
@@ -114,7 +118,7 @@ public final class CrudReadEmitter {
             return;
         }
         builder.addStatement("$T<$T> found = jdbcClient.sql($L).param($S, $L).query($L).optional()",
-                java.util.Optional.class, ctx.entity().typeName(), constant, MemberNames.ID_PARAM, value, readMapper(ctx));
+                java.util.Optional.class, typeMappingBuilder.classNameFor(ctx.entity().typeName()), constant, MemberNames.ID_PARAM, value, readMapper(ctx));
         builder.addStatement("found.ifPresent(e -> $L)", QueryInvocations.hydrationCall("java.util.List.of(e)"));
         builder.addStatement("return $L", kind == ResultKind.OPTIONAL ? "found" : "found.get()");
     }
@@ -123,7 +127,7 @@ public final class CrudReadEmitter {
         boolean joined = ctx.crudFullMapper() != null;
         String constant = SqlConstants.register(ctx.constants(), joined ? "SQL_FIND_ALL_JOINED" : "SQL_FIND_ALL",
                 joined ? joinedReadSql(ctx, List.of(), List.of(), 0)
-                        : new SqlBuilder(ctx.entity().metadata()).dialect(sqlDialect)
+                        : new SqlBuilder(ctx.entity()).dialect(sqlDialect)
                                 .selectBy(List.of(), List.of(), 0, null));
         // The declared shape decides the terminal: CrudRepository declares Stream<E>, but an
         // application may declare List<E>/Set<E>/E[], which .stream() does not satisfy.
@@ -135,7 +139,7 @@ public final class CrudReadEmitter {
             }
             if (kind == ResultKind.ARRAY) {
                 builder.addStatement("return jdbcClient.sql($L).query($L).list().toArray($T[]::new)",
-                        constant, readMapper(ctx), ctx.entity().typeName());
+                        constant, readMapper(ctx), typeMappingBuilder.classNameFor(ctx.entity().typeName()));
                 return;
             }
             builder.addStatement("return jdbcClient.sql($L).query($L).$L", constant,
@@ -144,14 +148,14 @@ public final class CrudReadEmitter {
         }
         // Materialize before streaming so the (lazy) stream's elements are all hydrated up front.
         builder.addStatement("$T<$T> results = jdbcClient.sql($L).query($L).list()",
-                List.class, ctx.entity().typeName(), constant, readMapper(ctx));
+                List.class, typeMappingBuilder.classNameFor(ctx.entity().typeName()), constant, readMapper(ctx));
         builder.addStatement("$L", QueryInvocations.hydrationCall("results"));
         if (kind == ResultKind.SET) {
             builder.addStatement("return new $T<>(results)", LinkedHashSet.class);
             return;
         }
         if (kind == ResultKind.ARRAY) {
-            builder.addStatement("return results.toArray($T[]::new)", ctx.entity().typeName());
+            builder.addStatement("return results.toArray($T[]::new)", typeMappingBuilder.classNameFor(ctx.entity().typeName()));
             return;
         }
         builder.addStatement("return $L", kind == ResultKind.LIST ? "results" : "results.stream()");
@@ -168,10 +172,10 @@ public final class CrudReadEmitter {
         boolean joined = ctx.crudFullMapper() != null;
         String findConstant = SqlConstants.register(ctx.constants(), joined ? "SQL_FIND_ALL_JOINED" : "SQL_FIND_ALL",
                 joined ? joinedReadSql(ctx, List.of(), List.of(), 0)
-                        : new SqlBuilder(ctx.entity().metadata()).dialect(sqlDialect)
+                        : new SqlBuilder(ctx.entity()).dialect(sqlDialect)
                                 .selectBy(List.of(), List.of(), 0, null));
         String countConstant = SqlConstants.register(ctx.constants(), "SQL_COUNT_ALL",
-                new SqlBuilder(ctx.entity().metadata()).dialect(sqlDialect).countBy(List.of()));
+                new SqlBuilder(ctx.entity()).dialect(sqlDialect).countBy(List.of()));
         // a runtime sort can traverse a relation and splice a LEFT JOIN onto this constant —
         // if the joined table shares a column name (entity targets always share "id") the bare select
         // list becomes ambiguous. When the descriptor has ANY traversable prop, register a second,
@@ -180,7 +184,7 @@ public final class CrudReadEmitter {
         // row mapper reads both. Relation-free descriptors keep the single-constant emission
         // byte-identical (legacy parity).
         boolean joinCapable = joined;
-        for (Prop p : ctx.entity().metadata().props()) {
+        for (Prop p : ctx.entity().props()) {
             if (PathResolver.isTraversable(p)) {
                 joinCapable = true;
                 break;
@@ -191,7 +195,7 @@ public final class CrudReadEmitter {
         String joinedFindConstant = joinCapable
                 ? (joined ? findConstant
                         : SqlConstants.register(ctx.constants(), "SQL_FIND_ALL_QUALIFIED",
-                                new SqlBuilder(ctx.entity().metadata()).dialect(sqlDialect)
+                                new SqlBuilder(ctx.entity()).dialect(sqlDialect)
                                         .qualifiedRootSelect(List.of(), true, "")))
                 : null;
         // The base constant of a JOIN-projected read already carries a LEFT JOIN per composing to-one
@@ -201,7 +205,7 @@ public final class CrudReadEmitter {
         // edges. With no projection there is nothing to suppress and the legacy call is kept verbatim.
         String alreadyJoined = joined ? projectedJoinTables(ctx.joinedReferences()) : null;
 
-        String entityFqn = ctx.entity().typeName().toString();
+        String entityFqn = typeMappingBuilder.classNameFor(ctx.entity().typeName()).toString();
         ClassName metadataClass = metadataGenerator.metadataNameFor(entityFqn);
         builder.addStatement("$T sql = new $T($T.INSTANCE).dialect(SQL_DIALECT)",
                 SqlBuilder.class, SqlBuilder.class, metadataClass);
@@ -248,13 +252,13 @@ public final class CrudReadEmitter {
             builder.addStatement("$T<$T> content = jdbcClient.sql(((joins.isEmpty() && !keyed ? $L : $L) + joins"
                             + " + (orderBy.length() > 0 ? $S + orderBy : $S)"
                             + " + $S + $L.size() + $S + offset)).query($L).list()",
-                    List.class, ctx.entity().typeName(), findConstant, joinedFindConstant, " ORDER BY ", "",
+                    List.class, typeMappingBuilder.classNameFor(ctx.entity().typeName()), findConstant, joinedFindConstant, " ORDER BY ", "",
                     sqlDialect.limitClause(""), pageRequest, sqlDialect.offsetClause(""),
                     readMapper(ctx));
         } else {
             builder.addStatement("$T<$T> content = jdbcClient.sql($L + joins + (orderBy.length() > 0 ? $S + orderBy : $S)"
                             + " + $S + $L.size() + $S + offset).query($L).list()",
-                    List.class, ctx.entity().typeName(), findConstant, " ORDER BY ", "",
+                    List.class, typeMappingBuilder.classNameFor(ctx.entity().typeName()), findConstant, " ORDER BY ", "",
                     sqlDialect.limitClause(""), pageRequest, sqlDialect.offsetClause(""),
                     readMapper(ctx));
         }

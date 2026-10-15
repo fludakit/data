@@ -2,8 +2,10 @@ package io.github.fludakit.data.processor.analysis;
 
 import com.squareup.javapoet.MethodSpec;
 import com.squareup.javapoet.TypeName;
-import io.github.fludakit.data.processor.model.EntityModel;
+import io.github.fludakit.data.metadata.TypeMapping;
+import java.util.function.Function;
 import javax.lang.model.element.ExecutableElement;
+import javax.lang.model.element.TypeElement;
 import javax.lang.model.type.ArrayType;
 import javax.lang.model.type.DeclaredType;
 import javax.lang.model.type.ExecutableType;
@@ -30,8 +32,7 @@ import javax.lang.model.util.Types;
  * {@code WriteMethodEmitter}, {@code RepositoryMethodCompiler}, {@code RepositoryMethodValidator} and
  * {@code QueryPlanCompiler} — held the service for these answers and for nothing else, so after this
  * move no generator in the package holds {@code Types} at all. What remains is the deliberate
- * minority: the two wiring holders, {@link MappedTypeBuilder} (which stores an erased mirror on
- * {@link EntityModel}), {@link AttributeTypes} (which needs an erased mirror to build a
+ * minority: the two wiring holders, {@link AttributeTypes} (which needs an erased mirror to build a
  * {@code TypeName}) and {@link RepositoryTypeResolver} (which walks supertypes).</p>
  *
  * <p>Only {@link #isEntity} and {@link #resolved} genuinely need {@link Types}. {@link #isList} and
@@ -47,8 +48,18 @@ public final class TypeShapes {
 
     private final Types types;
 
-    public TypeShapes(Types types) {
+    /**
+     * The declared type NAMED {@code fqn}, supplied by {@link MappedTypeBuilder#elementFor}.
+     *
+     * <p>It is a name-keyed function rather than an {@code Elements} field for the same reason every
+     * other generator takes one: a service is a round, and a round in a constructor is a generator
+     * that cannot be built without one. Naming a type is one question with one answer per round.</p>
+     */
+    private final Function<String, TypeElement> elementFor;
+
+    public TypeShapes(Types types, Function<String, TypeElement> elementFor) {
         this.types = types;
+        this.elementFor = elementFor;
     }
 
     /**
@@ -99,8 +110,10 @@ public final class TypeShapes {
      * and what makes {@code save(Book)} a write while {@code save(long)} is not. It asks about the
      * erasure because a repository method declares the entity, never a parameterisation of it.
      */
-    public boolean isEntity(TypeMirror mirror, EntityModel entity) {
-        return types.isAssignable(types.erasure(mirror), types.erasure(entity.typeMirror()));
+    public boolean isEntity(TypeMirror mirror, TypeMapping<?> entity) {
+        TypeElement element = elementFor.apply(entity.typeName());
+        return element != null
+                && types.isAssignable(types.erasure(mirror), types.erasure(element.asType()));
     }
 
     /**

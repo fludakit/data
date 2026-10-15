@@ -7,6 +7,7 @@ import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.emit.CrudReadEmitter;
 import java.util.List;
 import java.util.Map;
+import io.github.fludakit.data.metadata.TypeMapping;
 
 /**
  * Everything the method compiler needs that is fixed for the WHOLE repository rather than for one
@@ -31,7 +32,7 @@ import java.util.Map;
  * pairing is spelled out, so the CRUD read emitters cannot drift from what {@code generateMethod}
  * built.</p>
  */
-public record RepositoryEmission(EntityModel entity, RepositoryFlavour flavour, Map<String, String> constants,
+public record RepositoryEmission(TypeMapping<?> entity, RepositoryFlavour flavour, Map<String, String> constants,
                           ClassName mapperType, boolean hydrate, String crudFullMapper,
                           List<Prop.Reference> joinedReferences, List<MethodSpec> auxMethods,
                           List<QueryDefinitionSpec> queryDefinitions,

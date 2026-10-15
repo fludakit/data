@@ -12,8 +12,6 @@ import io.github.fludakit.data.metadata.EntityTypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.ValueObjectMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
-import io.github.fludakit.data.processor.model.EntityModel;
-import io.github.fludakit.data.processor.model.Property;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.support.MemberNames;
 import javax.lang.model.element.Element;
@@ -51,9 +49,16 @@ public final class MappedTypeBuilder {
      */
     private final Map<String, ElementCollectionValueObjectMapping<?>> elementCollectionCache = new HashMap<>();
     private final Map<String, TypeElement> elementsByName = new HashMap<>();
-    private final Map<String, EntityModel> entityModels = new HashMap<>();
-    private final Map<String, EntityModel> valueObjectModels = new HashMap<>();
-    private final Set<String> valueObjectModelsInProgress = new HashSet<>();
+    /**
+     * The JavaPoet type of one MEMBER, keyed by the type that declares it plus the member's name —
+     * the one compile-time fact a scan sees that the shipping descriptor cannot carry.
+     *
+     * <p>It is a Map keyed by declaring type rather than a list carried on the model because the
+     * descriptor already carries the property ORDER and SHAPE: {@link TypeMapping#rowProps()} is the
+     * list, and this is only the rendering of each one's type. Storing the pair again as a
+     * {@code Property} record next to the descriptor made the same field answerable in two places.
+     */
+    private final Map<String, TypeName> memberTypes = new HashMap<>();
 
     public MappedTypeBuilder(Types types, Elements elements, Diagnostics diagnostics) {
         this.types = types;
@@ -62,22 +67,36 @@ public final class MappedTypeBuilder {
     }
 
     /**
-     * One mapped type in two shapes: the descriptor the generated {@code <Entity>Metadata} prints,
-     * and the compile-time model the emitters work from. They are built by two METHODS, not by one
-     * loop doing both — see
-     * {@link #buildDescriptor} and {@link #compileModel}.
+     * The mapping of one declared type: the descriptor the generated {@code <Entity>Metadata} prints,
+     * and the only model the emitters work from.
+     *
+     * <p>What they additionally need — this type's {@code ClassName} and each member's JavaPoet
+     * {@code TypeName} — is memoized beside it by {@link #classNameFor} and {@link #memberType}, so
+     * there is no second model to keep in step with this one.</p>
      */
-    public EntityModel buildEntity(TypeElement element) {
-        boolean valueObject = isValueObjectType(element);
-        boolean ownerOwns = ownsAggregateLifecycle(element);
-        TypeMirror typeMirror = types.erasure(element.asType());
-        // An entity or value object is always a declared type, so its erased name is a ClassName —
-        // and a ClassName knows its own package, which is what six call sites used to ask Elements
-        // for. Building it from the element also gets NESTED types right (pkg.Outer.Inner), which
-        // TypeName.get(erasure) plus getSimpleName() did not.
-        ClassName typeName = ClassName.get(element);
-        String table = valueObject ? null : Names.tableName(element.getSimpleName().toString());
-        return compileModel(typeMirror, typeName, buildDescriptor(element, valueObject, ownerOwns, table));
+    public TypeMapping<?> buildEntity(TypeElement element) {
+        return descriptorFor(element);
+    }
+
+    /**
+     * The {@code ClassName} generated code refers to a mapped type by.
+     *
+     * <p>Derived from the memoized {@link #elementFor} rather than carried on the model: a mapped
+     * type is always declared, so its element IS its name, and a {@code ClassName} built from the
+     * element gets nested types right ({@code pkg.Outer.Inner}) and knows its own package — which
+     * is what half a dozen call sites used to ask {@code Elements} for.
+     */
+    public ClassName classNameFor(String fqn) {
+        TypeElement element = elementFor(fqn);
+        return element == null ? null : ClassName.get(element);
+    }
+
+    /**
+     * The JavaPoet type of {@code owner}'s member {@code name}, or {@code null} when the scan
+     * recorded none — which is exactly the members {@link TypeMapping#rowProps()} excludes.
+     */
+    public TypeName memberType(String ownerFqn, String name) {
+        return memberTypes.get(ownerFqn + "#" + name);
     }
 
     /**
@@ -85,13 +104,11 @@ public final class MappedTypeBuilder {
      * generated {@code <Entity>Metadata}.
      *
      * <p>This is the only pass that makes a mapping decision — which shape each field is, what column
-     * it takes, which target it points at. It used to also assemble the compile-time
-     * {@link EntityModel} in the same breath, so every one of its seven branches constructed two
-     * parallel things and the method carried three accumulators plus two identifier variables.
+     * it takes, which target it points at. It used to also assemble a compile-time model in the same
+     * breath, so every one of its seven branches constructed two parallel things.
      *
-     * <p>The two facts the descriptor cannot hold are recorded alongside it in
-     * {@link DescriptorBuild#facts()} and joined back on by {@link #compileModel}: a JavaPoet type
-     * name, and an embedded target's compile-time model. They are carried for two different reasons.
+     * <p>The one fact the descriptor cannot hold is recorded alongside it in {@link #memberTypes},
+     * keyed by this type's name and the member's name: the member's JavaPoet {@code TypeName}.
      *
      * <p>The type name genuinely cannot be recovered later. The descriptor carries a type as an FQN
      * {@code String}, and the way back to a {@code TypeName} is lossy: {@code ClassName.bestGuess}
@@ -101,18 +118,16 @@ public final class MappedTypeBuilder {
      * {@code TypeName} even if one were recoverable: JavaPoet is a processor-only dependency, and
      * the descriptor ships into the user's jar.
      *
-     * <p>The embedded model is carried for a different reason. It IS reachable by looking the target
-     * up by {@code typeName()}, but that lookup would resolve a value object that was still in
-     * progress during the scan, where the direct reference correctly stays {@code null}; and
-     * {@link Prop.Embedded#target()} prints as {@code null} in the descriptor, so the richer
-     * compile-time target is not part of what ships.
+     * <p>An embedded target needs no second model at all: {@link Prop.Embedded#target()} IS the
+     * target's mapping, resolved by this same memoized scan, and recursing into it by name reaches
+     * the same object. It prints as {@code null} in the descriptor — a value object's descriptor is
+     * generated as its own artifact — but that is about what ships, not about what is reachable.
      */
-    private DescriptorBuild buildDescriptor(TypeElement element, boolean valueObject,
-                                            boolean ownerOwns, String table) {
+    private TypeMapping<?> buildDescriptor(TypeElement element, boolean valueObject,
+                                           boolean ownerOwns, String table) {
         String typeNameString = element.getQualifiedName().toString();
         Prop.Id idProp = null;
         List<Prop> props = new ArrayList<>();
-        Map<String, FieldFacts> facts = new HashMap<>();
         Set<String> seen = new HashSet<>();
         for (Element member : elements.getAllMembers(element)) {
             if (member.getKind() != ElementKind.FIELD) {
@@ -141,18 +156,18 @@ public final class MappedTypeBuilder {
             }
             if (!valueObject && (identityAnnotated || name.equals(MemberNames.ID_PROPERTY))) {
                 idProp = new Prop.Id(name, Names.columnBase(name), fieldType);
-                facts.put(name, new FieldFacts(fieldTypeName, null));
+                memberTypes.put(memberKey(typeNameString, name), fieldTypeName);
 
             } else if (field.getAnnotation(Association.class) != null) {
                 TypeElement target = declaredElement(field);
                 props.add(referenceProp(name, Names.fkColumn(name),
                         target != null ? target.getQualifiedName().toString() : null, false, false, target));
-                facts.put(name, new FieldFacts(fieldTypeName, null));
+                memberTypes.put(memberKey(typeNameString, name), fieldTypeName);
 
             } else if (embeddedTarget(field) != null) {
                 TypeElement vo = embeddedTarget(field);
                 props.add(new Prop.Embedded(name, embeddedOf(descriptorFor(vo))));
-                facts.put(name, new FieldFacts(fieldTypeName, valueObjectModel(vo)));
+                memberTypes.put(memberKey(typeNameString, name), fieldTypeName);
 
             } else if (isEntityType(declaredElement(field))) {
                 TypeElement target = declaredElement(field);
@@ -161,7 +176,7 @@ public final class MappedTypeBuilder {
                 boolean composition = ownerOwns;
                 props.add(referenceProp(name, Names.fkColumn(name),
                         target.getQualifiedName().toString(), composition, !composition, target));
-                facts.put(name, new FieldFacts(fieldTypeName, null));
+                memberTypes.put(memberKey(typeNameString, name), fieldTypeName);
 
             } else if (valueObjectElementType(field) != null) {
                 TypeElement vo = valueObjectElementType(field);
@@ -191,14 +206,14 @@ public final class MappedTypeBuilder {
                 // back to the erased element type, which is exactly what this scan would have stored.
 
             } else if (entityTypeElement(field) != null) {
-                // No fact recorded: a to-many entity collection is neither a Property nor a
-                // child-table collection, so compileModel skips it without needing a type.
+                // No member type recorded: a to-many entity collection is neither a row prop nor a
+                // child-table collection, so nothing asks for a member type of it.
                 TypeElement child = entityTypeElement(field);
                 props.add(new Prop.EntityCollection(name, descriptorFor(child), null, null));
 
             } else {
                 props.add(new Prop.Scalar(name, Names.columnBase(name), fieldType));
-                facts.put(name, new FieldFacts(fieldTypeName, null));
+                memberTypes.put(memberKey(typeNameString, name), fieldTypeName);
             }
         }
         if (!valueObject && idProp == null) {
@@ -209,7 +224,7 @@ public final class MappedTypeBuilder {
                     "entity '" + element.getSimpleName() + "' declares no identifier; annotate one field with"
                             + " @Identity (or name it 'id')", element);
             idProp = new Prop.Id(MemberNames.ID_PROPERTY, Names.columnBase(MemberNames.ID_PROPERTY), "java.lang.Long");
-            facts.put(MemberNames.ID_PROPERTY, new FieldFacts(ClassName.get(Long.class), null));
+            memberTypes.put(memberKey(typeNameString, MemberNames.ID_PROPERTY), ClassName.get(Long.class));
         }
 
         // Resolve one-to-many inverse references after collecting all parent properties.
@@ -226,51 +241,8 @@ public final class MappedTypeBuilder {
                 resolved.add(prop);
             }
         }
-        return new DescriptorBuild(
-                entityMapping(valueObject, ownerOwns, typeNameString, table, idProp, resolved), facts);
+        return entityMapping(valueObject, ownerOwns, typeNameString, table, idProp, resolved);
     }
-
-    /**
-     * Joins {@link DescriptorBuild#facts()} back onto the descriptor's props.
-     *
-     * <p>The compile-time model is a function of the descriptor plus what only the field scan could
-     * see, so nothing here re-decides a mapping question — it only re-attaches the two things the
-     * descriptor cannot carry. A prop the scan recorded no fact for (a to-many entity collection) is
-     * one that has no column on the owner's row and therefore no {@link Property}.
-     */
-    private static EntityModel compileModel(TypeMirror typeMirror, ClassName typeName,
-                                            DescriptorBuild build) {
-        TypeMapping<?> metadata = build.metadata();
-        Map<String, FieldFacts> facts = build.facts();
-        Prop.Id idProp = metadata.id();
-        Property id = idProp == null ? null
-                : new Property(facts.get(idProp.name()).type(), idProp, null);
-        List<Property> properties = new ArrayList<>();
-        for (Prop prop : metadata.props()) {
-            // A to-many prop has no column on this type's own row, so it has no Property: an
-            // EntityCollection is reached through a join, and an ElementCollection through its child
-            // table. EntityModel.collections() derives the latter from the mapping.
-            if (prop instanceof Prop.EntityCollection || prop instanceof Prop.ElementCollection) {
-                continue;
-            }
-            FieldFacts fact = facts.get(prop.name());
-            properties.add(new Property(fact.type(), prop, fact.embeddedModel()));
-        }
-        return new EntityModel(typeMirror, typeName, id, properties, metadata);
-    }
-
-    /**
-     * What the field scan can see and the shipping descriptor cannot carry: a JavaPoet type name, and
-     * — for an embedded member — the compile-time model of its value object.
-     *
-     * @param type          the property's JavaPoet type; for an element collection this is the list's
-     *                      ELEMENT type, the only type any emitter names for it
-     * @param embeddedModel the embedded target's {@link EntityModel}, else {@code null}
-     */
-    private record FieldFacts(TypeName type, EntityModel embeddedModel) { }
-
-    /** One field scan: the shipping descriptor, plus the compile-time facts it cannot hold. */
-    private record DescriptorBuild(TypeMapping<?> metadata, Map<String, FieldFacts> facts) { }
 
     /**
      * The declared type NAMED {@code fqn}, or {@code null} when the name does not resolve in this
@@ -284,7 +256,7 @@ public final class MappedTypeBuilder {
      * already memoized by the same name.
      *
      * <p>{@code null} is cached as well as a hit, so an unresolvable name is resolved once — the
-     * same reason {@link #entityModel(String)} does not retry a name that already failed.
+     * same reason {@link #descriptorFor(String)} does not retry a name that already failed.</p>
      */
     public TypeElement elementFor(String fqn) {
         if (fqn == null) {
@@ -318,42 +290,15 @@ public final class MappedTypeBuilder {
         }
         descriptorsInProgress.add(fqn);
         try {
-            TypeMapping<?> descriptor = buildEntity(element).metadata();
+            boolean valueObject = isValueObjectType(element);
+            TypeMapping<?> descriptor = buildDescriptor(element, valueObject,
+                    ownsAggregateLifecycle(element),
+                    valueObject ? null : Names.tableName(element.getSimpleName().toString()));
             descriptorCache.put(fqn, descriptor);
             return descriptor;
         } finally {
             descriptorsInProgress.remove(fqn);
         }
-    }
-
-    public EntityModel entityModel(TypeElement element) {
-        String fqn = element.getQualifiedName().toString();
-        EntityModel cached = entityModels.get(fqn);
-        if (cached == null) {
-            cached = buildEntity(element);
-            entityModels.put(fqn, cached);
-        }
-        return cached;
-    }
-
-    /**
-     * The model of the mapped type NAMED {@code fqn}, or {@code null} when the name does not resolve.
-     *
-     * <p>The name-keyed form exists because a name is all a caller has: the descriptor carries a
-     * target as an FQN {@code String}, so a generator handed a {@code Prop.Reference} must resolve
-     * that name before it can reach the model. Resolving a type by name IS an environment call, so
-     * it belongs in the one class that owns {@code Elements} and memoizes the result — not in every
-     * generator, each of which held {@code Elements} for this and nothing else.
-     */
-    public EntityModel entityModel(String fqn) {
-        TypeElement element = elementFor(fqn);
-        return element == null ? null : entityModel(element);
-    }
-
-    /** As {@link #entityModel(String)}, for a value object. */
-    public EntityModel valueObjectModel(String fqn) {
-        TypeElement element = elementFor(fqn);
-        return element == null ? null : valueObjectModel(element);
     }
 
     /**
@@ -379,22 +324,8 @@ public final class MappedTypeBuilder {
         return false;
     }
 
-    public EntityModel valueObjectModel(TypeElement element) {
-        String fqn = element.getQualifiedName().toString();
-        EntityModel cached = valueObjectModels.get(fqn);
-        if (cached != null) {
-            return cached;
-        }
-        if (!valueObjectModelsInProgress.add(fqn)) {
-            return null;
-        }
-        try {
-            EntityModel model = buildEntity(element);
-            valueObjectModels.put(fqn, model);
-            return model;
-        } finally {
-            valueObjectModelsInProgress.remove(fqn);
-        }
+    private static String memberKey(String ownerFqn, String name) {
+        return ownerFqn + "#" + name;
     }
 
     public boolean isValueObjectType(TypeElement element) {

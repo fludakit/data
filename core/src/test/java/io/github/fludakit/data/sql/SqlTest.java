@@ -108,6 +108,46 @@ class SqlTest {
     }
 
     @Test
+    void aDialectThatOverridesTheCombinedClauseIsConsultedForIt() {
+        // A limit AND an offset go out through ONE method — limitOffsetClause — not through
+        // limitClause + offsetClause. The default composes the two, which is why pinning only the
+        // separate methods (SqlBuilderTest does) still passes on a renderer that ignores the
+        // override: the concatenation happens to be right for every dialect shipped today. A
+        // database whose paging is one clause rather than two — ROWS n TO m, OFFSET n ROWS FETCH
+        // NEXT m — overrides this method and is correct ONLY if the renderer asks for it. So the
+        // fake dialect below overrides it to something that is deliberately NOT the concatenation of
+        // its own two halves; "LIMIT 5 OFFSET 20" appearing here means the override was skipped.
+        SqlDialect windowed = new SqlDialect() {
+            @Override
+            public String quoteIdentifier(String identifier) {
+                return "[" + identifier + "]";
+            }
+
+            @Override
+            public String limitClause(String limitExpression) {
+                return " FETCH FIRST " + limitExpression + " ROWS ONLY";
+            }
+
+            @Override
+            public String offsetClause(String offsetExpression) {
+                return " SKIP " + offsetExpression;
+            }
+
+            @Override
+            public String limitOffsetClause(String limitExpression, String offsetExpression) {
+                return " ROWS " + offsetExpression + " TO " + limitExpression;
+            }
+        };
+        assertThat(Sql.select(customer()).dialect(windowed).asc("name").limit(5).offset(20).toSql())
+                .isEqualTo("SELECT [id], [name] FROM [customer]"
+                        + " ORDER BY [name] ASC ROWS 20 TO 5");
+        // …and a limit alone still goes through limitClause, so the combined override is not
+        // consulted when only one bound is present.
+        assertThat(Sql.select(customer()).dialect(windowed).limit(5).toSql())
+                .isEqualTo("SELECT [id], [name] FROM [customer] FETCH FIRST 5 ROWS ONLY");
+    }
+
+    @Test
     void distinctFoldsIntoTheProjection() {
         assertThat(Sql.select(customer()).distinct().toSql())
                 .isEqualTo("SELECT DISTINCT \"id\", \"name\" FROM \"customer\"");

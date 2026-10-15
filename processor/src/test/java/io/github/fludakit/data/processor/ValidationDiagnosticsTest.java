@@ -418,4 +418,74 @@ class ValidationDiagnosticsTest {
                 "the rejection must be reported where the sort is recognised, not by the per-repository"
                         + " net:" + System.lineSeparator() + result.diagnostics());
     }
+
+    @Test
+    void rejectsASliceReturnBecauseThereIsNoGeneratedShapeForIt() throws Exception {
+        // A Slice return used to fall through to the single-result path and produce a query whose
+        // terminal did not match the declaration: it compiled, and handed back one row where the
+        // caller asked for a window plus a next-page cursor. Nothing in the generated source is
+        // wrong-looking, so only the declaration site can catch it — and it must say what to return
+        // instead, because "Slice is unsupported" alone sends the reader to the Jakarta Data spec to
+        // find out which of the three page types are.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/slice-return"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-slice-return"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-slice-return"));
+
+        Files.writeString(sourceDir.resolve("Memo.java"), """
+                package slicereturn;
+                import io.github.fludakit.data.annotation.Entity;
+                import io.github.fludakit.data.annotation.Identity;
+                @Entity
+                public class Memo {
+                    @Identity Long id;
+                    String text;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getText() { return text; }
+                    public void setText(String text) { this.text = text; }
+                }
+                """);
+        // Jakarta Data 1.0.x ships Page and CursoredPage but NOT Slice — jakarta/data/page/ holds
+        // Page, CursoredPage, PageRequest, PageRequestCursor and Pagination, so on a real classpath
+        // this guard is unreachable and a Slice return is an unresolvable symbol that fails as a
+        // plain compile error. The guard exists for the version that DOES add Slice, so the test
+        // supplies it: a source fixture wins over the jar, and without it this assertion could not
+        // be written at all.
+        Path sliceDir = Files.createDirectories(sourceDir.resolve("jakarta/data/page"));
+        Files.writeString(sliceDir.resolve("Slice.java"), """
+                package jakarta.data.page;
+                public interface Slice<T> {
+                    java.util.List<T> content();
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Memos.java"), """
+                package slicereturn;
+                import jakarta.data.page.Slice;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Memos extends CrudRepository<Memo, Long> {
+                    Slice<Memo> findByText(String text);
+                }
+                """);
+
+        TaskResult result = runTask(sourceDir, classesDir, generatedDir,
+                "jakarta/data/page/Slice.java", "Memo.java", "Memos.java");
+
+        assertFalse(result.success(), "a Slice return must be rejected rather than silently narrowed");
+        assertTrue(result.diagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR
+                        && d.getMessage(Locale.ROOT).contains("returns Slice, which this implementation does not"
+                        + " generate yet")),
+                "the rejection must name the unsupported return type:"
+                        + System.lineSeparator() + result.diagnostics());
+        assertTrue(result.diagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR
+                        && d.getMessage(Locale.ROOT).contains("return Page or CursoredPage instead")),
+                "the rejection must say what to return instead — an unsupported type with no substitute"
+                        + " named sends the reader to the spec:"
+                        + System.lineSeparator() + result.diagnostics());
+        assertFalse(result.diagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR
+                        && d.getMessage(Locale.ROOT).contains("could not generate")),
+                "the rejection must be reported where the return type is recognised, not by the"
+                        + " per-repository net:" + System.lineSeparator() + result.diagnostics());
+    }
 }

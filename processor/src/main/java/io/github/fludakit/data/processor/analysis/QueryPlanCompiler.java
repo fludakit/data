@@ -4,9 +4,7 @@ import io.github.fludakit.data.metadata.ColumnPlacement;
 import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.RepositoryProcessor;
-import io.github.fludakit.data.processor.model.Binding;
-import io.github.fludakit.data.processor.model.QueryDefinitionSpec;
-import io.github.fludakit.data.processor.model.QueryPlan;
+import io.github.fludakit.data.processor.analysis.QueryPlan;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.qbn.ParsedMethodName;
 import io.github.fludakit.data.qbn.QueryByMethodNameParser;
@@ -21,6 +19,7 @@ import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
 import io.github.fludakit.data.query.SeekTerm;
 import io.github.fludakit.data.query.SortSpec;
+import io.github.fludakit.data.query.Connector;
 import io.github.fludakit.data.sql.SqlBuilder;
 import jakarta.data.repository.By;
 import jakarta.data.repository.OrderBy;
@@ -74,16 +73,20 @@ public final class QueryPlanCompiler {
         return null;
     }
 
-    public List<Binding> bindings(List<? extends VariableElement> parameters, List<? extends TypeMirror> parameterTypes,
-                                   boolean explicitFind, ParsedMethodName parsed) {
+    /**
+     * Resolves the method's parameter bindings into core {@link Predicate}s and {@link ParamBinding}s
+     * directly, eliminating the intermediate {@code Binding} representation. The predicates carry
+     * named parameters resolved from the method's {@link VariableElement}s; the param bindings expand
+     * multi-argument operators (BETWEEN) into individual entries.
+     */
+    public ResolvedBindings resolvedBindings(List<? extends VariableElement> parameters,
+                                              List<? extends TypeMirror> parameterTypes,
+                                              boolean explicitFind, ParsedMethodName parsed) {
         List<Integer> indices = nonSpecialIndices(parameterTypes);
-        List<Binding> result = new ArrayList<>();
+        List<Predicate> predicates = new ArrayList<>();
+        List<ParamBinding> paramBindings = new ArrayList<>();
         boolean annotated = parameters.stream().anyMatch(p -> p.getAnnotation(By.class) != null);
         if (annotated) {
-            // @Find/@By declare the predicate, so the METHOD NAME is not resolved at all: @By names
-            // the property and, carrying no operator, implies equality. Reading the name here would
-            // let a `Like` suffix override the annotation — findByEmailLike(@By("email")) used to
-            // bind a LIKE, so the same annotation produced different SQL depending on the method name.
             int cursor = 0;
             for (int index : indices) {
                 By by = parameters.get(index).getAnnotation(By.class);
@@ -93,69 +96,60 @@ public final class QueryPlanCompiler {
                 }
                 String property = by == null ? parameters.get(index).getSimpleName().toString()
                         : By.ID.equals(by.value()) ? MemberNames.ID_PROPERTY : by.value();
-                result.add(new Binding(property, Operator.EQ, takeIndices(indices, cursor, Operator.EQ)));
+                addResolvedBinding(predicates, paramBindings, parameters, indices, cursor,
+                        property, Operator.EQ, Connector.AND, false);
                 cursor += SqlBuilder.parameterCount(Operator.EQ);
             }
         } else if (explicitFind) {
             if (parsed != null) {
-                addParsedBindings(result, parsed.predicates(), indices);
+                addParsedResolvedBindings(predicates, paramBindings, parameters, parsed.predicates(), indices);
             } else {
                 for (int index : indices) {
                     String property = parameters.get(index).getSimpleName().toString();
-                    result.add(new Binding(property, Operator.EQ, index));
+                    addResolvedBinding(predicates, paramBindings, parameters, indices, 0,
+                            property, Operator.EQ, Connector.AND, false);
                 }
             }
         } else if (parsed != null) {
-            addParsedBindings(result, parsed.predicates(), indices);
+            addParsedResolvedBindings(predicates, paramBindings, parameters, parsed.predicates(), indices);
         }
-        return result;
+        return new ResolvedBindings(predicates, paramBindings);
     }
 
     /**
-     * Allocates method arguments to the parsed predicates in order, giving each operator the number of
-     * arguments {@link SqlBuilder#parameterCount} says it renders tokens for — so {@code BETWEEN}
-     * takes the two bounds and the nullary operators take none (they used to consume an argument they
-     * never bound, shifting every later predicate onto the wrong parameter).
+     * Bundles the resolved predicates and parameter bindings for one query method. Replaces the
+     * intermediate {@code Binding} representation with direct use of core types.
      */
-    private static void addParsedBindings(List<Binding> result, List<Predicate> predicates,
-                                          List<Integer> indices) {
+    public record ResolvedBindings(List<Predicate> predicates, List<ParamBinding> paramBindings) {}
+
+    private static void addParsedResolvedBindings(List<Predicate> predicates, List<ParamBinding> paramBindings,
+                                                   List<? extends VariableElement> parameters,
+                                                   List<Predicate> parsed, List<Integer> indices) {
         int cursor = 0;
-        for (Predicate predicate : predicates) {
-            result.add(new Binding(predicate.property(), predicate.operator(),
-                    takeIndices(indices, cursor, predicate.operator()),
-                    predicate.connector(), predicate.ignoreCase()));
+        for (Predicate predicate : parsed) {
+            addResolvedBinding(predicates, paramBindings, parameters, indices, cursor,
+                    predicate.property(), predicate.operator(), predicate.connector(), predicate.ignoreCase());
             cursor += SqlBuilder.parameterCount(predicate.operator());
         }
     }
 
-    /** The {@code count} argument slots starting at {@code cursor}, falling back to raw positions. */
-    private static List<Integer> takeIndices(List<Integer> indices, int cursor, Operator operator) {
+    private static void addResolvedBinding(List<Predicate> predicates, List<ParamBinding> paramBindings,
+                                            List<? extends VariableElement> parameters, List<Integer> indices,
+                                            int cursor, String property, Operator operator,
+                                            Connector connector, boolean ignoreCase) {
         int count = SqlBuilder.parameterCount(operator);
         List<Integer> taken = new ArrayList<>();
         for (int i = 0; i < count; i++) {
             int at = cursor + i;
             taken.add(at < indices.size() ? indices.get(at) : at);
         }
-        return taken;
-    }
-
-    /**
-     * Converts the resolved parameter bindings into {@link Predicate}s whose named parameters are the
-     * method's parameter names, so the SQL rendered by {@link SqlBuilder} uses exactly the tokens
-     * bound by {@link RepositoryProcessor#appendBoundParameters}.
-     */
-    public List<Predicate> predicates(List<Binding> bindings, List<? extends VariableElement> parameters) {
-        List<Predicate> predicates = new ArrayList<>();
-        for (Binding binding : bindings) {
-            // A nullary operator (Null/True/False) binds nothing, so there is no argument to name the
-            // token after; the token is never rendered, so the property name is a safe placeholder.
-            String param = binding.paramIndices().isEmpty()
-                    ? binding.property()
-                    : parameters.get(binding.paramIndices().get(0)).getSimpleName().toString();
-            predicates.add(Predicate.of(binding.property(), binding.operator(), param,
-                    binding.connector(), binding.ignoreCase()));
+        String param = taken.isEmpty() ? property : parameters.get(taken.get(0)).getSimpleName().toString();
+        predicates.add(Predicate.of(property, operator, param, connector, ignoreCase));
+        LikePattern pattern = LikePattern.of(operator);
+        List<String> tokenNames = SqlBuilder.paramNames(operator, param);
+        for (int i = 0; i < taken.size(); i++) {
+            paramBindings.add(new ParamBinding(taken.get(i), tokenNames.get(i), pattern));
         }
-        return predicates;
     }
 
     public List<SortSpec> sorts(ExecutableElement method, ParsedMethodName parsed) {
@@ -208,21 +202,18 @@ public final class QueryPlanCompiler {
     }
 
     /**
-     * Fold one query-by-names method's resolved lists into a {@link QueryDefinitionSpec}. The paging
+     * Fold one query-by-names method's resolved lists into a {@link QueryDefinition.Criteria}. The paging
      * mode and result kind come from the return {@link ResultKind} plus the parsed action; seek terms are
      * the runtime cursor key for CURSOR and the published default key for the other paged modes
      * (E1's base constant drops sorts/limit at render time, so the
-     * declared sorts stay in the model for introspection). {@code paramBindings} are exactly the
-     * {@code .param($S, ...)} tokens {@link RepositoryProcessor#appendBoundParameters} emits, keyed by argument slot.
+     * declared sorts stay in the model for introspection).
      */
-    public static QueryDefinitionSpec queryDefinitionOf(String typeName, Operation operation,
+    public static QueryDefinition.Criteria queryDefinitionOf(String typeName, Operation operation,
                                                   ResultKind kind, ResultKind resultKind,
                                                   QueryPlan plan, boolean distinct) {
         List<Predicate> logicalPredicates = new ArrayList<>();
         for (int i = 0; i < plan.predicates().size(); i++) {
             Predicate predicate = plan.predicates().get(i);
-            // The connector and the case flag are part of the plan, not incidental: dropping them here
-            // would publish a definition that renders differently from the baked SQL.
             String authoritative = plan.predicateAttributePaths().get(i);
             logicalPredicates.add(Predicate.of(
                     authoritative != null ? authoritative
@@ -241,33 +232,17 @@ public final class QueryPlanCompiler {
         }
         PagingMode paging = kind == ResultKind.PAGE ? PagingMode.OFFSET
                 : kind == ResultKind.CURSORED_PAGE ? PagingMode.CURSOR : PagingMode.NONE;
-        // Every paged shape (OFFSET as well as CURSOR) publishes the keyset key: the runtime emitPaged
-        // wiring computes the same props/dirs lists for both, and SqlBuilder.build ignores seek terms
-        // (paging != NONE renders the base constant), so this changes no rendered SQL.
         List<SeekTerm> seekTerms = paging == PagingMode.NONE ? List.of()
                 : seekTerms(plan.mapping(), plan.sortRefs(), plan.existentialSorts(), logicalSorts);
-        List<ParamBinding> paramBindings = new ArrayList<>();
-        for (Binding binding : plan.bindings()) {
-            for (int paramIndex : binding.paramIndices()) {
-                // The LIKE decoration rides on the binding, so the published definition says HOW the
-                // argument is bound — not just which argument. A reader of <Repository>Queries can
-                // then tell a Contains (BOTH) from a StartsWith (TRAILING) whose SQL text is identical.
-                paramBindings.add(new ParamBinding(paramIndex,
-                        plan.parameters().get(paramIndex).getSimpleName().toString(),
-                        LikePattern.of(binding.operator())));
-            }
-        }
-        // Each variant takes only what it can use, so a published count carries no plan.sorts(), no row
-        // window and no seek terms — not empty ones. A count and an exists know their own result
-        // shape; a read and a delete-by-criteria take the one the method declares.
+        // ParamBindings are pre-built in resolvedBindings; no conversion needed.
         QueryDefinition.Criteria definition = switch (operation) {
-            case COUNT -> new QueryDefinition.Count(logicalPredicates, paramBindings, distinct);
-            case EXISTS -> new QueryDefinition.Exists(logicalPredicates, paramBindings);
-            case DELETE -> new QueryDefinition.DeleteWhere(logicalPredicates, paramBindings, resultKind);
+            case COUNT -> new QueryDefinition.Count(logicalPredicates, plan.paramBindings(), distinct);
+            case EXISTS -> new QueryDefinition.Exists(logicalPredicates, plan.paramBindings());
+            case DELETE -> new QueryDefinition.DeleteWhere(logicalPredicates, plan.paramBindings(), resultKind);
             default -> new QueryDefinition.Read(resultKind, logicalPredicates, logicalSorts,
-                    paging, new LimitSpec(plan.limit(), 0), seekTerms, paramBindings, distinct);
+                    paging, new LimitSpec(plan.limit(), 0), seekTerms, plan.paramBindings(), distinct);
         };
-        return new QueryDefinitionSpec(typeName, definition);
+        return definition;
     }
 
     /**

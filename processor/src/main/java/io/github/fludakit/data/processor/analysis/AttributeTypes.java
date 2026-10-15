@@ -3,8 +3,6 @@ package io.github.fludakit.data.processor.analysis;
 import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.TypeName;
 
-import io.github.fludakit.data.processor.emit.NavSupport;
-import io.github.fludakit.data.processor.emit.RowWrites;
 import javax.lang.model.element.ElementKind;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.util.Elements;

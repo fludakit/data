@@ -3,10 +3,11 @@ package io.github.fludakit.data.processor.support;
 import com.squareup.javapoet.ClassName;
 
 import io.github.fludakit.data.processor.RepositoryProcessor;
-import io.github.fludakit.data.processor.emit.MetadataGenerator;
-import io.github.fludakit.data.processor.emit.MetamodelGenerator;
-import io.github.fludakit.data.processor.emit.RepositorySourceWriter;
-import io.github.fludakit.data.processor.emit.RowMapperGenerator;
+import io.github.fludakit.data.processor.generator.metadata.MetadataGenerator;
+import io.github.fludakit.data.processor.generator.metadata.MetamodelGenerator;
+import io.github.fludakit.data.processor.generator.RepositorySourceWriter;
+import io.github.fludakit.data.processor.generator.rowmapper.RowMapperGenerator;
+import io.github.fludakit.data.query.QueryDefinition;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -35,6 +36,20 @@ public class GeneratedArtifactRegistry {
 
     /** Entity FQN → generated {@code <Entity>RowMapper} type. */
     private final Map<String, ClassName> rowMappers = new LinkedHashMap<>();
+
+    /**
+     * Value object element collection name → generated {@code <VO>RowMapper} type. Pre-computed
+     * during the analysis phase so planners can read without triggering generation.
+     */
+    private final Map<String, ClassName> voRowMappers = new LinkedHashMap<>();
+
+    /**
+     * Repository FQN → (field name → query definition). Each query-by-names method contributes one
+     * entry; the field name is the UPPER_SNAKE constant used in the generated {@code <Repository>Queries}
+     * holder. Stored here rather than in the per-repository emission so the registry is the single
+     * cache for everything the session has produced.
+     */
+    private final Map<String, Map<String, QueryDefinition.Criteria>> queryDefinitions = new LinkedHashMap<>();
 
     /**
      * Entity/value-object FQN → generated {@code <Entity>Metadata} type. Doubles as the
@@ -132,6 +147,35 @@ public class GeneratedArtifactRegistry {
 
     public void rememberRowMapper(String entityFqn, ClassName type) {
         rowMappers.put(entityFqn, type);
+    }
+
+    // --------------------------------------------------------- value object row mappers
+
+    /**
+     * The {@code <VO>RowMapper} type for a value object element collection, or {@code null} when not
+     * pre-computed. Planners read this during the planning phase without triggering generation.
+     */
+    public ClassName voRowMapper(String collectionName) {
+        return voRowMappers.get(collectionName);
+    }
+
+    public void rememberVoRowMapper(String collectionName, ClassName type) {
+        voRowMappers.put(collectionName, type);
+    }
+
+    // -------------------------------------------------------------- query definitions
+
+    /**
+     * The query definitions for a repository, keyed by field name. Returns the live map so callers
+     * can add to it directly.
+     */
+    public Map<String, QueryDefinition.Criteria> queryDefinitions(String repositoryFqn) {
+        return queryDefinitions.computeIfAbsent(repositoryFqn, k -> new LinkedHashMap<>());
+    }
+
+    /** All query definitions for a repository, or an empty map if none. */
+    public Map<String, QueryDefinition.Criteria> queryDefinitionsOf(String repositoryFqn) {
+        return queryDefinitions.getOrDefault(repositoryFqn, Map.of());
     }
 
     // ------------------------------------------------------------------- static metamodel

@@ -1,7 +1,7 @@
 package io.github.fludakit.data.processor.analysis;
 
 import io.github.fludakit.data.metadata.TypeMapping;
-import io.github.fludakit.data.processor.model.RepositoryFlavour;
+import io.github.fludakit.data.processor.analysis.RepositoryFlavour;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import jakarta.data.repository.Delete;
 import jakarta.data.repository.Find;

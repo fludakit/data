@@ -4,27 +4,22 @@ import com.squareup.javapoet.ClassName;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 
 import io.github.fludakit.data.processor.RepositoryProcessor;
-import io.github.fludakit.data.processor.emit.HydrationEmitter;
-import io.github.fludakit.data.processor.emit.RepositoryMethodCompiler;
-import io.github.fludakit.data.processor.emit.RowMapperGenerator;
 import io.github.fludakit.data.metadata.TypeMapping;
-import io.github.fludakit.data.processor.model.EntityRelationship;
-import io.github.fludakit.data.processor.model.LoadPlan;
 import io.github.fludakit.data.processor.support.Diagnostics;
+import io.github.fludakit.data.processor.support.GeneratedArtifactRegistry;
 import javax.lang.model.element.TypeElement;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.function.BiFunction;
 
 /**
  * Decides WHAT an entity's read side materialises besides its own row: which
  * {@code List<@ValueObject>} element collections get a loader, and how each relationship is
  * materialised. It decides scope only — the loaders themselves are spelled by
- * {@link HydrationEmitter}, and the JOIN projection of a composing to-one by
- * {@link RepositoryMethodCompiler}.
+ * {@link io.github.fludakit.data.processor.generator.HydrationEmitter}, and the JOIN projection of a
+ * composing to-one by {@link io.github.fludakit.data.processor.generator.RepositoryMethodCompiler}.
  *
  * <p>The read side is deliberately EAGER for element collections (they are owned rows, part of the
  * parent's own state) and gated for relationships: a relationship is materialised only when its
@@ -35,47 +30,41 @@ import java.util.function.BiFunction;
  * {@code CascadeSavePlanner} apart: folding them into one class would produce flag arguments that
  * interfere with each other.</p>
  *
- * <p>Constructed after the round pre-scan: {@code managedEntities} is per-round. Resolving a
- * relationship target's row mapper is injected as a {@link BiFunction} rather than reached for
- * directly, because generating that mapper is ARTIFACT work (it writes {@code <Target>Metadata} and
- * {@code <Target>RowMapper} on first use), not planning — the planner asks for the mapper and
- * reports the gate, and stays unit-testable behind a plain function.</p>
+ * <p>Constructed after the round pre-scan: {@code managedEntities} is per-round. This planner reads
+ * from the pre-populated cache in {@link GeneratedArtifactRegistry} — all row mappers are generated
+ * during the analysis phase by {@link EntityAnalysis#preGenerateRowMappers}, so planning is pure
+ * analysis with no generation side effects.</p>
  */
 public final class RelationshipLoadPlanner {
 
     private final Diagnostics diagnostics;
     private final MappedTypeBuilder typeMappingBuilder;
-    private final RowMapperGenerator rowMapperGenerator;
-    /** Resolves (generating on first use) the {@code <Entity>RowMapper} of a relationship target. */
-    private final BiFunction<TypeElement, TypeMapping<?>, ClassName> targetMapperFor;
+    private final GeneratedArtifactRegistry registry;
     /** Entity FQNs managed in the CURRENT round — see the pre-scan in {@link RepositoryProcessor#process}. */
     private final Set<String> managedEntities;
 
     public RelationshipLoadPlanner(Diagnostics diagnostics,
                             MappedTypeBuilder typeMappingBuilder,
-                            RowMapperGenerator rowMapperGenerator,
-                            BiFunction<TypeElement, TypeMapping<?>, ClassName> targetMapperFor,
+                            GeneratedArtifactRegistry registry,
                             Set<String> managedEntities) {
         this.diagnostics = diagnostics;
         this.typeMappingBuilder = typeMappingBuilder;
-        this.rowMapperGenerator = rowMapperGenerator;
-        this.targetMapperFor = targetMapperFor;
+        this.registry = registry;
         this.managedEntities = managedEntities;
     }
 
     /**
      * Computes the read-side scope of one repository entity. Every rejection is reported as a NOTE
      * here rather than silently dropped, so a relationship that is unmapped on read says why.
+     * Reads all row mapper availability from the pre-populated cache — no generation occurs.
      */
     public LoadPlan plan(TypeElement entityElement, TypeMapping<?> entity) {
-        // Element-collection hydration: resolve a generated <VO>RowMapper for each
-        // List<@ValueObject> child. A child whose VO fails the mapper gate is skipped — hydration
-        // then degrades to the parent's default (empty) field value rather than failing the whole
-        // repository, matching the "gate fails closed" spirit of the row-mapper gate.
+        // Element-collection hydration: read the pre-computed <VO>RowMapper for each
+        // List<@ValueObject> child from the registry cache.
         List<Prop.ElementCollection> hydratedCollections = new ArrayList<>();
         Map<String, ClassName> collectionMappers = new LinkedHashMap<>();
         for (Prop.ElementCollection c : entity.elementCollections()) {
-            ClassName voMapper = rowMapperGenerator.voRowMapperFor(c, entityElement);
+            ClassName voMapper = registry.voRowMapper(c.name());
             if (voMapper != null) {
                 hydratedCollections.add(c);
                 collectionMappers.put(c.name(), voMapper);
@@ -118,7 +107,8 @@ public final class RelationshipLoadPlanner {
             TypeMapping<?> targetModel = null;
             if (targetElement != null && managedEntities.contains(targetFqn)) {
                 targetModel = typeMappingBuilder.descriptorFor(targetElement);
-                targetMapper = targetMapperFor.apply(targetElement, targetModel);
+                // Read from the pre-populated cache — no generation
+                targetMapper = registry.rowMapper(targetFqn);
             }
             if (targetMapper == null) {
                 diagnostics.note(
@@ -134,14 +124,6 @@ public final class RelationshipLoadPlanner {
             }
         }
 
-        if (true) {
-            System.err.println("LOADPLAN " + entity.typeName()
-                    + " joined=" + joinedReferences.stream().map(r -> r.name() + "/comp=" + r.composition()
-                            + "/tt=" + r.targetTable() + "/tic=" + r.targetIdColumn() + "/tgt="
-                            + (r.target() == null ? "null" : r.target().typeName())).toList()
-                    + " hydrated=" + hydratedRelationships.stream().map(r -> r.attribute().name()).toList()
-                    + " voColl=" + hydratedCollections.size());
-        }
         return new LoadPlan(hydratedCollections, collectionMappers, joinedReferences,
                 hydratedRelationships);
     }

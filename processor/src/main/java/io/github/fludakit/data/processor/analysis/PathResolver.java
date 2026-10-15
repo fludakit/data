@@ -8,10 +8,9 @@ import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 
 import io.github.fludakit.data.processor.RepositoryProcessor;
-import io.github.fludakit.data.processor.model.PathOrigin;
-import io.github.fludakit.data.processor.model.PathResolution;
+import io.github.fludakit.data.processor.analysis.PathOrigin;
+import io.github.fludakit.data.processor.analysis.PathResolution;
 import io.github.fludakit.data.processor.support.Diagnostics;
-import io.github.fludakit.data.processor.support.ResolutionVocabulary;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.TypeElement;
 import java.util.ArrayList;
@@ -64,11 +63,11 @@ public final class PathResolver {
         for (String path : paths) {
             PathResolution resolution = resolveCompilePath(mapping, path);
             if (resolution.multiHop()) {
-                diagnostics.note( ResolutionVocabulary.multiHop(path), method);
-                out.add(PathResolution.resolved(placementOf(snakeCasedLocalColumnRef(path))));
+                diagnostics.note("path '" + path + "' traverses more than one relation; not supported", method);
+                out.add(resolved(placementOf(snakeCasedLocalColumnRef(path))));
             } else if (resolution.unresolvedRelation()) {
-                diagnostics.note( ResolutionVocabulary.unresolved(path), method);
-                out.add(PathResolution.resolved(placementOf(snakeCasedLocalColumnRef(path))));
+                diagnostics.note("path '" + path + "' traverses a relation whose target could not be resolved; the predicate was left unqualified", method);
+                out.add(resolved(placementOf(snakeCasedLocalColumnRef(path))));
             } else if (resolution.ref() != null) {
                 out.add(resolution);
             } else {
@@ -80,9 +79,9 @@ public final class PathResolver {
                     // A rejected declared property must not be rendered: leaving the ref null is the
                     // signal the caller uses to skip the method, so SqlBuilder is never asked to render
                     // a path that has no physical column.
-                    out.add(PathResolution.unresolved());
+                    out.add(unresolved());
                 } else {
-                    out.add(PathResolution.resolved(placementOf(snakeCasedLocalColumnRef(path))));
+                    out.add(resolved(placementOf(snakeCasedLocalColumnRef(path))));
                 }
             }
         }
@@ -117,7 +116,7 @@ public final class PathResolver {
     public PathResolution resolveCompilePath(TypeMapping<?> mapping, String path) {
         Map.Entry<String, ColumnRef> local = localColumnEntry(mapping.columnRefs(), path);
         if (local != null) {
-            return PathResolution.resolved(placementOf(local.getValue())).at(local.getKey());
+            return resolved(placementOf(local.getValue())).at(local.getKey());
         }
         for (String[] head : candidateHeads(path)) {
             Prop prop = propOrNull(mapping, head[0]);
@@ -133,7 +132,7 @@ public final class PathResolver {
                         ? inner.at(prop.name() + "." + inner.attributePath()) : inner;
             }
         }
-        return PathResolution.unresolved();
+        return unresolved();
     }
 
     /**
@@ -151,35 +150,35 @@ public final class PathResolver {
             Map.Entry<String, ColumnRef> leaf =
                     localColumnEntry(elementCollection.target().columnRefs(), remainder);
             if (leaf == null) {
-                return PathResolution.unresolved();
+                return unresolved();
             }
             JoinEdge edge = toManyOrNull(mapping.tableName(), mapping.idColumn(),
                     elementCollection.childTable(), elementCollection.parentFkColumn());
             if (edge == null) {
-                return PathResolution.relationUnresolved();
+                return relationUnresolved();
             }
-            return PathResolution.existentialRef(new ColumnPlacement(leaf.getValue(), List.of(edge)))
+            return existentialRef(new ColumnPlacement(leaf.getValue(), List.of(edge)))
                     .at(leaf.getKey());
         }
         String targetFqn = prop instanceof Prop.Reference reference
                 ? reference.targetTypeName() : ((Prop.EntityCollection) prop).targetTypeName();
         if (!visited.add(targetFqn)) {
-            return PathResolution.relationUnresolved(); // cyclic relationship: degrade, don't recurse forever
+            return relationUnresolved(); // cyclic relationship: degrade, don't recurse forever
         }
         TypeMapping<?> target = descriptorByFqn(targetFqn);
         if (target == null) {
-            return PathResolution.relationUnresolved();
+            return relationUnresolved();
         }
         JoinEdge edge = relationEdge(mapping, target, prop);
         if (edge == null) {
-            return PathResolution.relationUnresolved();
+            return relationUnresolved();
         }
         Map.Entry<String, ColumnRef> leaf = localColumnEntry(target.columnRefs(), remainder);
         if (leaf != null) {
             ColumnPlacement res = new ColumnPlacement(leaf.getValue(), List.of(edge));
             return (prop instanceof Prop.EntityCollection
-                    ? PathResolution.existentialRef(res)
-                    : PathResolution.resolved(res)).at(leaf.getKey());
+                    ? existentialRef(res)
+                    : resolved(res)).at(leaf.getKey());
         }
         // The remainder names another relation in the target: a to-one Reference continues the
         // traversal (multi-hop); a to-many head nested under a to-one stays out of scope.
@@ -197,14 +196,14 @@ public final class PathResolver {
                         new ColumnPlacement(inner.placement().leaf(), chainedEdges);
                 String deeperPath = deeperProp.name() + "." + inner.attributePath();
                 return (prop instanceof Prop.EntityCollection
-                        ? PathResolution.existentialRef(chained)
-                        : PathResolution.resolved(chained)).at(deeperPath);
+                        ? existentialRef(chained)
+                        : resolved(chained)).at(deeperPath);
             }
             if (isTraversable(deeperProp)) {
-                return PathResolution.multiHopPath();
+                return multiHopPath();
             }
         }
-        return PathResolution.unresolved();
+        return unresolved();
     }
 
     /** The relation edge for a Reference / EntityCollection / ElementCollection traversal; {@code null} when unbuildable. */
@@ -360,5 +359,27 @@ public final class PathResolver {
     public static boolean complete(String ownerTable, String ownerColumn,
                             String childTable, String childColumn) {
         return ownerTable != null && ownerColumn != null && childTable != null && childColumn != null;
+    }
+
+    // ------------------------------------------------- PathResolution factories
+
+    private static PathResolution resolved(ColumnPlacement placement) {
+        return new PathResolution(placement, false, false, false, null);
+    }
+
+    private static PathResolution existentialRef(ColumnPlacement placement) {
+        return new PathResolution(placement, false, false, true, null);
+    }
+
+    private static PathResolution unresolved() {
+        return new PathResolution(null, false, false, false, null);
+    }
+
+    private static PathResolution multiHopPath() {
+        return new PathResolution(null, true, false, false, null);
+    }
+
+    private static PathResolution relationUnresolved() {
+        return new PathResolution(null, false, true, false, null);
     }
 }

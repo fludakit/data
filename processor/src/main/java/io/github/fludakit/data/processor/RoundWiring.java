@@ -11,18 +11,18 @@ import io.github.fludakit.data.processor.analysis.RepositoryMethodValidator;
 import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
 import io.github.fludakit.data.processor.analysis.RepositoryTypeResolver;
 import io.github.fludakit.data.processor.analysis.TypeShapes;
-import io.github.fludakit.data.processor.emit.HydrationEmitter;
-import io.github.fludakit.data.processor.emit.JoinedProjectionEmitter;
-import io.github.fludakit.data.processor.emit.MetadataGenerator;
-import io.github.fludakit.data.processor.emit.MetamodelGenerator;
-import io.github.fludakit.data.processor.emit.NavigationGenerator;
-import io.github.fludakit.data.processor.emit.QueriesWriter;
-import io.github.fludakit.data.processor.emit.RepositoryGenerator;
-import io.github.fludakit.data.processor.emit.RepositoryMethodCompiler;
-import io.github.fludakit.data.processor.emit.RepositorySourceWriter;
-import io.github.fludakit.data.processor.emit.RepositoryShellEmitter;
-import io.github.fludakit.data.processor.emit.RowMapperGenerator;
-import io.github.fludakit.data.processor.emit.WriteMethodEmitter;
+import io.github.fludakit.data.processor.generator.HydrationEmitter;
+import io.github.fludakit.data.processor.generator.JoinedProjectionEmitter;
+import io.github.fludakit.data.processor.generator.metadata.MetadataGenerator;
+import io.github.fludakit.data.processor.generator.metadata.MetamodelGenerator;
+import io.github.fludakit.data.processor.generator.nav.NavigationGenerator;
+import io.github.fludakit.data.processor.generator.metadata.QueriesWriter;
+import io.github.fludakit.data.processor.generator.RepositoryGenerator;
+import io.github.fludakit.data.processor.generator.RepositoryMethodCompiler;
+import io.github.fludakit.data.processor.generator.RepositorySourceWriter;
+import io.github.fludakit.data.processor.generator.RepositoryShellEmitter;
+import io.github.fludakit.data.processor.generator.rowmapper.RowMapperGenerator;
+import io.github.fludakit.data.processor.generator.WriteMethodEmitter;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.support.GeneratedArtifactRegistry;
 import io.github.fludakit.data.sql.SqlDialect;
@@ -130,38 +130,10 @@ public class RoundWiring {
         // the mapping builder and writes through the source writer, so it never sees the Filer.
         this.metadataGenerator = new MetadataGenerator(diagnostics, typeMappingBuilder,
                 pathResolver, sourceWriter, registry.metadataTypes());
-        // Round pre-scan: the set of managed entity FQNs (every entity that some
-        // @Repository in THIS round resolves to) must be known BEFORE generation dispatch, so a
-        // repository processed early in the round can already see targets that only get their own
-        // repository later in the same round. getSupportedAnnotationTypes hands all repositories in one
-        // Set, so this scan is complete for the round.
+        // Round pre-scan: discover every @Repository in this round, resolve its entity type,
+        // and claim metamodel/queries names BEFORE any nav class is generated. See scanRepositories().
         this.repositories = new ArrayList<>();
-        Set<String> managed = new HashSet<>();
-        for (Element element : roundEnv.getElementsAnnotatedWith(Repository.class)) {
-            if (element.getKind() != ElementKind.INTERFACE) {
-                continue;
-            }
-            TypeElement repository = (TypeElement) element;
-            repositories.add(repository);
-            TypeMirror entityMirror = repositoryTypeResolver.entityType(repository);
-            if (entityMirror != null && entityMirror.getKind() != TypeKind.TYPEVAR
-                    && entityMirror.getKind() != TypeKind.WILDCARD
-                    && types.erasure(entityMirror) instanceof DeclaredType declared
-                    && declared.asElement() instanceof TypeElement entityElement) {
-                managed.add(entityElement.getQualifiedName().toString());
-                // Pre-claim every aggregate-root metamodel FQN BEFORE any nav class is generated:
-                // a nav for another entity (e.g. Order.item → pkg._OrderItem) must lose the name
-                // race and degrade to the NOTE path, whichever repository the round processes first.
-                // Value objects get no metamodel, so their name stays available to owners' navs.
-                if (!typeMappingBuilder.isValueObjectType(entityElement)) {
-                    registry.claim(ClassName.get(entityElement).packageName()
-                            + "._" + entityElement.getSimpleName());
-                }
-            }
-            // the <Repository>Queries holder name is claimed up-front, exactly like the
-            // _Entity metamodel, so a nav class can never win the race against it.
-            registry.claim(ClassName.get(repository) + "Queries");
-        }
+        Set<String> managed = scanRepositories(roundEnv, this.repositories);
         registry.managedEntities(Set.copyOf(managed));
         // Built here, after the round pre-scan: the metamodel emitter captures THIS round's
         // managed-entity set, and the mapper emitter asks the metamodel emitter whether a relation
@@ -188,12 +160,58 @@ public class RoundWiring {
         this.hydrationEmitter = new HydrationEmitter(sqlDialect, attributeTypes, typeMappingBuilder);
         // Built after the round pre-scan (it captures THIS round's managed-entity set) and after the
         // mapper generator (it asks for a relationship target's row mapper through it).
+        // Before constructing the load planner, pre-generate all row mappers for managed entities
+        // so the planner can read from the cache without triggering generation.
+        entityAnalysis.preGenerateRowMappers(registry.managedEntities(), new java.util.HashMap<>());
         this.loadPlanner = new RelationshipLoadPlanner(diagnostics, typeMappingBuilder,
-                rowMapperGenerator, entityAnalysis::ensureEntityRowMapper, registry.managedEntities());
+                registry, registry.managedEntities());
         // No artifact generation from the write side: a cascade member needs only the target's
         // compile-time model, so no row-mapper function is injected here.
         this.savePlanner = new CascadeSavePlanner(diagnostics, typeMappingBuilder);
         this.generator = new RepositoryGenerator(this);
+    }
+
+    /**
+     * Round pre-scan: discovers every {@code @Repository} interface in this round, resolves its
+     * entity type, and claims the generated names ({@code _Entity} metamodel and
+     * {@code <Repository>Queries}) before any nav class is generated.
+     *
+     * <p>The managed-entity set (every entity FQN some repository in this round resolves to) must be
+     * known BEFORE generation dispatch, so a repository processed early in the round can already see
+     * targets that only get their own repository later in the same round.
+     * {@code getSupportedAnnotationTypes} hands all repositories in one set, so this scan is complete
+     * for the round.</p>
+     *
+     * <p>Name claiming prevents races: a nav class for another entity (e.g. {@code Order.item}
+     * → {@code pkg._OrderItem}) must lose the name race and degrade to the NOTE path, whichever
+     * repository the round processes first. Value objects get no metamodel, so their name stays
+     * available to owners' navs. The {@code <Repository>Queries} holder name is claimed up-front
+     * for the same reason.</p>
+     *
+     * @return the set of managed entity FQNs
+     */
+    private Set<String> scanRepositories(RoundEnvironment roundEnv, List<TypeElement> out) {
+        Set<String> managed = new HashSet<>();
+        for (Element element : roundEnv.getElementsAnnotatedWith(Repository.class)) {
+            if (element.getKind() != ElementKind.INTERFACE) {
+                continue;
+            }
+            TypeElement repository = (TypeElement) element;
+            out.add(repository);
+            TypeMirror entityMirror = repositoryTypeResolver.entityType(repository);
+            if (entityMirror != null && entityMirror.getKind() != TypeKind.TYPEVAR
+                    && entityMirror.getKind() != TypeKind.WILDCARD
+                    && types.erasure(entityMirror) instanceof DeclaredType declared
+                    && declared.asElement() instanceof TypeElement entityElement) {
+                managed.add(entityElement.getQualifiedName().toString());
+                if (!typeMappingBuilder.isValueObjectType(entityElement)) {
+                    registry.claim(ClassName.get(entityElement).packageName()
+                            + "._" + entityElement.getSimpleName());
+                }
+            }
+            registry.claim(ClassName.get(repository) + "Queries");
+        }
+        return managed;
     }
 
     // ------------------------------------------------- every repository in this round

@@ -2,11 +2,9 @@ package io.github.fludakit.data.processor.analysis;
 
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 
-import io.github.fludakit.data.processor.emit.ChildCascadeEmitter;
-import io.github.fludakit.data.processor.emit.WriteMethodEmitter;
 import io.github.fludakit.data.metadata.TypeMapping;
-import io.github.fludakit.data.processor.model.EntityRelationship;
-import io.github.fludakit.data.processor.model.WriteCascade;
+import io.github.fludakit.data.processor.analysis.EntityRelationship;
+import io.github.fludakit.data.processor.analysis.WriteCascade;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import javax.lang.model.element.TypeElement;
 import java.util.ArrayList;

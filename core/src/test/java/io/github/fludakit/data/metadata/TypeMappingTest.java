@@ -40,12 +40,17 @@ class TypeMappingTest {
 
     @Test
     void relationPropsContributeNoColumnAndElementCollectionKeepsChildPlacement() {
-        ElementCollectionValueObjectMapping<?> tags = new ElementCollectionValueObjectMapping("test.Tags", "load_tags", "load_id",
-                List.of(new Prop.Scalar("label", "label", "java.lang.String")));
+        // ONE value-object type, placed on the child table: it really does have a table of its own —
+        // that is what separates it from the embedded placement, which uses the owner's row.
+        ElementCollectionValueObjectMapping<?> tags =
+                new ElementCollectionValueObjectMapping("test.Tags", "load_tags", "load_id",
+                        List.of(new Prop.Scalar("label", "label", "java.lang.String")));
         Prop.ElementCollection elementCollection = new Prop.ElementCollection("tags", tags, tags.columns());
         assertEquals("load_tags", elementCollection.childTable());
         assertEquals("load_id", elementCollection.parentFkColumn());
         assertEquals("test.Tags", elementCollection.elementTypeName());
+        assertTrue(tags.tableBacked(), "an element-collection value object is table-backed");
+        assertEquals(List.of("label"), tags.columns().stream().map(ColumnRef::column).toList());
 
         EntityTypeMapping<?> load = new EntityTypeMapping("test.Load", "load",
                 new Prop.Id("id", "id", "java.lang.Long"), List.of(elementCollection));
@@ -53,12 +58,35 @@ class TypeMappingTest {
     }
 
     @Test
+    void anElementCollectionValueObjectHasATableOfItsOwnAndTheEmbeddedOneDoesNot() {
+        List<Prop> props = List.of(new Prop.Scalar("label", "label", "java.lang.String"));
+        EmbeddedValueObjectMapping<?> embedded = new EmbeddedValueObjectMapping("test.Tag", props);
+        ElementCollectionValueObjectMapping<?> inLoad =
+                new ElementCollectionValueObjectMapping("test.Tag", "load_tags", "load_id", props);
+        ElementCollectionValueObjectMapping<?> inOrder =
+                new ElementCollectionValueObjectMapping("test.Tag", "order_tags", "order_id", props);
+
+        // ONE field model, two placements: the props are identical in all three, and only the
+        // placement differs — which is what the two per-shape scans used to get wrong.
+        assertEquals(props, embedded.props());
+        assertEquals(props, inLoad.props());
+        assertEquals(props, inOrder.props());
+        assertTrue(embedded.isValueObject() && inLoad.isValueObject() && inOrder.isValueObject());
+        assertFalse(embedded.tableBacked(), "embedded flatten into their owner's row");
+        assertTrue(inLoad.tableBacked() && inOrder.tableBacked(), "an element collection has a child table");
+        assertEquals(List.of(new ColumnRef.Simple("label", null)), embedded.columns());
+        assertEquals(List.of(new ColumnRef.Simple("label", "load_tags")), inLoad.columns());
+        assertEquals(List.of(new ColumnRef.Simple("label", "order_tags")), inOrder.columns());
+    }
+
+    @Test
     void columnRefsKeepLogicalPathKeysSeparateFromPhysicalPlacement() {
         EntityTypeMapping<?> line = new EntityTypeMapping("test.Line", "line",
                 new Prop.Id("id", "id", "java.lang.Long"),
                 List.of(new Prop.Scalar("sku", "sku", "java.lang.String")));
-        ElementCollectionValueObjectMapping<?> tags = new ElementCollectionValueObjectMapping("test.Tag", "order_tags", "order_id",
-                List.of(new Prop.Scalar("label", "label", "java.lang.String")));
+        ElementCollectionValueObjectMapping<?> tags =
+                new ElementCollectionValueObjectMapping("test.Tag", "order_tags", "order_id",
+                        List.of(new Prop.Scalar("label", "label", "java.lang.String")));
         TypeMapping<?> order = new AggregateTypeMapping("test.Order", "orders",
                 new Prop.Id("id", "id", "java.lang.Long"),
                 List.of(new Prop.Scalar("status", "status", "java.lang.String"),

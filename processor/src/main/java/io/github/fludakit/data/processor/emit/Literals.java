@@ -164,6 +164,9 @@ public final class Literals {
                     entityCollection.name(), entityCollection.inverseName(), entityCollection.inverseFkColumn());
         }
         if (prop instanceof Prop.ElementCollection elementCollection) {
+            // Only the TARGET is null: the descriptor publishes placements, not the transitive
+            // mapping — and the child table / parent FK live on that target, which is the value
+            // object placed on them. The flattened elementColumns carry the child table themselves.
             return CodeBlock.of("new $T($S, null, $L)", propClass.nestedClass("ElementCollection"),
                     elementCollection.name(), columnRefList(elementCollection.elementColumns()));
         }

@@ -15,7 +15,9 @@ import java.util.Set;
  * time) and {@code SqlBuilder} (runtime).
  *
  * <p>The mapping has no compiler API or reflection dependencies. Its variants describe table-backed
- * entities, embedded value objects, and value-object element collections. It also implements
+ * entities ({@link AggregateTypeMapping}, {@link EntityTypeMapping}) and value objects
+ * ({@link ValueObjectMapping} — two shapes, one per PLACEMENT: flattened into the owner's row, or
+ * in a child table of its own). It also implements
  * {@link TableSchema} and {@link ColumnResolver} separately: physical columns describe one table,
  * while entity-rooted paths are resolved through the aggregate tree by {@link #resolve(String)}.</p>
  *
@@ -182,7 +184,8 @@ public interface TypeMapping<T> extends TableSchema, ColumnResolver {
     }
 
     /** A to-many head resolves to one of the child's own columns; deeper paths are not traversable. */
-    private static ColumnPlacement childLeaf(TypeMapping<?> target, String tail, String path, String ownerTypeName) {
+    private static ColumnPlacement childLeaf(TypeMapping<?> target, String tail, String path,
+                                             String ownerTypeName) {
         ColumnRef leaf = target.columnRefs().get(tail);
         if (leaf == null) {
             throw new UnknownAttributePathException(path, ownerTypeName);
@@ -319,10 +322,8 @@ public interface TypeMapping<T> extends TableSchema, ColumnResolver {
 
         /**
          * Embedded value object whose leaves flatten into this table. A {@code null} target marks
-         * an unresolved model during processor analysis.
-         *
-         * <p>Typed as {@link ValueObjectMapping} — the shared parent of both value-object storage
-         * shapes — because a {@code null} placeholder is not necessarily an embedded one.</p>
+         * an unresolved model during processor analysis — and it is {@code null} in a generated
+         * descriptor, which publishes placements rather than the transitive mapping.
          */
         record Embedded(String name, ValueObjectMapping<?> target) implements Prop { }
 
@@ -373,6 +374,12 @@ public interface TypeMapping<T> extends TableSchema, ColumnResolver {
         /**
          * Value-object element collection stored in a child table. {@code elementColumns} contains
          * the flattened element columns in write order.
+         *
+         * <p>The child table and the parent FK are answered by the TARGET, which is the value object
+         * placed on them: a value object in an element collection really does have a table of its
+         * own, and the column linking it back to the owner is part of that placement, not of this
+         * prop. The prop keeps only the flattened column list, so the two views of the placement
+         * cannot drift apart.</p>
          */
         record ElementCollection(String name, ElementCollectionValueObjectMapping<?> target,
                                  List<ColumnRef> elementColumns) implements Prop {

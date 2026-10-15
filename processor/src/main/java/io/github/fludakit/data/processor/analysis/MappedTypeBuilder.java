@@ -6,8 +6,8 @@ import io.github.fludakit.data.Names;
 import io.github.fludakit.data.annotation.Association;
 import io.github.fludakit.data.annotation.Identity;
 import io.github.fludakit.data.metadata.AggregateTypeMapping;
-import io.github.fludakit.data.metadata.EmbeddedValueObjectMapping;
 import io.github.fludakit.data.metadata.ElementCollectionValueObjectMapping;
+import io.github.fludakit.data.metadata.EmbeddedValueObjectMapping;
 import io.github.fludakit.data.metadata.EntityTypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.ValueObjectMapping;
@@ -41,6 +41,16 @@ public final class MappedTypeBuilder {
     private final Diagnostics diagnostics;
     private final Map<String, TypeMapping> descriptorCache = new HashMap<>();
     private final Set<String> descriptorsInProgress = new HashSet<>();
+    /**
+     * The element-collection mapping per PLACEMENT, keyed by the owner table and the field name that
+     * decide it — the same memoization {@link #descriptorCache} gives a descriptor per TYPE NAME.
+     *
+     * <p>The two caches answer different questions and must not be merged: a descriptor is one per
+     * mapped type, while a value object placed by two owners is one field model with two placements
+     * (the child table is {@code ownerTable + "_" + field}). Keying on the type name would make the
+     * second owner reuse the first owner's child table.</p>
+     */
+    private final Map<String, ElementCollectionValueObjectMapping<?>> elementCollectionCache = new HashMap<>();
     private final Map<String, TypeElement> elementsByName = new HashMap<>();
     private final Map<String, EntityModel> entityModels = new HashMap<>();
     private final Map<String, EntityModel> valueObjectModels = new HashMap<>();
@@ -157,12 +167,22 @@ public final class MappedTypeBuilder {
             } else if (valueObjectElementType(field) != null) {
                 TypeElement vo = valueObjectElementType(field);
                 if (table == null) {
-                    // A value object has no table, so a collection nested inside one has no parent
-                    // table to derive its own child table and parent FK from — Names.childTable(null, ..)
-                    // used to NPE here, which javac surfaced as a stack trace and which aborted the
-                    // whole round. The rejection is REPORTED by valueObjectMetadata, the one place
-                    // always reached for an element-collection value object; here it only has to not
-                    // crash, so the field is dropped from this view of the model.
+                    // A value object has no table of its own, so a collection nested inside one has
+                    // no parent table to derive a child table and parent FK from. It used to be a
+                    // NullPointerException out of the processor (Names.childTable(null, ..)), surfacing
+                    // as a javac stack trace that aborted the round and took every other repository in
+                    // it down. Reject the declaration instead: it is a shape the model cannot express,
+                    // not a state the generator can degrade gracefully from.
+                    //
+                    // Reported HERE, where the field is declared, rather than in the element-collection
+                    // scan that used to own it — that scan only ran when the owning value object was
+                    // itself used as a collection somewhere, so the same declaration was rejected or
+                    // silently dropped depending on an unrelated use site.
+                    diagnostics.error(
+                            "field '" + name + "' of value object '" + element.getSimpleName() + "' is a nested"
+                                    + " collection of '" + vo.getSimpleName() + "': a value object in an"
+                                    + " element collection has no table of its own, so a collection inside one has no"
+                                    + " child table to live in", field);
                     continue;
                 }
                 props.add(buildCollection(table, name, vo));
@@ -294,7 +314,7 @@ public final class MappedTypeBuilder {
         }
         if (descriptorsInProgress.contains(fqn)) {
             return isValueObjectType(element)
-                    ? new EmbeddedValueObjectMapping(fqn, List.of())
+                    ? new EmbeddedValueObjectMapping<>(fqn, List.of())
                     : entityMapping(false, ownsAggregateLifecycle(element), fqn,
                             Names.tableName(element.getSimpleName().toString()), null, List.of());
         }
@@ -403,7 +423,7 @@ public final class MappedTypeBuilder {
     private static TypeMapping<?> entityMapping(boolean valueObject, boolean ownsAggregate,
                                                 String typeName, String table, Prop.Id id, List<Prop> props) {
         if (valueObject) {
-            return new EmbeddedValueObjectMapping(typeName, props);
+            return new EmbeddedValueObjectMapping<>(typeName, props);
         }
         return ownsAggregate
                 ? new AggregateTypeMapping(typeName, table, id, props)
@@ -418,15 +438,36 @@ public final class MappedTypeBuilder {
     }
 
     /**
-     * The child table and its descriptor. It returns the DESCRIPTOR prop only: the child table and the
-     * parent FK are both reachable from it, and the value object's JavaPoet type is a fact the scan
-     * records separately.
+     * The child table and its descriptor — the value object's ONE field model, PLACED on that child
+     * table, memoized by the placement.
+     *
+     * <p>The field model comes from {@link #descriptorFor}: the same props the {@code <VO>Metadata}
+     * descriptor and the {@code <VO>RowMapper} are generated from. It used to be built a second time
+     * by a separate scan of the same fields ({@code valueObjectMetadata}), which is how the two paths
+     * came to disagree — one dropped an {@code @Identity} field the other kept as a scalar, so a
+     * child-table INSERT and the row mapper reading it back disagreed on the column set.
+     *
+     * <p>Only the placement is decided here, because it is the part the type cannot answer: the child
+     * table comes from the owner's table and this field's name, and the parent FK is the column on it
+     * that refers back to the owner. So the cache is keyed on the placement, not the type — the same
+     * value object placed by two owners is one field model with two entries.</p>
      */
     private Prop.ElementCollection buildCollection(
             String parentTable, String field, TypeElement valueObject) {
+        String placement = parentTable + '#' + field;
+        ElementCollectionValueObjectMapping<?> cached = elementCollectionCache.get(placement);
+        if (cached != null) {
+            return new Prop.ElementCollection(field, cached, cached.columns());
+        }
         String childTable = Names.childTable(parentTable, field);
         String parentFk = Names.fkColumn(parentTable);
-        ElementCollectionValueObjectMapping<?> target = valueObjectMetadata(valueObject, childTable, parentFk);
+        ValueObjectMapping<?> model = embeddedOf(descriptorFor(valueObject));
+        ElementCollectionValueObjectMapping<?> target = model == null
+                ? new ElementCollectionValueObjectMapping<>(valueObject.getQualifiedName().toString(),
+                        childTable, parentFk, List.of())
+                : new ElementCollectionValueObjectMapping<>(model.typeName(), childTable, parentFk,
+                        model.props());
+        elementCollectionCache.put(placement, target);
         return new Prop.ElementCollection(field, target, target.columns());
     }
 
@@ -445,57 +486,6 @@ public final class MappedTypeBuilder {
                             + "' that cannot be mapped to a generated row-mapper type", field);
             return TypeName.OBJECT;
         }
-    }
-
-    private ElementCollectionValueObjectMapping<?> valueObjectMetadata(
-            TypeElement valueObject, String childTable, String parentFk) {
-        List<Prop> props = new ArrayList<>();
-        Set<String> seen = new HashSet<>();
-        for (Element member : elements.getAllMembers(valueObject)) {
-            if (member.getKind() != ElementKind.FIELD) {
-                continue;
-            }
-            VariableElement field = (VariableElement) member;
-            if (field.getModifiers().contains(Modifier.STATIC)) {
-                continue;
-            }
-            String name = field.getSimpleName().toString();
-            if (!seen.add(name) || field.getAnnotation(Identity.class) != null || name.equals(MemberNames.ID_PROPERTY)) {
-                continue;
-            }
-            String fieldType = field.asType().toString();
-            TypeElement nestedCollection = valueObjectElementType(field);
-            if (nestedCollection != null) {
-                // A value object in an element collection is ONE child table reached from its OWNER's
-                // table; a collection nested inside it would need a child table of a row that has no
-                // identity of its own. This used to be a NullPointerException out of the processor
-                // (Names.childTable(null, ..)), surfacing as a javac stack trace that aborted the round
-                // and took every other repository in it down. Reject the declaration instead: it is a
-                // shape the model cannot express, not a state the generator can degrade gracefully from.
-                diagnostics.error(
-                        "field '" + name + "' of value object '" + valueObject.getSimpleName() + "' is a nested"
-                                + " collection of '" + nestedCollection.getSimpleName() + "': a value object in an"
-                                + " element collection has no table of its own, so a collection inside one has no"
-                                + " child table to live in", field);
-                continue;
-            }
-            if (field.getAnnotation(Association.class) != null) {
-                TypeElement target = declaredElement(field);
-                props.add(referenceProp(name, Names.fkColumn(name),
-                        target != null ? target.getQualifiedName().toString() : null, false, false, target));
-            } else if (embeddedTarget(field) != null) {
-                // A value object nested in an element-collection value object flattens EXACTLY like the
-                // same value object embedded in an entity (address_point_lat). Building it as one Scalar
-                // per property is what made the two paths disagree: the child-table INSERT bound the
-                // whole value object to a single column while <VO>RowMapper read the flattened leaves,
-                // so the row written was never the row read back.
-                props.add(new Prop.Embedded(name, embeddedOf(descriptorFor(embeddedTarget(field)))));
-            } else {
-                props.add(new Prop.Scalar(name, Names.columnBase(name), fieldType));
-            }
-        }
-        return new ElementCollectionValueObjectMapping(valueObject.getQualifiedName().toString(),
-                childTable, parentFk, List.copyOf(props));
     }
 
     private boolean isEntityType(TypeElement element) {

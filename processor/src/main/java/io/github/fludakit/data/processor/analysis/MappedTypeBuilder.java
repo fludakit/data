@@ -12,7 +12,6 @@ import io.github.fludakit.data.metadata.EntityTypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.ValueObjectMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
-import io.github.fludakit.data.processor.model.ElementCollection;
 import io.github.fludakit.data.processor.model.EntityModel;
 import io.github.fludakit.data.processor.model.Property;
 import io.github.fludakit.data.processor.support.Diagnostics;
@@ -186,9 +185,10 @@ public final class MappedTypeBuilder {
                     continue;
                 }
                 props.add(buildCollection(table, name, vo));
-                // The element type, not the List type: it is what an emitter names in the generated
-                // `for (Point item : ...)` loop and in the <VO>RowMapper it calls.
-                facts.put(name, new FieldFacts(TypeName.get(types.erasure(vo.asType())), null));
+                // No fact recorded. The element type an emitter names in the generated
+                // `for (Point item : ...)` loop used to be carried here, but it is recoverable from
+                // the FQN the mapping already holds — AttributeTypes.classArgOf resolves the name
+                // back to the erased element type, which is exactly what this scan would have stored.
 
             } else if (entityTypeElement(field) != null) {
                 // No fact recorded: a to-many entity collection is neither a Property nor a
@@ -246,19 +246,17 @@ public final class MappedTypeBuilder {
         Property id = idProp == null ? null
                 : new Property(facts.get(idProp.name()).type(), idProp, null);
         List<Property> properties = new ArrayList<>();
-        List<ElementCollection> collections = new ArrayList<>();
         for (Prop prop : metadata.props()) {
-            if (prop instanceof Prop.EntityCollection) {
+            // A to-many prop has no column on this type's own row, so it has no Property: an
+            // EntityCollection is reached through a join, and an ElementCollection through its child
+            // table. EntityModel.collections() derives the latter from the mapping.
+            if (prop instanceof Prop.EntityCollection || prop instanceof Prop.ElementCollection) {
                 continue;
             }
             FieldFacts fact = facts.get(prop.name());
-            if (prop instanceof Prop.ElementCollection elementCollection) {
-                collections.add(new ElementCollection(fact.type(), elementCollection));
-            } else {
-                properties.add(new Property(fact.type(), prop, fact.embeddedModel()));
-            }
+            properties.add(new Property(fact.type(), prop, fact.embeddedModel()));
         }
-        return new EntityModel(typeMirror, typeName, id, properties, collections, metadata);
+        return new EntityModel(typeMirror, typeName, id, properties, metadata);
     }
 
     /**

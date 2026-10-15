@@ -5,7 +5,6 @@ import com.squareup.javapoet.MethodSpec;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 
 import io.github.fludakit.data.processor.RoundWiring;
-import io.github.fludakit.data.processor.model.ElementCollection;
 import io.github.fludakit.data.processor.model.EntityModel;
 import io.github.fludakit.data.processor.model.EntityRelationship;
 import io.github.fludakit.data.processor.model.LoadPlan;
@@ -197,13 +196,13 @@ public class RepositoryGenerator {
      * per hydrated entity relationship.
      */
     private void appendHydration(RepositoryEmission emission, LoadPlan loadPlan) {
-        List<ElementCollection> hydratedCollections = loadPlan.hydratedCollections();
+        List<Prop.ElementCollection> hydratedCollections = loadPlan.hydratedCollections();
         List<EntityRelationship> hydratedRelationships = loadPlan.hydratedRelationships();
         emission.auxMethods().add(wiring.hydrationEmitter().hydrationUmbrella(emission.entity(),
                 hydratedCollections, hydratedRelationships));
-        for (ElementCollection c : hydratedCollections) {
+        for (Prop.ElementCollection c : hydratedCollections) {
             emission.auxMethods().add(wiring.hydrationEmitter().appendCollectionHydration(
-                    emission.constants(), emission.entity(), c, loadPlan.collectionMappers().get(c.field())));
+                    emission.constants(), emission.entity(), c, loadPlan.collectionMappers().get(c.name())));
         }
         // Only ONE_TO_MANY members reach here: a composing MANY_TO_ONE is JOIN-projected onto the
         // parent's own row (see joinedReferences), so it needs no loader of its own.

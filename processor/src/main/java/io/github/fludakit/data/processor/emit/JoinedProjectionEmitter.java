@@ -12,7 +12,6 @@ import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.RepositoryProcessor;
 import io.github.fludakit.data.processor.analysis.PathResolver;
 import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
-import io.github.fludakit.data.processor.model.ElementCollection;
 import io.github.fludakit.data.processor.model.EntityModel;
 import io.github.fludakit.data.processor.model.Property;
 import io.github.fludakit.data.processor.support.MemberNames;

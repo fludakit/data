@@ -7,7 +7,6 @@ import com.squareup.javapoet.TypeVariableName;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
 import io.github.fludakit.data.processor.analysis.TypeShapes;
-import io.github.fludakit.data.processor.model.ElementCollection;
 import io.github.fludakit.data.processor.model.EntityModel;
 import io.github.fludakit.data.processor.model.EntityRelationship;
 import io.github.fludakit.data.processor.model.WriteCascade;
@@ -69,7 +68,7 @@ public final class WriteMethodEmitter {
         this.diagnostics = diagnostics;
         this.sqlDialect = sqlDialect;
         this.rowWrites = new RowWrites(attributeTypes, sqlDialect);
-        this.childCascade = new ChildCascadeEmitter(sqlDialect, rowWrites);
+        this.childCascade = new ChildCascadeEmitter(sqlDialect, rowWrites, attributeTypes);
     }
 
     public void emitSave(MethodSpec.Builder builder, ExecutableElement method, String value,
@@ -169,7 +168,7 @@ public final class WriteMethodEmitter {
             builder.endControlFlow();
         }
 
-        for (ElementCollection collection : entity.collections()) {
+        for (Prop.ElementCollection collection : entity.collections()) {
             childCascade.appendElementCollectionInsert(builder, value, entity, collection, constants);
         }
         // the root INSERT cascades each composition entity collection — the child's own
@@ -215,7 +214,7 @@ public final class WriteMethodEmitter {
     private void appendInsertWithIdStatements(MethodSpec.Builder builder, String value, EntityModel entity,
                                               Map<String, String> constants, WriteCascade cascade) {
         appendRootInsertWithId(builder, value, entity, constants);
-        for (ElementCollection collection : entity.collections()) {
+        for (Prop.ElementCollection collection : entity.collections()) {
             childCascade.appendElementCollectionInsert(builder, value, entity, collection, constants);
         }
         for (EntityRelationship relationship : cascade.collections()) {
@@ -242,10 +241,10 @@ public final class WriteMethodEmitter {
         // Cascade over EVERY collection (save inserts all of them), not just the gate-passed
         // hydrated ones — a child whose VO fails the mapper gate would otherwise orphan rows. The child
         // DELETE is plain SQL keyed on the child table/FK, so it needs no VO mapper (see childDeleteConstant).
-        for (ElementCollection collection : entity.collections()) {
+        for (Prop.ElementCollection collection : entity.collections()) {
             String childConstant = childCascade.childDeleteConstant(constants, collection);
             builder.addStatement("jdbcClient.sql($L).param($S, $L).update()", childConstant,
-                    collection.parentFk(), value);
+                    collection.parentFkColumn(), value);
         }
         // the composition lifecycle is bound to the root — entity-collection children are
         // deleted from the CHILD's own table by the inverse fk, same children-first order.

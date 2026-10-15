@@ -8,7 +8,7 @@ import com.squareup.javapoet.TypeName;
 import io.github.fludakit.data.Names;
 import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
-import io.github.fludakit.data.processor.model.ElementCollection;
+import io.github.fludakit.data.processor.analysis.AttributeTypes;
 import io.github.fludakit.data.processor.model.EntityModel;
 import io.github.fludakit.data.processor.model.EntityRelationship;
 import io.github.fludakit.data.processor.support.MemberNames;
@@ -37,9 +37,16 @@ import java.util.Map;
 public final class HydrationEmitter {
 
     private final SqlDialect sqlDialect;
+    private final AttributeTypes attributeTypes;
 
-    public HydrationEmitter(SqlDialect sqlDialect) {
+    /**
+     * @param attributeTypes the one lookup this emitter needs: the element type of a collection, which
+     *                       is the only fact on a {@code Prop.ElementCollection} that is an FQN and
+     *                       therefore not a JavaPoet name
+     */
+    public HydrationEmitter(SqlDialect sqlDialect, AttributeTypes attributeTypes) {
         this.sqlDialect = sqlDialect;
+        this.attributeTypes = attributeTypes;
     }
 
     /**
@@ -50,7 +57,7 @@ public final class HydrationEmitter {
      * predicate only joins the lists.
      */
     public boolean hasGeneratedHydration(ClassName mapperType,
-                                  List<ElementCollection> hydratedCollections,
+                                  List<Prop.ElementCollection> hydratedCollections,
                                   List<EntityRelationship> hydratedRelationships) {
         return mapperType != null && (!hydratedCollections.isEmpty() || !hydratedRelationships.isEmpty());
     }
@@ -61,7 +68,7 @@ public final class HydrationEmitter {
      * the wiring sites free of per-collection / per-relationship detail; the relationship loaders
      * (many-to-one, one-to-many) join the same dispatch.
      */
-    public MethodSpec hydrationUmbrella(EntityModel entity, List<ElementCollection> hydrated,
+    public MethodSpec hydrationUmbrella(EntityModel entity, List<Prop.ElementCollection> hydrated,
                                  List<EntityRelationship> relationships) {
         MethodSpec.Builder umbrella = MethodSpec.methodBuilder("hydrateAll")
                 .addJavadoc("Dispatches every generated hydration loader over the given parents. "
@@ -69,8 +76,8 @@ public final class HydrationEmitter {
                 .addModifiers(Modifier.PRIVATE)
                 .addParameter(ParameterizedTypeName.get(ClassName.get(java.util.Collection.class),
                         entity.typeName()), "parents");
-        for (ElementCollection c : hydrated) {
-            umbrella.addStatement("hydrate$L(parents)", MemberNames.capitalize(c.field()));
+        for (Prop.ElementCollection c : hydrated) {
+            umbrella.addStatement("hydrate$L(parents)", MemberNames.capitalize(c.name()));
         }
         for (EntityRelationship r : relationships) {
             umbrella.addStatement("hydrate$L(parents)", MemberNames.capitalize(r.attribute().name()));
@@ -85,13 +92,15 @@ public final class HydrationEmitter {
      * reuses; the emission is textually the original element-collection body, so a VO corpus's generated impl stays identical.
      */
     public MethodSpec appendCollectionHydration(Map<String, String> constants,
-                                         EntityModel entity, ElementCollection collection, ClassName voMapper) {
-        String selectConst = SqlConstants.register(constants, "SQL_SELECT_" + MemberNames.upperSnake(collection.field()),
+                                         EntityModel entity, Prop.ElementCollection collection,
+                                         ClassName voMapper) {
+        String selectConst = SqlConstants.register(constants, "SQL_SELECT_" + MemberNames.upperSnake(collection.name()),
                 "SELECT " + quotedColumnList(collection) + " FROM "
                         + sqlDialect.quoteIdentifier(collection.childTable())
-                        + " WHERE " + sqlDialect.quoteIdentifier(collection.parentFk()) + " IN (");
-        return appendGroupedKeyHydration(constants, entity, collection.field(), selectConst,
-                collection.parentFk(), collection.valueObjectType(), voMapper);
+                        + " WHERE " + sqlDialect.quoteIdentifier(collection.parentFkColumn()) + " IN (");
+        return appendGroupedKeyHydration(constants, entity, collection.name(), selectConst,
+                collection.parentFkColumn(), attributeTypes.classArgOf(collection.elementTypeName()),
+                voMapper);
     }
 
     /**
@@ -202,9 +211,9 @@ public final class HydrationEmitter {
         return sb.toString();
     }
 
-    private String quotedColumnList(ElementCollection collection) {
-        StringBuilder sb = new StringBuilder(sqlDialect.quoteIdentifier(collection.parentFk()));
-        for (Prop a : collection.descriptor().props()) {
+    private String quotedColumnList(Prop.ElementCollection collection) {
+        StringBuilder sb = new StringBuilder(sqlDialect.quoteIdentifier(collection.parentFkColumn()));
+        for (Prop a : collection.target().props()) {
             if (a instanceof Prop.Id id) {
                 sb.append(", ").append(sqlDialect.quoteIdentifier(id.column()));
             } else if (a instanceof Prop.Scalar scalar) {

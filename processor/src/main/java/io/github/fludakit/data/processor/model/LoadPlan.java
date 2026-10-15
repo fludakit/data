@@ -18,7 +18,7 @@ import java.util.Map;
  * @param hydratedRelationships the one-to-many relationships that cleared the managed-target gate,
  *                            each of which gets a grouped {@code hydrate<Field>} loader
  */
-public record LoadPlan(List<ElementCollection> hydratedCollections,
+public record LoadPlan(List<Prop.ElementCollection> hydratedCollections,
                 Map<String, ClassName> collectionMappers,
                 List<Prop.Reference> joinedReferences,
                 List<EntityRelationship> hydratedRelationships) { }

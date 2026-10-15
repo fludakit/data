@@ -12,7 +12,6 @@ import io.github.fludakit.data.metadata.TypeMapping.Prop;
 
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
 import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
-import io.github.fludakit.data.processor.model.ElementCollection;
 import io.github.fludakit.data.processor.model.EntityModel;
 import io.github.fludakit.data.processor.model.Property;
 import io.github.fludakit.data.processor.support.Diagnostics;
@@ -270,8 +269,8 @@ public final class RowMapperGenerator {
      * {@code null}: its collection loader is skipped and a NOTE is recorded, so hydration degrades to
      * the parent's default field value rather than failing the whole repository.
      */
-    public ClassName voRowMapperFor(ElementCollection collection, Element origin) {
-        String voFqn = collection.descriptor().typeName();
+    public ClassName voRowMapperFor(Prop.ElementCollection collection, Element origin) {
+        String voFqn = collection.target().typeName();
         ClassName cached = voRowMappers.get(voFqn);
         if (cached != null) {
             return cached;

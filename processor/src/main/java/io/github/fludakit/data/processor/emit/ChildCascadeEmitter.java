@@ -6,7 +6,7 @@ import com.squareup.javapoet.TypeName;
 import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
-import io.github.fludakit.data.processor.model.ElementCollection;
+import io.github.fludakit.data.processor.analysis.AttributeTypes;
 import io.github.fludakit.data.processor.model.EntityModel;
 import io.github.fludakit.data.processor.model.EntityRelationship;
 import io.github.fludakit.data.processor.model.WriteCascade;
@@ -40,16 +40,28 @@ public final class ChildCascadeEmitter {
 
     private final SqlDialect sqlDialect;
     private final RowWrites rowWrites;
+    private final AttributeTypes attributeTypes;
 
     /**
-     * No {@code Elements} and no {@code Types}: every member this emitter writes was already resolved
-     * into the {@link EntityModel} it is handed — the child tables come from
-     * {@link Names#childTable(String, String)} and the target models from
-     * {@link WriteCascade#compositions()}, so nothing here resolves a type by name.
+     * No {@code Elements} and no {@code Types} of its own: every member this emitter writes was
+     * already resolved into the {@link EntityModel} or the {@link Prop.ElementCollection} prop it is
+     * handed — the child tables come from {@link Names#childTable(String, String)} and the target
+     * models from {@link WriteCascade#compositions()}.
+     *
+     * <p>The one thing it does look up is the element type of a collection, and that is because an
+     * FQN cannot be turned back into a JavaPoet name without the round: {@link AttributeTypes} is the
+     * collaborator that owns that lookup, so this class still holds no environment service.</p>
      */
-    public ChildCascadeEmitter(SqlDialect sqlDialect, RowWrites rowWrites) {
+    public ChildCascadeEmitter(SqlDialect sqlDialect, RowWrites rowWrites,
+                               AttributeTypes attributeTypes) {
         this.sqlDialect = sqlDialect;
         this.rowWrites = rowWrites;
+        this.attributeTypes = attributeTypes;
+    }
+
+    /** The element type of a {@code List<@ValueObject>} collection: what the generated loop declares. */
+    private TypeName elementTypeOf(Prop.ElementCollection collection) {
+        return attributeTypes.classArgOf(collection.elementTypeName());
     }
 
     public void appendCompositionWrites(MethodSpec.Builder builder, String value, EntityModel entity,
@@ -135,7 +147,8 @@ public final class ChildCascadeEmitter {
     }
 
     public void appendElementCollectionInsert(MethodSpec.Builder builder, String value, EntityModel entity,
-                                               ElementCollection collection, Map<String, String> constants) {
+                                               Prop.ElementCollection collection,
+                                               Map<String, String> constants) {
         // the child-table column list must iterate the SAME flattened descriptor columns the
         // params below bind. The old list walked {@code collection.properties()} while the params
         // walked {@code descriptor().columns()}; the two diverge for a collection VO that embeds
@@ -154,21 +167,21 @@ public final class ChildCascadeEmitter {
             sql.append(':').append(columns.get(i));
         }
         sql.append(')');
-        String constant = SqlConstants.register(constants, "SQL_INSERT_" + MemberNames.upperSnake(collection.field()), sql.toString());
+        String constant = SqlConstants.register(constants, "SQL_INSERT_" + MemberNames.upperSnake(collection.name()), sql.toString());
 
-        builder.beginControlFlow("for ($T item : $L.$L())", collection.valueObjectType(), value,
-                MemberNames.getter(collection.field()));
+        builder.beginControlFlow("for ($T item : $L.$L())", elementTypeOf(collection), value,
+                MemberNames.getter(collection.name()));
         builder.beginControlFlow("if (item != null)");
         CodeBlock.Builder insert = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
-        insert.add(".param($S, $L.$L())", collection.parentFk(), value, MemberNames.getter(entity.id().name()));
+        insert.add(".param($S, $L.$L())", collection.parentFkColumn(), value, MemberNames.getter(entity.id().name()));
         // Child-table placeholders stay COLUMN-named: the hand-rendered INSERT above lists the
         // element-collection columns (:product_id, :quantity), so the params must match them. The
         // authoritative flat child-column list is {@link Prop.ElementCollection#elementColumns()} — one
         // source of truth — while the value still walks the descriptor path through boundValue so
         // fk-bearing children bind their id exactly like the previous property-driven loop did.
-        for (Map.Entry<String, ColumnRef> entry : collection.descriptor().localColumnRefs().entrySet()) {
+        for (Map.Entry<String, ColumnRef> entry : collection.target().localColumnRefs().entrySet()) {
             insert.add(".param($S, $L)", entry.getValue().column(),
-                    rowWrites.boundValue(collection.descriptor(), "item", entry.getKey(), entry.getValue()));
+                    rowWrites.boundValue(collection.target(), "item", entry.getKey(), entry.getValue()));
         }
         insert.add(".update()");
         builder.addStatement("$L", insert.build());
@@ -176,10 +189,10 @@ public final class ChildCascadeEmitter {
         builder.endControlFlow();
     }
 
-    public List<String> childColumnNames(ElementCollection collection) {
+    public List<String> childColumnNames(Prop.ElementCollection collection) {
         List<String> columns = new ArrayList<>();
-        columns.add(collection.parentFk());
-        for (ColumnRef ref : collection.element().elementColumns()) {
+        columns.add(collection.parentFkColumn());
+        for (ColumnRef ref : collection.elementColumns()) {
             columns.add(ref.column());
         }
         return columns;
@@ -187,7 +200,7 @@ public final class ChildCascadeEmitter {
 
     public void appendChildSyncStatements(MethodSpec.Builder builder, String value, EntityModel entity,
                                            Map<String, String> constants, WriteCascade cascade) {
-        for (ElementCollection collection : entity.collections()) {
+        for (Prop.ElementCollection collection : entity.collections()) {
             appendElementCollectionDelete(builder, value, entity, collection, constants);
             appendElementCollectionInsert(builder, value, entity, collection, constants);
         }
@@ -277,9 +290,9 @@ public final class ChildCascadeEmitter {
                 + " AND " + sqlDialect.quoteIdentifier(idColumn) + " = :" + idColumn;
     }
 
-    public String childDeleteConstant(Map<String, String> constants, ElementCollection collection) {
-        return SqlConstants.register(constants, "SQL_DELETE_" + MemberNames.upperSnake(collection.field()),
-                childDeleteSql(collection.childTable(), collection.parentFk()));
+    public String childDeleteConstant(Map<String, String> constants, Prop.ElementCollection collection) {
+        return SqlConstants.register(constants, "SQL_DELETE_" + MemberNames.upperSnake(collection.name()),
+                childDeleteSql(collection.childTable(), collection.parentFkColumn()));
     }
 
     public String childDeleteSql(String childTable, String fkColumn) {
@@ -288,8 +301,9 @@ public final class ChildCascadeEmitter {
     }
 
     public void appendElementCollectionDelete(MethodSpec.Builder builder, String value, EntityModel entity,
-                                               ElementCollection collection, Map<String, String> constants) {
+                                               Prop.ElementCollection collection,
+                                               Map<String, String> constants) {
         appendChildDelete(builder, value, entity,
-                childDeleteConstant(constants, collection), collection.parentFk());
+                childDeleteConstant(constants, collection), collection.parentFkColumn());
     }
 }

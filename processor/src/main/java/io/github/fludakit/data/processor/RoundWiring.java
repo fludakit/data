@@ -185,7 +185,7 @@ public class RoundWiring {
                 pathResolver, queryPlanCompiler, metadataGenerator, writeMethodEmitter, joinedProjections);
         // Like the write emitter, built after init() settled the dialect: the loader column lists are
         // quoted through it.
-        this.hydrationEmitter = new HydrationEmitter(sqlDialect);
+        this.hydrationEmitter = new HydrationEmitter(sqlDialect, attributeTypes);
         // Built after the round pre-scan (it captures THIS round's managed-entity set) and after the
         // mapper generator (it asks for a relationship target's row mapper through it).
         this.loadPlanner = new RelationshipLoadPlanner(diagnostics, typeMappingBuilder,

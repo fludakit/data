@@ -7,7 +7,6 @@ import io.github.fludakit.data.processor.RepositoryProcessor;
 import io.github.fludakit.data.processor.emit.HydrationEmitter;
 import io.github.fludakit.data.processor.emit.RepositoryMethodCompiler;
 import io.github.fludakit.data.processor.emit.RowMapperGenerator;
-import io.github.fludakit.data.processor.model.ElementCollection;
 import io.github.fludakit.data.processor.model.EntityModel;
 import io.github.fludakit.data.processor.model.EntityRelationship;
 import io.github.fludakit.data.processor.model.LoadPlan;
@@ -73,13 +72,13 @@ public final class RelationshipLoadPlanner {
         // List<@ValueObject> child. A child whose VO fails the mapper gate is skipped — hydration
         // then degrades to the parent's default (empty) field value rather than failing the whole
         // repository, matching the "gate fails closed" spirit of the row-mapper gate.
-        List<ElementCollection> hydratedCollections = new ArrayList<>();
+        List<Prop.ElementCollection> hydratedCollections = new ArrayList<>();
         Map<String, ClassName> collectionMappers = new LinkedHashMap<>();
-        for (ElementCollection c : entity.collections()) {
+        for (Prop.ElementCollection c : entity.collections()) {
             ClassName voMapper = rowMapperGenerator.voRowMapperFor(c, entityElement);
             if (voMapper != null) {
                 hydratedCollections.add(c);
-                collectionMappers.put(c.field(), voMapper);
+                collectionMappers.put(c.name(), voMapper);
             }
         }
         // Relationship read gate: a relationship is materialised on read only when its TARGET is

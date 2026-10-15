@@ -10,6 +10,7 @@ import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.RepositoryProcessor;
 import io.github.fludakit.data.processor.analysis.PathResolver;
 import io.github.fludakit.data.processor.analysis.QueryPlanCompiler;
+import io.github.fludakit.data.processor.analysis.TypeShapes;
 import io.github.fludakit.data.processor.model.Binding;
 import io.github.fludakit.data.processor.model.EmissionContext;
 import io.github.fludakit.data.processor.model.EntityModel;
@@ -49,7 +50,6 @@ import javax.lang.model.type.DeclaredType;
 import javax.lang.model.type.ExecutableType;
 import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
-import javax.lang.model.util.Types;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -88,7 +88,7 @@ public final class RepositoryMethodCompiler {
             "java.util.List", "java.util.Set", "java.util.Collection", "java.lang.Iterable",
             "java.util.Optional", "java.util.stream.Stream");
 
-    private final Types types;
+    private final TypeShapes typeShapes;
     private final Diagnostics diagnostics;
     private final SqlDialect sqlDialect;
     private final PathResolver pathResolver;
@@ -111,11 +111,11 @@ public final class RepositoryMethodCompiler {
      */
     private final PagingEmitter pagingEmitter;
 
-    public RepositoryMethodCompiler(Types types, Diagnostics diagnostics, SqlDialect sqlDialect, PathResolver pathResolver,
+    public RepositoryMethodCompiler(TypeShapes typeShapes, Diagnostics diagnostics, SqlDialect sqlDialect, PathResolver pathResolver,
                              QueryPlanCompiler queryPlanCompiler, MetadataGenerator metadataGenerator,
                              WriteMethodEmitter writeMethodEmitter,
                              JoinedProjectionEmitter joinedProjections) {
-        this.types = types;
+        this.typeShapes = typeShapes;
         this.diagnostics = diagnostics;
         this.sqlDialect = sqlDialect;
         this.pathResolver = pathResolver;
@@ -131,14 +131,14 @@ public final class RepositoryMethodCompiler {
 
     public MethodSpec generateMethod(ExecutableElement method, DeclaredType repositoryType,
                               RepositoryEmission emission) {
-        ExecutableType resolved = (ExecutableType) types.asMemberOf(repositoryType, method);
+        ExecutableType resolved = typeShapes.resolved(repositoryType, method);
         TypeMirror returnMirror = resolved.getReturnType();
         List<? extends TypeMirror> parameterTypes = resolved.getParameterTypes();
         List<? extends VariableElement> parameters = method.getParameters();
         String name = method.getSimpleName().toString();
         int arity = parameters.size();
 
-        MethodSpec.Builder builder = MethodSpec.overriding(method, repositoryType, types);
+        MethodSpec.Builder builder = typeShapes.overriding(method, repositoryType);
         rebindTypeVariables(builder, method, emission.entity().typeName());
 
         Query query = method.getAnnotation(Query.class);
@@ -760,7 +760,7 @@ public final class RepositoryMethodCompiler {
         if (returnType.getKind() == TypeKind.ARRAY) {
             return ResultKind.ARRAY;
         }
-        return switch (types.erasure(returnType).toString()) {
+        return switch (typeShapes.erasedName(returnType)) {
             // A Set is materialized into a LinkedHashSet: .list() alone returns a List and would not
             // compile against the declared return type.
             case "java.util.Set" -> ResultKind.SET;
@@ -780,7 +780,7 @@ public final class RepositoryMethodCompiler {
             return TypeName.get(((ArrayType) returnType).getComponentType()).box();
         }
         if (returnType instanceof DeclaredType declared && declared.getTypeArguments().size() == 1
-                && CONTAINER_TYPES.contains(types.erasure(declared).toString())) {
+                && CONTAINER_TYPES.contains(typeShapes.erasedName(declared))) {
             return concrete(TypeName.get(declared.getTypeArguments().get(0)), fallback);
         }
         return concrete(TypeName.get(returnType).box(), fallback);
@@ -807,7 +807,7 @@ public final class RepositoryMethodCompiler {
         if (kind == ResultKind.VOID) {
             return ResultKind.VOID;
         }
-        return types.isAssignable(types.erasure(returnType), types.erasure(entity.typeMirror()))
+        return typeShapes.isEntity(returnType, entity)
                 ? ResultKind.SINGLE
                 : ResultKind.AFFECTED;
     }

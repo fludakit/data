@@ -15,7 +15,6 @@ import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.support.ResolutionVocabulary;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.TypeElement;
-import javax.lang.model.util.Elements;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -30,22 +29,23 @@ import java.util.function.Function;
  * <p>This was {@code RepositoryProcessor}'s path-resolution block. It is a handler rather than a
  * region of the processor because it is the only part that answers the question, and every emitter
  * (predicates, sorts, EXISTS conjuncts, delete criteria, cursor keys) asks it the same way. It
- * touches the javac environment only to report NOTEs and to look up a target type by name — it
- * emits nothing, claims no generated type name and writes no file, so it can be read, and tested,
- * on its own.</p>
+ * touches the javac environment only to report NOTEs — not even to look up a target type by name,
+ * which is why it holds no {@code Elements}: it emits nothing, claims no generated type name and
+ * writes no file, so it can be read, and tested, on its own.</p>
  *
- * <p>The lookup of a target's descriptor is injected rather than reached for: the mapping builder
- * owns the descriptor cache, and a handler that silently shared it would hide the one piece of
- * mutable state this class depends on.</p>
+ * <p>The lookup of a target's descriptor is injected, and is keyed by NAME rather than by
+ * {@link TypeElement}: a path's target reaches this class as the FQN {@code Prop.Reference} carries,
+ * so making the function name-keyed is what lets the caller stop resolving that name itself. The
+ * mapping builder owns both the descriptor cache and the name-to-element resolution behind it, and
+ * a handler that silently shared either would hide the one piece of mutable state this class
+ * depends on.</p>
  */
 public final class PathResolver {
 
-    private final Elements elements;
     private final Diagnostics diagnostics;
-    private final Function<TypeElement, TypeMapping<?>> descriptorOf;
+    private final Function<String, TypeMapping<?>> descriptorOf;
 
-    public PathResolver(Elements elements, Diagnostics diagnostics, Function<TypeElement, TypeMapping<?>> descriptorOf) {
-        this.elements = elements;
+    public PathResolver(Diagnostics diagnostics, Function<String, TypeMapping<?>> descriptorOf) {
         this.diagnostics = diagnostics;
         this.descriptorOf = descriptorOf;
     }
@@ -248,8 +248,7 @@ public final class PathResolver {
         }
         String raw = stripGenerics(fqn);
         try {
-            TypeElement te = elements.getTypeElement(raw);
-            return te == null ? null : descriptorOf.apply(te);
+            return descriptorOf.apply(raw);
         } catch (RuntimeException e) {
             diagnostics.note(
                     "the descriptor of '" + raw + "' could not be built (" + e

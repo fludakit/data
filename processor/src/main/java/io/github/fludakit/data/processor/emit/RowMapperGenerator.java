@@ -22,7 +22,6 @@ import javax.lang.model.element.ElementKind;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.Modifier;
 import javax.lang.model.element.TypeElement;
-import javax.lang.model.util.Elements;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -42,17 +41,18 @@ import java.util.Map;
  * that fails the gate — is a NOTE plus a null field, never an abort: hydration degrades to the
  * parent's default value rather than failing the user's build.</p>
  *
- * <p>Writes go out through {@link RepositorySourceWriter}, so this emitter never sees {@code Filer}.
- * {@link Elements} is injected for the one thing a name cannot answer: resolving a target's
- * {@code TypeElement} and SCANNING its members — whether it has a no-arg constructor and an id
- * setter, which is what makes an id-only partial constructible. A target that is only ever named
- * (a descriptor carries an FQN {@code String}) goes through {@link MappedTypeBuilder},
- * which owns {@code Elements} and memoizes the answer, so no name lookup lands here. A degradation
- * is reported through {@link Diagnostics}.</p>
+ * <p>Writes go out through {@link RepositorySourceWriter}, so this emitter never sees {@code Filer},
+ * and it holds no {@code Elements}: a target that is only ever named (a descriptor carries an FQN
+ * {@code String}) resolves through {@link MappedTypeBuilder#elementFor(String)}, and the one question
+ * that needs a member SCAN — whether the target has an id setter, which is what makes an id-only
+ * partial constructible — is {@link MappedTypeBuilder#hasMethod}, which owns {@code Elements} and
+ * memoizes by name. Both belong to the class that already had to own the environment for building the
+ * models; neither decides whether this emitter can be constructed. The no-arg-constructor test needs
+ * no environment at all — it reads {@code getEnclosedElements} off an element it already holds. A
+ * degradation is reported through {@link Diagnostics}.</p>
  */
 public final class RowMapperGenerator {
 
-    private final Elements elements;
     private final AttributeTypes attributeTypes;
     private final Diagnostics diagnostics;
     private final MappedTypeBuilder typeMappingBuilder;
@@ -68,11 +68,10 @@ public final class RowMapperGenerator {
     /** Value-object FQN to generated {@code <VO>RowMapper} type, deduped across processing rounds. */
     private final Map<String, ClassName> voRowMappers = new LinkedHashMap<>();
 
-    public RowMapperGenerator(Elements elements, AttributeTypes attributeTypes, Diagnostics diagnostics,
+    public RowMapperGenerator(AttributeTypes attributeTypes, Diagnostics diagnostics,
                        MappedTypeBuilder typeMappingBuilder,
                        MetadataGenerator metadataGenerator,
                        RepositorySourceWriter sourceWriter, Map<String, ClassName> metadataTypes) {
-        this.elements = elements;
         this.attributeTypes = attributeTypes;
         this.diagnostics = diagnostics;
         this.typeMappingBuilder = typeMappingBuilder;
@@ -229,7 +228,7 @@ public final class RowMapperGenerator {
         if (fqn == null) {
             return "the target type could not be resolved";
         }
-        TypeElement target = elements.getTypeElement(fqn);
+        TypeElement target = typeMappingBuilder.elementFor(fqn);
         if (target == null) {
             return "the target " + fqn + " could not be resolved";
         }
@@ -243,7 +242,7 @@ public final class RowMapperGenerator {
         if (!hasNoArgConstructor(target)) {
             return "the target " + fqn + " has no accessible no-argument constructor";
         }
-        if (!MemberNames.hasMethodNamed(elements, target, MemberNames.setter(targetModel.id().name()))) {
+        if (!typeMappingBuilder.hasMethod(target, MemberNames.setter(targetModel.id().name()))) {
             return "the target " + fqn + " has no " + MemberNames.setter(targetModel.id().name()) + " setter";
         }
         return null;
@@ -277,7 +276,7 @@ public final class RowMapperGenerator {
         if (cached != null) {
             return cached;
         }
-        TypeElement voElement = elements.getTypeElement(voFqn);
+        TypeElement voElement = typeMappingBuilder.elementFor(voFqn);
         if (voElement == null) {
             diagnostics.note(
                     "Cannot resolve element-collection value object '" + voFqn

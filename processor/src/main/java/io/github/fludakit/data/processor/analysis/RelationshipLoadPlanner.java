@@ -13,7 +13,6 @@ import io.github.fludakit.data.processor.model.EntityRelationship;
 import io.github.fludakit.data.processor.model.LoadPlan;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import javax.lang.model.element.TypeElement;
-import javax.lang.model.util.Elements;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -45,7 +44,6 @@ import java.util.function.BiFunction;
  */
 public final class RelationshipLoadPlanner {
 
-    private final Elements elements;
     private final Diagnostics diagnostics;
     private final MappedTypeBuilder typeMappingBuilder;
     private final RowMapperGenerator rowMapperGenerator;
@@ -54,12 +52,11 @@ public final class RelationshipLoadPlanner {
     /** Entity FQNs managed in the CURRENT round — see the pre-scan in {@link RepositoryProcessor#process}. */
     private final Set<String> managedEntities;
 
-    public RelationshipLoadPlanner(Elements elements, Diagnostics diagnostics,
+    public RelationshipLoadPlanner(Diagnostics diagnostics,
                             MappedTypeBuilder typeMappingBuilder,
                             RowMapperGenerator rowMapperGenerator,
                             BiFunction<TypeElement, EntityModel, ClassName> targetMapperFor,
                             Set<String> managedEntities) {
-        this.elements = elements;
         this.diagnostics = diagnostics;
         this.typeMappingBuilder = typeMappingBuilder;
         this.rowMapperGenerator = rowMapperGenerator;
@@ -117,7 +114,7 @@ public final class RelationshipLoadPlanner {
             }
             String targetFqn = a instanceof Prop.EntityCollection el
                     ? el.targetTypeName() : ((Prop.Reference) a).targetTypeName();
-            TypeElement targetElement = targetFqn == null ? null : elements.getTypeElement(targetFqn);
+            TypeElement targetElement = typeMappingBuilder.elementFor(targetFqn);
             ClassName targetMapper = null;
             EntityModel targetModel = null;
             if (targetElement != null && managedEntities.contains(targetFqn)) {

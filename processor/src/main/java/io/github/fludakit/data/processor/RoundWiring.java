@@ -10,6 +10,7 @@ import io.github.fludakit.data.processor.analysis.RelationshipLoadPlanner;
 import io.github.fludakit.data.processor.analysis.RepositoryMethodValidator;
 import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
 import io.github.fludakit.data.processor.analysis.RepositoryTypeResolver;
+import io.github.fludakit.data.processor.analysis.TypeShapes;
 import io.github.fludakit.data.processor.emit.HydrationEmitter;
 import io.github.fludakit.data.processor.emit.JoinedProjectionEmitter;
 import io.github.fludakit.data.processor.emit.MetadataGenerator;
@@ -62,6 +63,7 @@ import java.util.Set;
 public class RoundWiring {
 
     private final Types types;
+    private final TypeShapes typeShapes;
     private final Elements elements;
     private final Diagnostics diagnostics;
     private final GeneratedArtifactRegistry registry;
@@ -97,11 +99,17 @@ public class RoundWiring {
         this.repositoryTypeResolver = new RepositoryTypeResolver(types, elements);
         // The resolver needs the descriptor cache the mapping builder owns, and nothing else: it emits
         // no source and claims no generated name.
-        this.pathResolver = new PathResolver(elements, diagnostics, typeMappingBuilder::descriptorFor);
-        this.repositoryMethodValidator = new RepositoryMethodValidator(diagnostics, types);
+        // Name-keyed, not element-keyed: a path's target reaches the resolver as the FQN the
+        // descriptor carries, so letting it ask by name is what keeps Elements out of the resolver.
+        this.pathResolver = new PathResolver(diagnostics, typeMappingBuilder::descriptorFor);
+        // The shape questions four classes were each answering for themselves — the erased name of a
+        // declared type, whether it is a List, whether it is the entity, and a method's signature in
+        // the context that declares it. Owning Types once here is what lets all four drop it.
+        this.typeShapes = new TypeShapes(types);
+        this.repositoryMethodValidator = new RepositoryMethodValidator(diagnostics, typeShapes);
         // The plan compiler reads a method DECLARATION, not a type: it needs the erasure tests for the
         // positional paging parameters and nothing else, so no generator and no writer is involved.
-        this.queryPlanCompiler = new QueryPlanCompiler(types);
+        this.queryPlanCompiler = new QueryPlanCompiler(typeShapes);
         // The three compile-time questions several emitters ask — an attribute's metamodel KIND, the
         // class literal for a target FQN, and whether a declared type is an enum — all read the
         // environment. It is owned ONCE here (in AttributeTypes) and that instance is threaded
@@ -109,7 +117,7 @@ public class RoundWiring {
         AttributeTypes attributeTypes = new AttributeTypes(elements, types);
         // The write emitter is built after init() has settled the dialect, since whether a save is a
         // one-statement upsert is a property of the configured database.
-        this.writeMethodEmitter = new WriteMethodEmitter(attributeTypes, types, diagnostics, sqlDialect);
+        this.writeMethodEmitter = new WriteMethodEmitter(attributeTypes, typeShapes, diagnostics, sqlDialect);
         // The JOIN projection reuses the mapping builder's memo, which resolves a target from the FQN
         // its descriptor carries — so it needs no environment of its own. It writes no source file:
         // the mapper it builds is handed back to the caller.
@@ -120,7 +128,7 @@ public class RoundWiring {
         this.queriesWriter = new QueriesWriter(sourceWriter);
         // The descriptor emitter is the only writer of metadataTypes; it resolves value objects through
         // the mapping builder and writes through the source writer, so it never sees the Filer.
-        this.metadataGenerator = new MetadataGenerator(elements, diagnostics, typeMappingBuilder,
+        this.metadataGenerator = new MetadataGenerator(diagnostics, typeMappingBuilder,
                 pathResolver, sourceWriter, registry.metadataTypes());
         // Round pre-scan: the set of managed entity FQNs (every entity that some
         // @Repository in THIS round resolves to) must be known BEFORE generation dispatch, so a
@@ -158,7 +166,7 @@ public class RoundWiring {
         // Built here, after the round pre-scan: the metamodel emitter captures THIS round's
         // managed-entity set, and the mapper emitter asks the metamodel emitter whether a relation
         // target is materialisable — so the order is mappers, then metamodels.
-        this.rowMapperGenerator = new RowMapperGenerator(elements, attributeTypes, diagnostics,
+        this.rowMapperGenerator = new RowMapperGenerator(attributeTypes, diagnostics,
                 typeMappingBuilder, metadataGenerator, sourceWriter, registry.metadataTypes());
         // The nav generator is built after the mapper generator: it asks whether a relation target is
         // materialisable through the same mapper gate, and it captures THIS round's managed set.
@@ -173,18 +181,18 @@ public class RoundWiring {
         // The method compiler is built last: it reads a method DECLARATION through every collaborator
         // above (the descriptor registry for dynamic paging, the write emitter for the CRUD writes, the
         // plan compiler for query-by-names), and it emits no source of its own.
-        this.methodCompiler = new RepositoryMethodCompiler(types, diagnostics, sqlDialect,
+        this.methodCompiler = new RepositoryMethodCompiler(typeShapes, diagnostics, sqlDialect,
                 pathResolver, queryPlanCompiler, metadataGenerator, writeMethodEmitter, joinedProjections);
         // Like the write emitter, built after init() settled the dialect: the loader column lists are
         // quoted through it.
         this.hydrationEmitter = new HydrationEmitter(sqlDialect);
         // Built after the round pre-scan (it captures THIS round's managed-entity set) and after the
         // mapper generator (it asks for a relationship target's row mapper through it).
-        this.loadPlanner = new RelationshipLoadPlanner(elements, diagnostics, typeMappingBuilder,
+        this.loadPlanner = new RelationshipLoadPlanner(diagnostics, typeMappingBuilder,
                 rowMapperGenerator, entityAnalysis::ensureEntityRowMapper, registry.managedEntities());
         // No artifact generation from the write side: a cascade member needs only the target's
         // compile-time model, so no row-mapper function is injected here.
-        this.savePlanner = new CascadeSavePlanner(elements, diagnostics, typeMappingBuilder);
+        this.savePlanner = new CascadeSavePlanner(diagnostics, typeMappingBuilder);
         this.generator = new RepositoryGenerator(this);
     }
 
@@ -202,6 +210,10 @@ public class RoundWiring {
 
     public Types types() {
         return types;
+    }
+
+    public TypeShapes typeShapes() {
+        return typeShapes;
     }
 
     public Elements elements() {

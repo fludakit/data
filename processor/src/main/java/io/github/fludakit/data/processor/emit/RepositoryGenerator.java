@@ -179,8 +179,9 @@ public class RepositoryGenerator {
         // Answering it here — from the declared signature alone — keeps the whole rule in one
         // branch: `JdbcClient getJdbcClient();` returns the injected client, and anything else
         // still falls through to the ordinary path.
-        if (MemberNames.isJdbcClientAccessor(method, wiring.types())) {
-            return MethodSpec.overriding(method, repositoryType, wiring.types())
+        if (MemberNames.isJdbcClientAccessor(method,
+                wiring.typeShapes().erasedName(method.getReturnType()))) {
+            return wiring.typeShapes().overriding(method, repositoryType)
                     .addStatement("return $L", MemberNames.JDBC_CLIENT_FIELD)
                     .build();
         }

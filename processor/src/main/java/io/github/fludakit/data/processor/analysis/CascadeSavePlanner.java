@@ -9,7 +9,6 @@ import io.github.fludakit.data.processor.model.EntityRelationship;
 import io.github.fludakit.data.processor.model.WriteCascade;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import javax.lang.model.element.TypeElement;
-import javax.lang.model.util.Elements;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -42,13 +41,10 @@ import java.util.List;
  */
 public final class CascadeSavePlanner {
 
-    private final Elements elements;
     private final Diagnostics diagnostics;
     private final MappedTypeBuilder typeMappingBuilder;
 
-    public CascadeSavePlanner(Elements elements, Diagnostics diagnostics,
-                       MappedTypeBuilder typeMappingBuilder) {
-        this.elements = elements;
+    public CascadeSavePlanner(Diagnostics diagnostics, MappedTypeBuilder typeMappingBuilder) {
         this.diagnostics = diagnostics;
         this.typeMappingBuilder = typeMappingBuilder;
     }
@@ -79,10 +75,9 @@ public final class CascadeSavePlanner {
                     continue;
                 }
                 String targetFqn = list.targetTypeName();
-                TypeElement targetElement = targetFqn == null ? null : elements.getTypeElement(targetFqn);
                 // entityModel() is a pure memo of the idempotent buildEntity — safe for targets the
                 // read gate excluded; no mapper or descriptor artifact is generated from this path.
-                EntityModel targetModel = targetElement == null ? null : typeMappingBuilder.entityModel(targetElement);
+                EntityModel targetModel = typeMappingBuilder.entityModel(targetFqn);
                 String blocker = targetModel == null
                         ? "target type " + targetFqn + " is unresolvable"
                         : list.inverseName() == null
@@ -117,8 +112,7 @@ public final class CascadeSavePlanner {
                     continue;
                 }
                 String targetFqn = reference.targetTypeName();
-                TypeElement targetElement = targetFqn == null ? null : elements.getTypeElement(targetFqn);
-                EntityModel targetModel = targetElement == null ? null : typeMappingBuilder.entityModel(targetElement);
+                EntityModel targetModel = typeMappingBuilder.entityModel(targetFqn);
                 String blocker = targetModel == null
                         ? "target type " + targetFqn + " is unresolvable"
                         : ChildCascadeEmitter.entityCollectionWriteBlocker(targetModel);

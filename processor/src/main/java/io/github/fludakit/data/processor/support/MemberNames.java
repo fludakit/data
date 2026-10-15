@@ -5,13 +5,8 @@ import io.github.fludakit.data.metadata.TypeMapping.Prop;
 
 import io.github.fludakit.data.processor.emit.RepositoryGenerator;
 import io.github.fludakit.data.processor.emit.RepositoryShellEmitter;
-import javax.lang.model.element.Element;
-import javax.lang.model.element.ElementKind;
 import javax.lang.model.element.ExecutableElement;
-import javax.lang.model.element.TypeElement;
 import javax.lang.model.element.VariableElement;
-import javax.lang.model.util.Elements;
-import javax.lang.model.util.Types;
 
 /**
  * The generated code's view of a compiled member: the accessor names it calls, whether an accessor
@@ -20,9 +15,14 @@ import javax.lang.model.util.Types;
  * <p>These are the facts that the metadata descriptor, the static metamodel and the row mapper all
  * agree on before any of them emits anything — a getter spelled one way in the descriptor and
  * another in the mapper is a class that does not compile, so the spelling lives in one place.
- * Every method is a pure function of its arguments; only {@link #hasMethodNamed} reads the
- * annotation-processing environment, and it takes {@link Elements} as a parameter rather than
- * reaching for it, so a caller can be exercised without a live round.
+ * Every method here is a pure function of its arguments: nothing reads the
+ * annotation-processing environment, so none of these needs a live round to answer.
+ *
+ * <p>The one member question that DOES need the environment — whether a type declares or inherits a
+ * method of a given name — is {@code MappedTypeBuilder.hasMethod}, not a method here. A static that
+ * takes {@code Elements} as a parameter does not keep the environment off its callers: it means
+ * every caller must already hold one, which is precisely the two generator fields that scan went on
+ * to cost.
  */
 public final class MemberNames {
 
@@ -67,10 +67,10 @@ public final class MemberNames {
      * fully specified: a differently named method is not silently implemented, and there is no second
      * spelling for the processor and the reader to disagree about.</p>
      */
-    public static boolean isJdbcClientAccessor(ExecutableElement method, Types types) {
+    public static boolean isJdbcClientAccessor(ExecutableElement method, String erasedReturnTypeName) {
         return method.getParameters().isEmpty()
                 && "getJdbcClient".equals(method.getSimpleName().toString())
-                && JDBC_CLIENT.equals(types.erasure(method.getReturnType()).toString());
+                && JDBC_CLIENT.equals(erasedReturnTypeName);
     }
 
     private MemberNames() {
@@ -118,20 +118,6 @@ public final class MemberNames {
             return elementCollection.elementTypeName();
         }
         return null;
-    }
-
-    /**
-     * Whether {@code element} declares or inherits a method called {@code name}. Generated code calls
-     * an accessor only after this check, so a bean-less type degrades to a NOTE instead of emitting a
-     * call that does not compile.
-     */
-    public static boolean hasMethodNamed(Elements elements, TypeElement element, String name) {
-        for (Element member : elements.getAllMembers(element)) {
-            if (member.getKind() == ElementKind.METHOD && member.getSimpleName().contentEquals(name)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /**

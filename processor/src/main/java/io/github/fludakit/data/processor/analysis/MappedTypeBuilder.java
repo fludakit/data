@@ -41,6 +41,7 @@ public final class MappedTypeBuilder {
     private final Diagnostics diagnostics;
     private final Map<String, TypeMapping> descriptorCache = new HashMap<>();
     private final Set<String> descriptorsInProgress = new HashSet<>();
+    private final Map<String, TypeElement> elementsByName = new HashMap<>();
     private final Map<String, EntityModel> entityModels = new HashMap<>();
     private final Map<String, EntityModel> valueObjectModels = new HashMap<>();
     private final Set<String> valueObjectModelsInProgress = new HashSet<>();
@@ -253,6 +254,38 @@ public final class MappedTypeBuilder {
     /** One field scan: the shipping descriptor, plus the compile-time facts it cannot hold. */
     private record DescriptorBuild(TypeMapping<?> metadata, Map<String, FieldFacts> facts) { }
 
+    /**
+     * The declared type NAMED {@code fqn}, or {@code null} when the name does not resolve in this
+     * compilation.
+     *
+     * <p>This is the one place a name becomes an element. Five generators used to call
+     * {@code elements.getTypeElement(fqn)} themselves, which is why five of them held
+     * {@code Elements} — and a generator that holds {@code Elements} cannot be constructed without a
+     * round, so none of them could be exercised directly. Turning a name into a type is one question
+     * with one answer per round, so it is asked here and memoized, next to the models that are
+     * already memoized by the same name.
+     *
+     * <p>{@code null} is cached as well as a hit, so an unresolvable name is resolved once — the
+     * same reason {@link #entityModel(String)} does not retry a name that already failed.
+     */
+    public TypeElement elementFor(String fqn) {
+        if (fqn == null) {
+            return null;
+        }
+        if (elementsByName.containsKey(fqn)) {
+            return elementsByName.get(fqn);
+        }
+        TypeElement element = elements.getTypeElement(fqn);
+        elementsByName.put(fqn, element);
+        return element;
+    }
+
+    /** As {@link #descriptorFor(TypeElement)}, for a type a caller knows only by name. */
+    public TypeMapping<?> descriptorFor(String fqn) {
+        TypeElement element = elementFor(fqn);
+        return element == null ? null : descriptorFor(element);
+    }
+
     public TypeMapping<?> descriptorFor(TypeElement element) {
         String fqn = element.getQualifiedName().toString();
         TypeMapping<?> cached = descriptorCache.get(fqn);
@@ -295,20 +328,37 @@ public final class MappedTypeBuilder {
      * generator, each of which held {@code Elements} for this and nothing else.
      */
     public EntityModel entityModel(String fqn) {
-        if (fqn == null) {
-            return null;
-        }
-        TypeElement element = elements.getTypeElement(fqn);
+        TypeElement element = elementFor(fqn);
         return element == null ? null : entityModel(element);
     }
 
     /** As {@link #entityModel(String)}, for a value object. */
     public EntityModel valueObjectModel(String fqn) {
-        if (fqn == null) {
-            return null;
-        }
-        TypeElement element = elements.getTypeElement(fqn);
+        TypeElement element = elementFor(fqn);
         return element == null ? null : valueObjectModel(element);
+    }
+
+    /**
+     * Whether {@code element} declares or inherits a method called {@code methodName}.
+     *
+     * <p>Generated code calls an accessor only after this check, so a bean-less type degrades to a
+     * NOTE instead of emitting a call that does not compile.
+     *
+     * <p>It lives here rather than as a static beside {@link MemberNames} because a static that
+     * TAKES {@code Elements} does not keep the environment off its callers — measured, the same
+     * shape as {@code AttributeTypes}: two generators held {@code Elements} for this scan and for
+     * nothing else. An {@code Elements} parameter means every caller must already hold one.
+     */
+    public boolean hasMethod(TypeElement element, String methodName) {
+        if (element == null) {
+            return false;
+        }
+        for (Element member : elements.getAllMembers(element)) {
+            if (member.getKind() == ElementKind.METHOD && member.getSimpleName().contentEquals(methodName)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public EntityModel valueObjectModel(TypeElement element) {

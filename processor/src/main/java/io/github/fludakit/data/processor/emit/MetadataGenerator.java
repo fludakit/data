@@ -24,7 +24,6 @@ import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.support.MemberNames;
 import javax.lang.model.element.Modifier;
 import javax.lang.model.element.TypeElement;
-import javax.lang.model.util.Elements;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -43,14 +42,14 @@ import java.util.Set;
  * shape, and the name is registered before recursing so the second visit is a no-op.</p>
  *
  * <p>Nothing here touches {@code Filer}: the source goes out through {@link RepositorySourceWriter},
- * which is also what registers the generated name. {@link Elements} is still injected because
- * resolving a value-object element is a compile-time query; a degraded path is reported through
- * {@link Diagnostics}, which is swappable. The emitter never reaches for
- * {@code ProcessingEnvironment} itself.</p>
+ * which is also what registers the generated name. It holds no {@code Elements} either — resolving a
+ * value-object element by name is {@link MappedTypeBuilder#elementFor(String)}, the one place a name
+ * becomes a type, so a compile-time query no longer decides whether this emitter can be constructed.
+ * A degraded path is reported through {@link Diagnostics}, which is swappable. The emitter never
+ * reaches for {@code ProcessingEnvironment} itself.</p>
  */
 public final class MetadataGenerator {
 
-    private final Elements elements;
     private final Diagnostics diagnostics;
     private final MappedTypeBuilder typeMappingBuilder;
     private final PathResolver pathResolver;
@@ -62,10 +61,9 @@ public final class MetadataGenerator {
      */
     private final Map<String, ClassName> metadataTypes;
 
-    public MetadataGenerator(Elements elements, Diagnostics diagnostics, MappedTypeBuilder typeMappingBuilder,
+    public MetadataGenerator(Diagnostics diagnostics, MappedTypeBuilder typeMappingBuilder,
                       PathResolver pathResolver, RepositorySourceWriter sourceWriter,
                       Map<String, ClassName> metadataTypes) {
-        this.elements = elements;
         this.diagnostics = diagnostics;
         this.typeMappingBuilder = typeMappingBuilder;
         this.pathResolver = pathResolver;
@@ -370,9 +368,9 @@ public final class MetadataGenerator {
             String targetFqn = MemberNames.memberTargetFqn(p);
             TypeMapping<?> target = pathResolver.descriptorByFqn(targetFqn);
             TypeElement targetElement = target == null ? null
-                    : elements.getTypeElement(PathResolver.stripGenerics(target.typeName()));
+                    : typeMappingBuilder.elementFor(PathResolver.stripGenerics(target.typeName()));
             String headGetter = MemberNames.getter(p.name());
-            if (targetElement == null || !MemberNames.hasMethodNamed(elements, entityElement, headGetter)) {
+            if (targetElement == null || !typeMappingBuilder.hasMethod(entityElement, headGetter)) {
                 continue; // an unmapped target or a bean-less head is unnavigable at runtime as well
             }
             CodeBlock head = CodeBlock.of("e.$L()", headGetter);
@@ -506,7 +504,7 @@ public final class MetadataGenerator {
         int dot = path.indexOf('.');
         String head = dot < 0 ? path : path.substring(0, dot);
         Prop p = PathResolver.propOrNull(mapping, head);
-        if (p == null || element == null || !MemberNames.hasMethodNamed(elements, element, MemberNames.getter(head))) {
+        if (p == null || element == null || !typeMappingBuilder.hasMethod(element, MemberNames.getter(head))) {
             return null;
         }
         CodeBlock chain = CodeBlock.of("$L.$L()", recv, MemberNames.getter(head));
@@ -516,7 +514,7 @@ public final class MetadataGenerator {
         if (!(p instanceof Prop.Embedded embedded) || embedded.target() == null) {
             return null;
         }
-        TypeElement voElement = elements.getTypeElement(PathResolver.stripGenerics(embedded.target().typeName()));
+        TypeElement voElement = typeMappingBuilder.elementFor(PathResolver.stripGenerics(embedded.target().typeName()));
         CodeBlock body = valueChain(embedded.target(), chain, path.substring(dot + 1), voElement);
         return body == null ? null : CodeBlock.of("$L == null ? null : $L", chain, body);
     }
@@ -540,7 +538,7 @@ public final class MetadataGenerator {
                                   CodeBlock collection, String leafPath) {
         CodeBlock mapper;
         if (leafPath.indexOf('.') < 0) {
-            if (!MemberNames.hasMethodNamed(elements, childElement, MemberNames.getter(leafPath))) {
+            if (!typeMappingBuilder.hasMethod(childElement, MemberNames.getter(leafPath))) {
                 return null;
             }
             mapper = CodeBlock.of("$T::$L", ClassName.get(childElement), MemberNames.getter(leafPath));
@@ -571,7 +569,7 @@ public final class MetadataGenerator {
             if (voFqn == null || metadataTypes.containsKey(voFqn)) {
                 continue;
             }
-            TypeElement voElement = elements.getTypeElement(voFqn);
+            TypeElement voElement = typeMappingBuilder.elementFor(voFqn);
             if (voElement == null) {
                 continue;
             }
@@ -595,7 +593,7 @@ public final class MetadataGenerator {
             return known;
         }
         String rawName = PathResolver.stripGenerics(voFqn);
-        TypeElement element = elements.getTypeElement(rawName);
+        TypeElement element = typeMappingBuilder.elementFor(rawName);
         if (element != null) {
             ClassName resolved = ClassName.get(element);
             return ClassName.get(resolved.packageName(), resolved.simpleName() + "Metadata");

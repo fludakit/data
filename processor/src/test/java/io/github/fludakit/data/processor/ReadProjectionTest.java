@@ -560,8 +560,12 @@ class ReadProjectionTest {
                 "no term may follow the legacy to-one ORDER BY (no tiebreak gained):"
                         + System.lineSeparator() + impl);
         assertTrue(impl.contains("SQL_FIND_BY_SEEK_NEXT = \"SELECT \"id\", \"status\", \"customer_id\""
-                        + " FROM \"order\" WHERE ((\"customer_id\" > :cursor0)) ORDER BY \"customer_id\" ASC LIMIT \""),
-                "the forward seek constant must bake the legacy bare-column seek clause:"
+                        + " FROM \"order\" WHERE ((\"customer_id\" > :cursor0)) ORDER BY \"customer_id\" ASC\""),
+                "the forward seek constant must end at ORDER BY with no baked LIMIT fragment:"
+                        + System.lineSeparator() + impl);
+        assertTrue(impl.contains("? SQL_FIND_BY_SEEK_NEXT : SQL_FIND_BY_SEEK_PREV)"
+                        + " + \" LIMIT \" + (pageRequest.size() + 1)"),
+                "the seek call must splice a literal LIMIT for the fetch-one-extra (size + 1):"
                         + System.lineSeparator() + impl);
         assertTrue(!impl.contains("ORDER BY (SELECT"),
                 "no aggregate sort term may appear for a to-one sort:" + System.lineSeparator() + impl);
@@ -620,8 +624,8 @@ class ReadProjectionTest {
         assertTrue(impl.contains("ORDER BY \"text\" ASC"),
                 "legacy orderBy term for a local sort:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("SQL_FIND_BY_SEEK_NEXT = \"SELECT \"id\", \"text\" FROM \"memo\""
-                        + " WHERE ((\"text\" > :cursor0)) ORDER BY \"text\" ASC LIMIT \""),
-                "the forward seek constant must bake the legacy local-sort seek clause:"
+                        + " WHERE ((\"text\" > :cursor0)) ORDER BY \"text\" ASC\""),
+                "the forward seek constant must end at ORDER BY with no baked LIMIT fragment:"
                         + System.lineSeparator() + impl);
         assertTrue(impl.contains("CursorKeys.forEntity(java.util.List.of(\"text\"),"
                         + " java.util.List.of(true), MemoMetadata.INSTANCE, e)"),

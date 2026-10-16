@@ -269,6 +269,31 @@ public final class SqlBuilder {
         return SeekClause.render(terms, ascending, forward);
     }
 
+    /**
+     * Assembles a keyset-seek read statement on a pre-rendered {@code shell}: the shell, the seek
+     * predicate joined to it by {@code WHERE}/{@code AND} (whichever the shell still needs), and the
+     * shared {@code orderBy}. This is the composition the paged emitter used to do with {@code +} in
+     * the processor; it lives here so the clause order and connector are core's decision.
+     *
+     * <p>The LIMIT is deliberately NOT part of it. The fetch-one-extra row count is a RUNTIME value, so
+     * the caller splices {@code limitClause} onto the finished statement; baking the clause here would
+     * leave a trailing-space fragment that cannot be a formatted text block. The returned statement ends
+     * on {@code orderBy} — no boundary whitespace — so it is one clean, formable constant.</p>
+     *
+     * @param shell         the pre-rendered base SELECT shell (projection, FROM, any base predicates)
+     * @param shellHasWhere whether {@code shell} already carries a WHERE the seek must AND onto
+     * @param terms         the rendered sort terms, in cursor-key order
+     * @param ascending     the sort direction of each key
+     * @param forward       {@code true} for {@code CURSOR_NEXT}, {@code false} for {@code CURSOR_PREVIOUS}
+     * @param orderBy       the rendered ORDER BY clause (leading space, no trailing space)
+     * @return the seek statement, ending at {@code orderBy} with no boundary whitespace
+     */
+    public String pagedSeekStatement(String shell, boolean shellHasWhere, List<String> terms,
+                                     List<Boolean> ascending, boolean forward, String orderBy) {
+        return shell + (shellHasWhere ? " AND " : " WHERE ")
+                + seekClause(terms, ascending, forward) + orderBy;
+    }
+
     /** Whether the first segment of an entity-rooted path is a to-many relation or collection. */
     public boolean isToManyPath(String path) {
         return requireResolver().isToManyPath(path);

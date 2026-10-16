@@ -34,6 +34,29 @@ class SqlBuilderSeekClauseTest {
     }
 
     @Test
+    void pagedSeekStatementJoinsShellSeekAndOrderByWithNoLimit() {
+        // The seek statement is assembled in core: shell + connector + seek + ORDER BY, ending at
+        // ORDER BY with NO limit clause (the runtime splices the literal LIMIT for the extra row).
+        SqlBuilder builder = new SqlBuilder(SCHEMA).dialect(H2Dialect.INSTANCE);
+        String next = builder.pagedSeekStatement("SELECT \"id\", \"name\" FROM \"widget\"", false,
+                List.of("\"name\""), List.of(true), true, " ORDER BY \"name\" ASC");
+        assertThat(next).isEqualTo(
+                "SELECT \"id\", \"name\" FROM \"widget\" WHERE ((\"name\" > :cursor0)) ORDER BY \"name\" ASC");
+        // No baked limit fragment: the statement ends on a token, not whitespace, so it can format.
+        assertThat(next).endsWith("ASC");
+        assertThat(next).doesNotContain("LIMIT");
+    }
+
+    @Test
+    void pagedSeekStatementAndsTheSeekOntoAShellThatAlreadyHasWhere() {
+        SqlBuilder builder = new SqlBuilder(SCHEMA).dialect(H2Dialect.INSTANCE);
+        String prev = builder.pagedSeekStatement("SELECT \"id\" FROM \"widget\" WHERE \"id\" > 0", true,
+                List.of("\"name\""), List.of(true), false, " ORDER BY \"name\" ASC");
+        assertThat(prev).isEqualTo("SELECT \"id\" FROM \"widget\" WHERE \"id\" > 0"
+                + " AND ((\"name\" < :cursor0)) ORDER BY \"name\" ASC");
+    }
+
+    @Test
     void singleKeyUsesTheDirectionOperator() {
         assertThat(seek(List.of("\"name\""), List.of(true), true))
                 .isEqualTo("((\"name\" > :cursor0))");

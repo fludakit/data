@@ -12,7 +12,6 @@ import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
 import io.github.fludakit.data.processor.analysis.PathResolver;
 import io.github.fludakit.data.processor.generator.metadata.MetadataGenerator;
 import io.github.fludakit.data.processor.generator.EmissionContext;
-import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.analysis.PagedRead;
 import io.github.fludakit.data.processor.analysis.PathResolution;
 import io.github.fludakit.data.processor.support.Diagnostics;
@@ -147,7 +146,6 @@ public final class PagingEmitter {
         } else {
             orderBy = new SqlBuilder(ctx.entity(), ctx.entity()).dialect(sqlDialect).orderBy(effective);
         }
-        String wherePrefix = read.paramBindings().isEmpty() ? " WHERE " : " AND ";
 
         if (!read.cursored()) {
             String countConstant = SqlConstants.register(ctx.constants(), "SQL_COUNT_ALL",
@@ -192,14 +190,19 @@ public final class PagingEmitter {
         // the fetch-one-extra-row limit stays a runtime splice.
         List<Boolean> ascending = directions.stream().map(Boolean::parseBoolean).toList();
         String findConstantSql = ctx.constants().get(read.findConstant());
-        String suffix = sqlDialect.limitClause("");
-        String nextConstant = SqlConstants.register(ctx.constants(), read.findConstant() + "_SEEK_NEXT", findConstantSql
-                + wherePrefix + seek(ctx.entity(), terms, ascending, true) + orderBy + suffix);
-        String prevConstant = SqlConstants.register(ctx.constants(), read.findConstant() + "_SEEK_PREV", findConstantSql
-                + wherePrefix + seek(ctx.entity(), terms, ascending, false) + orderBy + suffix);
+        boolean shellHasWhere = !read.paramBindings().isEmpty();
+        SqlBuilder assembler = new SqlBuilder(ctx.entity()).dialect(sqlDialect);
+        String nextConstant = SqlConstants.register(ctx.constants(), read.findConstant() + "_SEEK_NEXT",
+                assembler.pagedSeekStatement(findConstantSql, shellHasWhere, terms, ascending, true, orderBy));
+        String prevConstant = SqlConstants.register(ctx.constants(), read.findConstant() + "_SEEK_PREV",
+                assembler.pagedSeekStatement(findConstantSql, shellHasWhere, terms, ascending, false, orderBy));
+        // The limit clause is spliced onto the finished statement at RUNTIME with a literal row count —
+        // the fetch-one-extra (size + 1) — exactly as the offset path splices its limit and offset. The
+        // seek constant itself ends at ORDER BY, so it carries no boundary whitespace and formats.
         CodeBlock.Builder seekCall = CodeBlock.builder()
-                .add("jdbcClient.sql(($L.mode() == $T.Mode.CURSOR_NEXT ? $L : $L) + $L.size() + $S)",
-                        read.pageRequest(), PageRequest.class, nextConstant, prevConstant, read.pageRequest(), " + 1");
+                .add("jdbcClient.sql(($L.mode() == $T.Mode.CURSOR_NEXT ? $L : $L) + $S + ($L.size() + 1))",
+                        read.pageRequest(), PageRequest.class, nextConstant, prevConstant,
+                        sqlDialect.limitClause(""), read.pageRequest());
         QueryInvocations.appendBoundParameters(seekCall, read.paramBindings(), read.parameters());
         for (int i = 0; i < terms.size(); i++) {
             seekCall.add(".param($S, cursor.get($L))", "cursor" + i, i);
@@ -221,11 +224,7 @@ public final class PagingEmitter {
         builder.addStatement("return new $T<>($L, content, cursors, -1L)", SimpleCursoredPage.class, read.pageRequest());
     }
 
-    /** The keyset seek predicate for {@code terms} in the given direction, rendered by {@link SqlBuilder}. */
-    private String seek(TypeMapping<?> entity, List<String> terms, List<Boolean> ascending, boolean forward) {
-        return new SqlBuilder(entity).dialect(sqlDialect).seekClause(terms, ascending, forward);
-    }
-
+    /** The {@code List.of("a", "b")} element bodies for {@code values}, each as a Java string literal. */
     private String quoted(List<String> values) {
         StringBuilder sb = new StringBuilder();
         for (String v : values) {

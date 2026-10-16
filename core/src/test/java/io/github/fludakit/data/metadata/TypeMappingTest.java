@@ -45,7 +45,7 @@ class TypeMappingTest {
         ElementCollectionValueObjectMapping<?> tags =
                 new ElementCollectionValueObjectMapping("test.Tags", "load_tags", "load_id",
                         List.of(new Prop.Scalar("label", "label", "java.lang.String")));
-        Prop.ElementCollection elementCollection = new Prop.ElementCollection("tags", tags, tags.columns());
+        Prop.ElementCollection elementCollection = new Prop.ElementCollection("tags", tags);
         assertEquals("load_tags", elementCollection.childTable());
         assertEquals("load_id", elementCollection.parentFkColumn());
         assertEquals("test.Tags", elementCollection.elementTypeName());
@@ -93,7 +93,7 @@ class TypeMappingTest {
                         new Prop.Embedded("address", geo()),
                         new Prop.Reference("customer", "customer_id", "test.Customer", customer(), false, false),
                         new Prop.EntityCollection("lines", line, "order", "order_id"),
-                        new Prop.ElementCollection("tags", tags, tags.columns())));
+                        new Prop.ElementCollection("tags", tags)));
 
         Map<String, ColumnRef> refs = order.columnRefs();
         assertEquals(new ColumnRef.Simple("address_lat", "orders"), refs.get("address.lat"));

@@ -7,21 +7,21 @@ import com.squareup.javapoet.JavaFile;
 import com.squareup.javapoet.MethodSpec;
 import com.squareup.javapoet.TypeSpec;
 import io.github.fludakit.data.processor.generator.RepositorySourceWriter;
-import io.github.fludakit.data.processor.analysis.QueryDefinitionSpec;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.query.ParamBinding;
 import io.github.fludakit.data.query.QueryDefinition;
 
 import javax.lang.model.element.Modifier;
 import javax.lang.model.element.TypeElement;
-import java.util.List;
+import java.util.Map;
 
 /**
  * Writes the {@code <Repository>Queries} holder — the one generated artifact nothing at runtime reads
  * (see {@link #write}). It is a writer of its own rather than a second method on
  * {@link RepositoryShellEmitter} because the two artifacts share nothing but the package they land in: the
- * implementation class is built from a method list and a constant map, this one from a list of
- * {@link QueryDefinition}s, and neither can drift toward the other's shape.
+ * implementation class is built from a method list and a constant map, this one from the per-repository
+ * map of {@link QueryDefinition}s collected in the session registry, and neither can drift toward the
+ * other's shape.
  */
 public final class QueriesWriter {
 
@@ -47,14 +47,15 @@ public final class QueriesWriter {
 
     /**
      * Emits the generated query-metadata holder: {@code public final class <Repository>Queries} with one
-     * {@code public static final QueryDefinition <FIELD>} per query-by-names method. Each field is a
-     * record literal built over logical query records, so the published structure describes the plan
-     * rendered into the SQL constant in {@code <Repository>Impl} — introspectable without reflection,
-     * and re-emitted per build so it can never drift. The holder is documentation and metadata:
-     * nothing at runtime reads it.
+     * {@code public static final QueryDefinition <FIELD>} per query-by-names method. The map is the live
+     * view collected by the {@code RepositoryMethodCompiler} for this repository — its insertion order is
+     * the declaration order of the methods, and the field name is the {@code UPPER_SNAKE} form of the
+     * generated key. Each field is a record literal built over logical query records, so the published
+     * structure describes the plan rendered into the SQL constant in {@code <Repository>Impl} —
+     * introspectable without reflection, and re-emitted per build so it can never drift.
      */
     public void write(TypeElement repository, String packageName, String queriesSimpleName,
-               List<QueryDefinitionSpec> queryDefinitions) {
+               Map<String, QueryDefinition.Criteria> queryDefinitions) {
         TypeSpec.Builder holder = TypeSpec.classBuilder(queriesSimpleName)
                 .addJavadoc("Generated query definitions for {@code $L}: one {@code QueryDefinition} field per"
                         + " query-by-names method. The rendered SQL literals live in {@code $LImpl};"
@@ -64,8 +65,8 @@ public final class QueriesWriter {
                                 queriesSimpleName.length() - "Queries".length()))
                 .addModifiers(Modifier.PUBLIC, Modifier.FINAL);
         holder.addMethod(MethodSpec.constructorBuilder().addModifiers(Modifier.PRIVATE).build());
-        for (QueryDefinitionSpec definition : queryDefinitions) {
-            holder.addField(queryDefinitionField(definition));
+        for (Map.Entry<String, QueryDefinition.Criteria> entry : queryDefinitions.entrySet()) {
+            holder.addField(queryDefinitionField(entry.getKey(), entry.getValue()));
         }
         sourceWriter.write(packageName + "." + queriesSimpleName, repository,
                 JavaFile.builder(packageName, holder.build()).skipJavaLangImports(true).build());
@@ -76,8 +77,7 @@ public final class QueriesWriter {
      * literal. Each variant emits only the components it carries, so a published count has no sort
      * list, no row window and no seek terms — not empty ones.
      */
-    private FieldSpec queryDefinitionField(QueryDefinitionSpec spec) {
-        QueryDefinition.Criteria definition = spec.definition();
+    private FieldSpec queryDefinitionField(String typeName, QueryDefinition.Criteria definition) {
         CodeBlock predicates = Literals.listLiteral(builder -> {
             for (int i = 0; i < definition.predicates().size(); i++) {
                 if (i > 0) {
@@ -118,7 +118,7 @@ public final class QueriesWriter {
                             Q_RESULT_KIND, delete.resultKind().name())
                     .build();
         };
-        return FieldSpec.builder(Q_QUERY_DEFINITION, MemberNames.upperSnake(spec.typeName()),
+        return FieldSpec.builder(Q_QUERY_DEFINITION, MemberNames.upperSnake(typeName),
                         Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
                 .initializer(initializer).build();
     }

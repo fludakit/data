@@ -12,6 +12,7 @@ import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.RepositoryProcessor;
 import io.github.fludakit.data.processor.analysis.PathResolver;
 import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
+import io.github.fludakit.data.processor.generator.rowmapper.RowReads;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.processor.support.Props;
 import io.github.fludakit.data.sql.SqlDialect;

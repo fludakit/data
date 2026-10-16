@@ -18,10 +18,9 @@ import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.analysis.PagedRead;
 import io.github.fludakit.data.processor.analysis.PathOrigin;
 import io.github.fludakit.data.processor.analysis.PathResolution;
-import io.github.fludakit.data.processor.analysis.QueryDefinitionSpec;
 import io.github.fludakit.data.processor.analysis.QueryPlan;
-import io.github.fludakit.data.processor.generator.RepositoryEmission;
 import io.github.fludakit.data.processor.support.Diagnostics;
+import io.github.fludakit.data.processor.support.GeneratedArtifactRegistry;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.qbn.ParsedMethodName;
 import io.github.fludakit.data.query.Operation;
@@ -32,6 +31,8 @@ import io.github.fludakit.data.query.ResultKind;
 import io.github.fludakit.data.query.SortSpec;
 import io.github.fludakit.data.sql.SqlBuilder;
 import io.github.fludakit.data.sql.SqlDialect;
+import io.github.fludakit.data.support.DataExceptions;
+import io.github.fludakit.jdbc.JdbcClientException;
 import jakarta.data.Sort;
 import jakarta.data.page.PageRequest;
 import jakarta.data.repository.By;
@@ -98,6 +99,13 @@ public final class RepositoryMethodCompiler {
     private final MetadataGenerator metadataGenerator;
     private final WriteMethodEmitter writeMethodEmitter;
     /**
+     * The session cache every structured read publishes its {@link QueryDefinition.Criteria} into,
+     * keyed by the repository's qualified name (carried on {@link RepositoryEmission#repositoryFqn()}).
+     * The generated {@code <Repository>Queries} holder is written from this map, so a definition is
+     * stored once here rather than threaded through a per-repository list.
+     */
+    private final GeneratedArtifactRegistry registry;
+    /**
      * The composing to-one JOIN projection: the extra SELECT list and the per-method row mapper that
      * reads it. Injected rather than built here because {@link RepositoryProcessor} asks it for the
      * CRUD full mapper too — the same projection serves the inherited reads and query-by-names.
@@ -117,7 +125,8 @@ public final class RepositoryMethodCompiler {
                              Diagnostics diagnostics, SqlDialect sqlDialect, PathResolver pathResolver,
                              QueryPlanCompiler queryPlanCompiler, MetadataGenerator metadataGenerator,
                              WriteMethodEmitter writeMethodEmitter,
-                             JoinedProjectionEmitter joinedProjections) {
+                             JoinedProjectionEmitter joinedProjections,
+                             GeneratedArtifactRegistry registry) {
         this.typeShapes = typeShapes;
         this.typeMappingBuilder = typeMappingBuilder;
         this.diagnostics = diagnostics;
@@ -127,6 +136,7 @@ public final class RepositoryMethodCompiler {
         this.metadataGenerator = metadataGenerator;
         this.writeMethodEmitter = writeMethodEmitter;
         this.joinedProjections = joinedProjections;
+        this.registry = registry;
         this.crudReads = new CrudReadEmitter(sqlDialect, typeMappingBuilder, metadataGenerator, joinedProjections);
         this.pagingEmitter = new PagingEmitter(sqlDialect, typeMappingBuilder, pathResolver, metadataGenerator,
                 diagnostics);
@@ -155,67 +165,97 @@ public final class RepositoryMethodCompiler {
     public MethodSpec generateMethod(ExecutableElement method, DeclaredType repositoryType,
                               RepositoryEmission emission) {
         ExecutableType resolved = typeShapes.resolved(repositoryType, method);
+        MethodSpec.Builder builder = typeShapes.overriding(method, repositoryType);
+        rebindTypeVariables(builder, method, typeMappingBuilder.classNameFor(emission.entity().typeName()));
+        // One guard per method rather than per call site: every jdbcClient invocation lives inside the
+        // body, so a single catch translates each failure the client raises without relabeling an
+        // unrelated bug (a NPE in a row mapper or a hydrate step) as a data exception.
+        builder.beginControlFlow("try");
+        compileBody(builder, method, resolved, repositoryType, emission);
+        builder.nextControlFlow("catch ($T e)", JdbcClientException.class);
+        builder.addStatement("throw $T.translate(e)", DataExceptions.class);
+        builder.endControlFlow();
+        return builder.build();
+    }
+
+    /**
+     * Fills the method body for one shape. The dispatch reads as a table of contents; each group is a
+     * named method below. Every branch adds statements to the caller's {@code builder} and returns —
+     * the caller owns the enclosing {@code try} and the {@link MethodSpec} build.
+     *
+     * <p>Ten shapes, in priority order:</p>
+     * <ol>
+     *   <li>{@code @Query} — native SQL, bind parameters</li>
+     *   <li>CRUD paged {@code findAll(PageRequest, Sort)} — runtime sort/join generation</li>
+     *   <li>CRUD {@code findById}/{@code findAll} with JOIN projection — joined constant + joined mapper</li>
+     *   <li>{@code @Find} — explicit finder, property-based criteria</li>
+     *   <li>Lifecycle batch — {@code List<E>} or {@code E[]} with {@code @Insert/@Update/@Save/@Delete}</li>
+     *   <li>Single-entity CRUD by name — {@code save}, {@code insert}, {@code update}, {@code delete}</li>
+     *   <li>Batch CRUD by name — {@code saveAll}, {@code insertAll}, {@code updateAll}, {@code deleteAll}</li>
+     *   <li>Remaining CRUD built-ins — {@code findById}, {@code deleteById}, {@code findAll}</li>
+     *   <li>Single-entity annotated writes — {@code @Insert}, {@code @Update}, {@code @Save}, {@code @Delete}</li>
+     *   <li>Query-by-name fallthrough — parse method name, resolve paths, render SQL</li>
+     * </ol>
+     */
+    private void compileBody(MethodSpec.Builder builder, ExecutableElement method, ExecutableType resolved,
+                             DeclaredType repositoryType, RepositoryEmission emission) {
         TypeMirror returnMirror = resolved.getReturnType();
         List<? extends TypeMirror> parameterTypes = resolved.getParameterTypes();
         List<? extends VariableElement> parameters = method.getParameters();
         String name = method.getSimpleName().toString();
         int arity = parameters.size();
 
-        MethodSpec.Builder builder = typeShapes.overriding(method, repositoryType);
-        rebindTypeVariables(builder, method, typeMappingBuilder.classNameFor(emission.entity().typeName()));
-
         // 1. @Query — native SQL, bind parameters
         Query query = method.getAnnotation(Query.class);
         if (query != null) {
             emitQuery(builder, method, query, returnMirror, emission.entity(), emission.constants());
-            return builder.build();
+            return;
         }
 
         // 2. CRUD paged findAll — runtime sort/join generation
         if (name.equals("findAll") && arity == 2) {
             crudReads.emitFindAllPage(builder, parameters, emission.readContext());
-            return builder.build();
+            return;
         }
 
         // 3. CRUD findById/findAll with JOIN projection — joined constant + joined mapper
         if (tryEmitJoinProjectedCrudRead(builder, name, arity, parameters, returnMirror, emission)) {
-            return builder.build();
+            return;
         }
 
         // 4. @Find — explicit finder, property-based criteria
         if (method.getAnnotation(Find.class) != null) {
             emitFind(builder, method, resolved, emission, true, false);
-            return builder.build();
+            return;
         }
 
         // 5. Lifecycle batch — List<E> or E[] with @Insert/@Update/@Save/@Delete
         if (tryEmitLifecycleBatch(builder, method, name, arity, parameters, parameterTypes, emission)) {
-            return builder.build();
+            return;
         }
 
         // 6. Single-entity CRUD by name — save, insert, update, delete
         if (tryEmitSingleEntityCrudByName(builder, method, name, arity, parameters, parameterTypes, returnMirror, emission)) {
-            return builder.build();
+            return;
         }
 
         // 7. Batch CRUD by name — saveAll, insertAll, updateAll, deleteAll
         if (tryEmitBatchCrudByName(builder, method, name, arity, parameters, emission)) {
-            return builder.build();
+            return;
         }
 
         // 8. Remaining CRUD built-ins — findById, deleteById, findAll
         if (tryEmitCrudBuiltins(builder, name, arity, parameters, returnMirror, emission)) {
-            return builder.build();
+            return;
         }
 
         // 9. Single-entity annotated writes — @Insert, @Update, @Save, @Delete
         if (tryEmitAnnotatedWrite(builder, method, name, arity, parameters, parameterTypes, returnMirror, emission)) {
-            return builder.build();
+            return;
         }
 
         // 10. Query-by-name fallthrough — parse method name, resolve paths, render SQL
         emitFind(builder, method, resolved, emission, false, method.getAnnotation(Delete.class) != null);
-        return builder.build();
     }
 
     /**
@@ -535,7 +575,8 @@ public final class RepositoryMethodCompiler {
          */
         private final EmissionContext ctx;
         private final List<MethodSpec> auxMethods;
-        private final List<QueryDefinitionSpec> queryDefinitions;
+        /** The key this repository's published query definitions are stored under in the registry. */
+        private final String repositoryFqn;
         private final Map<String, Integer> queryDefinitionNames;
         private final boolean explicitFind;
         private final boolean explicitDelete;
@@ -547,7 +588,7 @@ public final class RepositoryMethodCompiler {
             this.resolved = resolved;
             this.ctx = emission.readContext();
             this.auxMethods = emission.auxMethods();
-            this.queryDefinitions = emission.queryDefinitions();
+            this.repositoryFqn = emission.repositoryFqn();
             this.queryDefinitionNames = emission.queryDefinitionNames();
             this.explicitFind = explicitFind;
             this.explicitDelete = explicitDelete;
@@ -568,15 +609,27 @@ public final class RepositoryMethodCompiler {
             }
         }
 
+        /**
+         * Builds this method's {@link QueryDefinition.Criteria}, publishes it under the generated field
+         * name in the session registry (the source the {@code <Repository>Queries} holder is written
+         * from), and returns it so the caller renders the SQL constant from the very same object.
+         */
+        private QueryDefinition.Criteria publish(FindInput input, QueryPlan plan, boolean distinct,
+                Operation operation, ResultKind kind, ResultKind resultKind) {
+            QueryDefinition.Criteria definition =
+                    QueryPlanCompiler.queryDefinitionOf(operation, kind, resultKind, plan, distinct);
+            registry.queryDefinitions(repositoryFqn).put(input.queryDefinitionName(), definition);
+            return definition;
+        }
+
         private void emitCountOrExists(FindInput input) {
-            queryDefinitions.add(QueryPlanCompiler.queryDefinitionOf(input.queryDefinitionName(), input.operation(), input.kind(), input.kind(),
-                    new QueryPlan(ctx.entity(), input.predicates(), input.predicateRefs(), input.predicateAttributePaths(),
-                            List.of(), List.of(), List.of(), List.of(), 0, input.paramBindings(), input.parameters()),
-                    input.distinct()));
+            QueryDefinition.Criteria definition = publish(input,
+                    new QueryPlan(ctx.entity(), input.predicates(), input.predicateRefs(),
+                            input.predicateAttributePaths(), List.of(), List.of(), List.of(), List.of(), 0,
+                            input.paramBindings(), input.parameters()),
+                    input.distinct(), input.operation(), input.kind(), input.kind());
             String constant = SqlConstants.register(ctx.constants(), "SQL_" + MemberNames.upperSnake(input.name()),
-                    new SqlBuilder(ctx.entity(), ctx.entity(),
-                            queryDefinitions.get(queryDefinitions.size() - 1).definition())
-                            .dialect(sqlDialect).count());
+                    new SqlBuilder(ctx.entity(), ctx.entity(), definition).dialect(sqlDialect).count());
             CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
             QueryInvocations.appendBoundParameters(call, input.paramBindings(), input.parameters());
             call.add(".singleValue($T.class)", Long.class);
@@ -615,17 +668,15 @@ public final class RepositoryMethodCompiler {
                     deleteRefs.set(i, PathResolver.placementOf(PathResolver.snakeCasedLocalColumnRef(input.predicates().get(i).property())));
                 }
             }
-            queryDefinitions.add(QueryPlanCompiler.queryDefinitionOf(input.queryDefinitionName(), Operation.DELETE, input.kind(),
-                    // A delete-by-criteria is a write: a void method reports nothing, anything else
-                    // gets the affected-row count the .update() call already returns.
-                    writeResultKindOf(input.returnMirror(), input.kind(), ctx.entity()),
+            // A delete-by-criteria is a write: a void method reports nothing, anything else
+            // gets the affected-row count the .update() call already returns.
+            QueryDefinition.Criteria definition = publish(input,
                     new QueryPlan(ctx.entity(), input.predicates(), deleteRefs, deletePaths,
                             List.of(), List.of(), List.of(), List.of(), 0, input.paramBindings(), input.parameters()),
-                    false));
+                    false, Operation.DELETE, input.kind(),
+                    writeResultKindOf(input.returnMirror(), input.kind(), ctx.entity()));
             String constant = SqlConstants.register(ctx.constants(), "SQL_" + MemberNames.upperSnake(input.name()),
-                    new SqlBuilder(ctx.entity(), ctx.entity(),
-                            queryDefinitions.get(queryDefinitions.size() - 1).definition())
-                            .dialect(sqlDialect).delete());
+                    new SqlBuilder(ctx.entity(), ctx.entity(), definition).dialect(sqlDialect).delete());
             CodeBlock.Builder call = CodeBlock.builder().add("jdbcClient.sql($L)", constant);
             QueryInvocations.appendBoundParameters(call, input.paramBindings(), input.parameters());
             call.add(".update()");
@@ -699,15 +750,13 @@ public final class RepositoryMethodCompiler {
                 // A ref-less entry is NOTE-degraded to a bare column, so its published path degrades too.
                 pagedSortAttributePaths.add(ref != null ? pagedSortPaths.get(i).attributePath() : null);
             }
-            queryDefinitions.add(QueryPlanCompiler.queryDefinitionOf(input.queryDefinitionName(), Operation.FIND, input.kind(), input.kind(),
-                    new QueryPlan(ctx.entity(), input.predicates(), input.predicateRefs(), input.predicateAttributePaths(), methodSorts,
-                            pagedSortRefs, pagedSortAttributePaths, pagedExistentialSorts, 0,
+            QueryDefinition.Criteria definition = publish(input,
+                    new QueryPlan(ctx.entity(), input.predicates(), input.predicateRefs(), input.predicateAttributePaths(),
+                            methodSorts, pagedSortRefs, pagedSortAttributePaths, pagedExistentialSorts, 0,
                             input.paramBindings(), input.parameters()),
-                    input.distinct()));
+                    input.distinct(), Operation.FIND, input.kind(), input.kind());
             String constant = SqlConstants.register(ctx.constants(), "SQL_" + MemberNames.upperSnake(input.name()),
-                    new SqlBuilder(ctx.entity(), ctx.entity(),
-                            queryDefinitions.get(queryDefinitions.size() - 1).definition())
-                            .dialect(sqlDialect).select());
+                    new SqlBuilder(ctx.entity(), ctx.entity(), definition).dialect(sqlDialect).select());
             pagingEmitter.emitPaged(builder, ctx, new PagedRead(method, pageRequest, methodSorts, constant,
                     input.paramBindings(), input.parameters(), input.kind() == ResultKind.CURSORED_PAGE));
         }
@@ -741,13 +790,11 @@ public final class RepositoryMethodCompiler {
                 auxMethods.add(joinedProjections.buildFullMapper(fullMapper, ctx.entity(), ctx.mapperType(), traversed));
                 queryArgForMethod = CodeBlock.of("(rs, rowNum) -> $L(rs, rowNum)", fullMapper);
             }
-            queryDefinitions.add(QueryPlanCompiler.queryDefinitionOf(input.queryDefinitionName(), Operation.FIND, input.kind(), input.kind(),
-                    new QueryPlan(ctx.entity(), input.predicates(), input.predicateRefs(), input.predicateAttributePaths(), methodSorts,
-                            sortRefs, sortAttributePaths, existentialSorts,
+            QueryDefinition.Criteria queryDefinition = publish(input,
+                    new QueryPlan(ctx.entity(), input.predicates(), input.predicateRefs(), input.predicateAttributePaths(),
+                            methodSorts, sortRefs, sortAttributePaths, existentialSorts,
                             input.parsed() != null ? input.parsed().limit() : 0, input.paramBindings(), input.parameters()),
-                    input.distinct()));
-            QueryDefinition.Criteria queryDefinition =
-                    queryDefinitions.get(queryDefinitions.size() - 1).definition();
+                    input.distinct(), Operation.FIND, input.kind(), input.kind());
             String sql = new SqlBuilder(ctx.entity(), ctx.entity(), queryDefinition)
                     .dialect(sqlDialect).select(extraProjection);
             String constant = SqlConstants.register(ctx.constants(), "SQL_" + MemberNames.upperSnake(input.name()), sql);

@@ -132,7 +132,7 @@ class WriteEmissionTest {
 
         compile(sourceDir, classesDir, generatedDir, "Book.java", "Shelf.java");
 
-        String impl = Files.readString(generatedDir.resolve("collidingconstants/ShelfImpl.java"));
+        String impl = sqlFlat(generatedDir.resolve("collidingconstants/ShelfImpl.java"));
         assertTrue(impl.contains("SQL_SEARCH = \"SELECT id, title FROM book WHERE title = :title\""),
                 "the first statement must keep the bare base name:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("SQL_SEARCH_2 = \"SELECT id, title FROM book WHERE id = :id\""),
@@ -287,7 +287,7 @@ class WriteEmissionTest {
 
         compile(sourceDir, classesDir, generatedDir, "Product.java", "Line.java", "Basket.java", "Baskets.java");
 
-        String impl = Files.readString(generatedDir.resolve("voca/BasketsImpl.java")).replace("\\\"", "\"");
+        String impl = sqlFlat(generatedDir.resolve("voca/BasketsImpl.java"));
         assertTrue(impl.contains("INSERT INTO \"basket_lines\" (\"basket_id\", \"product_id\", \"quantity\")"
                         + " VALUES (:basket_id, :product_id, :quantity)"),
                 "child-table insert must keep the fk column:" + System.lineSeparator() + impl);
@@ -373,7 +373,7 @@ class WriteEmissionTest {
 
         compile(sourceDir, classesDir, generatedDir, "Product.java", "Line.java", "Basket.java", "Baskets.java");
 
-        String impl = Files.readString(generatedDir.resolve("hyd/BasketsImpl.java")).replace("\\\"", "\"");
+        String impl = sqlFlat(generatedDir.resolve("hyd/BasketsImpl.java"));
 
         // A per-collection loader plus its SELECT constant and a delete constant for replace-all/cascade.
         assertTrue(impl.contains("SQL_SELECT_LINES"), "missing child SELECT constant:" + System.lineSeparator() + impl);
@@ -410,27 +410,20 @@ class WriteEmissionTest {
 
         // The hydrated @Find branches (LIST / STREAM / OPTIONAL / SINGLE) each wrap the umbrella.
         assertTrue(impl.contains("List<Basket> results = jdbcClient.sql(SQL_FIND_BY_NAME)"
-                        + ".param(\"name\", name).query(new BasketRowMapper()).list();\n"
-                        + "    hydrateAll(results);\n"
-                        + "    return results;"),
+                        + ".param(\"name\", name).query(new BasketRowMapper()).list(); hydrateAll(results); return results;"),
                 "hydrated LIST @Find must materialize, hydrateAll, then return:"
                         + System.lineSeparator() + impl);
         assertTrue(impl.contains("List<Basket> results = jdbcClient.sql(SQL_STREAM_BY_NAME)"
-                        + ".param(\"name\", name).query(new BasketRowMapper()).list();\n"
-                        + "    hydrateAll(results);\n"
-                        + "    return results.stream();"),
+                        + ".param(\"name\", name).query(new BasketRowMapper()).list(); hydrateAll(results); return results.stream();"),
                 "hydrated STREAM @Find must materialize, hydrateAll, then stream:"
                         + System.lineSeparator() + impl);
         assertTrue(impl.contains("Optional<Basket> found = jdbcClient.sql(SQL_OPTIONAL_BY_NAME)"
-                        + ".param(\"name\", name).query(new BasketRowMapper()).optional();\n"
-                        + "    found.ifPresent(e -> hydrateAll(java.util.List.of(e)));\n"
-                        + "    return found;"),
+                        + ".param(\"name\", name).query(new BasketRowMapper()).optional(); "
+                        + "found.ifPresent(e -> hydrateAll(java.util.List.of(e))); return found;"),
                 "hydrated OPTIONAL @Find must hydrateAll the present value:"
                         + System.lineSeparator() + impl);
         assertTrue(impl.contains("Basket found = jdbcClient.sql(SQL_SINGLE_BY_NAME)"
-                        + ".param(\"name\", name).query(new BasketRowMapper()).single();\n"
-                        + "    hydrateAll(java.util.List.of(found));\n"
-                        + "    return found;"),
+                        + ".param(\"name\", name).query(new BasketRowMapper()).single(); hydrateAll(java.util.List.of(found)); return found;"),
                 "hydrated SINGLE @Find must hydrateAll the single value:"
                         + System.lineSeparator() + impl);
 
@@ -505,7 +498,7 @@ class WriteEmissionTest {
         List<Diagnostic<? extends JavaFileObject>> diagnostics = compileWithDiagnostics(
                 sourceDir, classesDir, generatedDir, "Line.java", "Basket.java", "Baskets.java");
 
-        String impl = Files.readString(generatedDir.resolve("casc/BasketsImpl.java")).replace("\\\"", "\"");
+        String impl = sqlFlat(generatedDir.resolve("casc/BasketsImpl.java"));
 
         // Save still inserts child rows for the gate-failed collection (unchanged write side).
         assertTrue(impl.contains("INSERT INTO \"basket_lines\""),
@@ -728,8 +721,7 @@ class WriteEmissionTest {
                 "Ticket.java", "TicketRepository.java", "Badge.java", "BadgeRepository.java",
                 "Widget.java", "WidgetRepository.java", "Segment.java", "SegmentRepository.java");
 
-        String ticket = Files.readString(generatedDir.resolve("appkey/TicketRepositoryImpl.java"))
-                .replace("\\\"", "\"").replaceAll("\\s+", " ");
+        String ticket = sqlFlat(generatedDir.resolve("appkey/TicketRepositoryImpl.java"));
         // No-keyholder shape: the identity column is part of the INSERT and bound from the entity.
         assertTrue(ticket.contains("SQL_INSERT = \"INSERT INTO \"ticket\" (\"id\", \"label\") VALUES (:id, :label)\""),
                 "the app-assigned id must be an INSERT column:" + System.lineSeparator() + ticket);
@@ -742,8 +734,7 @@ class WriteEmissionTest {
         assertTrue(!ticket.contains("GeneratedKeyHolder") && !ticket.contains("keys.getKey()"),
                 "String id must not do the keyholder roundtrip:" + System.lineSeparator() + ticket);
 
-        String badge = Files.readString(generatedDir.resolve("appkey/BadgeRepositoryImpl.java"))
-                .replace("\\\"", "\"").replaceAll("\\s+", " ");
+        String badge = sqlFlat(generatedDir.resolve("appkey/BadgeRepositoryImpl.java"));
         assertTrue(badge.contains("SQL_INSERT = \"INSERT INTO \"badge\" (\"id\", \"serial\") VALUES (:id, :serial)\""),
                 "the app-assigned UUID id must be an INSERT column:" + System.lineSeparator() + badge);
         assertTrue(badge.contains(
@@ -757,8 +748,7 @@ class WriteEmissionTest {
         // Long-id byte parity: the keyholder emission is textually identical to the shape it had
         // before generated-key coercion became id-aware.
         // (Integer byte parity is pinned by collectionLoaderKeyFollowsIntegerIdType above.)
-        String widget = Files.readString(generatedDir.resolve("appkey/WidgetRepositoryImpl.java"))
-                .replace("\\\"", "\"").replaceAll("\\s+", " ");
+        String widget = sqlFlat(generatedDir.resolve("appkey/WidgetRepositoryImpl.java"));
         assertTrue(widget.contains("SQL_INSERT = \"INSERT INTO \"widget\" (\"name\") VALUES (:name)\""),
                 "Long id keeps the identity column omitted:" + System.lineSeparator() + widget);
         assertTrue(widget.contains("GeneratedKeyHolder keys = new GeneratedKeyHolder(); jdbcClient.sql(SQL_INSERT)"
@@ -769,8 +759,7 @@ class WriteEmissionTest {
         // Ruled narrowing: Short (with the other ex-allowlisted Number types) now takes the
         // application-assigned shape — this leg names the ruling so the suite cannot mistake
         // it for an accident.
-        String segment = Files.readString(generatedDir.resolve("appkey/SegmentRepositoryImpl.java"))
-                .replace("\\\"", "\"").replaceAll("\\s+", " ");
+        String segment = sqlFlat(generatedDir.resolve("appkey/SegmentRepositoryImpl.java"));
         assertTrue(segment.contains(
                         "jdbcClient.sql(SQL_INSERT).param(\"id\", entity.getId()).param(\"code\", entity.getCode()).update()"),
                 "Short id takes the application-assigned shape:" + System.lineSeparator() + segment);
@@ -855,8 +844,7 @@ class WriteEmissionTest {
         compile(sourceDir, classesDir, generatedDir,
                 "Machine.java", "Part.java", "MachineRepository.java", "PartRepository.java");
 
-        String impl = Files.readString(generatedDir.resolve("casc/MachineRepositoryImpl.java"))
-                .replace("\\\"", "\"").replaceAll("\\s+", " ");
+        String impl = sqlFlat(generatedDir.resolve("casc/MachineRepositoryImpl.java"));
 
         // Child INSERT constant: the child's OWN SqlBuilder insert (identity omitted, ALL child columns
         // incl. the inverse fk), byte-equal to what PartRepository would emit for the same descriptor.
@@ -893,7 +881,9 @@ class WriteEmissionTest {
         assertFalse(impl.contains("SQL_DELETE_PARTS).param(\"owner_id\", entity.getId()).update(); for (Part item : entity.getParts())"),
                 "the child set must no longer be deleted before it is written:" + System.lineSeparator() + impl);
         // deleteById cascade: children first (id value bound directly), then the root row.
-        assertTrue(impl.contains("public void deleteById(Long id) { jdbcClient.sql(SQL_DELETE_PARTS).param(\"owner_id\", id).update(); jdbcClient.sql(SQL_DELETE).param(\"id\", id).update(); }"),
+        String deleteByIdCascade = bodyOf(impl, "public void deleteById(Long id) {");
+        assertTrue(deleteByIdCascade.contains("jdbcClient.sql(SQL_DELETE_PARTS).param(\"owner_id\", id).update();"
+                        + " jdbcClient.sql(SQL_DELETE).param(\"id\", id).update();"),
                 "deleteById must remove cascaded children before the root:" + System.lineSeparator() + impl);
     }
 
@@ -962,8 +952,7 @@ class WriteEmissionTest {
         compile(sourceDir, classesDir, generatedDir,
                 "Device.java", "Module.java", "DeviceRepository.java", "ModuleRepository.java");
 
-        String impl = Files.readString(generatedDir.resolve("cascnone/DeviceRepositoryImpl.java"))
-                .replace("\\\"", "\"").replaceAll("\\s+", " ");
+        String impl = sqlFlat(generatedDir.resolve("cascnone/DeviceRepositoryImpl.java"));
 
         // Read side UNCHANGED: the managed/mapped EntityCollection still gets its hydration loader.
         assertTrue(impl.contains("private void hydrateModules"),
@@ -979,7 +968,9 @@ class WriteEmissionTest {
                 "no child-table write statement may appear for an @Entity owner:"
                         + System.lineSeparator() + impl);
         // deleteById is the bare root delete (children-first cascade suppressed).
-        assertTrue(impl.contains("public void deleteById(Long id) { jdbcClient.sql(SQL_DELETE).param(\"id\", id).update(); }"),
+        String deleteRootOnly = bodyOf(impl, "public void deleteById(Long id) {");
+        assertTrue(deleteRootOnly.contains("jdbcClient.sql(SQL_DELETE).param(\"id\", id).update();")
+                        && !deleteRootOnly.contains("SQL_DELETE_MODULES"),
                 "deleteById must delete ONLY the root row for an @Entity owner:" + System.lineSeparator() + impl);
     }
 
@@ -1291,7 +1282,7 @@ class WriteEmissionTest {
         assertTrue(saveAll.contains("if (entity.getId() == null) {") && saveAll.contains("SQL_UPSERT"),
                 "saveAll must keep the insert-or-upsert choice per entity, not pick one:"
                         + System.lineSeparator() + saveAll);
-        assertTrue(saveAll.trim().endsWith("return entities; }"),
+        assertTrue(saveAll.contains("return entities;"),
                 "saveAll must hand back the same list it was given:" + System.lineSeparator() + saveAll);
 
         // insertAll has no choice to make: every entity is new, so every one takes the keyholder path.
@@ -1383,8 +1374,7 @@ class WriteEmissionTest {
 
         compile(sourceDir, classesDir, generatedDir, "Stub.java", "StubRepository.java");
 
-        String impl = Files.readString(generatedDir.resolve("appidonly/StubRepositoryImpl.java"))
-                .replace("\\\"", "\"").replaceAll("\\s+", " ");
+        String impl = sqlFlat(generatedDir.resolve("appidonly/StubRepositoryImpl.java"));
         assertTrue(impl.contains("SQL_INSERT = \"INSERT INTO \"stub\" DEFAULT VALUES\""),
                 "an entity with nothing to bind must insert a row of all defaults:"
                         + System.lineSeparator() + impl);

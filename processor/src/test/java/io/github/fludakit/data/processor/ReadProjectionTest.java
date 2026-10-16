@@ -149,8 +149,7 @@ class ReadProjectionTest {
 
         // ---- relationship hydration loaders (managed targets rel.Child / rel.Parent) ----
         // Normalise JavaPoet's escaped quotes and soft wraps so the SQL string literals pin verbatim.
-        String parentImpl = Files.readString(generatedDir.resolve("rel/ParentRepositoryImpl.java"))
-                .replace("\\\"", "\"");
+        String parentImpl = sqlFlat(generatedDir.resolve("rel/ParentRepositoryImpl.java"));
         // ONE_TO_MANY (Parent.children, inverse "owner" → fk "owner_id" on the child's own table):
         // single-phase, group by the inverse fk, delegate to the child's generated entity RowMapper.
         assertTrue(parentImpl.contains("private void hydrateChildren(Collection<Parent> parents)"),
@@ -217,8 +216,7 @@ class ReadProjectionTest {
         // Child.owner is a composing MANY_TO_ONE into the managed rel.Parent, so the CHILD side is
         // JOIN-projected too: no hydrateOwner loader, a joined constant carrying the owner's leaves,
         // and its own joined row mapper.
-        String childImpl = Files.readString(generatedDir.resolve("rel/ChildRepositoryImpl.java"))
-                .replace("\\\"", "\"");
+        String childImpl = sqlFlat(generatedDir.resolve("rel/ChildRepositoryImpl.java"));
         assertTrue(!childImpl.contains("hydrateOwner"),
                 "a composing many-to-one must not get a loader on the child side:"
                         + System.lineSeparator() + childImpl);
@@ -758,8 +756,7 @@ class ReadProjectionTest {
         compile(sourceDir, classesDir, generatedDir,
                 "GeoPoint.java", "Address.java", "Author.java", "Book.java", "Books.java");
 
-        String impl = Files.readString(generatedDir.resolve("dsort/BooksImpl.java"))
-                .replaceAll("\\s+", " ");
+        String impl = sqlFlat(generatedDir.resolve("dsort/BooksImpl.java"));
 
         // (1) The compile-time string-switch helper is gone; the generated per-entity resolve()
         //     switch on the descriptor replaces it — there is no per-repository resolver left.
@@ -793,9 +790,9 @@ class ReadProjectionTest {
                 "OFFSET statement must pick the qualified constant when joins are present:" + System.lineSeparator() + impl);
         // The qualified constant exists and qualifies EVERY root column (labels stay bare, so the
         // existing row mapper reads both variants).
-        assertTrue(impl.contains("SELECT \\\"book\\\".\\\"id\\\", \\\"book\\\".\\\"title\\\", \\\"book\\\".\\\"address_city\\\","
-                        + " \\\"book\\\".\\\"address_point_lat\\\", \\\"book\\\".\\\"address_point_lng\\\","
-                        + " \\\"book\\\".\\\"author_id\\\" FROM \\\"book\\\""),
+        assertTrue(impl.contains("SELECT \"book\".\"id\", \"book\".\"title\", \"book\".\"address_city\","
+                        + " \"book\".\"address_point_lat\", \"book\".\"address_point_lng\","
+                        + " \"book\".\"author_id\" FROM \"book\""),
                 "SQL_FIND_ALL_QUALIFIED must list root-table-qualified columns:" + System.lineSeparator() + impl);
     }
 
@@ -1142,7 +1139,7 @@ class ReadProjectionTest {
         assertTrue(!mapper.contains("partial_Payment") && !mapper.contains("setPayment"),
                 "a composition reference is never read by the row mapper (loader-fills):" + System.lineSeparator() + mapper);
 
-        String impl = Files.readString(generatedDir.resolve("assoc/OrdersImpl.java")).replace("\\\"", "\"");
+        String impl = sqlFlat(generatedDir.resolve("assoc/OrdersImpl.java"));
         // A composing to-one is JOIN-projected onto the owner's own row, so the composition gets NO
         // two-phase loader: the joined constant carries the target's labelled leaves and the shared
         // joined mapper materializes the target from them. Order has no to-many, so no umbrella either.
@@ -1566,7 +1563,7 @@ class ReadProjectionTest {
 
         compile(sourceDir, classesDir, generatedDir, "Book.java", "Shelf.java");
 
-        String impl = Files.readString(generatedDir.resolve("demo3/ShelfImpl.java"));
+        String impl = sqlFlat(generatedDir.resolve("demo3/ShelfImpl.java"));
         assertTrue(impl.contains("SqlDialect SQL_DIALECT = H2Dialect.INSTANCE"),
                 "generated SQL hooks must be centralized behind the dialect field:"
                         + System.lineSeparator() + impl);

@@ -10,8 +10,10 @@ import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
 import io.github.fludakit.data.processor.analysis.TypeShapes;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.analysis.EntityRelationship;
+import io.github.fludakit.data.processor.generator.rowmapper.RowWrites;
 import io.github.fludakit.data.processor.analysis.WriteCascade;
 import io.github.fludakit.data.processor.support.Diagnostics;
+import io.github.fludakit.data.processor.support.GeneratedKeyCoercion;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.sql.SqlBuilder;
 import io.github.fludakit.data.sql.SqlDialect;
@@ -77,7 +79,7 @@ public final class WriteMethodEmitter {
     public void emitSave(MethodSpec.Builder builder, ExecutableElement method, String value,
                           TypeMapping<?> entity, Map<String, String> constants,
                           WriteCascade cascade) {
-        if (RowWrites.idKeyCoercion(typeMappingBuilder.memberType(entity.typeName(), entity.id().name())) == null) {
+        if (GeneratedKeyCoercion.forIdType(typeMappingBuilder.memberType(entity.typeName(), entity.id().name())) == null) {
             // The null-id discrimination routes an application-assigned entity with no id yet into an
             // INSERT that would bind NULL into the identity column — warn and keep compiling.
             diagnostics.note(
@@ -153,7 +155,7 @@ public final class WriteMethodEmitter {
 
     private void appendRootInsertAndChildInserts(MethodSpec.Builder builder, String value, TypeMapping<?> entity,
                                                  Map<String, String> constants, WriteCascade cascade) {
-        String coercion = RowWrites.idKeyCoercion(typeMappingBuilder.memberType(entity.typeName(), entity.id().name()));
+        String coercion = GeneratedKeyCoercion.forIdType(typeMappingBuilder.memberType(entity.typeName(), entity.id().name()));
         if (coercion == null) {
             // An id type no GeneratedKeyHolder key can produce (String, UUID, ...) is
             // application-assigned: the identity column joins the INSERT and binds from the entity, so

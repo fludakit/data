@@ -223,10 +223,54 @@ final class ProcessorHarness {
                 """);
     }
 
-    /** Normalises a generated source for SQL-constant pins: unescapes quoted string literals and
-     *  folds whitespace so a JavaPoet soft wrap cannot break the pin. */
+    /**
+     * Reads a generated source for SQL-constant pins. It parses the JAVA, never the SQL: each literal is
+     * collapsed to its single-line logical value — a {@code """...""" } text block joins its clause lines
+     * into one quoted literal, an ordinary {@code "..."} (a runtime splice fragment, kept single-line by
+     * the formatter) is taken verbatim — then string escapes are undone and whitespace runs folded, so
+     * neither a JavaPoet soft wrap nor the clause-per-line layout breaks the pin. The formatting itself
+     * is owned by {@code SqlFormatter}; this only reads it back.
+     */
     static String sqlFlat(Path generatedFile) throws Exception {
-        return Files.readString(generatedFile).replace("\\\"", "\"").replaceAll("\\s+", " ");
+        return collapseLiterals(Files.readString(generatedFile))
+                .replace("\\\"", "\"")
+                .replaceAll("\\s+", " ");
+    }
+
+    /** Replace every text block with a single-line quoted literal; leave ordinary literals untouched. */
+    private static String collapseLiterals(String source) {
+        StringBuilder out = new StringBuilder(source.length());
+        int i = 0;
+        int n = source.length();
+        while (i < n) {
+            if (source.startsWith("\"\"\"", i)) {
+                int end = source.indexOf("\"\"\"", i + 3);
+                if (end < 0) {
+                    out.append(source.substring(i));
+                    break;
+                }
+                out.append('"').append(source.substring(i + 3, end).trim()).append('"');
+                i = end + 3;
+            } else if (source.charAt(i) == '"') {
+                int end = i + 1;
+                while (end < n) {
+                    char c = source.charAt(end);
+                    if (c == '\\') {
+                        end += 2;
+                    } else if (c == '"') {
+                        break;
+                    } else {
+                        end++;
+                    }
+                }
+                out.append(source, i, Math.min(end + 1, n));
+                i = Math.min(end + 1, n);
+            } else {
+                out.append(source.charAt(i));
+                i++;
+            }
+        }
+        return out.toString();
     }
 
     /**

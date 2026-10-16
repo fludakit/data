@@ -2,13 +2,13 @@ package io.github.fludakit.data.processor.generator.rowmapper;
 
 import com.squareup.javapoet.CodeBlock;
 import com.squareup.javapoet.MethodSpec;
-import com.squareup.javapoet.TypeName;
 import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
 import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
 import io.github.fludakit.data.processor.generator.SqlConstants;
+import io.github.fludakit.data.processor.support.GeneratedKeyCoercion;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.sql.SqlBuilder;
 import io.github.fludakit.data.sql.SqlDialect;
@@ -61,7 +61,8 @@ public final class RowWrites {
     public void appendRowWrite(MethodSpec.Builder builder, String value, TypeMapping<?> model,
                                 Map<String, String> constants, String insertName, String upsertName,
                                 String updateName, String keysVar) {
-        String coercion = idKeyCoercion(typeMappingBuilder.memberType(model.typeName(), model.id().name()));
+        String coercion = GeneratedKeyCoercion.forIdType(
+                typeMappingBuilder.memberType(model.typeName(), model.id().name()));
         builder.beginControlFlow("if ($L == null)", value + "." + MemberNames.getter(model.id().name()) + "()");
         if (coercion == null) {
             // An id type no GeneratedKeyHolder key can produce is application-assigned: the identity
@@ -112,14 +113,6 @@ public final class RowWrites {
             sql.add(".update()");
         }
         builder.addStatement("$L", sql.build());
-    }
-
-    public static String idKeyCoercion(TypeName idType) {
-        return switch (idType.box().toString()) {
-            case "java.lang.Long" -> "longValue";
-            case "java.lang.Integer" -> "intValue";
-            default -> null;
-        };
     }
 
     public void appendChildColumnParams(CodeBlock.Builder params, TypeMapping<?> mapping, String entityVar,

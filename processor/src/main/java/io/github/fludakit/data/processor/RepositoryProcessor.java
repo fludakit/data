@@ -1,6 +1,5 @@
 package io.github.fludakit.data.processor;
 
-import com.squareup.javapoet.ClassName;
 import io.github.fludakit.data.processor.analysis.EntityAnalysis;
 import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
 import io.github.fludakit.data.processor.generator.metadata.MetamodelGenerator;
@@ -55,7 +54,6 @@ import java.util.Set;
 public class RepositoryProcessor extends AbstractProcessor {
 
     private SqlDialect sqlDialect = H2Dialect.INSTANCE;
-    private ClassName dialectClass = ClassName.get(H2Dialect.class);
 
     /** Everything this session has already emitted or claimed a name for — survives rounds. */
     private final GeneratedArtifactRegistry registry = new GeneratedArtifactRegistry();
@@ -90,15 +88,12 @@ public class RepositoryProcessor extends AbstractProcessor {
         String name = processingEnv.getOptions().get("fluda.dialect");
         if (name == null || name.isBlank() || "h2".equalsIgnoreCase(name)) {
             sqlDialect = H2Dialect.INSTANCE;
-            dialectClass = ClassName.get(H2Dialect.class);
         } else if ("postgres".equalsIgnoreCase(name) || "postgresql".equalsIgnoreCase(name)) {
             sqlDialect = PostgreSqlDialect.INSTANCE;
-            dialectClass = ClassName.get(PostgreSqlDialect.class);
         } else {
             processingEnv.getMessager().printMessage(Diagnostic.Kind.WARNING,
                     "Unknown SQL dialect '" + name + "' — falling back to h2");
             sqlDialect = H2Dialect.INSTANCE;
-            dialectClass = ClassName.get(H2Dialect.class);
         }
         this.diagnostics = Diagnostics.of(processingEnv.getMessager());
     }
@@ -120,7 +115,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             sourceWriter = new RepositorySourceWriter(processingEnv.getFiler(), diagnostics,
                     registry.claimedNames());
         }
-        this.wiring = new RoundWiring(processingEnv, sqlDialect, dialectClass, registry,
+        this.wiring = new RoundWiring(processingEnv, sqlDialect, registry,
                 typeMappingBuilder, sourceWriter, roundEnv);
         boolean claimed = false;
         for (TypeElement repository : wiring.repositories()) {

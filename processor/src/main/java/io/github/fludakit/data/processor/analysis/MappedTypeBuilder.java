@@ -28,6 +28,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /** Builds and memoizes the compile-time entity and value-object models used by repository generation. */
@@ -302,6 +303,66 @@ public final class MappedTypeBuilder {
     }
 
     /**
+     * Re-points the relationship targets a mid-cycle build captured as placeholders. While one
+     * descriptor is in progress {@link #descriptorFor} returns an empty stand-in, so a
+     * {@link Prop.Reference} or {@link Prop.EntityCollection} on an entity built BEFORE its cyclic
+     * partner bakes a target with no id — and, for the collection, a null inverse. Once every
+     * managed entity is complete those names resolve to real models; this pass rebuilds each managed
+     * entity against them so the JOIN projection, the read loaders and the {@code value} switch no
+     * longer silently drop the relation. A model whose props already resolve unchanged is left
+     * untouched, so a non-cyclic mapping stays byte-identical.
+     */
+    public void reconcileRelationships(Set<String> managedEntities) {
+        for (String fqn : managedEntities) {
+            TypeMapping<?> model = descriptorCache.get(fqn);
+            if (model == null || model.id() == null) {
+                continue;
+            }
+            List<Prop> props = model.props();
+            List<Prop> reconciled = new ArrayList<>(props.size());
+            boolean changed = false;
+            for (Prop prop : props) {
+                Prop next = reconcileProp(model.typeName(), prop);
+                changed |= next != prop;
+                reconciled.add(next);
+            }
+            if (changed) {
+                descriptorCache.put(fqn, entityMapping(false, model.ownsAggregateLifecycle(),
+                        model.typeName(), model.tableName(), model.id(), List.copyOf(reconciled)));
+            }
+        }
+    }
+
+    /** The same prop with its target re-resolved against the completed cache, or itself when nothing moved. */
+    private Prop reconcileProp(String ownerTypeName, Prop prop) {
+        if (prop instanceof Prop.Reference reference) {
+            TypeMapping<?> real = descriptorCache.get(reference.targetTypeName());
+            if (real == null || real.id() == null || real == reference.target()) {
+                return reference;
+            }
+            return new Prop.Reference(reference.name(), reference.fkColumn(), reference.targetTypeName(),
+                    real, reference.composition(), reference.backReference());
+        }
+        if (prop instanceof Prop.EntityCollection collection) {
+            TypeMapping<?> real = descriptorCache.get(collection.targetTypeName());
+            if (real == null || real.id() == null) {
+                return collection;
+            }
+            String inverse = collection.inverseName() != null
+                    ? collection.inverseName() : findInverseName(ownerTypeName, real);
+            String inverseFk = collection.inverseFkColumn() != null
+                    ? collection.inverseFkColumn()
+                    : (inverse == null ? null : Names.fkColumn(inverse));
+            if (real == collection.target() && Objects.equals(inverse, collection.inverseName())
+                    && Objects.equals(inverseFk, collection.inverseFkColumn())) {
+                return collection;
+            }
+            return new Prop.EntityCollection(collection.name(), real, inverse, inverseFk);
+        }
+        return prop;
+    }
+
+    /**
      * Whether {@code element} declares or inherits a method called {@code methodName}.
      *
      * <p>Generated code calls an accessor only after this check, so a bean-less type degrades to a
@@ -386,7 +447,7 @@ public final class MappedTypeBuilder {
         String placement = parentTable + '#' + field;
         ElementCollectionValueObjectMapping<?> cached = elementCollectionCache.get(placement);
         if (cached != null) {
-            return new Prop.ElementCollection(field, cached, cached.columns());
+            return new Prop.ElementCollection(field, cached);
         }
         String childTable = Names.childTable(parentTable, field);
         String parentFk = Names.fkColumn(parentTable);
@@ -397,7 +458,7 @@ public final class MappedTypeBuilder {
                 : new ElementCollectionValueObjectMapping<>(model.typeName(), childTable, parentFk,
                         model.props());
         elementCollectionCache.put(placement, target);
-        return new Prop.ElementCollection(field, target, target.columns());
+        return new Prop.ElementCollection(field, target);
     }
 
     /**

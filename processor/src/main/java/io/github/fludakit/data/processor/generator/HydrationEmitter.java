@@ -14,7 +14,9 @@ import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
 import io.github.fludakit.data.processor.analysis.EntityRelationship;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.sql.SqlDialect;
+import io.github.fludakit.data.support.DataExceptions;
 import io.github.fludakit.jdbc.JdbcClient;
+import io.github.fludakit.jdbc.JdbcClientException;
 
 import javax.lang.model.element.Modifier;
 import java.util.List;
@@ -162,6 +164,7 @@ public final class HydrationEmitter {
                         + "children's own relationships are not hydrated.\n", field)
                 .addModifiers(Modifier.PRIVATE)
                 .addParameter(ParameterizedTypeName.get(ClassName.get(java.util.Collection.class), entityType), "parents");
+        loader.beginControlFlow("try");
         loader.beginControlFlow("if (parents.isEmpty())").addStatement("return").endControlFlow();
         loader.addStatement("$T keys = new $T<>()", parentKeyList, java.util.ArrayList.class);
         loader.beginControlFlow("for ($T parent : parents)", entityType);
@@ -192,6 +195,9 @@ public final class HydrationEmitter {
         loader.beginControlFlow("for ($T parent : parents)", entityType);
         loader.addStatement("parent.$L(grouped.getOrDefault(parent.$L(), new $T<>()))",
                 MemberNames.setter(field), MemberNames.getter(entity.id().name()), java.util.ArrayList.class);
+        loader.endControlFlow();
+        loader.nextControlFlow("catch ($T e)", JdbcClientException.class);
+        loader.addStatement("throw $T.translate(e)", DataExceptions.class);
         loader.endControlFlow();
 
         return loader.build();

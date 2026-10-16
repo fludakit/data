@@ -44,6 +44,12 @@ public final class Literals {
     public static final ClassName Q_SEEK_TERM =
             ClassName.get("io.github.fludakit.data.query", "SeekTerm");
 
+    // the metadata types columnRefLiteral / joinEdgeLiteral spell into a generated descriptor.
+    private static final ClassName MD_COLUMN_REF =
+            ClassName.get("io.github.fludakit.data.metadata", "ColumnRef");
+    private static final ClassName MD_JOIN_EDGE =
+            ClassName.get("io.github.fludakit.data.metadata", "JoinEdge");
+
     private Literals() {
     }
 
@@ -154,11 +160,12 @@ public final class Literals {
                     entityCollection.name(), entityCollection.inverseName(), entityCollection.inverseFkColumn());
         }
         if (prop instanceof Prop.ElementCollection elementCollection) {
-            // Only the TARGET is null: the descriptor publishes placements, not the transitive
-            // mapping — and the child table / parent FK live on that target, which is the value
-            // object placed on them. The flattened elementColumns carry the child table themselves.
-            return CodeBlock.of("new $T($S, null, $L)", propClass.nestedClass("ElementCollection"),
-                    elementCollection.name(), columnRefList(elementCollection.elementColumns()));
+            // The target is null exactly as for Reference / Embedded / EntityCollection: the descriptor
+            // publishes placements, not the transitive mapping, and the child table / parent FK /
+            // flattened columns all come from the overridden columnRefs() / columns(). Nothing at
+            // runtime reads a descriptor prop's elementColumns, so the prop carries only its name.
+            return CodeBlock.of("new $T($S, null)", propClass.nestedClass("ElementCollection"),
+                    elementCollection.name());
         }
         throw new IllegalStateException("unknown property kind: " + prop.getClass().getName());
     }

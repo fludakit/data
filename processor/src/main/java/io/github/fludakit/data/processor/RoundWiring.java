@@ -88,7 +88,7 @@ public class RoundWiring {
     private final RepositoryGenerator generator;
     private final List<TypeElement> repositories;
 
-    public RoundWiring(ProcessingEnvironment processingEnv, SqlDialect sqlDialect, ClassName dialectClass,
+    public RoundWiring(ProcessingEnvironment processingEnv, SqlDialect sqlDialect,
                 GeneratedArtifactRegistry registry, MappedTypeBuilder typeMappingBuilder,
                 RepositorySourceWriter sourceWriter, RoundEnvironment roundEnv) {
         this.types = processingEnv.getTypeUtils();
@@ -123,8 +123,10 @@ public class RoundWiring {
         // the mapper it builds is handed back to the caller.
         this.joinedProjections = new JoinedProjectionEmitter(typeMappingBuilder, sqlDialect);
         // Both writers are built after init() has settled the dialect: the impl shell pins it as
-        // its SQL_DIALECT field, and neither writer survives a round.
-        this.repositoryWriter = new RepositoryShellEmitter(sourceWriter, dialectClass);
+        // its SQL_DIALECT field, and neither writer survives a round. The shell names the dialect's
+        // own singleton (dialectClass.INSTANCE), which is the concrete class of the instance itself.
+        this.repositoryWriter = new RepositoryShellEmitter(sourceWriter,
+                ClassName.get(sqlDialect.getClass()));
         this.queriesWriter = new QueriesWriter(sourceWriter);
         // The descriptor emitter is the only writer of metadataTypes; it resolves value objects through
         // the mapping builder and writes through the source writer, so it never sees the Filer.
@@ -152,17 +154,19 @@ public class RoundWiring {
                 metamodelGenerator, rowMapperGenerator, registry);
         // The method compiler is built last: it reads a method DECLARATION through every collaborator
         // above (the descriptor registry for dynamic paging, the write emitter for the CRUD writes, the
-        // plan compiler for query-by-names), and it emits no source of its own.
+        // plan compiler for query-by-names), and it emits no source of its own. It publishes each
+        // structured read's query definition into the session registry, keyed by repository FQN.
         this.methodCompiler = new RepositoryMethodCompiler(typeShapes, typeMappingBuilder, diagnostics, sqlDialect,
-                pathResolver, queryPlanCompiler, metadataGenerator, writeMethodEmitter, joinedProjections);
+                pathResolver, queryPlanCompiler, metadataGenerator, writeMethodEmitter, joinedProjections, registry);
         // Like the write emitter, built after init() settled the dialect: the loader column lists are
         // quoted through it.
         this.hydrationEmitter = new HydrationEmitter(sqlDialect, attributeTypes, typeMappingBuilder);
         // Built after the round pre-scan (it captures THIS round's managed-entity set) and after the
         // mapper generator (it asks for a relationship target's row mapper through it).
-        // Before constructing the load planner, pre-generate all row mappers for managed entities
-        // so the planner can read from the cache without triggering generation.
-        entityAnalysis.preGenerateRowMappers(registry.managedEntities(), new java.util.HashMap<>());
+        // Before constructing the load planner, pre-generate all row mappers (and each managed
+        // entity's element-collection VO mappers) so the planner can read from the cache without
+        // triggering generation.
+        entityAnalysis.preGenerateRowMappers(registry.managedEntities());
         this.loadPlanner = new RelationshipLoadPlanner(diagnostics, typeMappingBuilder,
                 registry, registry.managedEntities());
         // No artifact generation from the write side: a cascade member needs only the target's

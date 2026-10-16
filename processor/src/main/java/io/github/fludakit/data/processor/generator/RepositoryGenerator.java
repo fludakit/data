@@ -13,6 +13,7 @@ import io.github.fludakit.data.processor.generator.RepositoryEmission;
 import io.github.fludakit.data.processor.analysis.RepositoryFlavour;
 import io.github.fludakit.data.processor.analysis.WriteCascade;
 import io.github.fludakit.data.processor.support.MemberNames;
+import io.github.fludakit.data.query.QueryDefinition;
 import javax.lang.model.element.Element;
 import javax.lang.model.element.ElementKind;
 import javax.lang.model.element.ExecutableElement;
@@ -25,6 +26,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * One {@code @Repository} interface → its {@code <Repository>Impl} (and, when it declares at least one
@@ -131,7 +133,8 @@ public class RepositoryGenerator {
         // and asking per method meant two supertype walks for every abstract member.
         RepositoryFlavour flavour = wiring.repositoryTypeResolver().flavourOf(repository);
         return new RepositoryEmission(entity, flavour, new LinkedHashMap<>(), mapperType, hydrate, crudFullMapper,
-                joinedReferences, new ArrayList<>(), new ArrayList<>(), new HashMap<>(), cascade);
+                joinedReferences, new ArrayList<>(), repository.getQualifiedName().toString(), new HashMap<>(),
+                cascade);
     }
 
     /**
@@ -218,9 +221,11 @@ public class RepositoryGenerator {
         String implementationName = repository.getSimpleName() + "Impl";
         wiring.repositoryWriter().write(repository, packageName, implementationName,
                 emission.constants(), emission.auxMethods());
-        if (!emission.queryDefinitions().isEmpty()) {
+        Map<String, QueryDefinition.Criteria> queryDefinitions =
+                wiring.registry().queryDefinitions(emission.repositoryFqn());
+        if (!queryDefinitions.isEmpty()) {
             wiring.queriesWriter().write(repository, packageName,
-                    repository.getSimpleName() + "Queries", emission.queryDefinitions());
+                    repository.getSimpleName() + "Queries", queryDefinitions);
         }
     }
 }

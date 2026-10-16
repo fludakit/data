@@ -9,6 +9,8 @@ import io.github.fludakit.data.processor.generator.rowmapper.RowMapperGenerator;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.support.GeneratedArtifactRegistry;
 import javax.lang.model.element.TypeElement;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -23,7 +25,7 @@ import java.util.Set;
  *
  * <ol>
  *   <li><strong>Analysis phase</strong> — {@link #buildEntity(TypeElement)} reads metadata and builds
- *       the compile-time model. {@link #preGenerateRowMappers(Set, Set)} pre-generates row mappers
+ *       the compile-time model. {@link #preGenerateRowMappers(Set)} pre-generates row mappers
  *       for all managed entities, populating the cache before any planning occurs.</li>
  *   <li><strong>Generation phase</strong> — {@link #ensureDescriptorArtifacts} and
  *       {@link #ensureEntityRowMapper} generate artifacts on demand, reading from the cache first.
@@ -103,21 +105,43 @@ public class EntityAnalysis {
     }
 
     /**
-     * Pre-generates row mappers for all managed entities during the analysis phase. This populates
-     * the cache so that planners (e.g., {@link RelationshipLoadPlanner}) can read from it without
-     * triggering generation.
+     * Pre-generates row mappers for all managed entities — and, for each entity's element
+     * collections, the {@code <VO>RowMapper} that read hydration delegates to — during the analysis
+     * phase. This populates the cache so that planners (e.g., {@link RelationshipLoadPlanner}) can read
+     * from it without triggering generation. A value object that fails the reflection-free gate records
+     * its NOTE here and gets no mapper, so its collection stays unhydrated rather than failing the
+     * repository.
      *
      * @param managedEntities the set of entity FQNs managed in this round
-     * @param voMappers pre-computed map of value object element collection name → row mapper ClassName
      */
-    public void preGenerateRowMappers(Set<String> managedEntities, java.util.Map<String, ClassName> voMappers) {
+    public void preGenerateRowMappers(Set<String> managedEntities) {
+        // Build every managed entity's model FIRST. A cyclic relationship makes one partner resolve
+        // the other while it is still in progress, capturing an empty placeholder as its target; the
+        // whole graph must be cached before anything resolves through it.
+        for (String entityFqn : managedEntities) {
+            TypeElement entityElement = typeMappingBuilder.elementFor(entityFqn);
+            if (entityElement != null) {
+                typeMappingBuilder.descriptorFor(entityElement);
+            }
+        }
+        // Re-point those placeholder targets against the now-complete cache before a mapper,
+        // descriptor or loader reads them.
+        typeMappingBuilder.reconcileRelationships(managedEntities);
+
+        Map<String, ClassName> voMappers = new LinkedHashMap<>();
         for (String entityFqn : managedEntities) {
             TypeElement entityElement = typeMappingBuilder.elementFor(entityFqn);
             if (entityElement == null) continue;
             TypeMapping<?> entity = typeMappingBuilder.descriptorFor(entityElement);
             ensureEntityRowMapper(entityElement, entity);
+            for (TypeMapping.Prop.ElementCollection collection : entity.elementCollections()) {
+                ClassName voMapper = rowMapperGenerator.voRowMapperFor(collection, entityElement);
+                if (voMapper != null) {
+                    voMappers.put(collection.name(), voMapper);
+                }
+            }
         }
-        // Store VO mappers in registry for planners to read
+        // Register each VO mapper under its collection name — the key the load planner looks up.
         voMappers.forEach(registry::rememberVoRowMapper);
     }
 

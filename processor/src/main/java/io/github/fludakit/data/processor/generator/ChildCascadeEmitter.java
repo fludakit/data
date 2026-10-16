@@ -11,6 +11,7 @@ import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
 import io.github.fludakit.data.processor.generator.rowmapper.RowWrites;
 import io.github.fludakit.data.processor.analysis.EntityRelationship;
 import io.github.fludakit.data.processor.analysis.WriteCascade;
+import io.github.fludakit.data.processor.support.GeneratedKeyCoercion;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.sql.SqlBuilder;
 import io.github.fludakit.data.sql.SqlDialect;
@@ -83,20 +84,6 @@ public final class ChildCascadeEmitter {
         }
     }
 
-    public static String entityCollectionWriteBlocker(TypeMapping<?> target,
-                                                      MappedTypeBuilder typeMappingBuilder) {
-        if (target.id() == null) {
-            return "target has no identity property";
-        }
-        if (target.tableName() == null) {
-            return "target table metadata is unresolved";
-        }
-        if (RowWrites.idKeyCoercion(typeMappingBuilder.memberType(target.typeName(), target.id().name())) == null) {
-            return "target id type " + typeMappingBuilder.memberType(target.typeName(), target.id().name()).box() + " is not generated-key coercible";
-        }
-        return null;
-    }
-
     public void appendEntityCollectionInsert(MethodSpec.Builder builder, String value, TypeMapping<?> entity,
                                               EntityRelationship relationship, Map<String, String> constants) {
         Prop.EntityCollection list = (Prop.EntityCollection) relationship.attribute();
@@ -127,7 +114,7 @@ public final class ChildCascadeEmitter {
         builder.addStatement("$L", sql.build());
         builder.beginControlFlow("if (childKeys.getKey() != null)");
         builder.addStatement("item.$L((($T) childKeys.getKey()).$L())", MemberNames.setter(target.id().name()),
-                Number.class, RowWrites.idKeyCoercion(typeMappingBuilder.memberType(target.typeName(), target.id().name())));
+                Number.class, GeneratedKeyCoercion.forIdType(typeMappingBuilder.memberType(target.typeName(), target.id().name())));
         builder.endControlFlow();
         builder.endControlFlow();
         builder.endControlFlow();
@@ -266,7 +253,7 @@ public final class ChildCascadeEmitter {
         builder.addStatement("$L", insertSql.build());
         builder.beginControlFlow("if (childKeys.getKey() != null)");
         builder.addStatement("item.$L((($T) childKeys.getKey()).$L())", MemberNames.setter(target.id().name()),
-                Number.class, RowWrites.idKeyCoercion(typeMappingBuilder.memberType(target.typeName(), target.id().name())));
+                Number.class, GeneratedKeyCoercion.forIdType(typeMappingBuilder.memberType(target.typeName(), target.id().name())));
         builder.endControlFlow();
         builder.endControlFlow();
         // A child the upsert/insert gave a key is not an orphan — remove it from the doomed set.

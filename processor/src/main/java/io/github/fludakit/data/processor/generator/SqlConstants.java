@@ -6,6 +6,12 @@ import java.util.Map;
  * The {@code private static final String SQL_...} constant registry every emitter writes into. One
  * registry per repository implementation: the emitter shares it with the read shapes, which is what
  * lets two methods that render the same statement share one constant instead of emitting a duplicate.
+ *
+ * <p>The registry stores the RAW assembled statement, exactly as the caller built it. Derived
+ * constants (the paged seek clause, the cascade DELETE) read a base back out of this map and splice
+ * onto it, so the stored form must be the plain single-line text they concatenate cleanly — the
+ * clause-per-line layout is applied only once, when the shell emitter writes the field. See
+ * {@link io.github.fludakit.data.sql.SqlFormatter}.</p>
  */
 public final class SqlConstants {
 

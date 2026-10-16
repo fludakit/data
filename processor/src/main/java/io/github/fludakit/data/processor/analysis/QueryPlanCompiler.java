@@ -4,7 +4,6 @@ import io.github.fludakit.data.metadata.ColumnPlacement;
 import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.RepositoryProcessor;
-import io.github.fludakit.data.processor.analysis.QueryPlan;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.qbn.ParsedMethodName;
 import io.github.fludakit.data.qbn.QueryByMethodNameParser;
@@ -37,7 +36,7 @@ import java.util.Map;
  * Turns ONE repository method declaration into the plan behind its SQL: the parsed method name, the
  * {@code @By}/{@code @OrderBy} annotations, the argument bindings, the {@link Predicate}s and
  * {@link SortSpec}s they become, the keyset seek terms a cursor uses, and the published
- * {@link QueryDefinitionSpec} that carries all of it into {@code <Repository>Queries}.
+ * {@link QueryDefinition.Criteria} that carries all of it into {@code <Repository>Queries}.
  *
  * <p>This is the only place the method NAME is interpreted. Two vocabularies feed it and they must
  * not mix: a query-by-method-name name is parsed, while an {@code @Find}/{@code @Delete} method is
@@ -208,7 +207,7 @@ public final class QueryPlanCompiler {
      * (E1's base constant drops sorts/limit at render time, so the
      * declared sorts stay in the model for introspection).
      */
-    public static QueryDefinition.Criteria queryDefinitionOf(String typeName, Operation operation,
+    public static QueryDefinition.Criteria queryDefinitionOf(Operation operation,
                                                   ResultKind kind, ResultKind resultKind,
                                                   QueryPlan plan, boolean distinct) {
         List<Predicate> logicalPredicates = new ArrayList<>();

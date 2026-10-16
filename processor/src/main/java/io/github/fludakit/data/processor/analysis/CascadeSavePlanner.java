@@ -3,9 +3,8 @@ package io.github.fludakit.data.processor.analysis;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 
 import io.github.fludakit.data.metadata.TypeMapping;
-import io.github.fludakit.data.processor.analysis.EntityRelationship;
-import io.github.fludakit.data.processor.analysis.WriteCascade;
 import io.github.fludakit.data.processor.support.Diagnostics;
+import io.github.fludakit.data.processor.support.GeneratedKeyCoercion;
 import javax.lang.model.element.TypeElement;
 import java.util.ArrayList;
 import java.util.List;
@@ -13,7 +12,7 @@ import java.util.List;
 /**
  * Decides WHAT an {@code @AggregateRoot} writes besides its own row: the entity collections it owns
  * and the to-one composition targets it owns. It decides membership only — the statements themselves
- * are spelled by {@link WriteMethodEmitter}.
+ * are spelled by the write emitters.
  *
  * <p>The write side is deliberately NOT the mirror image of the read side, which is why
  * {@code REFACTOR-PLAN.md} §4 keeps this class apart from {@link RelationshipLoadPlanner}:</p>
@@ -26,7 +25,7 @@ import java.util.List;
  *   <li><b>Write-gate decoupling.</b> Membership is computed from EVERY {@code EntityCollection} on
  *       the descriptor, NOT from the read-gate-passed relationships: the cascade INSERT/DELETE
  *       constants are plain SQL driven by the child's OWN table metadata and a
- *       generated-key-coercible id ({@link WriteMethodEmitter#entityCollectionWriteBlocker}), and
+ *       generated-key-coercible id ({@link #targetWriteBlocker}), and
  *       need no row mapper. A target that fails the managed/mapper READ gate loses only its
  *       hydration LOADER, never its write cascade.</li>
  * </ul>
@@ -45,6 +44,29 @@ public final class CascadeSavePlanner {
     public CascadeSavePlanner(Diagnostics diagnostics, MappedTypeBuilder typeMappingBuilder) {
         this.diagnostics = diagnostics;
         this.typeMappingBuilder = typeMappingBuilder;
+    }
+
+    /**
+     * Why one cascade target cannot be written as a plain-SQL child row, or {@code null} when it can.
+     *
+     * <p>A write cascade needs no row mapper — only that the target names a real table and carries a
+     * generated-key-coercible id (the {@code save}/{@code insert} path assigns that id from a
+     * {@code GeneratedKeyHolder}). This is a metadata predicate, so it lives on the planning side rather
+     * than the generator: both the entity-collection and composition write paths answer it here.</p>
+     */
+    private String targetWriteBlocker(TypeMapping<?> target) {
+        if (target.id() == null) {
+            return "target has no identity property";
+        }
+        if (target.tableName() == null) {
+            return "target table metadata is unresolved";
+        }
+        if (GeneratedKeyCoercion.forIdType(
+                typeMappingBuilder.memberType(target.typeName(), target.id().name())) == null) {
+            return "target id type " + typeMappingBuilder.memberType(target.typeName(), target.id().name()).box()
+                    + " is not generated-key coercible";
+        }
+        return null;
     }
 
     /**
@@ -80,7 +102,7 @@ public final class CascadeSavePlanner {
                         ? "target type " + targetFqn + " is unresolvable"
                         : list.inverseName() == null
                                 ? "one-to-many inverse is unresolved on the target"
-                                : ChildCascadeEmitter.entityCollectionWriteBlocker(targetModel, typeMappingBuilder);
+                                : targetWriteBlocker(targetModel);
                 if (blocker != null) {
                     diagnostics.note(
                             "entity collection '" + list.name() + "' on " + entityElement.getQualifiedName()
@@ -113,7 +135,7 @@ public final class CascadeSavePlanner {
                 TypeMapping<?> targetModel = typeMappingBuilder.descriptorFor(targetFqn);
                 String blocker = targetModel == null
                         ? "target type " + targetFqn + " is unresolvable"
-                        : ChildCascadeEmitter.entityCollectionWriteBlocker(targetModel, typeMappingBuilder);
+                        : targetWriteBlocker(targetModel);
                 if (blocker != null) {
                     diagnostics.note(
                             "composition reference '" + reference.name() + "' on "

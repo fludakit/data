@@ -395,21 +395,22 @@ public interface TypeMapping<T> extends TableSchema, ColumnResolver {
         }
 
         /**
-         * Value-object element collection stored in a child table. {@code elementColumns} contains
-         * the flattened element columns in write order.
+         * Value-object element collection stored in a child table.
          *
-         * <p>The child table and the parent FK are answered by the TARGET, which is the value object
-         * placed on them: a value object in an element collection really does have a table of its
-         * own, and the column linking it back to the owner is part of that placement, not of this
-         * prop. The prop keeps only the flattened column list, so the two views of the placement
-         * cannot drift apart.</p>
+         * <p>The child table, the parent FK and the flattened element columns are all answered by the
+         * TARGET, which is the value object placed on them: a value object in an element collection
+         * really does have a table of its own, the column linking it back to the owner is part of that
+         * placement, and the flattened columns are the target's own {@link ElementCollectionValueObjectMapping#columns()}.
+         * The prop stores only the target, so the two views of the placement cannot drift apart.</p>
          */
-        record ElementCollection(String name, ElementCollectionValueObjectMapping<?> target,
-                                 List<ColumnRef> elementColumns) implements Prop {
+        record ElementCollection(String name, ElementCollectionValueObjectMapping<?> target) implements Prop {
 
-            public ElementCollection {
-                elementColumns = elementColumns == null
-                        ? List.of() : List.copyOf(elementColumns);
+            /**
+             * The flattened element columns in write order — derived from the target, never stored
+             * separately, so it can never disagree with the placement that produced it.
+             */
+            public List<ColumnRef> elementColumns() {
+                return target == null ? List.of() : target.columns();
             }
 
             /** Element type, or {@code null} until resolved. */

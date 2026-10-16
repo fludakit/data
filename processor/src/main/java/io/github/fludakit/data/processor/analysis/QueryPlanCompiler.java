@@ -5,8 +5,6 @@ import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.RepositoryProcessor;
 import io.github.fludakit.data.processor.support.MemberNames;
-import io.github.fludakit.data.qbn.ParsedMethodName;
-import io.github.fludakit.data.qbn.QueryByMethodNameParser;
 import io.github.fludakit.data.query.LikePattern;
 import io.github.fludakit.data.query.LimitSpec;
 import io.github.fludakit.data.query.Operation;
@@ -80,7 +78,7 @@ public final class QueryPlanCompiler {
      */
     public ResolvedBindings resolvedBindings(List<? extends VariableElement> parameters,
                                               List<? extends TypeMirror> parameterTypes,
-                                              boolean explicitFind, ParsedMethodName parsed) {
+                                              boolean explicitFind, Object parsed) {
         List<Integer> indices = nonSpecialIndices(parameterTypes);
         List<Predicate> predicates = new ArrayList<>();
         List<ParamBinding> paramBindings = new ArrayList<>();
@@ -101,7 +99,8 @@ public final class QueryPlanCompiler {
             }
         } else if (explicitFind) {
             if (parsed != null) {
-                addParsedResolvedBindings(predicates, paramBindings, parameters, parsed.predicates(), indices);
+                addParsedResolvedBindings(predicates, paramBindings, parameters,
+                        ((io.github.fludakit.data.qbn.ParsedMethodName) parsed).predicates(), indices);
             } else {
                 for (int index : indices) {
                     String property = parameters.get(index).getSimpleName().toString();
@@ -110,7 +109,8 @@ public final class QueryPlanCompiler {
                 }
             }
         } else if (parsed != null) {
-            addParsedResolvedBindings(predicates, paramBindings, parameters, parsed.predicates(), indices);
+            addParsedResolvedBindings(predicates, paramBindings, parameters,
+                    ((io.github.fludakit.data.qbn.ParsedMethodName) parsed).predicates(), indices);
         }
         return new ResolvedBindings(predicates, paramBindings);
     }
@@ -151,10 +151,10 @@ public final class QueryPlanCompiler {
         }
     }
 
-    public List<SortSpec> sorts(ExecutableElement method, ParsedMethodName parsed) {
+    public List<SortSpec> sorts(ExecutableElement method, Object parsed) {
         List<SortSpec> sorts = new ArrayList<>();
         if (parsed != null) {
-            sorts.addAll(parsed.sorts());
+            sorts.addAll(((io.github.fludakit.data.qbn.ParsedMethodName) parsed).sorts());
         }
         for (OrderBy orderBy : method.getAnnotationsByType(OrderBy.class)) {
             String property = By.ID.equals(orderBy.value()) ? MemberNames.ID_PROPERTY : orderBy.value();
@@ -163,14 +163,14 @@ public final class QueryPlanCompiler {
         return sorts;
     }
 
-    public ParsedMethodName tryParse(String name) {
+    public Object tryParse(String name) {
         // A qbn-free prefix test: fluda-data-qbn is an OPTIONAL dependency, so the name is classified
         // before any qbn class is touched. RepositoryMethodValidator reports the diagnostics.
         if (!RepositoryMethodValidator.isQueryMethodName(name)) {
             return null;
         }
         try {
-            return new QueryByMethodNameParser().parse(name);
+            return new io.github.fludakit.data.qbn.QueryByMethodNameParser().parse(name);
         } catch (RuntimeException | LinkageError e) {
             // Unparseable name, or fluda-data-qbn absent from the annotation processor path.
             // RepositoryMethodValidator reports the diagnostic; there is nothing to emit.

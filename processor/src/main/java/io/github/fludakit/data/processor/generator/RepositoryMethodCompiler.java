@@ -22,7 +22,6 @@ import io.github.fludakit.data.processor.analysis.QueryPlan;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.support.GeneratedArtifactRegistry;
 import io.github.fludakit.data.processor.support.MemberNames;
-import io.github.fludakit.data.qbn.ParsedMethodName;
 import io.github.fludakit.data.query.Operation;
 import io.github.fludakit.data.query.ParamBinding;
 import io.github.fludakit.data.query.Predicate;
@@ -477,7 +476,7 @@ public final class RepositoryMethodCompiler {
      * the action from the name.
      */
     private record FindInput(String name, List<? extends VariableElement> parameters,
-                             ParsedMethodName parsed, Operation operation, boolean distinct,
+                             Object parsed, Operation operation, boolean distinct,
                              List<? extends TypeMirror> parameterTypes, List<ParamBinding> paramBindings,
                              TypeMirror returnMirror, ResultKind kind, String queryDefinitionName,
                              List<Predicate> predicates, List<ColumnPlacement> predicateRefs,
@@ -500,14 +499,14 @@ public final class RepositoryMethodCompiler {
         // Query-by-method-name IS the method name, so only an unannotated method is parsed. @Find and
         // @Query are annotation-driven — the opposite of QBN — so their name is never analyzed: the
         // criteria come from @By, or from the parameter names when @By is absent.
-        ParsedMethodName parsed = (explicitFind || explicitDelete) ? null : queryPlanCompiler.tryParse(name);
+        Object parsed = (explicitFind || explicitDelete) ? null : queryPlanCompiler.tryParse(name);
         // The operation is the name's own half — find/count/delete/exists — defaulted to a find when
         // the name carries no action (@Find, @Delete, or an unparseable name). Distinct likewise comes
         // from the name; only a find or a count can ask for it.
         Operation operation = explicitDelete ? Operation.DELETE
                 : explicitFind ? Operation.FIND
-                : parsed != null ? parsed.operation() : Operation.FIND;
-        boolean distinct = parsed != null && parsed.distinct()
+                : parsed != null ? ((io.github.fludakit.data.qbn.ParsedMethodName) parsed).operation() : Operation.FIND;
+        boolean distinct = parsed != null && ((io.github.fludakit.data.qbn.ParsedMethodName) parsed).distinct()
                 && (operation == Operation.FIND || operation == Operation.COUNT);
         List<? extends TypeMirror> parameterTypes = resolved.getParameterTypes();
         QueryPlanCompiler.ResolvedBindings resolvedBindings = queryPlanCompiler.resolvedBindings(parameters, parameterTypes, explicitFind || explicitDelete, parsed);
@@ -793,7 +792,7 @@ public final class RepositoryMethodCompiler {
             QueryDefinition.Criteria queryDefinition = publish(input,
                     new QueryPlan(ctx.entity(), input.predicates(), input.predicateRefs(), input.predicateAttributePaths(),
                             methodSorts, sortRefs, sortAttributePaths, existentialSorts,
-                            input.parsed() != null ? input.parsed().limit() : 0, input.paramBindings(), input.parameters()),
+                            input.parsed() != null ? ((io.github.fludakit.data.qbn.ParsedMethodName) input.parsed()).limit() : 0, input.paramBindings(), input.parameters()),
                     input.distinct(), Operation.FIND, input.kind(), input.kind());
             String sql = new SqlBuilder(ctx.entity(), ctx.entity(), queryDefinition)
                     .dialect(sqlDialect).select(extraProjection);

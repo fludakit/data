@@ -30,4 +30,27 @@ class TaskEnumTest {
         assertThat(reloaded.getTitle()).isEqualTo("Ship it");
         assertThat(reloaded.getStatus()).isEqualTo(Status.IN_PROGRESS);
     }
+
+    @Test
+    void defaultFindByStatusRunsTheHandWrittenQuery() {
+        Task triage = new Task();
+        triage.setTitle("Triage");
+        triage.setStatus(Status.OPEN);
+        tasks.insert(triage);
+
+        Task archive = new Task();
+        archive.setTitle("Archive");
+        archive.setStatus(Status.DONE);
+        tasks.insert(archive);
+
+        Task[] openTasks = tasks.findByStatus(Status.OPEN);
+        assertThat(openTasks).extracting(Task::getId).contains(triage.getId());
+        assertThat(openTasks).allSatisfy(task -> {
+            assertThat(task.getStatus()).isEqualTo(Status.OPEN);
+            assertThat(task.getTitle()).isNotBlank();
+        });
+
+        Task[] doneTasks = tasks.findByStatus(Status.DONE);
+        assertThat(doneTasks).extracting(Task::getId).containsExactly(archive.getId());
+    }
 }

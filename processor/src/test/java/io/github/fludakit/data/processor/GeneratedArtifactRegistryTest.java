@@ -70,7 +70,7 @@ class GeneratedArtifactRegistryTest {
         Map<String, ClassName> shared = registry.metadataTypes();
         assertFalse(registry.hasMetadata(ORDER));
 
-        // MetadataGenerator populates the map BEFORE it emits the class — it is the value-object cycle
+        // TypeMappingGenerator populates the map BEFORE it emits the class — it is the value-object cycle
         // guard, not a record of what is finished. Callers must see that write immediately.
         shared.put(ORDER, METADATA);
         assertTrue(registry.hasMetadata(ORDER),

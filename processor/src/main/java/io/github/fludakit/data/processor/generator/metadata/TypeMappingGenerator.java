@@ -17,7 +17,7 @@ import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.metadata.UnknownAttributePathException;
 
 import io.github.fludakit.data.processor.analysis.PathResolver;
-import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
+import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
 import io.github.fludakit.data.processor.generator.RepositorySourceWriter;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.support.MemberNames;
@@ -43,12 +43,12 @@ import java.util.Set;
  *
  * <p>Nothing here touches {@code Filer}: the source goes out through {@link RepositorySourceWriter},
  * which is also what registers the generated name. It holds no {@code Elements} either — resolving a
- * value-object element by name is {@link MappedTypeBuilder#elementFor(String)}, the one place a name
+ * value-object element by name is {@link TypeModelBuilder#elementFor(String)}, the one place a name
  * becomes a type, so a compile-time query no longer decides whether this emitter can be constructed.
  * A degraded path is reported through {@link Diagnostics}, which is swappable. The emitter never
  * reaches for {@code ProcessingEnvironment} itself.</p>
  */
-public final class MetadataGenerator {
+public final class TypeMappingGenerator {
 
     private static final ClassName MD_COLUMN_REF =
             ClassName.get("io.github.fludakit.data.metadata", "ColumnRef");
@@ -58,7 +58,7 @@ public final class MetadataGenerator {
             ClassName.get("io.github.fludakit.data.metadata", "ColumnPlacement");
 
     private final Diagnostics diagnostics;
-    private final MappedTypeBuilder typeMappingBuilder;
+    private final TypeModelBuilder typeMappingBuilder;
     private final PathResolver pathResolver;
     private final RepositorySourceWriter sourceWriter;
 
@@ -67,8 +67,10 @@ public final class MetadataGenerator {
      * reads it to wire row mappers and query builders to the descriptor; this class is its only writer.
      */
     private final Map<String, ClassName> metadataTypes;
+    /** The reflection-free {@code ValueAccess.value(...)} emitter, split from the descriptor structure. */
+    private final ValueAccessGenerator valueAccessGenerator;
 
-    public MetadataGenerator(Diagnostics diagnostics, MappedTypeBuilder typeMappingBuilder,
+    public TypeMappingGenerator(Diagnostics diagnostics, TypeModelBuilder typeMappingBuilder,
                       PathResolver pathResolver, RepositorySourceWriter sourceWriter,
                       Map<String, ClassName> metadataTypes) {
         this.diagnostics = diagnostics;
@@ -76,6 +78,7 @@ public final class MetadataGenerator {
         this.pathResolver = pathResolver;
         this.sourceWriter = sourceWriter;
         this.metadataTypes = metadataTypes;
+        this.valueAccessGenerator = new ValueAccessGenerator(diagnostics, typeMappingBuilder);
     }
 
     /**
@@ -247,7 +250,7 @@ public final class MetadataGenerator {
         // path lives; ValueAccess.value() answers what it IS on a materialised row, so a paged read can build its own
         // cursor key without reflection. Generation is NOTE-degraded: a descriptor that cannot carry the
         // switch simply keeps the interface default (which fails fast) instead of failing the round.
-        MethodSpec valueMethod = valueExtractor(entityElement, entity, navs);
+        MethodSpec valueMethod = valueAccessGenerator.valueMethod(entityElement, entity, navs);
         if (valueMethod != null) {
             builder.addMethod(valueMethod);
         }
@@ -256,41 +259,6 @@ public final class MetadataGenerator {
                 JavaFile.builder(packageName, builder.build()).skipJavaLangImports(true).build());
         return self;
     }
-
-    /**
-     * Emits the metadata's reflection-free {@code ValueAccess.value(String path, T root)} override: a
-     * {@code switch} over exactly the dot paths {@code columnRefs} resolves at the depth
-     * {@link PathResolver#resolveCompilePath} walks — the flattened {@code columns()} view (identifier, scalars,
-     * to-one heads, embedded leaves), the one-hop leaves of every {@link Prop.Reference} target, and the
-     * mapped child values of every {@link Prop.EntityCollection}/{@link Prop.ElementCollection}. Bodies are JavaPoet
-     * getter chains, method references and stream lambdas only (never reflection), each hop null-guarded
-     * and each to-many container guarded to an EMPTY list. A path whose accessor cannot be resolved is
-     * left out with a NOTE and the round continues; an unknown path fails fast with
-     * {@link IllegalArgumentException}, exactly as {@code visit} does.
-     */
-    private MethodSpec valueExtractor(TypeElement entityElement, TypeMapping<?> entity,
-                                        List<NavCase> navs) {
-        try {
-            return valueSwitch(entityElement, entity, navs);
-        } catch (RuntimeException e) {
-            diagnostics.note(
-                    "runtime path navigation could not be generated for " + entityElement.getSimpleName()
-                            + " (" + e + "); the navigation switch is omitted", entityElement);
-            return null;
-        }
-    }
-
-    /**
-     * One navigated leaf: the full dot path, its resolved placement (the child's column plus the ONE
-     * edge crossed to reach it), and what {@code valueSwitch} needs.
-     *
-     * <p>The edge is a {@link JoinEdge}, not a {@link ColumnRef}: reaching another table is not a
-     * column-placement question, and a {@code ColumnRef} no longer answers it. Keeping the typed
-     * edge here is what lets the generated {@code resolve} emit {@code ToOne} or {@code ToMany}
-     * rather than losing the cardinality.</p>
-     */
-    private record NavCase(String path, ColumnPlacement placement, TypeElement targetElement,
-                           TypeMapping<?> target, CodeBlock head, boolean toOne) { }
 
     /** The generated {@code resolve} method plus the {@code JoinEdge} constants its cases reference. */
     private record ResolverParts(MethodSpec method, List<FieldSpec> constants) { }
@@ -407,70 +375,6 @@ public final class MetadataGenerator {
         return out;
     }
 
-    private MethodSpec valueSwitch(TypeElement entityElement, TypeMapping<?> entity,
-                                 List<NavCase> navs) {
-        TypeMapping<?> mapping = entity;
-        Map<String, CodeBlock> cases = new LinkedHashMap<>();
-
-        // (1) The flattened column view this descriptor publishes: identifier, scalars, to-one heads
-        // (whose path is the property name, mapping to the fk column) and embedded leaves.
-        for (Map.Entry<String, ColumnRef> entry : mapping.columnRefs().entrySet()) {
-            putValueCase(cases, entityElement, entry.getKey(),
-                    valueChain(mapping, CodeBlock.of("e"), entry.getKey(), entityElement));
-        }
-
-        // (2) Depth 1 through every relationship the descriptor publishes — the SHARED
-        // navCases() enumeration (the columnRefs() map consumes the identical list; its
-        // path set is a SUPERSET of these value()-switch cases, since putValueCase may
-        // NOTE-drop a path from the switch only). Anything deeper is multi-hop for
-        // resolveCompilePath too, so it stays out of both surfaces by construction.
-        for (NavCase nav : navs) {
-            String leafPath = nav.path().substring(nav.path().indexOf(".") + 1);
-            CodeBlock body = nav.toOne()
-                    ? guardedValueChain(nav.targetElement(), nav.target(), nav.head(), leafPath)
-                    : toManyValue(nav.targetElement(), nav.target(), nav.head(), leafPath);
-            putValueCase(cases, entityElement, nav.path(), body);
-        }
-        // No early return when nothing resolved: the descriptor declares ValueAccess
-        // unconditionally, so the switch is emitted even with zero cases and every path falls
-        // through to the throwing default. A descriptor with no reachable path fails fast on use
-        // rather than failing the whole annotation-processing round with an abstract-method error.
-
-        TypeName entityType = typeMappingBuilder.classNameFor(entity.typeName());
-        MethodSpec.Builder navigateMethod = MethodSpec.methodBuilder("value")
-                .addModifiers(Modifier.PUBLIC)
-                .addAnnotation(Override.class)
-                .returns(Object.class)
-                .addParameter(String.class, "path")
-                .addParameter(entityType, "root")
-                .addStatement("$T e = ($T) root", entityType, entityType);
-        navigateMethod.beginControlFlow("switch (path)");
-        for (Map.Entry<String, CodeBlock> entry : cases.entrySet()) {
-            navigateMethod.addStatement("case $S: return $L", entry.getKey(), entry.getValue());
-        }
-        navigateMethod.addStatement("default: throw new $T(path, $S)", UnknownAttributePathException.class,
-                entityElement.getQualifiedName().toString());
-        navigateMethod.endControlFlow();
-        return navigateMethod.build();
-    }
-
-    /** Records one generated case, NOTE-degrading the path when its expression could not be built. */
-    private void putValueCase(Map<String, CodeBlock> cases, TypeElement origin, String path, CodeBlock value) {
-        if (value == null) {
-            diagnostics.note(
-                    "runtime path navigation is not available for path '" + path
-                            + "': its accessor could not be resolved; the path is left out of the"
-                            + " value switch", origin);
-            return;
-        }
-        cases.putIfAbsent(path, value);
-    }
-
-    /**
-     * The null-safe getter chain for one dot path walked from {@code recv} through {@code mapping} (declared
-     * on {@code element}), or {@code null} when a hop is unknown, is not an embedded value object, or
-     * has no accessor. Only {@link Prop.Embedded} may carry a further segment.
-     */
     /**
      * Builds the join edge that reaches {@code target} through {@code p}, or null when the
      * relationship shape cannot produce one.
@@ -505,60 +409,6 @@ public final class MetadataGenerator {
                     childTable, list.inverseFkColumn());
         }
         return null;
-    }
-
-    private CodeBlock valueChain(TypeMapping<?> mapping, CodeBlock recv, String path, TypeElement element) {
-        int dot = path.indexOf('.');
-        String head = dot < 0 ? path : path.substring(0, dot);
-        Prop p = PathResolver.propOrNull(mapping, head);
-        if (p == null || element == null || !typeMappingBuilder.hasMethod(element, MemberNames.getter(head))) {
-            return null;
-        }
-        CodeBlock chain = CodeBlock.of("$L.$L()", recv, MemberNames.getter(head));
-        if (dot < 0) {
-            return chain;
-        }
-        if (!(p instanceof Prop.Embedded embedded) || embedded.target() == null) {
-            return null;
-        }
-        TypeElement voElement = typeMappingBuilder.elementFor(PathResolver.stripGenerics(embedded.target().typeName()));
-        CodeBlock body = valueChain(embedded.target(), chain, path.substring(dot + 1), voElement);
-        return body == null ? null : CodeBlock.of("$L == null ? null : $L", chain, body);
-    }
-
-    /**
-     * A to-one leaf: the target's own chain, guarded on the reference itself —
-     * {@code e.getCustomer() == null ? null : e.getCustomer().getName()}.
-     */
-    private CodeBlock guardedValueChain(TypeElement targetElement, TypeMapping<?> target,
-                                        CodeBlock head, String leafPath) {
-        CodeBlock body = valueChain(target, head, leafPath, targetElement);
-        return body == null ? null : CodeBlock.of("$L == null ? null : $L", head, body);
-    }
-
-    /**
-     * A to-many leaf: the child values of the whole collection, mapped by a method reference (single
-     * segment) or a null-safe chain lambda (embedded leaf) and collected to a list. A null container
-     * reads as an empty list, never null, so the cursor reducer always gets a list.
-     */
-    private CodeBlock toManyValue(TypeElement childElement, TypeMapping<?> childModel,
-                                  CodeBlock collection, String leafPath) {
-        CodeBlock mapper;
-        if (leafPath.indexOf('.') < 0) {
-            if (!typeMappingBuilder.hasMethod(childElement, MemberNames.getter(leafPath))) {
-                return null;
-            }
-            mapper = CodeBlock.of("$T::$L", ClassName.get(childElement), MemberNames.getter(leafPath));
-        } else {
-            CodeBlock body = valueChain(childModel, CodeBlock.of("child"), leafPath, childElement);
-            mapper = body == null ? null : CodeBlock.of("child -> $L", body);
-        }
-        if (mapper == null) {
-            return null;
-        }
-        return CodeBlock.of("$L == null ? $T.of() : $L.stream().map($L).collect($T.toList())",
-                collection, ClassName.get(java.util.List.class), collection, mapper,
-                ClassName.get("java.util.stream", "Collectors"));
     }
 
     /**

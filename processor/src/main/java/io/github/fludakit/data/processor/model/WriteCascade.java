@@ -1,4 +1,4 @@
-package io.github.fludakit.data.processor.analysis;
+package io.github.fludakit.data.processor.model;
 
 import java.util.List;
 

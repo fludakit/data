@@ -9,25 +9,26 @@
  * <h2>Key classes</h2>
  *
  * <ul>
- *   <li>{@link io.github.fludakit.data.processor.analysis.MappedTypeBuilder} — builds and memoizes
+ *   <li>{@link io.github.fludakit.data.processor.analysis.TypeModelBuilder} — builds and memoizes
  *       the compile-time {@code TypeMapping} for entities and value objects. Scans fields, classifies
  *       them (id, scalar, reference, embedded, entity collection, element collection). The central
  *       model builder.</li>
- *   <li>{@link io.github.fludakit.data.processor.analysis.EntityAnalysis} — turns a {@code TypeElement}
- *       into the compile-time model and resolves generated artifacts (metamodel, metadata, row mapper)
- *       idempotently. Whoever asks first triggers generation.</li>
+ *   <li>{@link io.github.fludakit.data.processor.generator.ArtifactCoordinator} — resolves the
+ *       generated artifacts (metamodel, metadata, row mapper) for a model, idempotently. It lives in
+ *       {@code generate} so this package reads javac and produces the model without depending on any
+ *       generator.</li>
  *   <li>{@link io.github.fludakit.data.processor.analysis.RepositoryTypeResolver} — resolves the entity
  *       type from a repository's generic supertype hierarchy ({@code DataRepository<T,ID>}, etc.).</li>
  *   <li>{@link io.github.fludakit.data.processor.analysis.RepositoryMethodValidator} — checks every
  *       abstract repository method before code generation.</li>
- *   <li>{@link io.github.fludakit.data.processor.analysis.QueryPlanCompiler} — compiles one method
+ *   <li>{@link io.github.fludakit.data.processor.analysis.QueryPlanBuilder} — compiles one method
  *       declaration into a {@code QueryPlan}: parsed name, predicates, sorts, seek terms, parameter
  *       bindings.</li>
  *   <li>{@link io.github.fludakit.data.processor.analysis.PathResolver} — resolves logical attribute
  *       paths to physical {@code ColumnRef}s with join information.</li>
- *   <li>{@link io.github.fludakit.data.processor.analysis.RelationshipLoadPlanner} — plans which
+ *   <li>{@link io.github.fludakit.data.processor.analysis.LoadPlanner} — plans which
  *       relationships need runtime hydration (loader queries) vs JOIN projection.</li>
- *   <li>{@link io.github.fludakit.data.processor.analysis.CascadeSavePlanner} — plans write cascades
+ *   <li>{@link io.github.fludakit.data.processor.analysis.SavePlanner} — plans write cascades
  *       for aggregate children.</li>
  * </ul>
  *

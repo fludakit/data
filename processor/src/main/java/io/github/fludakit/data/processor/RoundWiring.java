@@ -2,33 +2,32 @@ package io.github.fludakit.data.processor;
 
 import com.squareup.javapoet.ClassName;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
-import io.github.fludakit.data.processor.analysis.CascadeSavePlanner;
-import io.github.fludakit.data.processor.analysis.EntityAnalysis;
+import io.github.fludakit.data.processor.analysis.SavePlanner;
+import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
 import io.github.fludakit.data.processor.analysis.PathResolver;
-import io.github.fludakit.data.processor.analysis.QueryPlanCompiler;
-import io.github.fludakit.data.processor.analysis.RelationshipLoadPlanner;
+import io.github.fludakit.data.processor.analysis.QueryPlanBuilder;
+import io.github.fludakit.data.processor.analysis.LoadPlanner;
 import io.github.fludakit.data.processor.analysis.RepositoryMethodValidator;
-import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
 import io.github.fludakit.data.processor.analysis.RepositoryTypeResolver;
 import io.github.fludakit.data.processor.analysis.TypeShapes;
+import io.github.fludakit.data.processor.context.ProcessingContext;
+import io.github.fludakit.data.processor.generator.ArtifactCoordinator;
 import io.github.fludakit.data.processor.generator.HydrationEmitter;
 import io.github.fludakit.data.processor.generator.JoinedProjectionEmitter;
-import io.github.fludakit.data.processor.generator.metadata.MetadataGenerator;
-import io.github.fludakit.data.processor.generator.metadata.MetamodelGenerator;
-import io.github.fludakit.data.processor.generator.nav.NavigationGenerator;
-import io.github.fludakit.data.processor.generator.metadata.QueriesWriter;
-import io.github.fludakit.data.processor.generator.RepositoryGenerator;
+import io.github.fludakit.data.processor.generator.RepositoryImplGenerator;
 import io.github.fludakit.data.processor.generator.RepositoryMethodCompiler;
-import io.github.fludakit.data.processor.generator.RepositorySourceWriter;
 import io.github.fludakit.data.processor.generator.RepositoryShellEmitter;
-import io.github.fludakit.data.processor.generator.rowmapper.RowMapperGenerator;
 import io.github.fludakit.data.processor.generator.WriteMethodEmitter;
+import io.github.fludakit.data.processor.generator.metadata.TypeMappingGenerator;
+import io.github.fludakit.data.processor.generator.metadata.MetamodelGenerator;
+import io.github.fludakit.data.processor.generator.metadata.QueryDefinitionWriter;
+import io.github.fludakit.data.processor.generator.nav.NavigationGenerator;
+import io.github.fludakit.data.processor.generator.rowmapper.RowMapperGenerator;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.support.GeneratedArtifactRegistry;
 import io.github.fludakit.data.sql.SqlDialect;
 import jakarta.data.repository.Repository;
 
-import javax.annotation.processing.ProcessingEnvironment;
 import javax.annotation.processing.RoundEnvironment;
 import javax.lang.model.element.Element;
 import javax.lang.model.element.ElementKind;
@@ -44,155 +43,124 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * One assembly of every collaborator a single processing ROUND needs, in the order the dependencies
- * require. The order is not incidental and each step says why it sits where it does; the comments
- * below moved here verbatim from {@link RepositoryProcessor#process}.
+ * One processing ROUND, split into three phases:
  *
- * <p>Per-round, because several collaborators capture round state: the {@code Filer} wrapper, the
- * managed-entity set, and the freshly built generators that write through it. The two caches that
- * must NOT be rebuilt live in {@link GeneratedArtifactRegistry}, which is injected and outlives this
- * object — as does {@link MappedTypeBuilder}, whose descriptor memo is the whole point of
- * keeping it across rounds.</p>
+ * <ol>
+ *   <li><b>ANALYZE</b> (the constructor) — build the compile-time question objects, then pre-scan
+ *       every {@code @Repository} interface to resolve its entity type and claim the generated names.</li>
+ *   <li><b>PLAN</b> ({@link #plan}) — build the round's generators and emitters in dependency order,
+ *       then pre-generate the row mappers and planners the generate phase reads from.</li>
+ *   <li><b>GENERATE</b> (the caller's loop) — hand each repository to the {@link RepositoryImplGenerator}.</li>
+ * </ol>
  *
- * <p>Why this class exists rather than the assembly staying in {@code process()}: {@code process()}
- * had grown to a hundred lines of {@code new}, and the ordering constraints were invisible next to
- * the round loop. Here the ordering is the only thing in the file, and
- * {@link RepositoryGenerator} takes this one object instead of the fourteen collaborators it would
- * otherwise list as constructor parameters.</p>
+ * <p>The session-scoped primitives live in {@link ProcessingContext}, which is injected; everything
+ * here is rebuilt per round because it captures round state (the managed-entity set, the freshly built
+ * generators). {@code RepositoryImplGenerator} takes this one object rather than the fourteen collaborators
+ * it would otherwise list as constructor parameters, which is why the accessors below stay.
  */
 public class RoundWiring {
 
-    private final Types types;
-    private final TypeShapes typeShapes;
-    private final Elements elements;
-    private final Diagnostics diagnostics;
-    private final GeneratedArtifactRegistry registry;
-    private final MappedTypeBuilder typeMappingBuilder;
-    private final RepositoryTypeResolver repositoryTypeResolver;
-    private final RepositoryMethodValidator repositoryMethodValidator;
-    private final QueryPlanCompiler queryPlanCompiler;
-    private final WriteMethodEmitter writeMethodEmitter;
-    private final JoinedProjectionEmitter joinedProjections;
-    private final RepositoryShellEmitter repositoryWriter;
-    private final QueriesWriter queriesWriter;
-    private final PathResolver pathResolver;
-    private final MetadataGenerator metadataGenerator;
-    private final RowMapperGenerator rowMapperGenerator;
-    private final NavigationGenerator navigationGenerator;
-    private final MetamodelGenerator metamodelGenerator;
-    private final EntityAnalysis entityAnalysis;
-    private final RepositoryMethodCompiler methodCompiler;
-    private final HydrationEmitter hydrationEmitter;
-    private final RelationshipLoadPlanner loadPlanner;
-    private final CascadeSavePlanner savePlanner;
-    private final RepositoryGenerator generator;
-    private final List<TypeElement> repositories;
+    private final ProcessingContext ctx;
 
-    public RoundWiring(ProcessingEnvironment processingEnv, SqlDialect sqlDialect,
-                GeneratedArtifactRegistry registry, MappedTypeBuilder typeMappingBuilder,
-                RepositorySourceWriter sourceWriter, RoundEnvironment roundEnv) {
-        this.types = processingEnv.getTypeUtils();
-        this.elements = processingEnv.getElementUtils();
-        this.diagnostics = Diagnostics.of(processingEnv.getMessager());
-        this.registry = registry;
-        this.typeMappingBuilder = typeMappingBuilder;
-        this.repositoryTypeResolver = new RepositoryTypeResolver(types, elements);
-        // The resolver needs the descriptor cache the mapping builder owns, and nothing else: it emits
-        // no source and claims no generated name.
+    // ---------------------------------------------------------------- ANALYZE (constructor)
+
+    private final RepositoryTypeResolver repositoryTypeResolver;
+    private final PathResolver pathResolver;
+    private final TypeShapes typeShapes;
+    private final RepositoryMethodValidator repositoryMethodValidator;
+    private final QueryPlanBuilder queryPlanCompiler;
+    private final AttributeTypes attributeTypes;
+    private final List<TypeElement> repositories = new ArrayList<>();
+
+    // ---------------------------------------------------------------------- PLAN (plan())
+
+    private WriteMethodEmitter writeMethodEmitter;
+    private JoinedProjectionEmitter joinedProjections;
+    private RepositoryShellEmitter repositoryWriter;
+    private QueryDefinitionWriter queriesWriter;
+    private TypeMappingGenerator metadataGenerator;
+    private RowMapperGenerator rowMapperGenerator;
+    private NavigationGenerator navigationGenerator;
+    private MetamodelGenerator metamodelGenerator;
+    private ArtifactCoordinator artifactCoordinator;
+    private RepositoryMethodCompiler methodCompiler;
+    private HydrationEmitter hydrationEmitter;
+    private LoadPlanner loadPlanner;
+    private SavePlanner savePlanner;
+    private RepositoryImplGenerator generator;
+
+    public RoundWiring(ProcessingContext ctx, RoundEnvironment roundEnv) {
+        this.ctx = ctx;
+        this.repositoryTypeResolver = new RepositoryTypeResolver(ctx.types(), ctx.elements());
         // Name-keyed, not element-keyed: a path's target reaches the resolver as the FQN the
         // descriptor carries, so letting it ask by name is what keeps Elements out of the resolver.
-        this.pathResolver = new PathResolver(diagnostics, typeMappingBuilder::descriptorFor);
-        // The shape questions four classes were each answering for themselves — the erased name of a
-        // declared type, whether it is a List, whether it is the entity, and a method's signature in
-        // the context that declares it. Owning Types once here is what lets all four drop it.
-        this.typeShapes = new TypeShapes(types, typeMappingBuilder::elementFor);
-        this.repositoryMethodValidator = new RepositoryMethodValidator(diagnostics, typeShapes);
-        // The plan compiler reads a method DECLARATION, not a type: it needs the erasure tests for the
-        // positional paging parameters and nothing else, so no generator and no writer is involved.
-        this.queryPlanCompiler = new QueryPlanCompiler(typeShapes);
-        // The three compile-time questions several emitters ask — an attribute's metamodel KIND, the
-        // class literal for a target FQN, and whether a declared type is an enum — all read the
-        // environment. It is owned ONCE here (in AttributeTypes) and that instance is threaded
-        // through, rather than every caller carrying Elements and Types to answer the same questions.
-        AttributeTypes attributeTypes = new AttributeTypes(elements, types);
-        // The write emitter is built after init() has settled the dialect, since whether a save is a
-        // one-statement upsert is a property of the configured database.
-        this.writeMethodEmitter = new WriteMethodEmitter(attributeTypes, typeMappingBuilder, typeShapes, diagnostics, sqlDialect);
-        // The JOIN projection reuses the mapping builder's memo, which resolves a target from the FQN
-        // its descriptor carries — so it needs no environment of its own. It writes no source file:
-        // the mapper it builds is handed back to the caller.
-        this.joinedProjections = new JoinedProjectionEmitter(typeMappingBuilder, sqlDialect);
-        // Both writers are built after init() has settled the dialect: the impl shell pins it as
-        // its SQL_DIALECT field, and neither writer survives a round. The shell names the dialect's
-        // own singleton (dialectClass.INSTANCE), which is the concrete class of the instance itself.
-        this.repositoryWriter = new RepositoryShellEmitter(sourceWriter,
-                ClassName.get(sqlDialect.getClass()));
-        this.queriesWriter = new QueriesWriter(sourceWriter);
-        // The descriptor emitter is the only writer of metadataTypes; it resolves value objects through
-        // the mapping builder and writes through the source writer, so it never sees the Filer.
-        this.metadataGenerator = new MetadataGenerator(diagnostics, typeMappingBuilder,
-                pathResolver, sourceWriter, registry.metadataTypes());
-        // Round pre-scan: discover every @Repository in this round, resolve its entity type,
-        // and claim metamodel/queries names BEFORE any nav class is generated. See scanRepositories().
-        this.repositories = new ArrayList<>();
-        Set<String> managed = scanRepositories(roundEnv, this.repositories);
-        registry.managedEntities(Set.copyOf(managed));
-        // Built here, after the round pre-scan: the metamodel emitter captures THIS round's
-        // managed-entity set, and the mapper emitter asks the metamodel emitter whether a relation
-        // target is materialisable — so the order is mappers, then metamodels.
-        this.rowMapperGenerator = new RowMapperGenerator(attributeTypes, diagnostics,
-                typeMappingBuilder, metadataGenerator, sourceWriter, registry.metadataTypes());
-        // The nav generator is built after the mapper generator: it asks whether a relation target is
-        // materialisable through the same mapper gate, and it captures THIS round's managed set.
-        this.navigationGenerator = new NavigationGenerator(attributeTypes, diagnostics,
-                typeMappingBuilder, rowMapperGenerator, sourceWriter, registry.managedEntities());
-        this.metamodelGenerator = new MetamodelGenerator(attributeTypes, diagnostics, sourceWriter,
-                registry.claimedNames(), navigationGenerator);
-        // Built after the metamodel and mapper generators: it IS the on-demand miss path for the
-        // descriptors and row mappers they emit, so it can only be assembled once both exist.
-        this.entityAnalysis = new EntityAnalysis(typeMappingBuilder, metadataGenerator,
-                metamodelGenerator, rowMapperGenerator, registry);
-        // The method compiler is built last: it reads a method DECLARATION through every collaborator
-        // above (the descriptor registry for dynamic paging, the write emitter for the CRUD writes, the
-        // plan compiler for query-by-names), and it emits no source of its own. It publishes each
-        // structured read's query definition into the session registry, keyed by repository FQN.
-        this.methodCompiler = new RepositoryMethodCompiler(typeShapes, typeMappingBuilder, diagnostics, sqlDialect,
-                pathResolver, queryPlanCompiler, metadataGenerator, writeMethodEmitter, joinedProjections, registry);
-        // Like the write emitter, built after init() settled the dialect: the loader column lists are
-        // quoted through it.
-        this.hydrationEmitter = new HydrationEmitter(sqlDialect, attributeTypes, typeMappingBuilder);
-        // Built after the round pre-scan (it captures THIS round's managed-entity set) and after the
-        // mapper generator (it asks for a relationship target's row mapper through it).
-        // Before constructing the load planner, pre-generate all row mappers (and each managed
-        // entity's element-collection VO mappers) so the planner can read from the cache without
-        // triggering generation.
-        entityAnalysis.preGenerateRowMappers(registry.managedEntities());
-        this.loadPlanner = new RelationshipLoadPlanner(diagnostics, typeMappingBuilder,
-                registry, registry.managedEntities());
-        // No artifact generation from the write side: a cascade member needs only the target's
-        // compile-time model, so no row-mapper function is injected here.
-        this.savePlanner = new CascadeSavePlanner(diagnostics, typeMappingBuilder);
-        this.generator = new RepositoryGenerator(this);
+        this.pathResolver = new PathResolver(ctx.diagnostics(), ctx.typeMappingBuilder()::descriptorFor);
+        // The shape questions several classes answer — the erased name of a declared type, whether it
+        // is a List, whether it is the entity, a method's signature in its declaring context. Owning
+        // Types once here is what lets them all drop it.
+        this.typeShapes = new TypeShapes(ctx.types(), ctx.typeMappingBuilder()::elementFor);
+        this.repositoryMethodValidator = new RepositoryMethodValidator(ctx.diagnostics(), typeShapes);
+        this.queryPlanCompiler = new QueryPlanBuilder(typeShapes);
+        // The compile-time questions several emitters ask — a metamodel KIND, a class literal, an enum
+        // test — all read the environment, so they are owned once here and threaded through.
+        this.attributeTypes = new AttributeTypes(ctx.elements(), ctx.types());
+        // Round pre-scan: resolve every repository's entity type and claim names BEFORE any nav class
+        // is generated, so a repository processed early sees targets that only get their own repository
+        // later in the same round.
+        Set<String> managed = scanRepositories(roundEnv, repositories);
+        ctx.registry().managedEntities(Set.copyOf(managed));
     }
 
     /**
-     * Round pre-scan: discovers every {@code @Repository} interface in this round, resolves its
-     * entity type, and claims the generated names ({@code _Entity} metamodel and
-     * {@code <Repository>Queries}) before any nav class is generated.
-     *
-     * <p>The managed-entity set (every entity FQN some repository in this round resolves to) must be
-     * known BEFORE generation dispatch, so a repository processed early in the round can already see
-     * targets that only get their own repository later in the same round.
-     * {@code getSupportedAnnotationTypes} hands all repositories in one set, so this scan is complete
-     * for the round.</p>
-     *
-     * <p>Name claiming prevents races: a nav class for another entity (e.g. {@code Order.item}
-     * → {@code pkg._OrderItem}) must lose the name race and degrade to the NOTE path, whichever
-     * repository the round processes first. Value objects get no metamodel, so their name stays
-     * available to owners' navs. The {@code <Repository>Queries} holder name is claimed up-front
-     * for the same reason.</p>
-     *
-     * @return the set of managed entity FQNs
+     * Builds the round's generators and emitters, then pre-generates the row mappers the planners read.
+     * The order is load-bearing and each step names why it sits where it does.
+     */
+    public void plan() {
+        SqlDialect sqlDialect = ctx.sqlDialect();
+        // The write emitter is built after init() has settled the dialect: whether a save is a
+        // one-statement upsert is a property of the configured database.
+        this.writeMethodEmitter = new WriteMethodEmitter(attributeTypes, ctx.typeMappingBuilder(),
+                typeShapes, ctx.diagnostics(), sqlDialect);
+        // The JOIN projection resolves a target from the FQN its descriptor carries — no environment.
+        this.joinedProjections = new JoinedProjectionEmitter(ctx.typeMappingBuilder(), sqlDialect);
+        // Both writers pin the dialect as SQL_DIALECT / the shell's field.
+        this.repositoryWriter = new RepositoryShellEmitter(ctx.sourceWriter(), ClassName.get(sqlDialect.getClass()));
+        this.queriesWriter = new QueryDefinitionWriter(ctx.sourceWriter());
+        // The descriptor emitter is the only writer of metadataTypes; it never sees the Filer.
+        this.metadataGenerator = new TypeMappingGenerator(ctx.diagnostics(), ctx.typeMappingBuilder(),
+                pathResolver, ctx.sourceWriter(), ctx.registry().metadataTypes());
+        // Mappers before metamodels: the metamodel emitter asks the mapper emitter whether a relation
+        // target is materialisable.
+        this.rowMapperGenerator = new RowMapperGenerator(attributeTypes, ctx.diagnostics(),
+                ctx.typeMappingBuilder(), metadataGenerator, ctx.sourceWriter(), ctx.registry().metadataTypes());
+        // The nav generator is built after the mapper generator (same materialisable gate) and captures
+        // THIS round's managed set.
+        this.navigationGenerator = new NavigationGenerator(attributeTypes, ctx.diagnostics(),
+                ctx.typeMappingBuilder(), rowMapperGenerator, ctx.sourceWriter(), ctx.registry().managedEntities());
+        this.metamodelGenerator = new MetamodelGenerator(attributeTypes, ctx.diagnostics(), ctx.sourceWriter(),
+                ctx.registry().claimedNames(), navigationGenerator);
+        // The on-demand miss path for descriptors and row mappers, assembled once both emitters exist.
+        this.artifactCoordinator = new ArtifactCoordinator(ctx.typeMappingBuilder(), metadataGenerator,
+                metamodelGenerator, rowMapperGenerator, ctx.registry());
+        // The method compiler reads a method declaration through every collaborator above.
+        this.methodCompiler = new RepositoryMethodCompiler(typeShapes, ctx.typeMappingBuilder(), ctx.diagnostics(),
+                sqlDialect, pathResolver, queryPlanCompiler, metadataGenerator, writeMethodEmitter,
+                joinedProjections, ctx.registry());
+        this.hydrationEmitter = new HydrationEmitter(sqlDialect, attributeTypes, ctx.typeMappingBuilder());
+        // Pre-generate all row mappers so the load planner can read from the cache without triggering
+        // generation.
+        artifactCoordinator.preGenerateRowMappers(ctx.registry().managedEntities());
+        this.loadPlanner = new LoadPlanner(ctx.diagnostics(), ctx.typeMappingBuilder(),
+                ctx.registry(), ctx.registry().managedEntities());
+        // No artifact generation from the write side: a cascade member needs only the target's model.
+        this.savePlanner = new SavePlanner(ctx.diagnostics(), ctx.typeMappingBuilder());
+        this.generator = new RepositoryImplGenerator(this);
+    }
+
+    /**
+     * Round pre-scan: discovers every {@code @Repository} interface in this round, resolves its entity
+     * type, and claims the generated names ({@code _Entity} metamodel and {@code <Repository>Queries})
+     * before any nav class is generated.
      */
     private Set<String> scanRepositories(RoundEnvironment roundEnv, List<TypeElement> out) {
         Set<String> managed = new HashSet<>();
@@ -205,15 +173,15 @@ public class RoundWiring {
             TypeMirror entityMirror = repositoryTypeResolver.entityType(repository);
             if (entityMirror != null && entityMirror.getKind() != TypeKind.TYPEVAR
                     && entityMirror.getKind() != TypeKind.WILDCARD
-                    && types.erasure(entityMirror) instanceof DeclaredType declared
+                    && ctx.types().erasure(entityMirror) instanceof DeclaredType declared
                     && declared.asElement() instanceof TypeElement entityElement) {
                 managed.add(entityElement.getQualifiedName().toString());
-                if (!typeMappingBuilder.isValueObjectType(entityElement)) {
-                    registry.claim(ClassName.get(entityElement).packageName()
+                if (!ctx.typeMappingBuilder().isValueObjectType(entityElement)) {
+                    ctx.registry().claim(ClassName.get(entityElement).packageName()
                             + "._" + entityElement.getSimpleName());
                 }
             }
-            registry.claim(ClassName.get(repository) + "Queries");
+            ctx.registry().claim(ClassName.get(repository) + "Queries");
         }
         return managed;
     }
@@ -224,14 +192,14 @@ public class RoundWiring {
         return repositories;
     }
 
-    public RepositoryGenerator generator() {
+    public RepositoryImplGenerator generator() {
         return generator;
     }
 
     // ----------------------------------------------------------------- collaborators
 
     public Types types() {
-        return types;
+        return ctx.types();
     }
 
     public TypeShapes typeShapes() {
@@ -239,15 +207,19 @@ public class RoundWiring {
     }
 
     public Elements elements() {
-        return elements;
+        return ctx.elements();
     }
 
     public Diagnostics diagnostics() {
-        return diagnostics;
+        return ctx.diagnostics();
     }
 
     public GeneratedArtifactRegistry registry() {
-        return registry;
+        return ctx.registry();
+    }
+
+    public TypeModelBuilder typeMappingBuilder() {
+        return ctx.typeMappingBuilder();
     }
 
     public RepositoryTypeResolver repositoryTypeResolver() {
@@ -258,7 +230,7 @@ public class RoundWiring {
         return repositoryMethodValidator;
     }
 
-    public MetadataGenerator metadataGenerator() {
+    public TypeMappingGenerator metadataGenerator() {
         return metadataGenerator;
     }
 
@@ -266,8 +238,8 @@ public class RoundWiring {
         return rowMapperGenerator;
     }
 
-    public EntityAnalysis entityAnalysis() {
-        return entityAnalysis;
+    public ArtifactCoordinator artifactCoordinator() {
+        return artifactCoordinator;
     }
 
     public JoinedProjectionEmitter joinedProjections() {
@@ -282,11 +254,11 @@ public class RoundWiring {
         return hydrationEmitter;
     }
 
-    public RelationshipLoadPlanner loadPlanner() {
+    public LoadPlanner loadPlanner() {
         return loadPlanner;
     }
 
-    public CascadeSavePlanner savePlanner() {
+    public SavePlanner savePlanner() {
         return savePlanner;
     }
 
@@ -294,7 +266,7 @@ public class RoundWiring {
         return repositoryWriter;
     }
 
-    public QueriesWriter queriesWriter() {
+    public QueryDefinitionWriter queriesWriter() {
         return queriesWriter;
     }
 }

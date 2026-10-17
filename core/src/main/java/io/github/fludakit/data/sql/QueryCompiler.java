@@ -116,6 +116,7 @@ public final class QueryCompiler {
             case QueryDefinition.Upsert ignored -> upsert(dialect, schema, requireResolver(resolver));
             case QueryDefinition.Update ignored -> update(dialect, schema, requireResolver(resolver));
             case QueryDefinition.DeleteById ignored -> deleteById(dialect, schema);
+            case QueryDefinition.Native nativeQuery -> nativeQuery.sql();
             case QueryDefinition.Criteria criteria -> {
                 Objects.requireNonNull(resolver, "resolver");
                 Planner planner = new Planner(schema, resolver, dialect, criteria, extraEdges);

@@ -17,7 +17,7 @@
  *       cache of everything emitted or claimed: row mappers, metadata types, metamodel types,
  *       generated type names, managed entities. Survives rounds. This is the backbone of the
  *       idempotent generation protocol: see
- *       {@link io.github.fludakit.data.processor.analysis.EntityAnalysis} for the full explanation.</li>
+ *       {@link io.github.fludakit.data.processor.generator.ArtifactCoordinator} for the full explanation.</li>
  *   <li>{@link io.github.fludakit.data.processor.support.MemberNames} — known method/property name
  *       constants ({@code JDBC_CLIENT_FIELD}, {@code ID_PROPERTY}, etc.) and helper predicates.
  *       Centralizes the strings that appear in generated code so they don't drift.</li>

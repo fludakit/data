@@ -1,11 +1,11 @@
 package io.github.fludakit.data.processor;
 
-import io.github.fludakit.data.processor.analysis.EntityAnalysis;
-import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
+import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
+import io.github.fludakit.data.processor.context.ProcessingContext;
 import io.github.fludakit.data.processor.generator.metadata.MetamodelGenerator;
 import io.github.fludakit.data.processor.generator.nav.NavigationGenerator;
-import io.github.fludakit.data.processor.generator.metadata.QueriesWriter;
-import io.github.fludakit.data.processor.generator.RepositoryGenerator;
+import io.github.fludakit.data.processor.generator.metadata.QueryDefinitionWriter;
+import io.github.fludakit.data.processor.generator.RepositoryImplGenerator;
 import io.github.fludakit.data.processor.generator.RepositorySourceWriter;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.support.GeneratedArtifactRegistry;
@@ -33,7 +33,7 @@ import java.util.Set;
  * embedded or relation member (see {@link NavigationGenerator}), and — only when the repository
  * declares at least one query-by-names or {@code @Find} finder — a {@code <Repository>Queries} holder
  * publishing one nested {@link io.github.fludakit.data.query.QueryDefinition} per query-by-names
- * method (see {@link QueriesWriter}).
+ * method (see {@link QueryDefinitionWriter}).
  *
  * <p>The generated implementation class is
  * {@link jakarta.enterprise.context.ApplicationScoped @ApplicationScoped} and carries a single
@@ -45,9 +45,9 @@ import java.util.Set;
  *
  * <p>This class is the APT entry point and nothing else: it reads the {@code fluda.dialect} option,
  * assembles each round's collaborators (see {@link RoundWiring}) and hands every repository to
- * {@link RepositoryGenerator}. The caches that must survive a round live in
+ * {@link RepositoryImplGenerator}. The caches that must survive a round live in
  * {@link GeneratedArtifactRegistry}; the per-entity compile-time model and the on-demand artifact
- * resolution live in {@link EntityAnalysis}.</p>
+ * resolution live in {@link TypeModelBuilder} and {@code ArtifactCoordinator}.</p>
  */
 @SupportedAnnotationTypes("jakarta.data.repository.Repository")
 @SupportedOptions("fluda.dialect")
@@ -62,7 +62,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      * The entity/value-object model builder. Session-scoped: the descriptor memo it keeps is what
      * stops a value object reached from two owners from being analysed twice.
      */
-    private MappedTypeBuilder typeMappingBuilder;
+    private TypeModelBuilder typeMappingBuilder;
 
     /** The only holder of the {@code Filer} in this package. Session-scoped for the same reason. */
     private RepositorySourceWriter sourceWriter;
@@ -108,15 +108,17 @@ public class RepositoryProcessor extends AbstractProcessor {
         // the Filer — neither may be rebuilt mid-session, or a name already written would be writable
         // again.
         if (typeMappingBuilder == null) {
-            typeMappingBuilder = new MappedTypeBuilder(processingEnv.getTypeUtils(),
+            typeMappingBuilder = new TypeModelBuilder(processingEnv.getTypeUtils(),
                     processingEnv.getElementUtils(), diagnostics);
         }
         if (sourceWriter == null) {
             sourceWriter = new RepositorySourceWriter(processingEnv.getFiler(), diagnostics,
                     registry.claimedNames());
         }
-        this.wiring = new RoundWiring(processingEnv, sqlDialect, registry,
-                typeMappingBuilder, sourceWriter, roundEnv);
+        ProcessingContext context = new ProcessingContext(processingEnv.getTypeUtils(),
+                processingEnv.getElementUtils(), diagnostics, sqlDialect, registry, sourceWriter, typeMappingBuilder);
+        this.wiring = new RoundWiring(context, roundEnv);
+        wiring.plan();
         boolean claimed = false;
         for (TypeElement repository : wiring.repositories()) {
             generateSafely(repository);
@@ -127,13 +129,13 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     /**
      * One channel for every failure the generator cannot recover from. An exception escaping
-     * {@link RepositoryGenerator#generate} reaches javac, which reports it as a stack trace and ABORTS
+     * {@link RepositoryImplGenerator#generate} reaches javac, which reports it as a stack trace and ABORTS
      * THE ROUND — so one repository the processor cannot handle would also cost every other repository
      * in the same round its implementation. Reporting it as an ERROR on the declaration that caused it
      * and carrying on keeps the failure where it belongs.
      *
      * <p>This is the net, not the fix: a shape the model cannot express must be REJECTED where it is
-     * recognised (see {@code MappedTypeBuilder}'s nested element-collection diagnostic), so
+     * recognised (see {@code TypeModelBuilder}'s nested element-collection diagnostic), so
      * that the user gets the reason instead of an exception class. What reaches here is a shape nobody
      * anticipated, and the message says so.</p>
      */

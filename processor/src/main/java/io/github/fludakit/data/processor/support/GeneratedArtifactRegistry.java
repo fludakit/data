@@ -3,7 +3,7 @@ package io.github.fludakit.data.processor.support;
 import com.squareup.javapoet.ClassName;
 
 import io.github.fludakit.data.processor.RepositoryProcessor;
-import io.github.fludakit.data.processor.generator.metadata.MetadataGenerator;
+import io.github.fludakit.data.processor.generator.metadata.TypeMappingGenerator;
 import io.github.fludakit.data.processor.generator.metadata.MetamodelGenerator;
 import io.github.fludakit.data.processor.generator.RepositorySourceWriter;
 import io.github.fludakit.data.processor.generator.rowmapper.RowMapperGenerator;
@@ -23,7 +23,7 @@ import java.util.Set;
  * unchanged — this class adds no new bookkeeping, it gives the four one name and one vocabulary
  * ({@code claim}/{@code isClaimed}, {@code remember…}/{@code …Of}). Two of them are handed out LIVE
  * and are still mutated by the generators that own them: {@link #metadataTypes()} is filled by
- * {@link MetadataGenerator} as it emits descriptors (and is the value-object cycle guard, so it is
+ * {@link TypeMappingGenerator} as it emits descriptors (and is the value-object cycle guard, so it is
  * populated <em>before</em> the class is written), and {@link #claimedNames()} is the set
  * {@link RepositorySourceWriter} and {@link MetamodelGenerator} consult and extend. Neither is
  * copied here, because a copy would let a caller deduplicate against a snapshot instead of against
@@ -49,7 +49,7 @@ public class GeneratedArtifactRegistry {
      * holder. Stored here rather than in the per-repository emission so the registry is the single
      * cache for everything the session has produced.
      */
-    private final Map<String, Map<String, QueryDefinition.Criteria>> queryDefinitions = new LinkedHashMap<>();
+    private final Map<String, Map<String, QueryDefinition>> queryDefinitions = new LinkedHashMap<>();
 
     /**
      * Entity/value-object FQN → generated {@code <Entity>Metadata} type. Doubles as the
@@ -120,7 +120,7 @@ public class GeneratedArtifactRegistry {
 
     /**
      * The live entity/value-object FQN → {@code <Entity>Metadata} map, shared with
-     * {@link MetadataGenerator} and {@link RowMapperGenerator}: the former fills it, the latter reads
+     * {@link TypeMappingGenerator} and {@link RowMapperGenerator}: the former fills it, the latter reads
      * it to type the mapper it emits.
      */
     public Map<String, ClassName> metadataTypes() {
@@ -169,12 +169,12 @@ public class GeneratedArtifactRegistry {
      * The query definitions for a repository, keyed by field name. Returns the live map so callers
      * can add to it directly.
      */
-    public Map<String, QueryDefinition.Criteria> queryDefinitions(String repositoryFqn) {
+    public Map<String, QueryDefinition> queryDefinitions(String repositoryFqn) {
         return queryDefinitions.computeIfAbsent(repositoryFqn, k -> new LinkedHashMap<>());
     }
 
     /** All query definitions for a repository, or an empty map if none. */
-    public Map<String, QueryDefinition.Criteria> queryDefinitionsOf(String repositoryFqn) {
+    public Map<String, QueryDefinition> queryDefinitionsOf(String repositoryFqn) {
         return queryDefinitions.getOrDefault(repositoryFqn, Map.of());
     }
 

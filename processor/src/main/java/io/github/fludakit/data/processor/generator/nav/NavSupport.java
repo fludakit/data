@@ -10,7 +10,7 @@ import com.squareup.javapoet.TypeName;
 import com.squareup.javapoet.TypeSpec;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
-import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
+import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import javax.lang.model.element.Modifier;
 import javax.lang.model.element.TypeElement;
@@ -32,14 +32,14 @@ public final class NavSupport {
 
     private final AttributeTypes attributeTypes;
     private final Diagnostics diagnostics;
-    private final MappedTypeBuilder typeMappingBuilder;
+    private final TypeModelBuilder typeMappingBuilder;
 
     /**
      * No {@code Elements} and no {@code Types}: the one compile-time lookup this class performs is
      * {@link AttributeTypes#kindOf}, and it takes the wired {@link AttributeTypes} instead.
      */
     public NavSupport(AttributeTypes attributeTypes, Diagnostics diagnostics,
-               MappedTypeBuilder typeMappingBuilder) {
+               TypeModelBuilder typeMappingBuilder) {
         this.attributeTypes = attributeTypes;
         this.diagnostics = diagnostics;
         this.typeMappingBuilder = typeMappingBuilder;

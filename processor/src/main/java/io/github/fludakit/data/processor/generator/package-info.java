@@ -11,20 +11,20 @@
  * <p>Three suffixes, each with a precise meaning:</p>
  * <ul>
  *   <li><b>{@code *Generator}</b> — generates a whole <b>type</b> (a {@code .java} file written to
- *       its own {@code TypeSpec}). Examples: {@link MetadataGenerator}, {@link RowMapperGenerator},
+ *       its own {@code TypeSpec}). Examples: {@link TypeMappingGenerator}, {@link RowMapperGenerator},
  *       {@link MetamodelGenerator}.</li>
  *   <li><b>{@code *Emitter}</b> — generates <b>method bodies</b> ({@code MethodSpec}s) attached to
  *       an existing type being built by a generator. Examples: {@link CrudReadEmitter},
  *       {@link WriteMethodEmitter}, {@link PagingEmitter}.</li>
  *   <li><b>{@code *Writer}</b> — writes a file that is neither a generated type nor a method body.
  *       Examples: {@link RepositorySourceWriter} (writes {@code JavaFile} to {@code Filer}),
- *       {@link QueriesWriter} (writes the Queries holder).</li>
+ *       {@link QueryDefinitionWriter} (writes the Queries holder).</li>
  * </ul>
  *
  * <h2>Orchestration</h2>
  *
  * <ul>
- *   <li>{@link RepositoryGenerator} — one {@code @Repository} interface → its {@code <Repository>Impl}
+ *   <li>{@link RepositoryImplGenerator} — one {@code @Repository} interface → its {@code <Repository>Impl}
  *       and (when it declares finders) its {@code <Repository>Queries}. The step list: resolve entity,
  *       ensure artifacts, plan loads and cascades, compile methods, write files.</li>
  *   <li>{@link RepositoryMethodCompiler} — compiles one abstract method into its {@code MethodSpec}:
@@ -37,13 +37,13 @@
  * <ul>
  *   <li>{@link RepositoryShellEmitter} — writes the {@code <Repository>Impl} class shell:
  *       {@code @ApplicationScoped}, SQL constants, injected {@code JdbcClient}.</li>
- *   <li>{@link MetadataGenerator} — emits {@code <Entity>Metadata}, the reflection-free
+ *   <li>{@link TypeMappingGenerator} — emits {@code <Entity>Metadata}, the reflection-free
  *       {@code TypeMapping} descriptor with column constants and the {@code resolve(path)} switch.</li>
  *   <li>{@link RowMapperGenerator} — emits {@code <Entity>RowMapper}, a reflection-free
  *       {@code mapRow(ResultSet)} with direct {@code rs.getObject} calls.</li>
  *   <li>{@link MetamodelGenerator} — emits the {@code _Entity} static metamodel interface
  *       (Jakarta Data 1.0 §3.3) with {@code UPPER_CASE} attribute constants.</li>
- *   <li>{@link QueriesWriter} — writes {@code <Repository>Queries}, one nested {@code QueryDefinition}
+ *   <li>{@link QueryDefinitionWriter} — writes {@code <Repository>Queries}, one nested {@code QueryDefinition}
  *       per query-by-name method.</li>
  * </ul>
  *

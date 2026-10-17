@@ -1,4 +1,4 @@
-package io.github.fludakit.data.processor.analysis;
+package io.github.fludakit.data.processor.model;
 
 import io.github.fludakit.data.metadata.ColumnPlacement;
 import io.github.fludakit.data.metadata.ColumnRef;

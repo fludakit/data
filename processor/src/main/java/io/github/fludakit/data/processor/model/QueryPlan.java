@@ -1,8 +1,8 @@
-package io.github.fludakit.data.processor.analysis;
+package io.github.fludakit.data.processor.model;
 
 import io.github.fludakit.data.metadata.ColumnPlacement;
 import io.github.fludakit.data.metadata.TypeMapping;
-import io.github.fludakit.data.processor.analysis.QueryPlanCompiler;
+import io.github.fludakit.data.processor.analysis.QueryPlanBuilder;
 import io.github.fludakit.data.query.ParamBinding;
 import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.SortSpec;
@@ -23,7 +23,7 @@ import java.util.List;
  *
  * <p>What is NOT here is what the method DECLARES rather than what it asks for: the published type
  * name, the operation, the declared and the published result shape, and {@code distinct} — those
- * stay arguments to {@link QueryPlanCompiler#queryDefinitionOf}.</p>
+ * stay arguments to {@link QueryPlanBuilder#queryDefinitionOf}.</p>
  */
 public record QueryPlan(TypeMapping<?> mapping, List<Predicate> predicates, List<ColumnPlacement> predicateRefs,
                  List<String> predicateAttributePaths, List<SortSpec> sorts,

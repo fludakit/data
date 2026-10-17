@@ -7,10 +7,10 @@ import io.github.fludakit.data.metadata.JoinEdge;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.page.SimplePage;
-import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
+import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
 import io.github.fludakit.data.processor.analysis.PathResolver;
 import io.github.fludakit.data.processor.generator.metadata.Literals;
-import io.github.fludakit.data.processor.generator.metadata.MetadataGenerator;
+import io.github.fludakit.data.processor.generator.metadata.TypeMappingGenerator;
 import io.github.fludakit.data.processor.generator.EmissionContext;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.query.LimitSpec;
@@ -58,12 +58,12 @@ public final class CrudReadEmitter {
             ClassName.get("io.github.fludakit.data.metadata", "ColumnPlacement");
 
     private final SqlDialect sqlDialect;
-    private final MappedTypeBuilder typeMappingBuilder;
-    private final MetadataGenerator metadataGenerator;
+    private final TypeModelBuilder typeMappingBuilder;
+    private final TypeMappingGenerator metadataGenerator;
     private final JoinedProjectionEmitter joinedProjections;
 
-    public CrudReadEmitter(SqlDialect sqlDialect, MappedTypeBuilder typeMappingBuilder,
-                           MetadataGenerator metadataGenerator,
+    public CrudReadEmitter(SqlDialect sqlDialect, TypeModelBuilder typeMappingBuilder,
+                           TypeMappingGenerator metadataGenerator,
                            JoinedProjectionEmitter joinedProjections) {
         this.sqlDialect = sqlDialect;
         this.typeMappingBuilder = typeMappingBuilder;

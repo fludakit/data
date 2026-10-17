@@ -1,5 +1,7 @@
 package io.github.fludakit.data.processor.analysis;
 
+import io.github.fludakit.data.processor.model.QueryPlan;
+
 import io.github.fludakit.data.metadata.ColumnPlacement;
 import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.TypeMapping;
@@ -47,7 +49,7 @@ import java.util.Map;
  * positional rather than named, are {@link TypeShapes#erasedName}, so the one compile-time query this
  * compiler makes is not one it has to be able to perform.</p>
  */
-public final class QueryPlanCompiler {
+public final class QueryPlanBuilder {
 
     public static final String PAGE_REQUEST = "jakarta.data.page.PageRequest";
     public static final String ORDER = "jakarta.data.Order";
@@ -56,7 +58,7 @@ public final class QueryPlanCompiler {
 
     private final TypeShapes typeShapes;
 
-    public QueryPlanCompiler(TypeShapes typeShapes) {
+    public QueryPlanBuilder(TypeShapes typeShapes) {
         this.typeShapes = typeShapes;
     }
 

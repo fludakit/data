@@ -11,10 +11,10 @@ import io.github.fludakit.data.Names;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
-import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
+import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
 import io.github.fludakit.data.processor.generator.RepositorySourceWriter;
 import io.github.fludakit.data.processor.generator.metadata.Literals;
-import io.github.fludakit.data.processor.generator.metadata.MetadataGenerator;
+import io.github.fludakit.data.processor.generator.metadata.TypeMappingGenerator;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.support.MemberNames;
@@ -45,9 +45,9 @@ import java.util.Map;
  *
  * <p>Writes go out through {@link RepositorySourceWriter}, so this emitter never sees {@code Filer},
  * and it holds no {@code Elements}: a target that is only ever named (a descriptor carries an FQN
- * {@code String}) resolves through {@link MappedTypeBuilder#elementFor(String)}, and the one question
+ * {@code String}) resolves through {@link TypeModelBuilder#elementFor(String)}, and the one question
  * that needs a member SCAN — whether the target has an id setter, which is what makes an id-only
- * partial constructible — is {@link MappedTypeBuilder#hasMethod}, which owns {@code Elements} and
+ * partial constructible — is {@link TypeModelBuilder#hasMethod}, which owns {@code Elements} and
  * memoizes by name. Both belong to the class that already had to own the environment for building the
  * models; neither decides whether this emitter can be constructed. The no-arg-constructor test needs
  * no environment at all — it reads {@code getEnclosedElements} off an element it already holds. A
@@ -57,8 +57,8 @@ public final class RowMapperGenerator {
 
     private final AttributeTypes attributeTypes;
     private final Diagnostics diagnostics;
-    private final MappedTypeBuilder typeMappingBuilder;
-    private final MetadataGenerator metadataGenerator;
+    private final TypeModelBuilder typeMappingBuilder;
+    private final TypeMappingGenerator metadataGenerator;
     private final RepositorySourceWriter sourceWriter;
 
     /**
@@ -71,8 +71,8 @@ public final class RowMapperGenerator {
     private final Map<String, ClassName> voRowMappers = new LinkedHashMap<>();
 
     public RowMapperGenerator(AttributeTypes attributeTypes, Diagnostics diagnostics,
-                       MappedTypeBuilder typeMappingBuilder,
-                       MetadataGenerator metadataGenerator,
+                       TypeModelBuilder typeMappingBuilder,
+                       TypeMappingGenerator metadataGenerator,
                        RepositorySourceWriter sourceWriter, Map<String, ClassName> metadataTypes) {
         this.attributeTypes = attributeTypes;
         this.diagnostics = diagnostics;

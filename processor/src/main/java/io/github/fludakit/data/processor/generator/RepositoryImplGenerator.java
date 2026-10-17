@@ -7,11 +7,11 @@ import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.RoundWiring;
 import io.github.fludakit.data.processor.analysis.RepositoryTypeResolver;
 import io.github.fludakit.data.metadata.TypeMapping;
-import io.github.fludakit.data.processor.analysis.EntityRelationship;
-import io.github.fludakit.data.processor.analysis.LoadPlan;
+import io.github.fludakit.data.processor.model.EntityRelationship;
+import io.github.fludakit.data.processor.model.LoadPlan;
 import io.github.fludakit.data.processor.generator.RepositoryEmission;
 import io.github.fludakit.data.processor.analysis.RepositoryFlavour;
-import io.github.fludakit.data.processor.analysis.WriteCascade;
+import io.github.fludakit.data.processor.model.WriteCascade;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.query.QueryDefinition;
 import javax.lang.model.element.Element;
@@ -42,11 +42,11 @@ import java.util.Map;
  * (or a repository and a relationship target's planner) can each ask for the same artifact and only
  * the first one writes it.</p>
  */
-public class RepositoryGenerator {
+public class RepositoryImplGenerator {
 
     private final RoundWiring wiring;
 
-    public RepositoryGenerator(RoundWiring wiring) {
+    public RepositoryImplGenerator(RoundWiring wiring) {
         this.wiring = wiring;
     }
 
@@ -56,7 +56,7 @@ public class RepositoryGenerator {
             return;
         }
         TypeElement entityElement = (TypeElement) entityErasure.asElement();
-        TypeMapping<?> entity = wiring.entityAnalysis().buildEntity(entityElement);
+        TypeMapping<?> entity = wiring.typeMappingBuilder().buildEntity(entityElement);
         ClassName mapperType = ensureRowMapper(entityElement, entity);
         LoadPlan loadPlan = wiring.loadPlanner().plan(entityElement, entity);
         RepositoryEmission emission = newEmission(repository, entity, mapperType, loadPlan,
@@ -101,7 +101,7 @@ public class RepositoryGenerator {
         // additive for aggregate roots (it references no JDBC types) and its field instances ARE the
         // descriptor's attributes. Value objects surface only as navigable member
         // classes (_<Entity><Field> chains) of their owner's metamodel, never as `_VO` classes.
-        wiring.entityAnalysis().ensureDescriptorArtifacts(entityElement, entity, true);
+        wiring.artifactCoordinator().ensureDescriptorArtifacts(entityElement, entity, true);
         if (mapperPending) {
             mapperType = wiring.rowMapperGenerator().generateRowMapper(entityElement, entity,
                     wiring.registry().metadataType(entityFqn));
@@ -206,7 +206,7 @@ public class RepositoryGenerator {
                 hydratedCollections, hydratedRelationships));
         for (Prop.ElementCollection c : hydratedCollections) {
             emission.auxMethods().add(wiring.hydrationEmitter().appendCollectionHydration(
-                    emission.constants(), emission.entity(), c, loadPlan.collectionMappers().get(c.name())));
+                    emission.constants(), emission.entity(), c, ClassName.bestGuess(loadPlan.collectionMappers().get(c.name()))));
         }
         // Only ONE_TO_MANY members reach here: a composing MANY_TO_ONE is JOIN-projected onto the
         // parent's own row (see joinedReferences), so it needs no loader of its own.
@@ -221,7 +221,7 @@ public class RepositoryGenerator {
         String implementationName = repository.getSimpleName() + "Impl";
         wiring.repositoryWriter().write(repository, packageName, implementationName,
                 emission.constants(), emission.auxMethods());
-        Map<String, QueryDefinition.Criteria> queryDefinitions =
+        Map<String, QueryDefinition> queryDefinitions =
                 wiring.registry().queryDefinitions(emission.repositoryFqn());
         if (!queryDefinitions.isEmpty()) {
             wiring.queriesWriter().write(repository, packageName,

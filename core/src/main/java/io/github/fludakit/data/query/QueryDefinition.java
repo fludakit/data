@@ -267,4 +267,27 @@ public sealed interface QueryDefinition {
             return Operation.DELETE;
         }
     }
+
+    /**
+     * A user-supplied native SQL statement declared with {@code @Query}. It has no logical attribute
+     * paths — the statement text is the whole query — so it publishes only the SQL and the declared
+     * result shape. {@link #operation()} returns {@link Operation#FIND} as a placeholder: a native
+     * statement's operation cannot be inferred from its text, and the result shape is the signal that
+     * actually distinguishes a read from a write.
+     *
+     * @param sql        the raw SQL, exactly as the application wrote it
+     * @param resultKind the declared result shape — {@link ResultKind#VOID} for a fire-and-forget
+     *                   statement, otherwise the shape the caller asked for
+     */
+    record Native(String sql, ResultKind resultKind) implements QueryDefinition {
+
+        public Native {
+            resultKind = resultKind == null ? ResultKind.VOID : resultKind;
+        }
+
+        @Override
+        public Operation operation() {
+            return Operation.FIND;
+        }
+    }
 }

@@ -1,5 +1,8 @@
 package io.github.fludakit.data.processor.analysis;
 
+import io.github.fludakit.data.processor.model.EntityRelationship;
+import io.github.fludakit.data.processor.model.LoadPlan;
+
 import com.squareup.javapoet.ClassName;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 
@@ -26,25 +29,25 @@ import java.util.Set;
  * target is managed — some {@code @Repository} in the current round resolves to it — and has a
  * generated row mapper to delegate to. An ineligible relationship gets one NOTE and is left
  * unmapped on read rather than failing the repository. That asymmetry against the write side is
- * exactly why {@code REFACTOR-PLAN.md} §4 keeps {@code RelationshipLoadPlanner} and
- * {@code CascadeSavePlanner} apart: folding them into one class would produce flag arguments that
+ * exactly why {@code REFACTOR-PLAN.md} §4 keeps {@code LoadPlanner} and
+ * {@code SavePlanner} apart: folding them into one class would produce flag arguments that
  * interfere with each other.</p>
  *
  * <p>Constructed after the round pre-scan: {@code managedEntities} is per-round. This planner reads
  * from the pre-populated cache in {@link GeneratedArtifactRegistry} — all row mappers are generated
- * during the analysis phase by {@link EntityAnalysis#preGenerateRowMappers}, so planning is pure
+ * during the analysis phase by {@link io.github.fludakit.data.processor.generator.ArtifactCoordinator#preGenerateRowMappers}, so planning is pure
  * analysis with no generation side effects.</p>
  */
-public final class RelationshipLoadPlanner {
+public final class LoadPlanner {
 
     private final Diagnostics diagnostics;
-    private final MappedTypeBuilder typeMappingBuilder;
+    private final TypeModelBuilder typeMappingBuilder;
     private final GeneratedArtifactRegistry registry;
     /** Entity FQNs managed in the CURRENT round — see the pre-scan in {@link RepositoryProcessor#process}. */
     private final Set<String> managedEntities;
 
-    public RelationshipLoadPlanner(Diagnostics diagnostics,
-                            MappedTypeBuilder typeMappingBuilder,
+    public LoadPlanner(Diagnostics diagnostics,
+                            TypeModelBuilder typeMappingBuilder,
                             GeneratedArtifactRegistry registry,
                             Set<String> managedEntities) {
         this.diagnostics = diagnostics;
@@ -62,12 +65,12 @@ public final class RelationshipLoadPlanner {
         // Element-collection hydration: read the pre-computed <VO>RowMapper for each
         // List<@ValueObject> child from the registry cache.
         List<Prop.ElementCollection> hydratedCollections = new ArrayList<>();
-        Map<String, ClassName> collectionMappers = new LinkedHashMap<>();
+        Map<String, String> collectionMappers = new LinkedHashMap<>();
         for (Prop.ElementCollection c : entity.elementCollections()) {
             ClassName voMapper = registry.voRowMapper(c.name());
             if (voMapper != null) {
                 hydratedCollections.add(c);
-                collectionMappers.put(c.name(), voMapper);
+                collectionMappers.put(c.name(), voMapper.canonicalName());
             }
         }
         // Relationship read gate: a relationship is materialised on read only when its TARGET is
@@ -120,7 +123,7 @@ public final class RelationshipLoadPlanner {
             if (manyToOne) {
                 joinedReferences.add((Prop.Reference) a);
             } else {
-                hydratedRelationships.add(new EntityRelationship(a, targetModel, targetMapper));
+                hydratedRelationships.add(new EntityRelationship(a, targetModel, targetMapper.canonicalName()));
             }
         }
 

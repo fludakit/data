@@ -2,7 +2,7 @@ package io.github.fludakit.data.processor.support;
 
 import io.github.fludakit.data.Names;
 
-import io.github.fludakit.data.processor.generator.RepositoryGenerator;
+import io.github.fludakit.data.processor.generator.RepositoryImplGenerator;
 import io.github.fludakit.data.processor.generator.RepositoryShellEmitter;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.VariableElement;
@@ -19,7 +19,7 @@ import javax.lang.model.element.VariableElement;
  *
  * <p>Property-storage questions (column name, target type) live in {@link Props}, not here.
  * The one member question that DOES need the environment — whether a type declares or inherits a
- * method of a given name — is {@code MappedTypeBuilder.hasMethod}, not a method here.</p>
+ * method of a given name — is {@code TypeModelBuilder.hasMethod}, not a method here.</p>
  */
 public final class MemberNames {
 
@@ -42,7 +42,7 @@ public final class MemberNames {
     /**
      * The generated field holding the repository's injected {@code JdbcClient}. Spelled here because
      * two places must agree on it: {@link RepositoryShellEmitter} declares the field, and
-     * {@link RepositoryGenerator} returns it from an accessor the repository declared. A rename in
+     * {@link RepositoryImplGenerator} returns it from an accessor the repository declared. A rename in
      * either alone produces a class that does not compile.
      */
     public static final String JDBC_CLIENT_FIELD = "jdbcClient";

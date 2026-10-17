@@ -14,7 +14,7 @@ import io.github.fludakit.data.processor.RepositoryProcessor;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
 import io.github.fludakit.data.processor.analysis.PathResolver;
 import io.github.fludakit.data.processor.generator.rowmapper.RowMapperGenerator;
-import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
+import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
 import io.github.fludakit.data.processor.generator.nav.MmMember;
 import io.github.fludakit.data.processor.generator.nav.NavUnit;
 import io.github.fludakit.data.processor.support.MemberNames;
@@ -36,13 +36,13 @@ import java.util.Set;
 public final class RelationNavGenerator {
 
     private final AttributeTypes attributeTypes;
-    private final MappedTypeBuilder typeMappingBuilder;
+    private final TypeModelBuilder typeMappingBuilder;
     private final RowMapperGenerator rowMapperGenerator;
     private final NavSupport support;
     private final Set<String> managedEntities;
 
     public RelationNavGenerator(AttributeTypes attributeTypes,
-                         MappedTypeBuilder typeMappingBuilder,
+                         TypeModelBuilder typeMappingBuilder,
                          RowMapperGenerator rowMapperGenerator, NavSupport support,
                          Set<String> managedEntities) {
         this.attributeTypes = attributeTypes;

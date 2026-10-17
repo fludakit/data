@@ -11,7 +11,7 @@ import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.RepositoryProcessor;
 import io.github.fludakit.data.processor.analysis.PathResolver;
-import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
+import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
 import io.github.fludakit.data.processor.generator.rowmapper.RowReads;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.processor.support.Props;
@@ -48,10 +48,10 @@ import java.util.Map;
  */
 public final class JoinedProjectionEmitter {
 
-    private final MappedTypeBuilder typeMappingBuilder;
+    private final TypeModelBuilder typeMappingBuilder;
     private final SqlDialect sqlDialect;
 
-    public JoinedProjectionEmitter(MappedTypeBuilder typeMappingBuilder, SqlDialect sqlDialect) {
+    public JoinedProjectionEmitter(TypeModelBuilder typeMappingBuilder, SqlDialect sqlDialect) {
         this.typeMappingBuilder = typeMappingBuilder;
         this.sqlDialect = sqlDialect;
     }

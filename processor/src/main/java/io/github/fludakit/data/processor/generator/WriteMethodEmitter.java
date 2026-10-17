@@ -6,12 +6,12 @@ import com.squareup.javapoet.TypeName;
 import com.squareup.javapoet.TypeVariableName;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
-import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
+import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
 import io.github.fludakit.data.processor.analysis.TypeShapes;
 import io.github.fludakit.data.metadata.TypeMapping;
-import io.github.fludakit.data.processor.analysis.EntityRelationship;
+import io.github.fludakit.data.processor.model.EntityRelationship;
 import io.github.fludakit.data.processor.generator.rowmapper.RowWrites;
-import io.github.fludakit.data.processor.analysis.WriteCascade;
+import io.github.fludakit.data.processor.model.WriteCascade;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.support.GeneratedKeyCoercion;
 import io.github.fludakit.data.processor.support.MemberNames;
@@ -56,7 +56,7 @@ public final class WriteMethodEmitter {
      * it writes comes from the {@link TypeMapping} it is handed.
      */
     private final AttributeTypes attributeTypes;
-    private final MappedTypeBuilder typeMappingBuilder;
+    private final TypeModelBuilder typeMappingBuilder;
     private final TypeShapes typeShapes;
     private final Diagnostics diagnostics;
     private final SqlDialect sqlDialect;
@@ -65,7 +65,7 @@ public final class WriteMethodEmitter {
     /** The child-cascade statements: element collections, owned entity collections, compositions. */
     private final ChildCascadeEmitter childCascade;
 
-    public WriteMethodEmitter(AttributeTypes attributeTypes, MappedTypeBuilder typeMappingBuilder,
+    public WriteMethodEmitter(AttributeTypes attributeTypes, TypeModelBuilder typeMappingBuilder,
                        TypeShapes typeShapes, Diagnostics diagnostics, SqlDialect sqlDialect) {
         this.attributeTypes = attributeTypes;
         this.typeMappingBuilder = typeMappingBuilder;

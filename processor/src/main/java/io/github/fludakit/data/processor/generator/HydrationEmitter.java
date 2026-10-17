@@ -10,8 +10,8 @@ import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
 import io.github.fludakit.data.metadata.TypeMapping;
-import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
-import io.github.fludakit.data.processor.analysis.EntityRelationship;
+import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
+import io.github.fludakit.data.processor.model.EntityRelationship;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.sql.SqlDialect;
 import io.github.fludakit.data.support.DataExceptions;
@@ -41,7 +41,7 @@ public final class HydrationEmitter {
 
     private final SqlDialect sqlDialect;
     private final AttributeTypes attributeTypes;
-    private final MappedTypeBuilder typeMappingBuilder;
+    private final TypeModelBuilder typeMappingBuilder;
 
     /**
      * @param attributeTypes the one lookup this emitter needs: the element type of a collection, which
@@ -49,7 +49,7 @@ public final class HydrationEmitter {
      *                       therefore not a JavaPoet name
      */
     public HydrationEmitter(SqlDialect sqlDialect, AttributeTypes attributeTypes,
-                            MappedTypeBuilder typeMappingBuilder) {
+                            TypeModelBuilder typeMappingBuilder) {
         this.sqlDialect = sqlDialect;
         this.attributeTypes = attributeTypes;
         this.typeMappingBuilder = typeMappingBuilder;
@@ -128,7 +128,7 @@ public final class HydrationEmitter {
                         + sqlDialect.quoteIdentifier(targetModel.tableName())
                         + " WHERE " + sqlDialect.quoteIdentifier(inverseFk) + " IN (");
         return appendGroupedKeyHydration(constants, entity, a.name(), selectConst, inverseFk,
-                typeMappingBuilder.classNameFor(targetModel.typeName()), relationship.targetMapper());
+                typeMappingBuilder.classNameFor(targetModel.typeName()), ClassName.bestGuess(relationship.targetMapper()));
     }
 
     /**

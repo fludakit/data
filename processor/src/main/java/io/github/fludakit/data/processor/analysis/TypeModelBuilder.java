@@ -32,7 +32,7 @@ import java.util.Objects;
 import java.util.Set;
 
 /** Builds and memoizes the compile-time entity and value-object models used by repository generation. */
-public final class MappedTypeBuilder {
+public final class TypeModelBuilder {
 
     private final Types types;
     private final Elements elements;
@@ -61,7 +61,7 @@ public final class MappedTypeBuilder {
      */
     private final Map<String, TypeName> memberTypes = new HashMap<>();
 
-    public MappedTypeBuilder(Types types, Elements elements, Diagnostics diagnostics) {
+    public TypeModelBuilder(Types types, Elements elements, Diagnostics diagnostics) {
         this.types = types;
         this.elements = elements;
         this.diagnostics = diagnostics;

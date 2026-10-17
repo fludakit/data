@@ -1,5 +1,8 @@
 package io.github.fludakit.data.processor.analysis;
 
+import io.github.fludakit.data.processor.model.EntityRelationship;
+import io.github.fludakit.data.processor.model.WriteCascade;
+
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 
 import io.github.fludakit.data.metadata.TypeMapping;
@@ -15,7 +18,7 @@ import java.util.List;
  * are spelled by the write emitters.
  *
  * <p>The write side is deliberately NOT the mirror image of the read side, which is why
- * {@code REFACTOR-PLAN.md} §4 keeps this class apart from {@link RelationshipLoadPlanner}:</p>
+ * {@code REFACTOR-PLAN.md} §4 keeps this class apart from {@link LoadPlanner}:</p>
  * <ul>
  *   <li><b>Kind gate.</b> The composition lifecycle is bound to the root ONLY for an
  *       {@code @AggregateRoot} owner. Inside a plain {@code @Entity} an entity collection is a
@@ -32,16 +35,16 @@ import java.util.List;
  *
  * <p>Every skip is reported as its own write-honest NOTE ("children will NOT be cascaded on
  * save/update/delete"), so {@code save()} can never silently drop children without write-side
- * diagnostics. Unlike {@link RelationshipLoadPlanner} this needs no injected function: resolving a
- * target's compile-time model is memoized inside {@link MappedTypeBuilder} and generates
+ * diagnostics. Unlike {@link LoadPlanner} this needs no injected function: resolving a
+ * target's compile-time model is memoized inside {@link TypeModelBuilder} and generates
  * no artifact, so the planner stays free of row-mapper generation entirely.</p>
  */
-public final class CascadeSavePlanner {
+public final class SavePlanner {
 
     private final Diagnostics diagnostics;
-    private final MappedTypeBuilder typeMappingBuilder;
+    private final TypeModelBuilder typeMappingBuilder;
 
-    public CascadeSavePlanner(Diagnostics diagnostics, MappedTypeBuilder typeMappingBuilder) {
+    public SavePlanner(Diagnostics diagnostics, TypeModelBuilder typeMappingBuilder) {
         this.diagnostics = diagnostics;
         this.typeMappingBuilder = typeMappingBuilder;
     }

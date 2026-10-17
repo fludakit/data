@@ -8,12 +8,12 @@ import io.github.fludakit.data.metadata.NonLocalAttributePathException;
 import io.github.fludakit.data.metadata.UnknownAttributePathException;
 import io.github.fludakit.data.page.SimpleCursoredPage;
 import io.github.fludakit.data.page.SimplePage;
-import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
+import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
 import io.github.fludakit.data.processor.analysis.PathResolver;
-import io.github.fludakit.data.processor.generator.metadata.MetadataGenerator;
+import io.github.fludakit.data.processor.generator.metadata.TypeMappingGenerator;
 import io.github.fludakit.data.processor.generator.EmissionContext;
-import io.github.fludakit.data.processor.analysis.PagedRead;
-import io.github.fludakit.data.processor.analysis.PathResolution;
+import io.github.fludakit.data.processor.model.PagedRead;
+import io.github.fludakit.data.processor.model.PathResolution;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.query.SortSpec;
 import io.github.fludakit.data.sql.CursorKeys;
@@ -48,13 +48,13 @@ import java.util.List;
 public final class PagingEmitter {
 
     private final SqlDialect sqlDialect;
-    private final MappedTypeBuilder typeMappingBuilder;
+    private final TypeModelBuilder typeMappingBuilder;
     private final PathResolver pathResolver;
-    private final MetadataGenerator metadataGenerator;
+    private final TypeMappingGenerator metadataGenerator;
     private final Diagnostics diagnostics;
 
-    public PagingEmitter(SqlDialect sqlDialect, MappedTypeBuilder typeMappingBuilder,
-                         PathResolver pathResolver, MetadataGenerator metadataGenerator,
+    public PagingEmitter(SqlDialect sqlDialect, TypeModelBuilder typeMappingBuilder,
+                         PathResolver pathResolver, TypeMappingGenerator metadataGenerator,
                          Diagnostics diagnostics) {
         this.sqlDialect = sqlDialect;
         this.typeMappingBuilder = typeMappingBuilder;

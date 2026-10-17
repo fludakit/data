@@ -14,20 +14,20 @@
  * ┌─────────────────────────────────────────────────────────────────────────────────────┐
  * │  1. RESOLVE  (analysis/)                                                            │
  * │     RepositoryTypeResolver → entity type T from DataRepository<T,ID>                │
- * │     MappedTypeBuilder → compile-time TypeMapping (fields → columns, relations)      │
+ * │     TypeModelBuilder → compile-time TypeMapping (fields → columns, relations)      │
  * └────────────────────────────────────┬────────────────────────────────────────────────┘
  *                                      ▼
  * ┌─────────────────────────────────────────────────────────────────────────────────────┐
  * │  2. GENERATE METADATA  (emit/)                                                      │
- * │     MetadataGenerator → <Entity>Metadata (reflection-free TypeMapping impl)         │
+ * │     TypeMappingGenerator → <Entity>Metadata (reflection-free TypeMapping impl)         │
  * │     RowMapperGenerator → <Entity>RowMapper (reflection-free ResultSet reader)       │
  * │     MetamodelGenerator → _Entity static metamodel + navigable member classes        │
  * └────────────────────────────────────┬────────────────────────────────────────────────┘
  *                                      ▼
  * ┌─────────────────────────────────────────────────────────────────────────────────────┐
  * │  3. PLAN  (analysis/)                                                               │
- * │     RelationshipLoadPlanner → which relations need hydration loaders vs JOIN        │
- * │     CascadeSavePlanner → which children participate in aggregate writes             │
+ * │     LoadPlanner → which relations need hydration loaders vs JOIN        │
+ * │     SavePlanner → which children participate in aggregate writes             │
  * └────────────────────────────────────┬────────────────────────────────────────────────┘
  *                                      ▼
  * ┌─────────────────────────────────────────────────────────────────────────────────────┐
@@ -43,7 +43,7 @@
  * ┌─────────────────────────────────────────────────────────────────────────────────────┐
  * │  5. WRITE  (emit/)                                                                  │
  * │     RepositoryShellEmitter → <Repository>Impl (@ApplicationScoped, JdbcClient)      │
- * │     QueriesWriter → <Repository>Queries (QueryDefinition per query-by-name method)  │
+ * │     QueryDefinitionWriter → <Repository>Queries (QueryDefinition per query-by-name method)  │
  * └────────────────────────────────────┬────────────────────────────────────────────────┘
  *                                      ▼
  * ┌─────────────────────────────────────────────────────────────────────────────────────┐
@@ -80,11 +80,11 @@
  * reference {@code Customer}). The first repository to need {@code _Customer}, {@code CustomerMetadata},
  * or {@code CustomerRowMapper} triggers generation; later requests hit the cache in
  * {@link io.github.fludakit.data.processor.support.GeneratedArtifactRegistry}. See
- * {@link io.github.fludakit.data.processor.analysis.EntityAnalysis} for the protocol.</p>
+ * {@link io.github.fludakit.data.processor.generator.ArtifactCoordinator} for the protocol.</p>
  *
  * <p><strong>Session-scoped vs round-scoped.</strong> Two caches outlive a round:
  * {@code GeneratedArtifactRegistry} (what has been emitted or claimed) and
- * {@link io.github.fludakit.data.processor.analysis.MappedTypeBuilder} (the descriptor memo that
+ * {@link io.github.fludakit.data.processor.analysis.TypeModelBuilder} (the descriptor memo that
  * prevents a value object reached from two owners from being analyzed twice). Everything else is
  * rebuilt per round; see {@link RoundWiring} for the construction order.</p>
  *

@@ -49,7 +49,7 @@ public final class RowReads {
      * objects. Primitives contribute nothing — a primitive leaf cannot be NULL in the database, so it
      * carries no presence signal.
      *
-     * @param memberType the declaring type's member-type cache ({@code MappedTypeBuilder::memberType});
+     * @param memberType the declaring type's member-type cache ({@code TypeModelBuilder::memberType});
      *                   the one fact needed here that the shipping descriptor cannot hold, because
      *                   "is this leaf primitive" is a compile-time rendering of its FQN
      */

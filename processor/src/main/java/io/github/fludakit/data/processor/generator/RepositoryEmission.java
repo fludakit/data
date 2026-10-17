@@ -5,7 +5,7 @@ import com.squareup.javapoet.MethodSpec;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.analysis.RepositoryFlavour;
-import io.github.fludakit.data.processor.analysis.WriteCascade;
+import io.github.fludakit.data.processor.model.WriteCascade;
 import java.util.List;
 import java.util.Map;
 

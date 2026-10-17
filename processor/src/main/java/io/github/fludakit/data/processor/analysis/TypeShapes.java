@@ -30,7 +30,7 @@ import javax.lang.model.util.Types;
  *
  * <p>Holding {@link Types} here is what lets the callers stop holding it. Four of them —
  * {@code WriteMethodEmitter}, {@code RepositoryMethodCompiler}, {@code RepositoryMethodValidator} and
- * {@code QueryPlanCompiler} — held the service for these answers and for nothing else, so after this
+ * {@code QueryPlanBuilder} — held the service for these answers and for nothing else, so after this
  * move no generator in the package holds {@code Types} at all. What remains is the deliberate
  * minority: the two wiring holders, {@link AttributeTypes} (which needs an erased mirror to build a
  * {@code TypeName}) and {@link RepositoryTypeResolver} (which walks supertypes).</p>
@@ -49,7 +49,7 @@ public final class TypeShapes {
     private final Types types;
 
     /**
-     * The declared type NAMED {@code fqn}, supplied by {@link MappedTypeBuilder#elementFor}.
+     * The declared type NAMED {@code fqn}, supplied by {@link TypeModelBuilder#elementFor}.
      *
      * <p>It is a name-keyed function rather than an {@code Elements} field for the same reason every
      * other generator takes one: a service is a round, and a round in a constructor is a generator

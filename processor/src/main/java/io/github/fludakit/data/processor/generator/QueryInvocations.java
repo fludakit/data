@@ -3,7 +3,7 @@ package io.github.fludakit.data.processor.generator;
 import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.CodeBlock;
 import com.squareup.javapoet.TypeName;
-import io.github.fludakit.data.processor.analysis.MappedTypeBuilder;
+import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.query.LikePattern;
 import io.github.fludakit.data.query.ParamBinding;

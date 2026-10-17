@@ -1,5 +1,8 @@
 package io.github.fludakit.data.processor.analysis;
 
+import io.github.fludakit.data.processor.model.PathOrigin;
+import io.github.fludakit.data.processor.model.PathResolution;
+
 import io.github.fludakit.data.Names;
 import io.github.fludakit.data.metadata.ColumnPlacement;
 import io.github.fludakit.data.metadata.ColumnRef;
@@ -8,8 +11,8 @@ import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 
 import io.github.fludakit.data.processor.RepositoryProcessor;
-import io.github.fludakit.data.processor.analysis.PathOrigin;
-import io.github.fludakit.data.processor.analysis.PathResolution;
+import io.github.fludakit.data.processor.model.PathOrigin;
+import io.github.fludakit.data.processor.model.PathResolution;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.TypeElement;

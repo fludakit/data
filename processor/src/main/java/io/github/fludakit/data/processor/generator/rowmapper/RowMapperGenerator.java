@@ -7,7 +7,6 @@ import com.squareup.javapoet.MethodSpec;
 import com.squareup.javapoet.ParameterizedTypeName;
 import com.squareup.javapoet.TypeName;
 import com.squareup.javapoet.TypeSpec;
-import io.github.fludakit.data.Names;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
@@ -24,7 +23,6 @@ import javax.lang.model.element.ElementKind;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.Modifier;
 import javax.lang.model.element.TypeElement;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -70,6 +68,9 @@ public final class RowMapperGenerator {
     /** Value-object FQN to generated {@code <VO>RowMapper} type, deduped across processing rounds. */
     private final Map<String, ClassName> voRowMappers = new LinkedHashMap<>();
 
+    /** The flattened embedded-value-object reader, shared by the entity and VO mappers. */
+    private final EmbeddedValueReader embeddedReader;
+
     public RowMapperGenerator(AttributeTypes attributeTypes, Diagnostics diagnostics,
                        TypeModelBuilder typeMappingBuilder,
                        TypeMappingGenerator metadataGenerator,
@@ -80,6 +81,7 @@ public final class RowMapperGenerator {
         this.metadataGenerator = metadataGenerator;
         this.sourceWriter = sourceWriter;
         this.metadataTypes = metadataTypes;
+        this.embeddedReader = new EmbeddedValueReader(typeMappingBuilder, this::readExpression);
     }
 
     /**
@@ -164,7 +166,7 @@ public final class RowMapperGenerator {
                 continue; // composition reference: FK-only on the mapper, hydrated by the loader
             }
             if (p instanceof Prop.Embedded embedded) {
-                appendEmbeddedRead(mapRow, metadataType, embedded, entityElement.getSimpleName().toString());
+                embeddedReader.appendEmbeddedRead(mapRow, metadataType, embedded, entityElement.getSimpleName().toString());
                 continue;
             }
             appendPropertyRead(mapRow, typeMappingBuilder.memberType(entity.typeName(), p.name()), metadataType, p.name(), Props.column(p),
@@ -344,7 +346,7 @@ public final class RowMapperGenerator {
                 continue; // FK-only reference; left null (the relationship loaders fill it)
             }
             if (p instanceof Prop.Embedded embedded) {
-                appendEmbeddedRead(mapRow, voMetadataType, embedded, voName);
+                embeddedReader.appendEmbeddedRead(mapRow, voMetadataType, embedded, voName);
                 continue;
             }
             appendPropertyRead(mapRow, typeMappingBuilder.memberType(voModel.typeName(), p.name()), voMetadataType, p.name(), Props.column(p), voName);
@@ -386,99 +388,6 @@ public final class RowMapperGenerator {
                         + "\" mapped to " + entityName + "." + property);
         mapRow.endControlFlow();
         mapRow.addStatement("entity.$L($L)", MemberNames.setter(property), temp);
-    }
-
-    /**
-     * Emits the read and construction of one {@code EMBEDDED} property: every flattened
-     * leaf of the value-object tree is read into a local named after its physical column
-     * ({@code <prefix>_<leaf>}, e.g. {@code address_point_lat}); the top VO is then constructed inside
-     * a guard firing iff at least one boxed leaf anywhere in its subtree is non-null, and each nested
-     * child VO is constructed and set iff at least one boxed leaf in <em>its own</em> subtree is
-     * non-null — an all-null child subtree leaves the child null (per-subtree presence). Primitive
-     * leaves follow the {@link #appendPropertyRead} temp+{@code wasNull()} rule, never join any
-     * presence test, and so a VO with a primitive leaf cannot be NULL-absent in the database. The
-     * whole block stays reflection-free.
-     */
-    private void appendEmbeddedRead(MethodSpec.Builder mapRow, ClassName ownerMetadata,
-                                    Prop.Embedded embedded, String entityName) {
-        List<String> presence = new ArrayList<>();
-        readEmbeddedLeaves(mapRow, ownerMetadata, embedded.target(),
-                Names.columnBase(embedded.name()), embedded.name(), presence, entityName);
-        boolean guarded = !presence.isEmpty();
-        if (guarded) {
-            mapRow.beginControlFlow("if ($L)", String.join(" || ", presence));
-        }
-        buildEmbeddedValue(mapRow, embedded.target(), Names.columnBase(embedded.name()), embedded.name());
-        mapRow.addStatement("entity.$L($L)", MemberNames.setter(embedded.name()), embedded.name());
-        if (guarded) {
-            mapRow.endControlFlow();
-        }
-    }
-
-    /** Reads each flattened leaf of {@code vo} into a column-named local, collecting the boxed-leaf presence terms. */
-    private void readEmbeddedLeaves(MethodSpec.Builder mapRow, ClassName ownerMetadata, TypeMapping<?> valueObject,
-                                    String prefix, String path, List<String> presence, String entityName) {
-        for (Prop p : valueObject.rowProps()) {
-            if (p instanceof Prop.Reference) {
-                continue; // fk-only children stay null on read, as at owner level
-            }
-            if (p instanceof Prop.Embedded) {
-                readEmbeddedLeaves(mapRow, ownerMetadata, ((Prop.Embedded) p).target(),
-                        prefix + "_" + Props.column(p), path + "." + p.name(), presence, entityName);
-                continue;
-            }
-            String local = prefix + "_" + Props.column(p);
-            if (!typeMappingBuilder.memberType(valueObject.typeName(), p.name()).isPrimitive()) {
-                mapRow.addStatement("$T $L = $L", typeMappingBuilder.memberType(valueObject.typeName(), p.name()), local,
-                        readExpression(typeMappingBuilder.memberType(valueObject.typeName(), p.name()), ownerMetadata, local));
-                presence.add(local + " != null");
-                continue;
-            }
-            mapRow.addStatement("$T $L = rs.$L($T.$L)", typeMappingBuilder.memberType(valueObject.typeName(), p.name()), local, RowReads.primitiveGetter(path, typeMappingBuilder.memberType(valueObject.typeName(), p.name())),
-                    ownerMetadata, Literals.constName(local));
-            mapRow.beginControlFlow("if (rs.wasNull())");
-            mapRow.addStatement("throw new $T($S)", ClassName.get("java.sql", "SQLException"),
-                    "NULL value in non-nullable primitive column \"" + local
-                            + "\" mapped to " + entityName + "." + path);
-            mapRow.endControlFlow();
-        }
-    }
-
-    /**
-     * Constructs one value-object instance from its already-read leaf locals (parent first): the VO's
-     * own scalar leaves are assigned, then each nested child is constructed and set under its OWN
-     * subtree presence guard (an all-null child subtree leaves the child null). A child
-     * whose subtree holds no boxed leaf has no presence signal and is constructed unconditionally
-     * under the parent's guard.
-     */
-    private void buildEmbeddedValue(MethodSpec.Builder mapRow, TypeMapping<?> valueObject, String prefix, String local) {
-        mapRow.addStatement("$T $L = new $T()", typeMappingBuilder.classNameFor(valueObject.typeName()), local,
-                typeMappingBuilder.classNameFor(valueObject.typeName()));
-        for (Prop p : valueObject.rowProps()) {
-            Prop pp = p;
-            if (pp instanceof Prop.Reference || pp instanceof Prop.Embedded) {
-                continue;
-            }
-            mapRow.addStatement("$L.$L($L)", local, MemberNames.setter(p.name()), prefix + "_" + Props.column(p));
-        }
-        for (Prop p : valueObject.rowProps()) {
-            if (!(p instanceof Prop.Embedded)) {
-                continue;
-            }
-            String childLocal = prefix + "_" + Props.column(p);
-            List<String> terms = new ArrayList<>();
-            RowReads.collectPresenceTerms(((Prop.Embedded) p).target(), childLocal, terms,
-                    typeMappingBuilder::memberType);
-            if (terms.isEmpty()) {
-                buildEmbeddedValue(mapRow, ((Prop.Embedded) p).target(), childLocal, childLocal);
-                mapRow.addStatement("$L.$L($L)", local, MemberNames.setter(p.name()), childLocal);
-            } else {
-                mapRow.beginControlFlow("if ($L)", String.join(" || ", terms));
-                buildEmbeddedValue(mapRow, ((Prop.Embedded) p).target(), childLocal, childLocal);
-                mapRow.addStatement("$L.$L($L)", local, MemberNames.setter(p.name()), childLocal);
-                mapRow.endControlFlow();
-            }
-        }
     }
 
     /** Boxed/reference read expression; a primitive column is guarded separately in {@link #appendPropertyRead}. */

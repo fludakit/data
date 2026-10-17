@@ -7,7 +7,7 @@ import io.github.fludakit.data.processor.analysis.AttributeTypes;
 import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
 import io.github.fludakit.data.processor.generator.RepositorySourceWriter;
 import io.github.fludakit.data.processor.generator.rowmapper.RowMapperGenerator;
-import io.github.fludakit.data.processor.generator.nav.MmMember;
+import io.github.fludakit.data.processor.generator.metadata.MmMember;
 import io.github.fludakit.data.processor.generator.nav.NavContext;
 import io.github.fludakit.data.processor.generator.nav.NavLevel;
 import io.github.fludakit.data.processor.generator.nav.NavUnit;

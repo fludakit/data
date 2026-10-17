@@ -16,7 +16,6 @@ import io.github.fludakit.data.processor.analysis.AttributeTypes;
 import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
 import io.github.fludakit.data.processor.generator.RepositorySourceWriter;
 import io.github.fludakit.data.processor.generator.nav.NavigationGenerator;
-import io.github.fludakit.data.processor.generator.nav.MmMember;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.processor.support.Props;

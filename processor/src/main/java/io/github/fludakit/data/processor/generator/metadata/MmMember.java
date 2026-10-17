@@ -1,4 +1,4 @@
-package io.github.fludakit.data.processor.generator.nav;
+package io.github.fludakit.data.processor.generator.metadata;
 
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 

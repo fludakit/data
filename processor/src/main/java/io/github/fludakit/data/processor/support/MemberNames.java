@@ -2,8 +2,6 @@ package io.github.fludakit.data.processor.support;
 
 import io.github.fludakit.data.Names;
 
-import io.github.fludakit.data.processor.generator.RepositoryImplGenerator;
-import io.github.fludakit.data.processor.generator.RepositoryShellEmitter;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.VariableElement;
 
@@ -41,8 +39,8 @@ public final class MemberNames {
 
     /**
      * The generated field holding the repository's injected {@code JdbcClient}. Spelled here because
-     * two places must agree on it: {@link RepositoryShellEmitter} declares the field, and
-     * {@link RepositoryImplGenerator} returns it from an accessor the repository declared. A rename in
+     * two places must agree on it: {@link io.github.fludakit.data.processor.generator.RepositoryShellEmitter} declares the field, and
+     * {@link io.github.fludakit.data.processor.generator.RepositoryImplGenerator} returns it from an accessor the repository declared. A rename in
      * either alone produces a class that does not compile.
      */
     public static final String JDBC_CLIENT_FIELD = "jdbcClient";

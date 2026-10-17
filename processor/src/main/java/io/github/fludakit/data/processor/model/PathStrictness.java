@@ -1,6 +1,5 @@
 package io.github.fludakit.data.processor.model;
 
-import io.github.fludakit.data.processor.analysis.PathResolver;
 
 /**
  * What an UNRESOLVABLE property means, decided by where the property came from.

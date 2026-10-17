@@ -2,11 +2,6 @@ package io.github.fludakit.data.processor.support;
 
 import com.squareup.javapoet.ClassName;
 
-import io.github.fludakit.data.processor.RepositoryProcessor;
-import io.github.fludakit.data.processor.generator.metadata.TypeMappingGenerator;
-import io.github.fludakit.data.processor.generator.metadata.MetamodelGenerator;
-import io.github.fludakit.data.processor.generator.RepositorySourceWriter;
-import io.github.fludakit.data.processor.generator.rowmapper.RowMapperGenerator;
 import io.github.fludakit.data.query.QueryDefinition;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -19,13 +14,13 @@ import java.util.Set;
  * must emit its {@code <Entity>Metadata}, its {@code _Entity} metamodel and its
  * {@code <Entity>RowMapper} exactly once, however the repositories are ordered across rounds.
  *
- * <p>The four collections were private fields of {@link RepositoryProcessor} and are otherwise
+ * <p>The four collections were private fields of {@link io.github.fludakit.data.processor.RepositoryProcessor} and are otherwise
  * unchanged — this class adds no new bookkeeping, it gives the four one name and one vocabulary
  * ({@code claim}/{@code isClaimed}, {@code remember…}/{@code …Of}). Two of them are handed out LIVE
  * and are still mutated by the generators that own them: {@link #metadataTypes()} is filled by
- * {@link TypeMappingGenerator} as it emits descriptors (and is the value-object cycle guard, so it is
+ * {@link io.github.fludakit.data.processor.generator.metadata.TypeMappingGenerator} as it emits descriptors (and is the value-object cycle guard, so it is
  * populated <em>before</em> the class is written), and {@link #claimedNames()} is the set
- * {@link RepositorySourceWriter} and {@link MetamodelGenerator} consult and extend. Neither is
+ * {@link io.github.fludakit.data.processor.generator.RepositorySourceWriter} and {@link io.github.fludakit.data.processor.generator.metadata.MetamodelGenerator} consult and extend. Neither is
  * copied here, because a copy would let a caller deduplicate against a snapshot instead of against
  * what has actually been written.</p>
  *
@@ -84,8 +79,8 @@ public class GeneratedArtifactRegistry {
     // ------------------------------------------------------------------ name claiming
 
     /**
-     * The live set of claimed generated-type FQNs, shared with {@link RepositorySourceWriter} and
-     * {@link MetamodelGenerator}: both must see (and add to) what has already been taken, not a
+     * The live set of claimed generated-type FQNs, shared with {@link io.github.fludakit.data.processor.generator.RepositorySourceWriter} and
+     * {@link io.github.fludakit.data.processor.generator.metadata.MetamodelGenerator}: both must see (and add to) what has already been taken, not a
      * snapshot of it.
      */
     public Set<String> claimedNames() {
@@ -120,7 +115,7 @@ public class GeneratedArtifactRegistry {
 
     /**
      * The live entity/value-object FQN → {@code <Entity>Metadata} map, shared with
-     * {@link TypeMappingGenerator} and {@link RowMapperGenerator}: the former fills it, the latter reads
+     * {@link io.github.fludakit.data.processor.generator.metadata.TypeMappingGenerator} and {@link io.github.fludakit.data.processor.generator.rowmapper.RowMapperGenerator}: the former fills it, the latter reads
      * it to type the mapper it emits.
      */
     public Map<String, ClassName> metadataTypes() {

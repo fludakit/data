@@ -2,12 +2,11 @@ package io.github.fludakit.data.processor.model;
 
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 
-import io.github.fludakit.data.processor.analysis.LoadPlanner;
 import java.util.List;
 import java.util.Map;
 
 /**
- * The read-side scope {@link LoadPlanner} computed for one repository entity.
+ * The read-side scope {@link io.github.fludakit.data.processor.analysis.LoadPlanner} computed for one repository entity.
  *
  * @param hydratedCollections the {@code List<@ValueObject>} children that cleared the VO row-mapper
  *                            gate, each of which gets a {@code hydrate<Field>} loader

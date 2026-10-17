@@ -1,6 +1,5 @@
 package io.github.fludakit.data.processor.support;
 
-import io.github.fludakit.data.processor.analysis.PathResolver;
 import javax.annotation.processing.Messager;
 import javax.lang.model.element.Element;
 import javax.tools.Diagnostic;

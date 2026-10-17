@@ -1,7 +1,6 @@
 package io.github.fludakit.data.processor.generator.nav;
 
 import com.squareup.javapoet.TypeName;
-import io.github.fludakit.data.processor.generator.metadata.MmMember;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;

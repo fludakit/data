@@ -36,15 +36,15 @@ import java.util.List;
  * <p>Every skip is reported as its own write-honest NOTE ("children will NOT be cascaded on
  * save/update/delete"), so {@code save()} can never silently drop children without write-side
  * diagnostics. Unlike {@link LoadPlanner} this needs no injected function: resolving a
- * target's compile-time model is memoized inside {@link TypeModelBuilder} and generates
+ * target's compile-time model is memoized inside {@link TypeModelRegistry} and generates
  * no artifact, so the planner stays free of row-mapper generation entirely.</p>
  */
 public final class SavePlanner {
 
     private final Diagnostics diagnostics;
-    private final TypeModelBuilder typeMappingBuilder;
+    private final TypeModelRegistry typeMappingBuilder;
 
-    public SavePlanner(Diagnostics diagnostics, TypeModelBuilder typeMappingBuilder) {
+    public SavePlanner(Diagnostics diagnostics, TypeModelRegistry typeMappingBuilder) {
         this.diagnostics = diagnostics;
         this.typeMappingBuilder = typeMappingBuilder;
     }

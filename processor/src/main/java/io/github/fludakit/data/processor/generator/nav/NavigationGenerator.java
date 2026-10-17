@@ -4,13 +4,9 @@ import com.squareup.javapoet.ClassName;
 import io.github.fludakit.data.Names;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
-import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
+import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
 import io.github.fludakit.data.processor.generator.RepositorySourceWriter;
 import io.github.fludakit.data.processor.generator.rowmapper.RowMapperGenerator;
-import io.github.fludakit.data.processor.generator.metadata.MmMember;
-import io.github.fludakit.data.processor.generator.nav.NavContext;
-import io.github.fludakit.data.processor.generator.nav.NavLevel;
-import io.github.fludakit.data.processor.generator.nav.NavUnit;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.support.MemberNames;
 import javax.lang.model.element.TypeElement;
@@ -58,7 +54,7 @@ public final class NavigationGenerator {
     private final List<NavUnit> pending = new ArrayList<>();
 
     public NavigationGenerator(AttributeTypes attributeTypes, Diagnostics diagnostics,
-                        TypeModelBuilder typeMappingBuilder,
+                        TypeModelRegistry typeMappingBuilder,
                         RowMapperGenerator rowMapperGenerator, RepositorySourceWriter sourceWriter,
                         Set<String> managedEntities) {
         this.sourceWriter = sourceWriter;

@@ -83,10 +83,10 @@ public final class QueryDefinitionWriter {
                     .add("new $T.Read($T.$L, $L, $L, $T.$L, new $T($L, $L), $L, $L, $L)",
                             Q_QUERY_DEFINITION,
                             Q_RESULT_KIND, read.resultKind().name(),
-                            predicatesLiteral(read), Literals.sortListLiteral(read.sorts()),
+                            predicatesLiteral(read), QueryLiterals.sortListLiteral(read.sorts()),
                             Q_PAGING_MODE, read.paging().name(),
                             Q_LIMIT_SPEC, read.limit().limit(), read.limit().offset(),
-                            Literals.seekListLiteral(read.seekTerms()), paramsLiteral(read),
+                            QueryLiterals.seekListLiteral(read.seekTerms()), paramsLiteral(read),
                             read.distinct())
                     .build();
             case QueryDefinition.Count count -> CodeBlock.builder()
@@ -130,19 +130,19 @@ public final class QueryDefinitionWriter {
 
     /** The {@code List.of(...)} literal of a criteria statement's {@link Predicate}s. */
     private CodeBlock predicatesLiteral(QueryDefinition.Criteria definition) {
-        return Literals.listLiteral(builder -> {
+        return QueryLiterals.listLiteral(builder -> {
             for (int i = 0; i < definition.predicates().size(); i++) {
                 if (i > 0) {
                     builder.add(", ");
                 }
-                builder.add(Literals.predicateLiteral(definition.predicates().get(i)));
+                builder.add(QueryLiterals.predicateLiteral(definition.predicates().get(i)));
             }
         });
     }
 
     /** The {@code List.of(...)} literal of a criteria statement's {@link ParamBinding}s. */
     private CodeBlock paramsLiteral(QueryDefinition.Criteria definition) {
-        return Literals.listLiteral(builder -> {
+        return QueryLiterals.listLiteral(builder -> {
             for (int i = 0; i < definition.paramBindings().size(); i++) {
                 if (i > 0) {
                     builder.add(", ");

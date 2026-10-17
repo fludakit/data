@@ -188,23 +188,4 @@ public final class RepositoryTypeResolver {
         }
         return type;
     }
-
-    /** The erased name of the JDBC client type a repository accessor may expose. */
-    private static final String JDBC_CLIENT = "io.github.fludakit.jdbc.JdbcClient";
-
-    /**
-     * Whether {@code method} is the {@code JdbcClient} escape hatch: {@code JdbcClient getJdbcClient()},
-     * no parameters. Recognised on the declaration itself rather than through a marker interface, so a
-     * repository asks for it by writing the method.
-     *
-     * <p>All three parts are checked, and the RETURN TYPE is the load-bearing one. Name and arity
-     * alone would let {@code String getJdbcClient()} be answered with the wrong field and compile into
-     * a repository whose accessor cannot be called; the type test keeps a wrong-shaped declaration on
-     * the ordinary path, where it is reported as an unrecognised method like any other.</p>
-     */
-    public static boolean isJdbcClientAccessor(ExecutableElement method, String erasedReturnTypeName) {
-        return method.getParameters().isEmpty()
-                && "getJdbcClient".equals(method.getSimpleName().toString())
-                && JDBC_CLIENT.equals(erasedReturnTypeName);
-    }
 }

@@ -9,38 +9,25 @@ import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.JoinEdge;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.RepositoryProcessor;
-import io.github.fludakit.data.query.Predicate;
-import io.github.fludakit.data.query.SeekTerm;
-import io.github.fludakit.data.query.SortSpec;
 
 import javax.lang.model.element.Modifier;
 import java.util.List;
-import java.util.function.Consumer;
 
 /**
- * The JavaPoet literal builders for the generated classes — the {@code new ColumnRef.Simple(...)},
- * {@code new Predicate.of(...)} and {@code public static final String X = "..."} shapes that the
- * metadata descriptors and the query-definition holders both emit.
+ * The JavaPoet literal builders for the generated METADATA DESCRIPTOR — the {@code new
+ * ColumnRef.Simple(...)}, {@code new JoinEdge.ToOne(...)}, {@code new Prop.Scalar(...)} and
+ * {@code public static final String X = "..."} shapes the descriptor emits.
+ *
+ * <p>The query-definition holder's literals live in {@link QueryLiterals}: a descriptor and a query
+ * holder emit two different type families, so they no longer share one class.</p>
  *
  * <p>They live apart from {@link RepositoryProcessor} because two different emitters need the same
  * literal for the same value, and a literal that is built twice drifts: a change to how a
  * {@code ColumnRef} is spelled has to land in every emitter at once. Nothing here reads the
  * annotation-processing environment — every method is a pure function of its arguments, so the
- * literal for a given model value is the same wherever it is emitted from.
+ * literal for a given model value is the same wherever it is emitted from.</p>
  */
 public final class Literals {
-
-    // the query-metadata types the generated <Repository>Queries serialises literals with.
-    public static final ClassName Q_PREDICATE =
-            ClassName.get("io.github.fludakit.data.query", "Predicate");
-    public static final ClassName Q_SORT_SPEC =
-            ClassName.get("io.github.fludakit.data.query", "SortSpec");
-    public static final ClassName Q_OPERATOR =
-            ClassName.get("io.github.fludakit.data.query", "Operator");
-    public static final ClassName Q_CONNECTOR =
-            ClassName.get("io.github.fludakit.data.query", "Connector");
-    public static final ClassName Q_SEEK_TERM =
-            ClassName.get("io.github.fludakit.data.query", "SeekTerm");
 
     // the metadata types columnRefLiteral / joinEdgeLiteral spell into a generated descriptor.
     private static final ClassName MD_COLUMN_REF =
@@ -49,35 +36,6 @@ public final class Literals {
             ClassName.get("io.github.fludakit.data.metadata", "JoinEdge");
 
     private Literals() {
-    }
-
-    public static CodeBlock listLiteral(Consumer<CodeBlock.Builder> items) {
-        CodeBlock.Builder builder = CodeBlock.builder().add("$T.of(", ClassName.get(List.class));
-        items.accept(builder);
-        return builder.add(")").build();
-    }
-
-    public static CodeBlock sortListLiteral(List<SortSpec> sorts) {
-        return listLiteral(builder -> {
-            for (int i = 0; i < sorts.size(); i++) {
-                if (i > 0) {
-                    builder.add(", ");
-                }
-                builder.add(sortLiteral(sorts.get(i)));
-            }
-        });
-    }
-
-    public static CodeBlock seekListLiteral(List<SeekTerm> terms) {
-        return listLiteral(builder -> {
-            for (int i = 0; i < terms.size(); i++) {
-                if (i > 0) {
-                    builder.add(", ");
-                }
-                SeekTerm term = terms.get(i);
-                builder.add("new $T($L, $L)", Q_SEEK_TERM, columnRefLiteral(term.column()), term.ascending());
-            }
-        });
     }
 
     /**
@@ -166,17 +124,6 @@ public final class Literals {
                     elementCollection.name());
         }
         throw new IllegalStateException("unknown property kind: " + prop.getClass().getName());
-    }
-
-    public static CodeBlock predicateLiteral(Predicate predicate) {
-        return CodeBlock.of("$T.of($S, $T.$L, $S, $T.$L, $L)", Q_PREDICATE, predicate.property(), Q_OPERATOR,
-                predicate.operator().name(), predicate.param(), Q_CONNECTOR,
-                predicate.connector().name(), predicate.ignoreCase());
-    }
-
-    public static CodeBlock sortLiteral(SortSpec sort) {
-        return CodeBlock.of("$T.of($S, $L, $L)", Q_SORT_SPEC, sort.property(),
-                sort.ascending(), sort.ignoreCase());
     }
 
     /** The UPPER_SNAKE constant name a column-bearing property publishes in its descriptor. */

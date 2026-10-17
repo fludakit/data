@@ -16,7 +16,7 @@ import io.github.fludakit.data.metadata.ValueObjectMapping;
 import io.github.fludakit.data.processor.RepositoryProcessor;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
 import io.github.fludakit.data.processor.analysis.PathResolver;
-import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
+import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
 import io.github.fludakit.data.processor.generator.rowmapper.RowMapperGenerator;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.support.Props;
@@ -42,12 +42,12 @@ public final class NavSupport {
 
     private final AttributeTypes attributeTypes;
     private final Diagnostics diagnostics;
-    private final TypeModelBuilder typeMappingBuilder;
+    private final TypeModelRegistry typeMappingBuilder;
     private final RowMapperGenerator rowMapperGenerator;
     private final Set<String> managedEntities;
 
     public NavSupport(AttributeTypes attributeTypes, Diagnostics diagnostics,
-               TypeModelBuilder typeMappingBuilder, RowMapperGenerator rowMapperGenerator,
+               TypeModelRegistry typeMappingBuilder, RowMapperGenerator rowMapperGenerator,
                Set<String> managedEntities) {
         this.attributeTypes = attributeTypes;
         this.diagnostics = diagnostics;
@@ -98,20 +98,8 @@ public final class NavSupport {
             attrType = AttributeTypes.FM_ID;
             recordType = AttributeTypes.FM_ID_RECORD;
         } else if (prop instanceof Prop.Scalar scalar) {
-            switch (attributeTypes.kindOf(scalar.typeFqn())) {
-                case TEXT -> {
-                    attrType = AttributeTypes.FM_TEXT;
-                    recordType = AttributeTypes.FM_TEXT_RECORD;
-                }
-                case SORTABLE -> {
-                    attrType = AttributeTypes.FM_SORTABLE;
-                    recordType = AttributeTypes.FM_SORTABLE_RECORD;
-                }
-                default -> {
-                    attrType = AttributeTypes.FM_COLUMN;
-                    recordType = AttributeTypes.FM_COLUMN_RECORD;
-                }
-            }
+            attrType = attributeTypes.scalarAttributeType(scalar.typeFqn());
+            recordType = attributeTypes.scalarRecordType(scalar.typeFqn());
         } else {
             attrType = AttributeTypes.FM_COLUMN; // relation/embedded foreign keys surface as plain column leaves
             recordType = AttributeTypes.FM_COLUMN_RECORD;

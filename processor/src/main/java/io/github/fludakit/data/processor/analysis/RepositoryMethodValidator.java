@@ -14,6 +14,8 @@ import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.type.DeclaredType;
 import javax.lang.model.type.ExecutableType;
 import javax.lang.model.type.TypeMirror;
+import javax.lang.model.util.Elements;
+import javax.lang.model.util.Types;
 import java.util.List;
 import java.util.Set;
 import java.util.regex.Pattern;
@@ -63,13 +65,15 @@ public final class RepositoryMethodValidator {
             Pattern.compile("(?:find|count|delete|exists)By?");
 
     private final Diagnostics diagnostics;
-    private final TypeShapes typeShapes;
+    private final Types types;
+    private final Elements elements;
     private boolean queryByNameChecked;
     private boolean queryByNameAvailable;
 
-    public RepositoryMethodValidator(Diagnostics diagnostics, TypeShapes typeShapes) {
+    public RepositoryMethodValidator(Diagnostics diagnostics, Types types, Elements elements) {
         this.diagnostics = diagnostics;
-        this.typeShapes = typeShapes;
+        this.types = types;
+        this.elements = elements;
     }
 
     /**
@@ -85,12 +89,12 @@ public final class RepositoryMethodValidator {
         }
 
         String name = method.getSimpleName().toString();
-        ExecutableType resolvedType = typeShapes.resolved(repositoryType, method);
+        ExecutableType resolvedType = (ExecutableType) types.asMemberOf(repositoryType, method);
         List<? extends TypeMirror> parameterTypes = resolvedType.getParameterTypes();
 
         // Slice has no generated shape yet. Left alone it fell through to the single-result path and
         // silently produced a query whose terminal does not match the declaration.
-        if ("jakarta.data.page.Slice".equals(typeShapes.erasedName(resolvedType.getReturnType()))) {
+        if ("jakarta.data.page.Slice".equals(types.erasure(resolvedType.getReturnType()).toString())) {
             error(method, "Repository method '" + name + "' returns Slice, which this implementation does not"
                     + " generate yet; return Page or CursoredPage instead");
             return false;
@@ -143,7 +147,7 @@ public final class RepositoryMethodValidator {
         boolean delete = method.getAnnotation(Delete.class) != null;
         if (parameterTypes.size() == 1) {
             TypeMirror parameter = parameterTypes.get(0);
-            if (typeShapes.isEntity(parameter, entity) || isEntitySequence(parameter, entity)) {
+            if (TypeMirrors.isEntity(types, elements, parameter, entity) || isEntitySequence(parameter, entity)) {
                 return true;
             }
         }
@@ -171,7 +175,7 @@ public final class RepositoryMethodValidator {
         int arity = parameterTypes.size();
         boolean ok;
         if (ENTITY_LIFECYCLE_METHODS.contains(name)) {
-            ok = arity == 1 && typeShapes.isEntity(parameterTypes.get(0), entity);
+            ok = arity == 1 && TypeMirrors.isEntity(types, elements, parameterTypes.get(0), entity);
         } else if (SEQUENCE_LIFECYCLE_METHODS.contains(name)) {
             ok = arity == 1 && isEntitySequence(parameterTypes.get(0), entity);
         } else if (IDENTIFIER_METHODS.contains(name)) {
@@ -288,12 +292,12 @@ public final class RepositoryMethodValidator {
     /**
      * Whether {@code parameterType} is a sequence OF the entity: {@code List<Book>} or
      * {@code Book[]} against a {@code Book} repository. The element test is
-     * {@link TypeShapes#sequenceElementType} — a {@code List} of something else, or a raw one, is not
+     * {@link TypeMirrors#sequenceElementType} — a {@code List} of something else, or a raw one, is not
      * an entity sequence however much it looks like one at the call site.
      */
     private boolean isEntitySequence(TypeMirror parameterType, TypeMapping<?> entity) {
-        TypeMirror element = typeShapes.sequenceElementType(parameterType);
-        return element != null && typeShapes.isEntity(element, entity);
+        TypeMirror element = TypeMirrors.sequenceElementType(parameterType);
+        return element != null && TypeMirrors.isEntity(types, elements, element, entity);
     }
 
     private static String signature(String name, List<? extends TypeMirror> parameterTypes) {

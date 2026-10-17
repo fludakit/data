@@ -7,11 +7,12 @@ import io.github.fludakit.data.metadata.JoinEdge;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.page.SimplePage;
-import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
+import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
 import io.github.fludakit.data.processor.analysis.PathResolver;
 import io.github.fludakit.data.processor.generator.metadata.Literals;
 import io.github.fludakit.data.processor.generator.metadata.TypeMappingGenerator;
 import io.github.fludakit.data.processor.generator.RepositoryContext;
+import io.github.fludakit.data.processor.support.JoinEdges;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.query.LimitSpec;
 import io.github.fludakit.data.query.Operator;
@@ -58,11 +59,11 @@ public final class CrudReadEmitter {
             ClassName.get("io.github.fludakit.data.metadata", "ColumnPlacement");
 
     private final SqlDialect sqlDialect;
-    private final TypeModelBuilder typeMappingBuilder;
+    private final TypeModelRegistry typeMappingBuilder;
     private final TypeMappingGenerator metadataGenerator;
     private final JoinedProjectionEmitter joinedProjections;
 
-    public CrudReadEmitter(SqlDialect sqlDialect, TypeModelBuilder typeMappingBuilder,
+    public CrudReadEmitter(SqlDialect sqlDialect, TypeModelRegistry typeMappingBuilder,
                            TypeMappingGenerator metadataGenerator,
                            JoinedProjectionEmitter joinedProjections) {
         this.sqlDialect = sqlDialect;
@@ -89,7 +90,7 @@ public final class CrudReadEmitter {
             if (ref.targetTable() == null || ref.targetIdColumn() == null) {
                 continue;
             }
-            JoinEdge edge = PathResolver.toOneOrNull(mapping.tableName(), ref.fkColumn(),
+            JoinEdge edge = JoinEdges.toOneOrNull(mapping.tableName(), ref.fkColumn(),
                     ref.targetTable(), ref.targetIdColumn());
             if (edge != null) {
                 edges.add(edge);

@@ -13,7 +13,7 @@
  *   <li>{@link io.github.fludakit.data.processor.support.Diagnostics} — single diagnostic channel
  *       interface. Production wraps {@code Messager}; tests use a collecting sink. Methods:
  *       {@code error()}, {@code note()}, {@code warning()}.</li>
- *   <li>{@link io.github.fludakit.data.processor.support.GeneratedArtifactRegistry} — session-scoped
+ *   <li>{@link io.github.fludakit.data.processor.GeneratedArtifacts} — session-scoped
  *       cache of everything emitted or claimed: row mappers, metadata types, metamodel types,
  *       generated type names, managed entities. Survives rounds. This is the backbone of the
  *       idempotent generation protocol: see

@@ -10,6 +10,8 @@ import io.github.fludakit.data.metadata.EntityTypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.metadata.ValueObjectMapping;
+import javax.lang.model.element.Element;
+import javax.lang.model.element.ElementKind;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.util.Elements;
 import javax.lang.model.util.Types;
@@ -195,15 +197,33 @@ public final class TypeModelRegistry {
     // ------------------------------------------------------------ the type-kind predicates
 
     /** Whether the annotated type is a value object. */
-    public static boolean isValueObjectType(TypeElement element) {
+    public boolean isValueObjectType(TypeElement element) {
         return element != null
                 && element.getAnnotation(io.github.fludakit.data.annotation.ValueObject.class) != null;
     }
 
     /** Whether the annotated type is an aggregate root (owns the lifecycle of everything inside it). */
-    public static boolean ownsAggregateLifecycle(TypeElement element) {
+    public boolean ownsAggregateLifecycle(TypeElement element) {
         return element != null
                 && element.getAnnotation(io.github.fludakit.data.annotation.AggregateRoot.class) != null;
+    }
+
+    /**
+     * Whether {@code element} declares or inherits a method called {@code methodName}.
+     *
+     * <p>Generated code calls an accessor only after this check, so a bean-less type degrades to a
+     * NOTE instead of emitting a call that does not compile.</p>
+     */
+    public boolean hasMethod(TypeElement element, String methodName) {
+        if (element == null) {
+            return false;
+        }
+        for (Element member : elements.getAllMembers(element)) {
+            if (member.getKind() == ElementKind.METHOD && member.getSimpleName().contentEquals(methodName)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** The mapping whose TYPE carries the domain role: value object, aggregate root, or plain entity. */

@@ -3,8 +3,8 @@
  * loads and cascades.
  *
  * <p>This package produces the {@link io.github.fludakit.data.metadata.TypeMapping TypeMapping} every
- * generator consumes. It has no JavaPoet dependencies and writes no source files — it only reads
- * compiler elements and answers structural questions about the entity model.</p>
+ * generator consumes. It writes no source files — it only reads compiler elements and answers
+ * structural questions about the entity model.</p>
  *
  * <h2>Key classes</h2>
  *
@@ -15,7 +15,7 @@
  *       model builder.</li>
  *   <li>{@link io.github.fludakit.data.processor.generator.ArtifactCoordinator} — resolves the
  *       generated artifacts (metamodel, metadata, row mapper) for a model, idempotently. It lives in
- *       {@code generate} so this package reads javac and produces the model without depending on any
+ *       {@code generator} so this package reads javac and produces the model without depending on any
  *       generator.</li>
  *   <li>{@link io.github.fludakit.data.processor.analysis.RepositoryTypeResolver} — resolves the entity
  *       type from a repository's generic supertype hierarchy ({@code DataRepository<T,ID>}, etc.).</li>
@@ -32,7 +32,9 @@
  *       for aggregate children.</li>
  * </ul>
  *
- * <p>Utility classes {@code AttributeTypes} and {@code TypeShapes} wrap compiler {@code Elements} and
- * {@code Types} so other classes need not hold them directly.</p>
+ * <p>{@code AttributeTypes} wraps compiler {@code Elements}/{@code Types} for the metamodel-kind and
+ * enum questions; {@link io.github.fludakit.data.processor.analysis.TypeMirrors} answers the shared
+ * type questions (sequence element, is-this-the-entity) as static methods over a raw pair, so every
+ * other class holds {@code Types}/{@code Elements} directly.</p>
  */
 package io.github.fludakit.data.processor.analysis;

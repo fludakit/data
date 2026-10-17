@@ -2,9 +2,10 @@ package io.github.fludakit.data.processor.generator.method;
 
 import com.squareup.javapoet.MethodSpec;
 import io.github.fludakit.data.metadata.ColumnRef;
+import io.github.fludakit.data.processor.analysis.MethodResults;
 import io.github.fludakit.data.processor.generator.CrudReadEmitter;
 import io.github.fludakit.data.processor.generator.RepositoryContext;
-import io.github.fludakit.data.processor.support.GeneratedArtifactRegistry;
+import io.github.fludakit.data.processor.GeneratedArtifacts;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.query.LimitSpec;
 import io.github.fludakit.data.query.Operator;
@@ -33,10 +34,10 @@ public final class CrudReadMethodGenerator implements MethodGenerator {
 
     private final CrudReadEmitter crudReads;
     private final MethodResults methodResults;
-    private final GeneratedArtifactRegistry registry;
+    private final GeneratedArtifacts registry;
 
     public CrudReadMethodGenerator(CrudReadEmitter crudReads, MethodResults methodResults,
-                            GeneratedArtifactRegistry registry) {
+                            GeneratedArtifacts registry) {
         this.crudReads = crudReads;
         this.methodResults = methodResults;
         this.registry = registry;
@@ -72,14 +73,14 @@ public final class CrudReadMethodGenerator implements MethodGenerator {
         return false;
     }
 
-    private QueryDefinition.Read findById(RepositoryContext emission, ResultKind kind) {
+    static QueryDefinition.Read findById(RepositoryContext emission, ResultKind kind) {
         return new QueryDefinition.Read(kind,
                 List.of(Predicate.of(emission.entity().id().name(), Operator.EQ, MemberNames.ID_PARAM)),
                 List.of(), PagingMode.NONE, LimitSpec.none(), List.of(),
                 List.of(new ParamBinding(0, MemberNames.ID_PARAM)), false);
     }
 
-    private QueryDefinition.Read findAll(ResultKind kind) {
+    static QueryDefinition.Read findAll(ResultKind kind) {
         return new QueryDefinition.Read(kind, List.of(), List.of(), PagingMode.NONE, LimitSpec.none(),
                 List.of(), List.of(), false);
     }

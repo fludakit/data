@@ -6,15 +6,16 @@ import io.github.fludakit.data.Names;
 import io.github.fludakit.data.metadata.ColumnPlacement;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
-import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
-import io.github.fludakit.data.processor.model.PathStrictness;
-import io.github.fludakit.data.processor.model.PathResolution;
+import io.github.fludakit.data.processor.analysis.MethodResults;
+import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
 import io.github.fludakit.data.processor.analysis.PathResolver;
 import io.github.fludakit.data.processor.model.PagedRead;
 import io.github.fludakit.data.processor.model.QueryPlan;
+import io.github.fludakit.data.processor.model.ResolvedMethod;
 import io.github.fludakit.data.processor.model.ResolvedPredicate;
 import io.github.fludakit.data.processor.model.ResolvedSort;
 import io.github.fludakit.data.processor.analysis.QueryPlanBuilder;
+import io.github.fludakit.data.processor.analysis.RepositoryMethodResolver;
 import io.github.fludakit.data.processor.generator.RepositoryContext;
 import io.github.fludakit.data.processor.generator.JoinedProjectionEmitter;
 import io.github.fludakit.data.processor.generator.PagingEmitter;
@@ -22,25 +23,19 @@ import io.github.fludakit.data.processor.generator.QueryInvocations;
 import io.github.fludakit.data.processor.generator.RepositoryContext;
 import io.github.fludakit.data.processor.generator.SqlConstants;
 import io.github.fludakit.data.processor.support.Diagnostics;
-import io.github.fludakit.data.processor.support.GeneratedArtifactRegistry;
+import io.github.fludakit.data.processor.GeneratedArtifacts;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.query.Operation;
-import io.github.fludakit.data.query.ParamBinding;
-import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
-import io.github.fludakit.data.query.SortSpec;
 import io.github.fludakit.data.sql.SqlBuilder;
 import io.github.fludakit.data.sql.SqlDialect;
-import jakarta.data.repository.By;
 import jakarta.data.repository.OrderBy;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import javax.lang.model.element.ExecutableElement;
-import javax.lang.model.element.VariableElement;
 import javax.lang.model.type.ExecutableType;
-import javax.lang.model.type.TypeMirror;
 
 /**
  * The shared emitter behind the two finder shapes — {@code @Find} and query-by-method-name.
@@ -53,29 +48,29 @@ import javax.lang.model.type.TypeMirror;
  */
 public final class FinderEmitter {
 
-    private final TypeModelBuilder typeMappingBuilder;
+    private final TypeModelRegistry typeMappingBuilder;
     private final Diagnostics diagnostics;
     private final SqlDialect sqlDialect;
-    private final PathResolver pathResolver;
     private final QueryPlanBuilder queryPlanCompiler;
     private final JoinedProjectionEmitter joinedProjections;
     private final PagingEmitter pagingEmitter;
-    private final GeneratedArtifactRegistry registry;
+    private final GeneratedArtifacts registry;
     private final MethodResults methodResults;
+    private final RepositoryMethodResolver resolver;
 
-    public FinderEmitter(TypeModelBuilder typeMappingBuilder, Diagnostics diagnostics, SqlDialect sqlDialect,
-                  PathResolver pathResolver, QueryPlanBuilder queryPlanCompiler,
+    public FinderEmitter(TypeModelRegistry typeMappingBuilder, Diagnostics diagnostics, SqlDialect sqlDialect,
+                  QueryPlanBuilder queryPlanCompiler,
                   JoinedProjectionEmitter joinedProjections, PagingEmitter pagingEmitter,
-                  GeneratedArtifactRegistry registry, MethodResults methodResults) {
+                  GeneratedArtifacts registry, MethodResults methodResults, RepositoryMethodResolver resolver) {
         this.typeMappingBuilder = typeMappingBuilder;
         this.diagnostics = diagnostics;
         this.sqlDialect = sqlDialect;
-        this.pathResolver = pathResolver;
         this.queryPlanCompiler = queryPlanCompiler;
         this.joinedProjections = joinedProjections;
         this.pagingEmitter = pagingEmitter;
         this.registry = registry;
         this.methodResults = methodResults;
+        this.resolver = resolver;
     }
 
     /**
@@ -88,62 +83,6 @@ public final class FinderEmitter {
                      RepositoryContext emission, boolean explicitFind, boolean explicitDelete) {
         new Emission(builder, method, resolved, emission, emission.auxMethods(),
                 emission.repositoryFqn(), emission.queryDefinitionNames(), explicitFind, explicitDelete).run();
-    }
-
-    /**
-     * Everything the find/count/delete emitters need from one repository method: the parsed action, the
-     * argument bindings, the predicates and their compile-time column refs, and the collision-suffixed
-     * query-definition name.
-     */
-    private record MethodContext(String name, List<? extends VariableElement> parameters,
-                             Object parsed, Operation operation, boolean distinct,
-                             List<? extends TypeMirror> parameterTypes, List<ParamBinding> paramBindings,
-                             TypeMirror returnMirror, ResultKind kind, String queryDefinitionName,
-                             List<ResolvedPredicate> predicates) {
-    }
-
-    /**
-     * Resolves everything a find/count/delete emitter needs from one method.
-     *
-     * @return the resolved input, or {@code null} when a declared predicate property does not resolve —
-     *         the ERROR is already reported, so the method must be skipped
-     */
-    private MethodContext resolveFindInput(ExecutableElement method, ExecutableType resolved,
-                                       TypeMapping<?> entity, Map<String, Integer> queryDefinitionNames,
-                                       boolean explicitFind, boolean explicitDelete) {
-        String name = method.getSimpleName().toString();
-        List<? extends VariableElement> parameters = method.getParameters();
-        Object parsed = (explicitFind || explicitDelete) ? null : queryPlanCompiler.tryParse(name);
-        Operation operation = explicitDelete ? Operation.DELETE
-                : explicitFind ? Operation.FIND
-                : parsed != null ? ((io.github.fludakit.data.qbn.ParsedMethodName) parsed).operation() : Operation.FIND;
-        boolean distinct = parsed != null && ((io.github.fludakit.data.qbn.ParsedMethodName) parsed).distinct()
-                && (operation == Operation.FIND || operation == Operation.COUNT);
-        List<? extends TypeMirror> parameterTypes = resolved.getParameterTypes();
-        QueryPlanBuilder.ResolvedBindings resolvedBindings = queryPlanCompiler.resolvedBindings(parameters, parameterTypes, explicitFind || explicitDelete, parsed);
-        List<Predicate> predicates = resolvedBindings.predicates();
-        List<ParamBinding> paramBindings = resolvedBindings.paramBindings();
-        TypeMirror returnMirror = resolved.getReturnType();
-        ResultKind kind = methodResults.resultKindOf(returnMirror);
-        String queryDefinitionName = MemberNames.capitalize(name) + "Query";
-        int nameClash = queryDefinitionNames.merge(queryDefinitionName, 1, Integer::sum);
-        if (nameClash > 1) {
-            queryDefinitionName = queryDefinitionName + nameClash; // overload collision: declaration-order suffix
-        }
-        boolean annotatedParams = parameters.stream().anyMatch(p -> p.getAnnotation(By.class) != null);
-        PathStrictness strictness = (parsed != null || annotatedParams) ? PathStrictness.STRICT : PathStrictness.LENIENT;
-        List<PathResolution> predicatePaths = pathResolver.resolveCompilePaths(entity,
-                predicates.stream().map(Predicate::property).toList(), method, strictness);
-        if (strictness.failsOnUnresolved() && predicatePaths.stream().anyMatch(p -> p.placement() == null)) {
-            return null;
-        }
-        List<ResolvedPredicate> resolvedPredicates = new ArrayList<>();
-        for (int i = 0; i < predicates.size(); i++) {
-            resolvedPredicates.add(new ResolvedPredicate(predicates.get(i),
-                    predicatePaths.get(i).placement(), predicatePaths.get(i).attributePath()));
-        }
-        return new MethodContext(name, parameters, parsed, operation, distinct, parameterTypes, paramBindings,
-                returnMirror, kind, queryDefinitionName, resolvedPredicates);
     }
 
     /** One method's emission: the per-method state the private helpers share. */
@@ -173,8 +112,8 @@ public final class FinderEmitter {
         }
 
         void run() {
-            MethodContext input = resolveFindInput(method, resolved, ctx.entity(), queryDefinitionNames,
-                    explicitFind, explicitDelete);
+            ResolvedMethod input = resolver.resolveFindMethod(method, resolved, ctx.entity(),
+                    explicitFind, explicitDelete, repositoryFqn);
             if (input == null) {
                 return;
             }
@@ -192,15 +131,20 @@ public final class FinderEmitter {
          * name in the session registry (the source the {@code <Repository>Queries} holder is written
          * from), and returns it so the caller renders the SQL constant from the very same object.
          */
-        private QueryDefinition.Criteria publish(MethodContext input, QueryPlan plan, boolean distinct,
+        private QueryDefinition.Criteria publish(ResolvedMethod input, QueryPlan plan, boolean distinct,
                 Operation operation, ResultKind kind, ResultKind resultKind) {
+            String queryDefinitionName = MemberNames.capitalize(input.name()) + "Query";
+            int nameClash = queryDefinitionNames.merge(queryDefinitionName, 1, Integer::sum);
+            if (nameClash > 1) {
+                queryDefinitionName = queryDefinitionName + nameClash;
+            }
             QueryDefinition.Criteria definition =
                     QueryPlanBuilder.queryDefinitionOf(operation, kind, resultKind, plan, distinct);
-            registry.queryDefinitions(repositoryFqn).put(input.queryDefinitionName(), definition);
+            registry.queryDefinitions(repositoryFqn).put(queryDefinitionName, definition);
             return definition;
         }
 
-        private void emitCountOrExists(MethodContext input) {
+        private void emitCountOrExists(ResolvedMethod input) {
             QueryDefinition.Criteria definition = publish(input,
                     new QueryPlan(ctx.entity(), input.predicates(), List.of(), 0, input.paramBindings(), input.parameters()),
                     input.distinct(), input.operation(), input.kind(), input.kind());
@@ -218,7 +162,7 @@ public final class FinderEmitter {
             }
         }
 
-        private void emitDelete(MethodContext input) {
+        private void emitDelete(ResolvedMethod input) {
             // A delete whose predicate traverses more than one relation would need a nested EXISTS,
             // which is not rendered yet: degrade each such predicate to a bare column with a null path.
             List<ResolvedPredicate> deletePredicates = new ArrayList<>();
@@ -248,30 +192,15 @@ public final class FinderEmitter {
             }
         }
 
-        private void emitFindRead(MethodContext input) {
-            List<SortSpec> methodSorts = queryPlanCompiler.sorts(method, input.parsed());
-            for (SortSpec sort : methodSorts) {
-                if (!sort.ignoreCase()) {
-                    continue;
-                }
-                boolean paged = input.kind() == ResultKind.PAGE || input.kind() == ResultKind.CURSORED_PAGE;
-                boolean toMany = pathResolver.resolveCompilePath(ctx.entity(), sort.property()).existential();
-                if (paged || toMany) {
-                    diagnostics.error(
-                            input.name() + ": IgnoreCase ordering is not supported for "
-                                    + (paged ? "paged reads" : "a to-many sort path ('" + sort.property() + "')"),
-                            method);
-                    return;
-                }
-            }
+        private void emitFindRead(ResolvedMethod input) {
             if (input.kind() == ResultKind.CURSORED_PAGE || input.kind() == ResultKind.PAGE) {
-                emitPagedFind(input, methodSorts);
+                emitPagedFind(input);
             } else {
-                emitPlainFind(input, methodSorts);
+                emitPlainFind(input);
             }
         }
 
-        private void emitPagedFind(MethodContext input, List<SortSpec> methodSorts) {
+        private void emitPagedFind(ResolvedMethod input) {
             String pageRequest = queryPlanCompiler.specialParameter(input.parameters(), input.parameterTypes(), QueryPlanBuilder.PAGE_REQUEST);
             if (pageRequest == null) {
                 diagnostics.error(
@@ -285,39 +214,17 @@ public final class FinderEmitter {
                         input.name() + ": full materialisation through joins is not supported for paged finders;"
                                 + " association fields materialize as id-only partials", method);
             }
-            List<ResolvedSort> resolvedSorts = new ArrayList<>();
-            for (int i = 0; i < methodSorts.size(); i++) {
-                PathResolution pr = pathResolver.resolveCompilePath(ctx.entity(), methodSorts.get(i).property());
-                ColumnPlacement original = pr.placement();
-                ColumnPlacement ref = original == null
-                        ? PathResolver.placementOf(PathResolver.snakeCasedLocalColumnRef(methodSorts.get(i).property()))
-                        : original;
-                resolvedSorts.add(new ResolvedSort(methodSorts.get(i), ref,
-                        original == null ? null : pr.attributePath(), original != null && pr.existential()));
-            }
             QueryDefinition.Criteria definition = publish(input,
-                    new QueryPlan(ctx.entity(), input.predicates(), resolvedSorts, 0, input.paramBindings(), input.parameters()),
+                    new QueryPlan(ctx.entity(), input.predicates(), input.resolvedSorts(), 0, input.paramBindings(), input.parameters()),
                     input.distinct(), Operation.FIND, input.kind(), input.kind());
             String constant = SqlConstants.register(ctx.constants(), "SQL_" + MemberNames.upperSnake(input.name()),
                     new SqlBuilder(ctx.entity(), ctx.entity(), definition).dialect(sqlDialect).select());
-            pagingEmitter.emitPaged(builder, ctx, new PagedRead(method, pageRequest, methodSorts, constant,
+            pagingEmitter.emitPaged(builder, ctx, new PagedRead(method, pageRequest, input.sorts(), constant,
                     input.paramBindings(), input.parameters(), input.kind() == ResultKind.CURSORED_PAGE));
         }
 
-        private void emitPlainFind(MethodContext input, List<SortSpec> methodSorts) {
-            PathStrictness sortStrictness = (input.parsed() != null || method.getAnnotationsByType(OrderBy.class).length > 0)
-                    ? PathStrictness.STRICT : PathStrictness.LENIENT;
-            List<PathResolution> sortPaths = pathResolver.resolveCompilePaths(ctx.entity(),
-                    methodSorts.stream().map(SortSpec::property).toList(), method, sortStrictness);
-            if (sortStrictness.failsOnUnresolved() && sortPaths.stream().anyMatch(p -> p.placement() == null)) {
-                return;
-            }
-            List<ResolvedSort> resolvedSorts = new ArrayList<>();
-            for (int i = 0; i < methodSorts.size(); i++) {
-                resolvedSorts.add(new ResolvedSort(methodSorts.get(i), sortPaths.get(i).placement(),
-                        sortPaths.get(i).attributePath(), sortPaths.get(i).existential()));
-            }
-            List<ColumnPlacement> sortRefs = resolvedSorts.stream().map(ResolvedSort::placement).toList();
+        private void emitPlainFind(ResolvedMethod input) {
+            List<ColumnPlacement> sortRefs = input.resolvedSorts().stream().map(ResolvedSort::placement).toList();
 
             List<Prop.Reference> traversed = joinedProjections.collectTraversedReferences(ctx.entity(),
                     input.predicates().stream().map(ResolvedPredicate::placement).toList(), sortRefs);
@@ -332,7 +239,7 @@ public final class FinderEmitter {
                 queryArgForMethod = CodeBlock.of("(rs, rowNum) -> $L(rs, rowNum)", fullMapper);
             }
             QueryDefinition.Criteria queryDefinition = publish(input,
-                    new QueryPlan(ctx.entity(), input.predicates(), resolvedSorts,
+                    new QueryPlan(ctx.entity(), input.predicates(), input.resolvedSorts(),
                             input.parsed() != null ? ((io.github.fludakit.data.qbn.ParsedMethodName) input.parsed()).limit() : 0, input.paramBindings(), input.parameters()),
                     input.distinct(), Operation.FIND, input.kind(), input.kind());
             String sql = new SqlBuilder(ctx.entity(), ctx.entity(), queryDefinition)
@@ -343,7 +250,7 @@ public final class FinderEmitter {
             emitFindTerminal(input, call, queryArgForMethod);
         }
 
-        private void emitFindTerminal(MethodContext input, CodeBlock.Builder call, CodeBlock queryArgForMethod) {
+        private void emitFindTerminal(ResolvedMethod input, CodeBlock.Builder call, CodeBlock queryArgForMethod) {
             if (input.kind() == ResultKind.ARRAY) {
                 call.add(".query($L).list()", queryArgForMethod);
                 if (!ctx.hydrate()) {

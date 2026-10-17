@@ -1,32 +1,17 @@
 package io.github.fludakit.data.sql;
 
-import java.util.Objects;
+import java.util.List;
+import java.util.stream.Collectors;
 
-/** SQL syntax used by the currently supported H2 backend. */
-public final class H2Dialect implements SqlDialect {
+/**
+ * SQL syntax used by the currently supported H2 backend. Identifier quoting and {@code LIMIT}/
+ * {@code OFFSET} come from {@link AnsiSqlDialect}; H2 differs only in its single-statement upsert.
+ */
+public final class H2Dialect extends AnsiSqlDialect {
 
     public static final H2Dialect INSTANCE = new H2Dialect();
 
     private H2Dialect() {
-    }
-
-    @Override
-    public String quoteIdentifier(String identifier) {
-        Objects.requireNonNull(identifier, "identifier");
-        if (identifier.isEmpty()) {
-            throw new IllegalArgumentException("SQL identifier must not be empty");
-        }
-        return "\"" + identifier.replace("\"", "\"\"") + "\"";
-    }
-
-    @Override
-    public String limitClause(String limitExpression) {
-        return " LIMIT " + Objects.requireNonNull(limitExpression, "limitExpression");
-    }
-
-    @Override
-    public String offsetClause(String offsetExpression) {
-        return " OFFSET " + Objects.requireNonNull(offsetExpression, "offsetExpression");
     }
 
     /**
@@ -39,5 +24,13 @@ public final class H2Dialect implements SqlDialect {
     @Override
     public UpsertForm upsertForm() {
         return UpsertForm.MERGE;
+    }
+
+    @Override
+    public String upsertStatement(String tableName, String idColumn, List<String> columns,
+                                  List<String> params) {
+        String names = columns.stream().map(this::quoteIdentifier).collect(Collectors.joining(", "));
+        return "MERGE INTO " + quoteIdentifier(tableName) + " (" + names + ") KEY (" + quoteIdentifier(idColumn)
+                + ") VALUES (" + String.join(", ", params) + ")";
     }
 }

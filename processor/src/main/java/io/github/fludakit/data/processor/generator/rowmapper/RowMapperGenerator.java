@@ -10,7 +10,7 @@ import com.squareup.javapoet.TypeSpec;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
-import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
+import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
 import io.github.fludakit.data.processor.generator.RepositorySourceWriter;
 import io.github.fludakit.data.processor.generator.metadata.Literals;
 import io.github.fludakit.data.processor.generator.metadata.TypeMappingGenerator;
@@ -19,8 +19,6 @@ import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.processor.support.Props;
 import javax.lang.model.element.Element;
-import javax.lang.model.element.ElementKind;
-import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.Modifier;
 import javax.lang.model.element.TypeElement;
 import java.util.LinkedHashMap;
@@ -43,9 +41,9 @@ import java.util.Map;
  *
  * <p>Writes go out through {@link RepositorySourceWriter}, so this emitter never sees {@code Filer},
  * and it holds no {@code Elements}: a target that is only ever named (a descriptor carries an FQN
- * {@code String}) resolves through {@link TypeModelBuilder#elementFor(String)}, and the one question
+ * {@code String}) resolves through {@link TypeModelRegistry#elementFor(String)}, and the one question
  * that needs a member SCAN — whether the target has an id setter, which is what makes an id-only
- * partial constructible — is {@link TypeModelBuilder#hasMethod}, which owns {@code Elements} and
+ * partial constructible — is {@link TypeModelRegistry#hasMethod}, which owns {@code Elements} and
  * memoizes by name. Both belong to the class that already had to own the environment for building the
  * models; neither decides whether this emitter can be constructed. The no-arg-constructor test needs
  * no environment at all — it reads {@code getEnclosedElements} off an element it already holds. A
@@ -53,9 +51,9 @@ import java.util.Map;
  */
 public final class RowMapperGenerator {
 
-    private final AttributeTypes attributeTypes;
+    private final RowMapperEligibility eligibility;
     private final Diagnostics diagnostics;
-    private final TypeModelBuilder typeMappingBuilder;
+    private final TypeModelRegistry typeMappingBuilder;
     private final TypeMappingGenerator metadataGenerator;
     private final RepositorySourceWriter sourceWriter;
 
@@ -72,10 +70,10 @@ public final class RowMapperGenerator {
     private final EmbeddedValueReader embeddedReader;
 
     public RowMapperGenerator(AttributeTypes attributeTypes, Diagnostics diagnostics,
-                       TypeModelBuilder typeMappingBuilder,
+                       TypeModelRegistry typeMappingBuilder,
                        TypeMappingGenerator metadataGenerator,
                        RepositorySourceWriter sourceWriter, Map<String, ClassName> metadataTypes) {
-        this.attributeTypes = attributeTypes;
+        this.eligibility = new RowMapperEligibility(attributeTypes, typeMappingBuilder);
         this.diagnostics = diagnostics;
         this.typeMappingBuilder = typeMappingBuilder;
         this.metadataGenerator = metadataGenerator;
@@ -85,51 +83,11 @@ public final class RowMapperGenerator {
     }
 
     /**
-     * True when {@code type} names an enum, which the reflection-free mapper reads via String +
-     * valueOf. The lookup is {@code AttributeTypes}' single copy — the metamodel kind decision asks
-     * the same question, and a row that disagreed with its own metamodel would not type-check.
-     */
-    private boolean isEnumType(TypeName type) {
-        return attributeTypes.isEnum(type);
-    }
-
-    /**
-     * Gate for the reflection-free row mapper: safe when every property is JDBC-safe, an
-     * {@code ASSOCIATION}/{@code MANY_TO_ONE} fk (skipped on read), or an {@code EMBEDDED} value
-     * object whose own model passes the same check. A VO's model has no id and its leaves are its
-     * properties, so the recursion flattens naturally; a {@code null} embedded model (cycle guard)
-     * fails closed.
+     * Whether {@code entity} can be materialised by a reflection-free row mapper. Delegates to
+     * {@link RowMapperEligibility}, which owns the gate so this emitter stays about emission.
      */
     public boolean canGenerateRowMapper(TypeMapping<?> entity) {
-        if (entity.id() != null && !JdbcTypes.isJdbcSafe(idType(entity)) && !isEnumType(idType(entity))) {
-            return false;
-        }
-        for (Prop p : entity.rowProps()) {
-            if (p instanceof Prop.Reference) {
-                continue; // FK-only, or hydrated by the relationship loaders
-            }
-            if (JdbcTypes.isJdbcSafe(typeMappingBuilder.memberType(entity.typeName(), p.name())) || isEnumType(typeMappingBuilder.memberType(entity.typeName(), p.name()))) {
-                continue;
-            }
-            if (p instanceof Prop.Embedded && ((Prop.Embedded) p).target() != null
-                    && canGenerateRowMapper(((Prop.Embedded) p).target())) {
-                continue;
-            }
-            return false;
-        }
-        return true;
-    }
-
-    /**
-     * The id's JavaPoet type — the one member whose type the mapping names but does not render.
-     *
-     * <p>Not {@code entity.id().typeFqn()} turned back into a name: a synthesized {@code long id}
-     * resolves to {@code java.lang.Long} through {@link AttributeTypes#classArgOf} only by accident,
-     * and a primitive must stay primitive for {@code JdbcTypes.isJdbcSafe} and for the
-     * {@code wasNull()} guard to be emitted. The scan recorded it, so the scan is asked.</p>
-     */
-    private TypeName idType(TypeMapping<?> entity) {
-        return typeMappingBuilder.memberType(entity.typeName(), entity.id().name());
+        return eligibility.canGenerateRowMapper(entity);
     }
 
     /** Emits {@code <Entity>RowMapper implements io.github.fludakit.jdbc.RowMapper<Entity>}; reflection-free. */
@@ -149,7 +107,7 @@ public final class RowMapperGenerator {
                 .addStatement("$T entity = new $T()", entityType, entityType);
 
         if (entity.id() != null) {
-            appendPropertyRead(mapRow, idType(entity), metadataType, entity.id().name(),
+            appendPropertyRead(mapRow, eligibility.idType(entity), metadataType, entity.id().name(),
                     entity.id().column(), entityElement.getSimpleName().toString());
         }
         // a non-composing @Association (composition=false) materializes at read time as an
@@ -198,7 +156,7 @@ public final class RowMapperGenerator {
     private void appendAssociationPartial(MethodSpec.Builder mapRow, Prop.Reference reference,
                                           ClassName metadataType, TypeElement entityElement,
                                           Map<String, MethodSpec> helpers) {
-        String why = associationPartialBlocked(reference, entityElement);
+        String why = eligibility.associationPartialBlocked(reference, entityElement);
         if (why != null) {
             diagnostics.note(
                     "association '" + reference.name() + "' on " + entityElement.getQualifiedName() + ": " + why
@@ -232,56 +190,6 @@ public final class RowMapperGenerator {
                 .build());
     }
 
-    /**
-     * The reason a {@code @Association} target cannot back an id-only partial, or {@code null} when it
-     * can. Checks (in order): the target element resolves, the target carries an id, the id is JDBC-safe
-     * (so the FK reads through {@code getObject}), and the target exposes a no-arg constructor and an
-     * id setter. Java 17 safety: driven by {@code elements}/{@code types}, never reflection in the
-     * generated code.
-     */
-    private String associationPartialBlocked(Prop.Reference reference, TypeElement entityElement) {
-        String fqn = reference.targetTypeName();
-        if (fqn == null) {
-            return "the target type could not be resolved";
-        }
-        TypeElement target = typeMappingBuilder.elementFor(fqn);
-        if (target == null) {
-            return "the target " + fqn + " could not be resolved";
-        }
-        TypeMapping<?> targetModel = typeMappingBuilder.descriptorFor(target);
-        if (targetModel.id() == null) {
-            return "the target " + fqn + " has no identifier";
-        }
-        if (!JdbcTypes.isJdbcSafe(typeMappingBuilder.memberType(targetModel.typeName(),
-                targetModel.id().name()).box())) {
-            return "the target " + fqn + " id type "
-                + typeMappingBuilder.memberType(targetModel.typeName(), targetModel.id().name())
-                + " is not JDBC-safe";
-        }
-        if (!hasNoArgConstructor(target)) {
-            return "the target " + fqn + " has no accessible no-argument constructor";
-        }
-        if (!typeMappingBuilder.hasMethod(target, MemberNames.setter(targetModel.id().name()))) {
-            return "the target " + fqn + " has no " + MemberNames.setter(targetModel.id().name()) + " setter";
-        }
-        return null;
-    }
-
-    /** True when {@code element} can be instantiated with {@code new X()} (an explicit or default ctor). */
-    private static boolean hasNoArgConstructor(TypeElement element) {
-        boolean hasExplicitCtor = false;
-        for (Element member : element.getEnclosedElements()) {
-            if (member.getKind() == ElementKind.CONSTRUCTOR) {
-                hasExplicitCtor = true;
-                if (((ExecutableElement) member).getParameters().isEmpty()) {
-                    return true;
-                }
-            }
-        }
-        return !hasExplicitCtor; // no explicit ctor → the compiler supplies a no-arg default
-    }
-
-    /** True when {@code element} has any member method named {@code name}. */
     /**
      * Resolves (generating on first use) the {@code <VO>RowMapper} for an element-collection child VO.
      * The VO's own descriptor metadata is generated (and its transitive embedded tree) so the mapper's
@@ -380,24 +288,16 @@ public final class RowMapperGenerator {
         // Temp name is derived from the (unique) property name so it cannot collide with the
         // generated entity/rs/rowNum locals nor with another primitive property in the same mapper.
         String temp = property + "Value";
-        mapRow.addStatement("$T $L = rs.$L($T.$L)", type, temp, RowReads.primitiveGetter(property, type),
-                metadataType, Literals.constName(property));
-        mapRow.beginControlFlow("if (rs.wasNull())");
-        mapRow.addStatement("throw new $T($S)", ClassName.get("java.sql", "SQLException"),
-                "NULL value in non-nullable primitive column \"" + columnName
-                        + "\" mapped to " + entityName + "." + property);
-        mapRow.endControlFlow();
+        RowReads.appendPrimitiveRead(mapRow, type, temp, property,
+                CodeBlock.of("$T.$L", metadataType, Literals.constName(property)),
+                columnName, entityName + "." + property);
         mapRow.addStatement("entity.$L($L)", MemberNames.setter(property), temp);
     }
 
     /** Boxed/reference read expression; a primitive column is guarded separately in {@link #appendPropertyRead}. */
     private CodeBlock readExpression(TypeName type, ClassName metadataType, String property) {
-        if (isEnumType(type)) {
-            // Enums persist as their name; read the string and convert, null-safe for a nullable column.
-            return CodeBlock.of("rs.getString($T.$L) == null ? null : $T.valueOf($T.class, rs.getString($T.$L))",
-                    metadataType, Literals.constName(property), Enum.class, type, metadataType, Literals.constName(property));
-        }
-        return CodeBlock.of("rs.getObject($T.$L, $T.class)", metadataType, Literals.constName(property), type.box());
+        return RowReads.boxedRead(type.box(), CodeBlock.of("$T.$L", metadataType, Literals.constName(property)),
+                eligibility.isEnumType(type));
     }
 
     /** The simple name of a target entity model, for the {@code SQL_FIND_<TARGET>_BY_IDS} constant base. */

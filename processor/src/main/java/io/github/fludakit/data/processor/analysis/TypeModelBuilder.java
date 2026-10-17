@@ -52,38 +52,11 @@ public final class TypeModelBuilder {
         return registry.descriptorFor(element);
     }
 
-    // ------------------------------------------------------------ memoized lookups (facade)
+    // ------------------------------------------------------------ memoized lookups
 
-    public ClassName classNameFor(String fqn) {
-        return registry.classNameFor(fqn);
-    }
-
-    public TypeName memberType(String ownerFqn, String name) {
-        return registry.memberType(ownerFqn, name);
-    }
-
-    public TypeElement elementFor(String fqn) {
-        return registry.elementFor(fqn);
-    }
-
-    public TypeMapping<?> descriptorFor(String fqn) {
-        return registry.descriptorFor(fqn);
-    }
-
-    public TypeMapping<?> descriptorFor(TypeElement element) {
-        return registry.descriptorFor(element);
-    }
-
-    public void reconcileRelationships(Set<String> managedEntities) {
-        registry.reconcileRelationships(managedEntities);
-    }
-
-    public boolean isValueObjectType(TypeElement element) {
-        return TypeModelRegistry.isValueObjectType(element);
-    }
-
-    public boolean ownsAggregateLifecycle(TypeElement element) {
-        return TypeModelRegistry.ownsAggregateLifecycle(element);
+    /** The resolved models this builder scans into: the memoized cache the generators consume. */
+    public TypeModelRegistry registry() {
+        return registry;
     }
 
     // ------------------------------------------------------------------------- the field scan
@@ -94,8 +67,8 @@ public final class TypeModelBuilder {
      * annotations, so the registry's memoization can drive this as a plain {@code TypeElement} function.
      */
     private TypeMapping<?> buildDescriptor(TypeElement element) {
-        boolean valueObject = isValueObjectType(element);
-        boolean ownerOwns = ownsAggregateLifecycle(element);
+        boolean valueObject = registry.isValueObjectType(element);
+        boolean ownerOwns = registry.ownsAggregateLifecycle(element);
         String table = valueObject ? null : Names.tableName(element.getSimpleName().toString());
         String typeNameString = element.getQualifiedName().toString();
         Prop.Id idProp = null;
@@ -215,24 +188,6 @@ public final class TypeModelBuilder {
         }
     }
 
-    /**
-     * Whether {@code element} declares or inherits a method called {@code methodName}.
-     *
-     * <p>Generated code calls an accessor only after this check, so a bean-less type degrades to a
-     * NOTE instead of emitting a call that does not compile.</p>
-     */
-    public boolean hasMethod(TypeElement element, String methodName) {
-        if (element == null) {
-            return false;
-        }
-        for (Element member : elements.getAllMembers(element)) {
-            if (member.getKind() == ElementKind.METHOD && member.getSimpleName().contentEquals(methodName)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     // ------------------------------------------------------------------ field classification
 
     private boolean isEntityType(TypeElement element) {
@@ -247,7 +202,7 @@ public final class TypeModelBuilder {
                 || !(declared.asElement() instanceof TypeElement element)) {
             return null;
         }
-        return isValueObjectType(element) ? element : null;
+        return registry.isValueObjectType(element) ? element : null;
     }
 
     private TypeElement listElementType(VariableElement field,
@@ -271,7 +226,7 @@ public final class TypeModelBuilder {
     }
 
     private TypeElement valueObjectElementType(VariableElement field) {
-        return listElementType(field, this::isValueObjectType);
+        return listElementType(field, registry::isValueObjectType);
     }
 
     private static TypeElement declaredElement(VariableElement field) {

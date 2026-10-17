@@ -15,6 +15,7 @@ import io.github.fludakit.data.processor.RepositoryProcessor;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
 import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
 import io.github.fludakit.data.processor.generator.RepositorySourceWriter;
+import io.github.fludakit.data.processor.generator.nav.MmMember;
 import io.github.fludakit.data.processor.generator.nav.NavigationGenerator;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.support.MemberNames;
@@ -185,11 +186,7 @@ public final class MetamodelGenerator {
             return ParameterizedTypeName.get(AttributeTypes.FM_ID, owner);
         }
         if (p instanceof Prop.Scalar scalar) {
-            return switch (attributeTypes.kindOf(scalar.typeFqn())) {
-                case TEXT -> ParameterizedTypeName.get(AttributeTypes.FM_TEXT, owner);
-                case SORTABLE -> ParameterizedTypeName.get(AttributeTypes.FM_SORTABLE, owner);
-                default -> ParameterizedTypeName.get(AttributeTypes.FM_COLUMN, owner);
-            };
+            return ParameterizedTypeName.get(attributeTypes.scalarAttributeType(scalar.typeFqn()), owner);
         }
         if (p instanceof Prop.Embedded) {
             return ParameterizedTypeName.get(AttributeTypes.FM_EMBEDDED, owner,
@@ -222,12 +219,8 @@ public final class MetamodelGenerator {
             return CodeBlock.of("new $T$L($L, $L)", AttributeTypes.FM_ID_RECORD, typeArgs, name, path);
         }
         if (p instanceof Prop.Scalar scalar) {
-            ClassName rec = switch (attributeTypes.kindOf(scalar.typeFqn())) {
-                case TEXT -> AttributeTypes.FM_TEXT_RECORD;
-                case SORTABLE -> AttributeTypes.FM_SORTABLE_RECORD;
-                default -> AttributeTypes.FM_COLUMN_RECORD;
-            };
-            return CodeBlock.of("new $T$L($L, $L)", rec, typeArgs, name, path);
+            return CodeBlock.of("new $T$L($L, $L)", attributeTypes.scalarRecordType(scalar.typeFqn()),
+                    typeArgs, name, path);
         }
         if (p instanceof Prop.Embedded) {
             return CodeBlock.of("new $T$L($L, $L)", AttributeTypes.FM_EMBEDDED_RECORD, typeArgs, name, path);

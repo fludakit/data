@@ -4,12 +4,13 @@ import com.squareup.javapoet.CodeBlock;
 import com.squareup.javapoet.MethodSpec;
 import com.squareup.javapoet.TypeName;
 import io.github.fludakit.data.metadata.TypeMapping;
-import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
+import io.github.fludakit.data.processor.analysis.MethodResults;
+import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
 import io.github.fludakit.data.processor.analysis.QueryPlanBuilder;
 import io.github.fludakit.data.processor.generator.QueryInvocations;
 import io.github.fludakit.data.processor.generator.RepositoryContext;
 import io.github.fludakit.data.processor.generator.SqlConstants;
-import io.github.fludakit.data.processor.support.GeneratedArtifactRegistry;
+import io.github.fludakit.data.processor.GeneratedArtifacts;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
@@ -29,12 +30,12 @@ import javax.lang.model.type.TypeMirror;
 public final class NativeQueryGenerator implements MethodGenerator {
 
     private final QueryPlanBuilder queryPlanCompiler;
-    private final TypeModelBuilder typeMappingBuilder;
+    private final TypeModelRegistry typeMappingBuilder;
     private final MethodResults methodResults;
-    private final GeneratedArtifactRegistry registry;
+    private final GeneratedArtifacts registry;
 
-    public NativeQueryGenerator(QueryPlanBuilder queryPlanCompiler, TypeModelBuilder typeMappingBuilder,
-                         MethodResults methodResults, GeneratedArtifactRegistry registry) {
+    public NativeQueryGenerator(QueryPlanBuilder queryPlanCompiler, TypeModelRegistry typeMappingBuilder,
+                         MethodResults methodResults, GeneratedArtifacts registry) {
         this.queryPlanCompiler = queryPlanCompiler;
         this.typeMappingBuilder = typeMappingBuilder;
         this.methodResults = methodResults;

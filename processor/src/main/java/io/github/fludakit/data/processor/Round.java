@@ -6,11 +6,11 @@ import io.github.fludakit.data.processor.analysis.SavePlanner;
 import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
 import io.github.fludakit.data.processor.analysis.PathResolver;
 import io.github.fludakit.data.processor.analysis.QueryPlanBuilder;
+import io.github.fludakit.data.processor.analysis.MethodResults;
+import io.github.fludakit.data.processor.analysis.RepositoryMethodResolver;
 import io.github.fludakit.data.processor.analysis.LoadPlanner;
 import io.github.fludakit.data.processor.analysis.RepositoryMethodValidator;
 import io.github.fludakit.data.processor.analysis.RepositoryTypeResolver;
-import io.github.fludakit.data.processor.analysis.TypeShapes;
-import io.github.fludakit.data.processor.context.ProcessingContext;
 import io.github.fludakit.data.processor.generator.ArtifactCoordinator;
 import io.github.fludakit.data.processor.generator.HydrationEmitter;
 import io.github.fludakit.data.processor.generator.JoinedProjectionEmitter;
@@ -24,7 +24,6 @@ import io.github.fludakit.data.processor.generator.metadata.QueryDefinitionWrite
 import io.github.fludakit.data.processor.generator.nav.NavigationGenerator;
 import io.github.fludakit.data.processor.generator.rowmapper.RowMapperGenerator;
 import io.github.fludakit.data.processor.support.Diagnostics;
-import io.github.fludakit.data.processor.support.GeneratedArtifactRegistry;
 import io.github.fludakit.data.sql.SqlDialect;
 import jakarta.data.repository.Repository;
 
@@ -53,22 +52,23 @@ import java.util.Set;
  *   <li><b>GENERATE</b> (the caller's loop) — hand each repository to the {@link RepositoryImplGenerator}.</li>
  * </ol>
  *
- * <p>The session-scoped primitives live in {@link ProcessingContext}, which is injected; everything
+ * <p>The session-scoped primitives live in {@link Session}, which is injected; everything
  * here is rebuilt per round because it captures round state (the managed-entity set, the freshly built
  * generators). {@code RepositoryImplGenerator} takes this one object rather than the fourteen collaborators
  * it would otherwise list as constructor parameters, which is why the accessors below stay.
  */
-public class RoundWiring {
+public class Round {
 
-    private final ProcessingContext ctx;
+    private final Session session;
 
     // ---------------------------------------------------------------- ANALYZE (constructor)
 
     private final RepositoryTypeResolver repositoryTypeResolver;
     private final PathResolver pathResolver;
-    private final TypeShapes typeShapes;
     private final RepositoryMethodValidator repositoryMethodValidator;
     private final QueryPlanBuilder queryPlanCompiler;
+    private final MethodResults methodResults;
+    private final RepositoryMethodResolver repositoryMethodResolver;
     private final AttributeTypes attributeTypes;
     private final List<TypeElement> repositories = new ArrayList<>();
 
@@ -89,26 +89,24 @@ public class RoundWiring {
     private SavePlanner savePlanner;
     private RepositoryImplGenerator generator;
 
-    public RoundWiring(ProcessingContext ctx, RoundEnvironment roundEnv) {
-        this.ctx = ctx;
-        this.repositoryTypeResolver = new RepositoryTypeResolver(ctx.types(), ctx.elements());
+    public Round(Session session, RoundEnvironment roundEnv) {
+        this.session = session;
+        this.repositoryTypeResolver = new RepositoryTypeResolver(session.types(), session.elements());
         // Name-keyed, not element-keyed: a path's target reaches the resolver as the FQN the
         // descriptor carries, so letting it ask by name is what keeps Elements out of the resolver.
-        this.pathResolver = new PathResolver(ctx.diagnostics(), ctx.typeMappingBuilder()::descriptorFor);
-        // The shape questions several classes answer — the erased name of a declared type, whether it
-        // is a List, whether it is the entity, a method's signature in its declaring context. Owning
-        // Types once here is what lets them all drop it.
-        this.typeShapes = new TypeShapes(ctx.types(), ctx.typeMappingBuilder()::elementFor);
-        this.repositoryMethodValidator = new RepositoryMethodValidator(ctx.diagnostics(), typeShapes);
-        this.queryPlanCompiler = new QueryPlanBuilder(typeShapes);
+        this.pathResolver = new PathResolver(session.diagnostics(), session.typeMappingBuilder().registry()::descriptorFor);
+        this.repositoryMethodValidator = new RepositoryMethodValidator(session.diagnostics(), session.types(), session.elements());
+        this.queryPlanCompiler = new QueryPlanBuilder(session.types());
+        this.methodResults = new MethodResults(session.types(), session.elements());
+        this.repositoryMethodResolver = new RepositoryMethodResolver(queryPlanCompiler, pathResolver, methodResults, session.diagnostics());
         // The compile-time questions several emitters ask — a metamodel KIND, a class literal, an enum
         // test — all read the environment, so they are owned once here and threaded through.
-        this.attributeTypes = new AttributeTypes(ctx.elements(), ctx.types());
+        this.attributeTypes = new AttributeTypes(session.elements(), session.types());
         // Round pre-scan: resolve every repository's entity type and claim names BEFORE any nav class
         // is generated, so a repository processed early sees targets that only get their own repository
         // later in the same round.
         Set<String> managed = scanRepositories(roundEnv, repositories);
-        ctx.registry().managedEntities(Set.copyOf(managed));
+        session.registry().managedEntities(Set.copyOf(managed));
     }
 
     /**
@@ -116,44 +114,45 @@ public class RoundWiring {
      * The order is load-bearing and each step names why it sits where it does.
      */
     public void plan() {
-        SqlDialect sqlDialect = ctx.sqlDialect();
+        SqlDialect sqlDialect = session.sqlDialect();
         // The write emitter is built after init() has settled the dialect: whether a save is a
         // one-statement upsert is a property of the configured database.
-        this.writeMethodEmitter = new WriteMethodEmitter(attributeTypes, ctx.typeMappingBuilder(),
-                typeShapes, ctx.diagnostics(), sqlDialect);
+        this.writeMethodEmitter = new WriteMethodEmitter(attributeTypes, session.typeMappingBuilder().registry(),
+                session.types(), session.elements(), session.diagnostics(), sqlDialect);
         // The JOIN projection resolves a target from the FQN its descriptor carries — no environment.
-        this.joinedProjections = new JoinedProjectionEmitter(ctx.typeMappingBuilder(), sqlDialect);
+        this.joinedProjections = new JoinedProjectionEmitter(session.typeMappingBuilder().registry(), sqlDialect, attributeTypes);
         // Both writers pin the dialect as SQL_DIALECT / the shell's field.
-        this.repositoryWriter = new RepositoryShellEmitter(ctx.sourceWriter(), ClassName.get(sqlDialect.getClass()));
-        this.queriesWriter = new QueryDefinitionWriter(ctx.sourceWriter());
+        this.repositoryWriter = new RepositoryShellEmitter(session.sourceWriter(), ClassName.get(sqlDialect.getClass()));
+        this.queriesWriter = new QueryDefinitionWriter(session.sourceWriter());
         // The descriptor emitter is the only writer of metadataTypes; it never sees the Filer.
-        this.metadataGenerator = new TypeMappingGenerator(ctx.diagnostics(), ctx.typeMappingBuilder(),
-                pathResolver, ctx.sourceWriter(), ctx.registry().metadataTypes());
+        this.metadataGenerator = new TypeMappingGenerator(session.diagnostics(), session.typeMappingBuilder().registry(),
+                pathResolver, session.sourceWriter(), session.registry().metadataTypes());
         // Mappers before metamodels: the metamodel emitter asks the mapper emitter whether a relation
         // target is materialisable.
-        this.rowMapperGenerator = new RowMapperGenerator(attributeTypes, ctx.diagnostics(),
-                ctx.typeMappingBuilder(), metadataGenerator, ctx.sourceWriter(), ctx.registry().metadataTypes());
+        this.rowMapperGenerator = new RowMapperGenerator(attributeTypes, session.diagnostics(),
+                session.typeMappingBuilder().registry(), metadataGenerator, session.sourceWriter(), session.registry().metadataTypes());
         // The nav generator is built after the mapper generator (same materialisable gate) and captures
         // THIS round's managed set.
-        this.navigationGenerator = new NavigationGenerator(attributeTypes, ctx.diagnostics(),
-                ctx.typeMappingBuilder(), rowMapperGenerator, ctx.sourceWriter(), ctx.registry().managedEntities());
-        this.metamodelGenerator = new MetamodelGenerator(attributeTypes, ctx.diagnostics(), ctx.sourceWriter(),
-                ctx.registry().claimedNames(), navigationGenerator);
+        this.navigationGenerator = new NavigationGenerator(attributeTypes, session.diagnostics(),
+                session.typeMappingBuilder().registry(), rowMapperGenerator, session.sourceWriter(), session.registry().managedEntities());
+        this.metamodelGenerator = new MetamodelGenerator(attributeTypes, session.diagnostics(), session.sourceWriter(),
+                session.registry().claimedNames(), navigationGenerator);
         // The on-demand miss path for descriptors and row mappers, assembled once both emitters exist.
-        this.artifactCoordinator = new ArtifactCoordinator(ctx.typeMappingBuilder(), metadataGenerator,
-                metamodelGenerator, rowMapperGenerator, ctx.registry());
+        this.artifactCoordinator = new ArtifactCoordinator(session.typeMappingBuilder().registry(), metadataGenerator,
+                metamodelGenerator, rowMapperGenerator, session.registry());
         // The method compiler reads a method declaration through every collaborator above.
-        this.methodCompiler = new RepositoryMethodCompiler(typeShapes, ctx.typeMappingBuilder(), ctx.diagnostics(),
+        this.methodCompiler = new RepositoryMethodCompiler(session.types(), session.typeMappingBuilder().registry(),
+                session.diagnostics(),
                 sqlDialect, pathResolver, queryPlanCompiler, metadataGenerator, writeMethodEmitter,
-                joinedProjections, ctx.registry());
-        this.hydrationEmitter = new HydrationEmitter(sqlDialect, attributeTypes, ctx.typeMappingBuilder());
+                joinedProjections, session.registry(), methodResults, repositoryMethodResolver);
+        this.hydrationEmitter = new HydrationEmitter(sqlDialect, attributeTypes, session.typeMappingBuilder().registry());
         // Pre-generate all row mappers so the load planner can read from the cache without triggering
         // generation.
-        artifactCoordinator.preGenerateRowMappers(ctx.registry().managedEntities());
-        this.loadPlanner = new LoadPlanner(ctx.diagnostics(), ctx.typeMappingBuilder(),
-                ctx.registry(), ctx.registry().managedEntities());
+        artifactCoordinator.preGenerateRowMappers(session.registry().managedEntities());
+        this.loadPlanner = new LoadPlanner(session.diagnostics(), session.typeMappingBuilder().registry(),
+                session.registry(), session.registry().managedEntities());
         // No artifact generation from the write side: a cascade member needs only the target's model.
-        this.savePlanner = new SavePlanner(ctx.diagnostics(), ctx.typeMappingBuilder());
+        this.savePlanner = new SavePlanner(session.diagnostics(), session.typeMappingBuilder().registry());
         this.generator = new RepositoryImplGenerator(this);
     }
 
@@ -173,15 +172,15 @@ public class RoundWiring {
             TypeMirror entityMirror = repositoryTypeResolver.entityType(repository);
             if (entityMirror != null && entityMirror.getKind() != TypeKind.TYPEVAR
                     && entityMirror.getKind() != TypeKind.WILDCARD
-                    && ctx.types().erasure(entityMirror) instanceof DeclaredType declared
+                    && session.types().erasure(entityMirror) instanceof DeclaredType declared
                     && declared.asElement() instanceof TypeElement entityElement) {
                 managed.add(entityElement.getQualifiedName().toString());
-                if (!ctx.typeMappingBuilder().isValueObjectType(entityElement)) {
-                    ctx.registry().claim(ClassName.get(entityElement).packageName()
+                if (!session.typeMappingBuilder().registry().isValueObjectType(entityElement)) {
+                    session.registry().claim(ClassName.get(entityElement).packageName()
                             + "._" + entityElement.getSimpleName());
                 }
             }
-            ctx.registry().claim(ClassName.get(repository) + "Queries");
+            session.registry().claim(ClassName.get(repository) + "Queries");
         }
         return managed;
     }
@@ -199,27 +198,23 @@ public class RoundWiring {
     // ----------------------------------------------------------------- collaborators
 
     public Types types() {
-        return ctx.types();
-    }
-
-    public TypeShapes typeShapes() {
-        return typeShapes;
+        return session.types();
     }
 
     public Elements elements() {
-        return ctx.elements();
+        return session.elements();
     }
 
     public Diagnostics diagnostics() {
-        return ctx.diagnostics();
+        return session.diagnostics();
     }
 
-    public GeneratedArtifactRegistry registry() {
-        return ctx.registry();
+    public GeneratedArtifacts registry() {
+        return session.registry();
     }
 
     public TypeModelBuilder typeMappingBuilder() {
-        return ctx.typeMappingBuilder();
+        return session.typeMappingBuilder();
     }
 
     public RepositoryTypeResolver repositoryTypeResolver() {
@@ -248,6 +243,10 @@ public class RoundWiring {
 
     public RepositoryMethodCompiler methodCompiler() {
         return methodCompiler;
+    }
+
+    public RepositoryMethodResolver repositoryMethodResolver() {
+        return repositoryMethodResolver;
     }
 
     public HydrationEmitter hydrationEmitter() {

@@ -43,9 +43,9 @@ import java.util.stream.Collectors;
  *     for DELETE.</li>
  * <li>An existential sort renders an {@link #aggregateSortTerm} and contributes NO join; only
  *     to-one predicate refs and to-one sort refs splice the join chain.</li>
- * <li>The legacy delegation fires exactly when nothing joins and nothing needs an EXISTS or an
- *     aggregate, so every pre-join constant stays byte-identical through
- *     {@link #countBy}/{@link #deleteBy}/{@link #selectBy}.</li>
+ * <li>The classic {@link #selectBy}/{@link #countBy}/{@link #deleteBy} builders stay as a separate
+ *     raw-predicates API (no {@code QueryDefinition}, no resolver) for the generated paged readers,
+ *     which splice a seek predicate and cursor ORDER BY onto a pre-baked shell at runtime.</li>
  * <li>A {@code model.paging()} other than {@link PagingMode#NONE} renders the BASE constant:
  *     ORDER BY and LIMIT are spliced at runtime by the generated paged read, so the declared sorts
  *     and the static limit are dropped from this rendering.</li>
@@ -69,8 +69,7 @@ public final class QueryCompiler {
      * order, which terms to order by, and whether the whole thing degrades to the pre-join classic
      * statement.
      */
-    public record Plan(List<JoinEdge> joins, List<Conjunct> where, List<String> orderBy, int limit,
-                       boolean legacy) {
+    public record Plan(List<JoinEdge> joins, List<Conjunct> where, List<String> orderBy, int limit) {
     }
 
     // ------------------------------------------------------------------- entry points
@@ -119,12 +118,8 @@ public final class QueryCompiler {
             case QueryDefinition.Native nativeQuery -> nativeQuery.sql();
             case QueryDefinition.Criteria criteria -> {
                 Objects.requireNonNull(resolver, "resolver");
-                Planner planner = new Planner(schema, resolver, dialect, criteria, extraEdges);
-                Plan plan = planner.plan();
-                yield plan.legacy()
-                        ? classicStatement(schema, dialect, criteria, planner.predicates(),
-                                planner.sorts(), plan.limit())
-                        : fragment(schema, dialect, criteria, plan, extraProjection).render(dialect);
+                Plan plan = new QueryPlanner(schema, resolver, dialect, criteria, extraEdges).plan();
+                yield fragment(schema, dialect, criteria, plan, extraProjection).render(dialect);
             }
         };
     }
@@ -138,7 +133,7 @@ public final class QueryCompiler {
     /** As {@link #plan}, seeding the join chain with {@code extraEdges}. */
     public static Plan plan(TableSchema schema, ColumnResolver resolver, SqlDialect dialect,
                             QueryDefinition.Criteria model, List<JoinEdge> extraEdges) {
-        return new Planner(schema, resolver, dialect, model, extraEdges).plan();
+        return new QueryPlanner(schema, resolver, dialect, model, extraEdges).plan();
     }
 
     private static ColumnResolver requireResolver(ColumnResolver resolver) {
@@ -204,18 +199,6 @@ public final class QueryCompiler {
                 : columns + ", " + extraProjection;
     }
 
-    /** The pre-join classic statement, valid only when nothing joins and nothing needs an EXISTS or aggregate. */
-    private static String classicStatement(TableSchema schema, SqlDialect dialect, QueryDefinition.Criteria model,
-                                           List<Predicate> predicates, List<SortSpec> sorts, int limit) {
-        return switch (model) {
-            case QueryDefinition.Read read -> selectBy(dialect, schema, predicates, sorts, limit, null,
-                    read.distinct());
-            case QueryDefinition.Count count -> countBy(dialect, schema, predicates, count.distinct());
-            case QueryDefinition.Exists ignored -> countBy(dialect, schema, predicates, false);
-            case QueryDefinition.DeleteWhere ignored -> deleteBy(dialect, schema, predicates);
-        };
-    }
-
     /** {@code DISTINCT} is a fact only a read and a count carry; every other statement ignores it. */
     private static boolean distinct(QueryDefinition.Criteria model) {
         return switch (model) {
@@ -224,131 +207,6 @@ public final class QueryCompiler {
             case QueryDefinition.Exists ignored -> false;
             case QueryDefinition.DeleteWhere ignored -> false;
         };
-    }
-
-    // ------------------------------------------------------------------- planning
-
-    /**
-     * One pass over a logical query model: resolves and classifies every predicate and sort ref.
-     * The layout rules live on {@link QueryCompiler}; this method object exists only to keep that
-     * one pass readable.
-     */
-    private static final class Planner {
-        private final TableSchema schema;
-        private final ColumnResolver attributes;
-        private final SqlDialect dialect;
-        private final boolean deleteMode;
-        private final List<JoinEdge> extraEdges;
-        private final List<Predicate> predicates;
-        private final List<SortSpec> sorts;
-        private final int limit;
-
-        private final List<JoinEdge> joinEdges = new ArrayList<>();
-        private final List<Integer> existentialIndices = new ArrayList<>();
-        private final List<ColumnPlacement> predicateRefs = new ArrayList<>();
-        private final List<ColumnPlacement> sortRefs = new ArrayList<>();
-        private final List<Boolean> existentialSorts = new ArrayList<>();
-        private boolean legacyCompatible = true;
-
-        Planner(TableSchema schema, ColumnResolver attributes, SqlDialect dialect,
-                QueryDefinition.Criteria model, List<JoinEdge> extraEdges) {
-            this.schema = schema;
-            this.attributes = attributes;
-            this.dialect = dialect;
-            this.extraEdges = List.copyOf(extraEdges);
-            this.deleteMode = model instanceof QueryDefinition.DeleteWhere;
-            this.predicates = model.predicates();
-            // Only a read orders and caps its rows: a count, an exists and a delete have neither, and
-            // a paged read renders the base constant and leaves the window to the runtime.
-            QueryDefinition.Read read = model instanceof QueryDefinition.Read r ? r : null;
-            boolean windowless = read == null || read.paging() != PagingMode.NONE;
-            this.sorts = windowless ? List.of() : read.sorts();
-            this.limit = windowless ? 0 : read.limit().limit();
-        }
-
-        List<Predicate> predicates() {
-            return predicates;
-        }
-
-        List<SortSpec> sorts() {
-            return sorts;
-        }
-
-        Plan plan() {
-            joinEdges.addAll(extraEdges);
-            for (int i = 0; i < predicates.size(); i++) {
-                Predicate predicate = predicates.get(i);
-                ColumnPlacement ref = resolveColumn(schema, attributes, predicate.property());
-                predicateRefs.add(ref);
-                legacyCompatible &= legacyCompatible(ref, predicate.property(), schema);
-                if (isExistential(attributes, predicate.property()) || (deleteMode && !ref.local())) {
-                    existentialIndices.add(i);
-                } else {
-                    joinEdges.addAll(ref.edges());
-                }
-            }
-            for (SortSpec sort : sorts) {
-                ColumnPlacement ref = resolveColumn(schema, attributes, sort.property());
-                boolean existential = isExistential(attributes, sort.property());
-                sortRefs.add(ref);
-                existentialSorts.add(existential);
-                legacyCompatible &= legacyCompatible(ref, sort.property(), schema);
-                if (!existential) {
-                    joinEdges.addAll(ref.edges());
-                }
-            }
-            boolean noExistential = existentialIndices.isEmpty() && !existentialSorts.contains(Boolean.TRUE);
-            return new Plan(List.copyOf(joinEdges), where(), orderBy(), limit,
-                    legacyCompatible && noExistential && joinEdges.isEmpty());
-        }
-
-        private List<Conjunct> where() {
-            List<Conjunct> conjuncts = new ArrayList<>();
-            boolean spliceJoins = !joinEdges.isEmpty();
-            if (predicates.stream().anyMatch(p -> Connector.isOr(p.connector()))) {
-                // With any OR the declaration order is load-bearing, so each predicate renders in
-                // place — and its shape decides the renderer. The all-AND branch below may reorder
-                // freely.
-                for (int i = 0; i < predicates.size(); i++) {
-                    conjuncts.add(new Conjunct(conjunctAt(i, spliceJoins),
-                            i > 0 && Connector.isOr(predicates.get(i).connector())));
-                }
-            } else {
-                for (int i = 0; i < predicates.size(); i++) {
-                    if (!existentialIndices.contains(i)) {
-                        conjuncts.add(new Conjunct(conjunctAt(i, spliceJoins), false));
-                    }
-                }
-                for (int i : existentialIndices) {
-                    conjuncts.add(new Conjunct(conjunctAt(i, spliceJoins), false));
-                }
-            }
-            return conjuncts;
-        }
-
-        private String conjunctAt(int index, boolean spliceJoins) {
-            Predicate predicate = predicates.get(index);
-            ColumnPlacement ref = predicateRefs.get(index);
-            return existentialIndices.contains(index)
-                    ? existsConjunct(dialect, predicate, ref)
-                    : render(dialect, predicate, ref, schema.tableName(), spliceJoins);
-        }
-
-        private List<String> orderBy() {
-            List<String> terms = new ArrayList<>(sorts.size());
-            for (int i = 0; i < sorts.size(); i++) {
-                SortSpec sort = sorts.get(i);
-                ColumnPlacement ref = sortRefs.get(i);
-                boolean existential = Boolean.TRUE.equals(existentialSorts.get(i));
-                String term = existential
-                        ? aggregateSortTerm(dialect, schema, ref, sort.ascending())
-                        : isLocalTo(ref.leaf(), schema.tableName())
-                                ? dialect.quoteIdentifier(ref.leaf().column())
-                                : qualify(dialect, ref.leaf(), schema.tableName());
-                terms.add(orderTerm(term, sort, existential));
-            }
-            return terms;
-        }
     }
 
     // ------------------------------------------------------------------- classic statements
@@ -422,49 +280,20 @@ public final class QueryCompiler {
      * whichever single-statement form {@code dialect} declares.
      *
      * <p>The identifier always rides along: it is the match key, so an upsert has no
-     * {@code includeId} decision to make. The two forms differ only in how they say "or update it":
-     * {@code KEY (id)} names the match key up front, while {@code ON CONFLICT (id) DO UPDATE} restates
-     * the non-key columns with {@code EXCLUDED} — the row the INSERT tried to write — so the update
-     * half binds nothing extra and both halves share the same named parameters.</p>
+     * {@code includeId} decision to make. The column list and the {@code :param} tokens are identical
+     * across every form — only the dialect's spelling of "or update it" differs, so the spelling
+     * lives in {@link SqlDialect#upsertStatement} and this method only computes the shared pieces.</p>
      *
      * @throws IllegalStateException when the dialect declares {@link UpsertForm#NONE}; a caller that
      *         must honour the contract there issues an {@link #update} and, if it matched nothing, an
      *         {@link #insert} carrying the identifier
      */
     public static String upsert(SqlDialect dialect, TableSchema schema, ColumnResolver attributes) {
-        UpsertForm form = dialect.upsertForm();
-        if (form == UpsertForm.NONE) {
-            throw new IllegalStateException(dialect.getClass().getName()
-                    + " declares no single-statement upsert (" + UpsertForm.NONE
-                    + "); issue an UPDATE and, when it matches no row, an INSERT carrying the id");
-        }
-        String idCol = dialect.quoteIdentifier(schema.idColumn());
         List<ColumnRef> cols = schema.columns();
-        String names = cols.stream().map(c -> dialect.quoteIdentifier(c.column()))
-                .collect(Collectors.joining(", "));
-        String params = cols.stream().map(c -> ":" + paramName(attributePath(attributes, c)))
-                .collect(Collectors.joining(", "));
-        String table = dialect.quoteIdentifier(schema.tableName());
-        // An entity whose only column is the identifier has no non-key column, so the "or update it"
-        // half has nothing to assign and `DO UPDATE SET ` followed by an empty list is not SQL.
-        // `DO NOTHING` is the same promise read at that size: insert the row, or leave the existing
-        // one alone when the identifier is already there.
-        String updateHalf = excludedSet(dialect, schema);
-        return switch (form) {
-            case MERGE -> "MERGE INTO " + table + " (" + names + ") KEY (" + idCol + ") VALUES (" + params + ")";
-            case ON_CONFLICT -> "INSERT INTO " + table + " (" + names + ") VALUES (" + params + ")"
-                    + " ON CONFLICT (" + idCol + ") DO "
-                    + (updateHalf.isEmpty() ? "NOTHING" : "UPDATE SET " + updateHalf);
-            case NONE -> throw new IllegalStateException(); // unreachable: guarded above
-        };
-    }
-
-    /** The {@code DO UPDATE} half of an {@code ON CONFLICT} upsert: every non-key column from the row the insert tried to write. */
-    private static String excludedSet(SqlDialect dialect, TableSchema schema) {
-        return schema.columns().stream()
-                .filter(c -> !c.column().equals(schema.idColumn()))
-                .map(c -> dialect.quoteIdentifier(c.column()) + " = EXCLUDED." + dialect.quoteIdentifier(c.column()))
-                .collect(Collectors.joining(", "));
+        List<String> names = cols.stream().map(ColumnRef::column).collect(Collectors.toList());
+        List<String> params = cols.stream().map(c -> ":" + paramName(attributePath(attributes, c)))
+                .collect(Collectors.toList());
+        return dialect.upsertStatement(schema.tableName(), schema.idColumn(), names, params);
     }
 
     /** Renders an UPDATE by identifier. */
@@ -673,12 +502,6 @@ public final class QueryCompiler {
         }
     }
 
-    /** Whether this placement renders exactly as the pre-join classic statement would. */
-    public static boolean legacyCompatible(ColumnPlacement placement, String path, TableSchema schema) {
-        return placement.local() && isLocalTo(placement.leaf(), schema.tableName())
-                && placement.leaf().column().equals(Names.columnBase(path));
-    }
-
     /** Whether {@code leaf} is a column local to {@code table}: owned by no table or by that table. */
     public static boolean isLocalTo(ColumnRef leaf, String table) {
         return leaf.table() == null || leaf.table().equals(table);
@@ -828,7 +651,7 @@ public final class QueryCompiler {
             case IS_NULL -> column + " IS NULL";
             case IS_NOT_NULL -> column + " IS NOT NULL";
             case TRUE -> column + " = TRUE";
-            case FALSE -> column = column + " = FALSE";
+            case FALSE -> column + " = FALSE";
             case IGNORE_CASE_EQ -> "LOWER(" + column + ") = LOWER(:" + param + ")";
         };
     }

@@ -4,7 +4,7 @@ import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.MethodSpec;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 
-import io.github.fludakit.data.processor.RoundWiring;
+import io.github.fludakit.data.processor.Round;
 import io.github.fludakit.data.processor.analysis.RepositoryTypeResolver;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.model.EntityRelationship;
@@ -14,12 +14,16 @@ import io.github.fludakit.data.processor.analysis.RepositoryFlavour;
 import io.github.fludakit.data.processor.model.WriteCascade;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.query.QueryDefinition;
+import jakarta.data.repository.Delete;
+import jakarta.data.repository.Find;
+import jakarta.data.repository.Query;
 import javax.lang.model.element.Element;
 import javax.lang.model.element.ElementKind;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.Modifier;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.type.DeclaredType;
+import javax.lang.model.type.ExecutableType;
 import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
 import java.util.List;
@@ -34,16 +38,16 @@ import java.util.Map;
  * write the two files. Each step is a named method below, so the file reads top-down: the step a
  * reader is looking for is the one whose name it is, not a line number inside a hundred-line body.</p>
  *
- * <p>Per-round, and it holds nothing but the round's collaborator assembly — see {@link RoundWiring}.
+ * <p>Per-round, and it holds nothing but the round's collaborator assembly — see {@link Round}.
  * Every call it makes is idempotent at the artifact level, so two repositories over the same entity
  * (or a repository and a relationship target's planner) can each ask for the same artifact and only
  * the first one writes it.</p>
  */
 public class RepositoryImplGenerator {
 
-    private final RoundWiring wiring;
+    private final Round wiring;
 
-    public RepositoryImplGenerator(RoundWiring wiring) {
+    public RepositoryImplGenerator(Round wiring) {
         this.wiring = wiring;
     }
 
@@ -58,6 +62,7 @@ public class RepositoryImplGenerator {
         RepositoryContext context = newContext(repository, entity, mapperType,
                 wiring.loadPlanner().plan(entityElement, entity),
                 wiring.savePlanner().plan(entityElement, entity));
+        preResolveMethods(repository, (DeclaredType) repository.asType(), entity);
         generateMembers(repository, context);
         writeArtifacts(repository, context);
     }
@@ -133,6 +138,31 @@ public class RepositoryImplGenerator {
     }
 
     /**
+     * Resolves every abstract finder method ahead of generation, so the method compiler and the finder
+     * emitter read a cached {@code ResolvedMethod} rather than resolving on the fly. Non-finder methods
+     * (native, lifecycle, CRUD built-ins) are resolved here too, harmlessly: another generator handles
+     * them, so their cached result is never read, and the resolution no longer claims names.
+     */
+    private void preResolveMethods(TypeElement repository, DeclaredType repositoryType, TypeMapping<?> entity) {
+        String fqn = repository.getQualifiedName().toString();
+        for (Element member : wiring.elements().getAllMembers(repository)) {
+            if (member.getKind() != ElementKind.METHOD) {
+                continue;
+            }
+            ExecutableElement method = (ExecutableElement) member;
+            if (!method.getModifiers().contains(Modifier.ABSTRACT)
+                    || method.getAnnotation(Query.class) != null
+                    || MemberNames.isJdbcClientAccessor(method,
+                            wiring.types().erasure(method.getReturnType()).toString())) {
+                continue;
+            }
+            ExecutableType resolved = (ExecutableType) wiring.types().asMemberOf(repositoryType, method);
+            wiring.repositoryMethodResolver().resolveFindMethod(method, resolved, entity,
+                    method.getAnnotation(Find.class) != null, method.getAnnotation(Delete.class) != null, fqn);
+        }
+    }
+
+    /**
      * Every method the {@code <Repository>Impl} gets: one per abstract inherited member, then the
      * JOIN-projection mapper the read shapes share, then the hydration umbrella and its loaders.
      */
@@ -177,9 +207,9 @@ public class RepositoryImplGenerator {
         // Answering it here — from the declared signature alone — keeps the whole rule in one
         // branch: `JdbcClient getJdbcClient();` returns the injected client, and anything else
         // still falls through to the ordinary path.
-        if (RepositoryTypeResolver.isJdbcClientAccessor(method,
-                wiring.typeShapes().erasedName(method.getReturnType()))) {
-            return wiring.typeShapes().overriding(method, repositoryType)
+        if (MemberNames.isJdbcClientAccessor(method,
+                wiring.types().erasure(method.getReturnType()).toString())) {
+            return MethodSpec.overriding(method, repositoryType, wiring.types())
                     .addStatement("return $L", MemberNames.JDBC_CLIENT_FIELD)
                     .build();
         }

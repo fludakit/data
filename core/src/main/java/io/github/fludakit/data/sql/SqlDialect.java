@@ -1,5 +1,7 @@
 package io.github.fludakit.data.sql;
 
+import java.util.List;
+
 /**
  * SQL syntax hooks used by the generated-SQL renderer.
  *
@@ -41,12 +43,29 @@ public interface SqlDialect {
      * How this database writes an insert-or-update in one statement, or {@link UpsertForm#NONE} when
      * it has no such form.
      *
-     * <p>A dialect answers WHICH syntax its database accepts; {@link QueryCompiler} owns the text.
-     * {@link UpsertForm#NONE} is a supported answer, not an error: a caller that must still honour
-     * {@code save}'s insert-or-update contract falls back to an {@code UPDATE} followed, when it
-     * matched nothing, by an {@code INSERT} carrying the identifier.</p>
+     * <p>A dialect answers WHICH syntax its database accepts, and {@link #upsertStatement} owns the
+     * text. {@link UpsertForm#NONE} is a supported answer, not an error: a caller that must still
+     * honour {@code save}'s insert-or-update contract falls back to an {@code UPDATE} followed, when
+     * it matched nothing, by an {@code INSERT} carrying the identifier.</p>
      */
     default UpsertForm upsertForm() {
         return UpsertForm.NONE;
+    }
+
+    /**
+     * Renders the dialect's single-statement upsert from the renderer's raw inputs: the table name,
+     * the id column, the column names, and the aligned {@code :param} tokens. The dialect owns all
+     * quoting AND any form-specific halves — the {@code ON CONFLICT} family derives its
+     * {@code col = EXCLUDED.col} update set from {@code columns} by dropping {@code idColumn}.
+     *
+     * <p>The default is the {@link UpsertForm#NONE} answer: it throws, because a database with no
+     * single-statement upsert must be honoured by the caller's update-then-insert fallback, not by
+     * inventing syntax.</p>
+     */
+    default String upsertStatement(String tableName, String idColumn, List<String> columns,
+                                   List<String> params) {
+        throw new IllegalStateException(getClass().getName()
+                + " declares no single-statement upsert (" + UpsertForm.NONE
+                + "); issue an UPDATE and, when it matches no row, an INSERT carrying the id");
     }
 }

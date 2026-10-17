@@ -1,15 +1,16 @@
-package io.github.fludakit.data.processor.generator.method;
+package io.github.fludakit.data.processor.analysis;
 
 import com.squareup.javapoet.TypeName;
 import com.squareup.javapoet.TypeVariableName;
 import io.github.fludakit.data.metadata.TypeMapping;
-import io.github.fludakit.data.processor.analysis.TypeShapes;
 import io.github.fludakit.data.query.ResultKind;
 import java.util.Set;
 import javax.lang.model.type.ArrayType;
 import javax.lang.model.type.DeclaredType;
 import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
+import javax.lang.model.util.Elements;
+import javax.lang.model.util.Types;
 
 /**
  * The declared-result-shape classification shared by the find and native-query generators.
@@ -27,10 +28,12 @@ public final class MethodResults {
             "java.util.List", "java.util.Set", "java.util.Collection", "java.lang.Iterable",
             "java.util.Optional", "java.util.stream.Stream");
 
-    private final TypeShapes typeShapes;
+    private final Types types;
+    private final Elements elements;
 
-    public MethodResults(TypeShapes typeShapes) {
-        this.typeShapes = typeShapes;
+    public MethodResults(Types types, Elements elements) {
+        this.types = types;
+        this.elements = elements;
     }
 
     public ResultKind resultKindOf(TypeMirror returnType) {
@@ -40,7 +43,7 @@ public final class MethodResults {
         if (returnType.getKind() == TypeKind.ARRAY) {
             return ResultKind.ARRAY;
         }
-        return switch (typeShapes.erasedName(returnType)) {
+        return switch (types.erasure(returnType).toString()) {
             case "java.util.Set" -> ResultKind.SET;
             case "java.util.List", "java.util.Collection", "java.lang.Iterable" -> ResultKind.LIST;
             case "java.util.Optional" -> ResultKind.OPTIONAL;
@@ -56,7 +59,7 @@ public final class MethodResults {
             return TypeName.get(((ArrayType) returnType).getComponentType()).box();
         }
         if (returnType instanceof DeclaredType declared && declared.getTypeArguments().size() == 1
-                && CONTAINER_TYPES.contains(typeShapes.erasedName(declared))) {
+                && CONTAINER_TYPES.contains(types.erasure(declared).toString())) {
             return concrete(TypeName.get(declared.getTypeArguments().get(0)), fallback);
         }
         return concrete(TypeName.get(returnType).box(), fallback);
@@ -77,7 +80,7 @@ public final class MethodResults {
         if (kind == ResultKind.VOID) {
             return ResultKind.VOID;
         }
-        return typeShapes.isEntity(returnType, entity)
+        return TypeMirrors.isEntity(types, elements, returnType, entity)
                 ? ResultKind.SINGLE
                 : ResultKind.AFFECTED;
     }

@@ -1,14 +1,12 @@
 package io.github.fludakit.data.processor;
 
 import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
-import io.github.fludakit.data.processor.context.ProcessingContext;
 import io.github.fludakit.data.processor.generator.metadata.MetamodelGenerator;
 import io.github.fludakit.data.processor.generator.nav.NavigationGenerator;
 import io.github.fludakit.data.processor.generator.metadata.QueryDefinitionWriter;
 import io.github.fludakit.data.processor.generator.RepositoryImplGenerator;
 import io.github.fludakit.data.processor.generator.RepositorySourceWriter;
 import io.github.fludakit.data.processor.support.Diagnostics;
-import io.github.fludakit.data.processor.support.GeneratedArtifactRegistry;
 import io.github.fludakit.data.sql.H2Dialect;
 import io.github.fludakit.data.sql.PostgreSqlDialect;
 import io.github.fludakit.data.sql.SqlDialect;
@@ -44,9 +42,9 @@ import java.util.Set;
  * convention (see {@link io.github.fludakit.data.Names}).</p>
  *
  * <p>This class is the APT entry point and nothing else: it reads the {@code fluda.dialect} option,
- * assembles each round's collaborators (see {@link RoundWiring}) and hands every repository to
+ * assembles each round's collaborators (see {@link Round}) and hands every repository to
  * {@link RepositoryImplGenerator}. The caches that must survive a round live in
- * {@link GeneratedArtifactRegistry}; the per-entity compile-time model and the on-demand artifact
+ * {@link GeneratedArtifacts}; the per-entity compile-time model and the on-demand artifact
  * resolution live in {@link TypeModelBuilder} and {@code ArtifactCoordinator}.</p>
  */
 @SupportedAnnotationTypes("jakarta.data.repository.Repository")
@@ -56,7 +54,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     private SqlDialect sqlDialect = H2Dialect.INSTANCE;
 
     /** Everything this session has already emitted or claimed a name for — survives rounds. */
-    private final GeneratedArtifactRegistry registry = new GeneratedArtifactRegistry();
+    private final GeneratedArtifacts registry = new GeneratedArtifacts();
 
     /**
      * The entity/value-object model builder. Session-scoped: the descriptor memo it keeps is what
@@ -75,7 +73,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     private Diagnostics diagnostics;
 
     /** This round's collaborator assembly. */
-    private RoundWiring wiring;
+    private Round round;
 
     @Override
     public SourceVersion getSupportedSourceVersion() {
@@ -115,12 +113,12 @@ public class RepositoryProcessor extends AbstractProcessor {
             sourceWriter = new RepositorySourceWriter(processingEnv.getFiler(), diagnostics,
                     registry.claimedNames());
         }
-        ProcessingContext context = new ProcessingContext(processingEnv.getTypeUtils(),
+        Session session = new Session(processingEnv.getTypeUtils(),
                 processingEnv.getElementUtils(), diagnostics, sqlDialect, registry, sourceWriter, typeMappingBuilder);
-        this.wiring = new RoundWiring(context, roundEnv);
-        wiring.plan();
+        this.round = new Round(session, roundEnv);
+        round.plan();
         boolean claimed = false;
-        for (TypeElement repository : wiring.repositories()) {
+        for (TypeElement repository : round.repositories()) {
             generateSafely(repository);
             claimed = true;
         }
@@ -141,7 +139,7 @@ public class RepositoryProcessor extends AbstractProcessor {
      */
     private void generateSafely(TypeElement repository) {
         try {
-            wiring.generator().generate(repository);
+            round.generator().generate(repository);
         } catch (RuntimeException failure) {
             processingEnv.getMessager().printMessage(Diagnostic.Kind.ERROR,
                     "fluda-data could not generate " + repository.getSimpleName() + "Impl: "

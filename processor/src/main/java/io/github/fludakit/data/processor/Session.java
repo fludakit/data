@@ -1,9 +1,8 @@
-package io.github.fludakit.data.processor.context;
+package io.github.fludakit.data.processor;
 
 import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
 import io.github.fludakit.data.processor.generator.RepositorySourceWriter;
 import io.github.fludakit.data.processor.support.Diagnostics;
-import io.github.fludakit.data.processor.support.GeneratedArtifactRegistry;
 import io.github.fludakit.data.sql.SqlDialect;
 import javax.lang.model.util.Elements;
 import javax.lang.model.util.Types;
@@ -16,21 +15,21 @@ import javax.lang.model.util.Types;
  *
  * <p>This is the slim replacement for the round-assembly god object. It holds ONLY what is stable
  * across rounds; everything rebuilt per round (the generators and emitters, the managed-entity set, the
- * repository list) lives in {@code RoundWiring}, which is constructed from this context for one round
+ * repository list) lives in {@code Round}, which is constructed from this context for one round
  * at a time.
  */
-public final class ProcessingContext {
+public final class Session {
 
     private final Types types;
     private final Elements elements;
     private final Diagnostics diagnostics;
     private final SqlDialect sqlDialect;
-    private final GeneratedArtifactRegistry registry;
+    private final GeneratedArtifacts registry;
     private final RepositorySourceWriter sourceWriter;
     private final TypeModelBuilder typeMappingBuilder;
 
-    public ProcessingContext(Types types, Elements elements, Diagnostics diagnostics,
-                             SqlDialect sqlDialect, GeneratedArtifactRegistry registry,
+    public Session(Types types, Elements elements, Diagnostics diagnostics,
+                             SqlDialect sqlDialect, GeneratedArtifacts registry,
                              RepositorySourceWriter sourceWriter, TypeModelBuilder typeMappingBuilder) {
         this.types = types;
         this.elements = elements;
@@ -57,7 +56,7 @@ public final class ProcessingContext {
         return sqlDialect;
     }
 
-    public GeneratedArtifactRegistry registry() {
+    public GeneratedArtifacts registry() {
         return registry;
     }
 

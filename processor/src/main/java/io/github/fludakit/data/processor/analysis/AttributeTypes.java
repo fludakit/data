@@ -101,6 +101,24 @@ public final class AttributeTypes {
 
     public enum MetamodelKind { PLAIN, SORTABLE, TEXT }
 
+    /** The attribute interface a scalar member of the given type instantiates. */
+    public ClassName scalarAttributeType(String typeFqn) {
+        return switch (kindOf(typeFqn)) {
+            case TEXT -> FM_TEXT;
+            case SORTABLE -> FM_SORTABLE;
+            default -> FM_COLUMN;
+        };
+    }
+
+    /** The attribute record a scalar member of the given type instantiates. */
+    public ClassName scalarRecordType(String typeFqn) {
+        return switch (kindOf(typeFqn)) {
+            case TEXT -> FM_TEXT_RECORD;
+            case SORTABLE -> FM_SORTABLE_RECORD;
+            default -> FM_COLUMN_RECORD;
+        };
+    }
+
     /**
      * Whether the named type is an {@code enum}.
      *

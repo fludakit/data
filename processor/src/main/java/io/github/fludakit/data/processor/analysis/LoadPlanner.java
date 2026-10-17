@@ -9,7 +9,7 @@ import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.RepositoryProcessor;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.support.Diagnostics;
-import io.github.fludakit.data.processor.support.GeneratedArtifactRegistry;
+import io.github.fludakit.data.processor.GeneratedArtifacts;
 import javax.lang.model.element.TypeElement;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -34,21 +34,21 @@ import java.util.Set;
  * interfere with each other.</p>
  *
  * <p>Constructed after the round pre-scan: {@code managedEntities} is per-round. This planner reads
- * from the pre-populated cache in {@link GeneratedArtifactRegistry} — all row mappers are generated
+ * from the pre-populated cache in {@link GeneratedArtifacts} — all row mappers are generated
  * during the analysis phase by {@link io.github.fludakit.data.processor.generator.ArtifactCoordinator#preGenerateRowMappers}, so planning is pure
  * analysis with no generation side effects.</p>
  */
 public final class LoadPlanner {
 
     private final Diagnostics diagnostics;
-    private final TypeModelBuilder typeMappingBuilder;
-    private final GeneratedArtifactRegistry registry;
+    private final TypeModelRegistry typeMappingBuilder;
+    private final GeneratedArtifacts registry;
     /** Entity FQNs managed in the CURRENT round — see the pre-scan in {@link RepositoryProcessor#process}. */
     private final Set<String> managedEntities;
 
     public LoadPlanner(Diagnostics diagnostics,
-                            TypeModelBuilder typeMappingBuilder,
-                            GeneratedArtifactRegistry registry,
+                            TypeModelRegistry typeMappingBuilder,
+                            GeneratedArtifacts registry,
                             Set<String> managedEntities) {
         this.diagnostics = diagnostics;
         this.typeMappingBuilder = typeMappingBuilder;

@@ -1,6 +1,7 @@
 package io.github.fludakit.data.processor.generator;
 
 import com.squareup.javapoet.ClassName;
+import com.squareup.javapoet.CodeBlock;
 import com.squareup.javapoet.MethodSpec;
 import com.squareup.javapoet.TypeName;
 import io.github.fludakit.data.Names;
@@ -10,8 +11,9 @@ import io.github.fludakit.data.metadata.JoinEdge;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.RepositoryProcessor;
+import io.github.fludakit.data.processor.analysis.AttributeTypes;
 import io.github.fludakit.data.processor.analysis.PathResolver;
-import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
+import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
 import io.github.fludakit.data.processor.generator.rowmapper.RowReads;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.processor.support.Props;
@@ -48,12 +50,15 @@ import java.util.Map;
  */
 public final class JoinedProjectionEmitter {
 
-    private final TypeModelBuilder typeMappingBuilder;
+    private final TypeModelRegistry typeMappingBuilder;
     private final SqlDialect sqlDialect;
+    private final AttributeTypes attributeTypes;
 
-    public JoinedProjectionEmitter(TypeModelBuilder typeMappingBuilder, SqlDialect sqlDialect) {
+    public JoinedProjectionEmitter(TypeModelRegistry typeMappingBuilder, SqlDialect sqlDialect,
+                                   AttributeTypes attributeTypes) {
         this.typeMappingBuilder = typeMappingBuilder;
         this.sqlDialect = sqlDialect;
+        this.attributeTypes = attributeTypes;
     }
 
     /**
@@ -193,17 +198,15 @@ public final class JoinedProjectionEmitter {
                 continue;
             }
             String label = alias + "_join_" + Props.column(p);
-            if (!typeMappingBuilder.memberType(valueObject.typeName(), p.name()).isPrimitive()) {
-                builder.addStatement("$L.$L(rs.getObject($S, $T.class))", targetVar, MemberNames.setter(p.name()), label, typeMappingBuilder.memberType(valueObject.typeName(), p.name()).box());
+            TypeName type = typeMappingBuilder.memberType(valueObject.typeName(), p.name());
+            if (!type.isPrimitive()) {
+                builder.addStatement("$L.$L($L)", targetVar, MemberNames.setter(p.name()),
+                        RowReads.boxedRead(type.box(), CodeBlock.of("$S", label), attributeTypes.isEnum(type)));
                 continue;
             }
             String temp = alias + "_" + Props.column(p) + "Value";
-            builder.addStatement("$T $L = rs.$L($S)", typeMappingBuilder.memberType(valueObject.typeName(), p.name()), temp, RowReads.primitiveGetter(alias + "." + p.name(), typeMappingBuilder.memberType(valueObject.typeName(), p.name())), label);
-            builder.beginControlFlow("if (rs.wasNull())");
-            builder.addStatement("throw new $T($S)", ClassName.get("java.sql", "SQLException"),
-                    "NULL value in non-nullable primitive column \"" + label + "\" mapped to "
-                            + ownerName + "." + alias + "." + p.name());
-            builder.endControlFlow();
+            RowReads.appendPrimitiveRead(builder, type, temp, alias + "." + p.name(),
+                    CodeBlock.of("$S", label), label, ownerName + "." + alias + "." + p.name());
             builder.addStatement("$L.$L($L)", targetVar, MemberNames.setter(p.name()), temp);
         }
     }
@@ -242,17 +245,15 @@ public final class JoinedProjectionEmitter {
                 continue;
             }
             String leafLocal = prefix + "_" + Props.column(p);
-            if (!typeMappingBuilder.memberType(valueObject.typeName(), p.name()).isPrimitive()) {
-                builder.addStatement("$T $L = rs.getObject($S, $T.class)", typeMappingBuilder.memberType(valueObject.typeName(), p.name()).box(), leafLocal, leafLocal,
-                        typeMappingBuilder.memberType(valueObject.typeName(), p.name()).box());
+            TypeName type = typeMappingBuilder.memberType(valueObject.typeName(), p.name());
+            if (!type.isPrimitive()) {
+                builder.addStatement("$T $L = $L", type.box(), leafLocal,
+                        RowReads.boxedRead(type.box(), CodeBlock.of("$S", leafLocal), attributeTypes.isEnum(type)));
                 presence.add(leafLocal + " != null");
                 continue;
             }
-            builder.addStatement("$T $L = rs.$L($S)", typeMappingBuilder.memberType(valueObject.typeName(), p.name()), leafLocal, RowReads.primitiveGetter(path, typeMappingBuilder.memberType(valueObject.typeName(), p.name())), leafLocal);
-            builder.beginControlFlow("if (rs.wasNull())");
-            builder.addStatement("throw new $T($S)", ClassName.get("java.sql", "SQLException"),
-                    "NULL value in non-nullable primitive column \"" + leafLocal + "\" mapped to " + path);
-            builder.endControlFlow();
+            RowReads.appendPrimitiveRead(builder, type, leafLocal, path,
+                    CodeBlock.of("$S", leafLocal), leafLocal, path);
         }
     }
 

@@ -17,8 +17,9 @@ import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.metadata.UnknownAttributePathException;
 
 import io.github.fludakit.data.processor.analysis.PathResolver;
-import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
+import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
 import io.github.fludakit.data.processor.generator.RepositorySourceWriter;
+import io.github.fludakit.data.processor.support.JoinEdges;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.processor.support.Props;
@@ -43,7 +44,7 @@ import java.util.Set;
  *
  * <p>Nothing here touches {@code Filer}: the source goes out through {@link RepositorySourceWriter},
  * which is also what registers the generated name. It holds no {@code Elements} either — resolving a
- * value-object element by name is {@link TypeModelBuilder#elementFor(String)}, the one place a name
+ * value-object element by name is {@link TypeModelRegistry#elementFor(String)}, the one place a name
  * becomes a type, so a compile-time query no longer decides whether this emitter can be constructed.
  * A degraded path is reported through {@link Diagnostics}, which is swappable. The emitter never
  * reaches for {@code ProcessingEnvironment} itself.</p>
@@ -58,7 +59,7 @@ public final class TypeMappingGenerator {
             ClassName.get("io.github.fludakit.data.metadata", "ColumnPlacement");
 
     private final Diagnostics diagnostics;
-    private final TypeModelBuilder typeMappingBuilder;
+    private final TypeModelRegistry typeMappingBuilder;
     private final PathResolver pathResolver;
     private final RepositorySourceWriter sourceWriter;
 
@@ -70,7 +71,7 @@ public final class TypeMappingGenerator {
     /** The reflection-free {@code ValueAccess.value(...)} emitter, split from the descriptor structure. */
     private final ValueAccessGenerator valueAccessGenerator;
 
-    public TypeMappingGenerator(Diagnostics diagnostics, TypeModelBuilder typeMappingBuilder,
+    public TypeMappingGenerator(Diagnostics diagnostics, TypeModelRegistry typeMappingBuilder,
                       PathResolver pathResolver, RepositorySourceWriter sourceWriter,
                       Map<String, ClassName> metadataTypes) {
         this.diagnostics = diagnostics;
@@ -354,7 +355,7 @@ public final class TypeMappingGenerator {
             JoinEdge edge;
             if (p instanceof Prop.ElementCollection elementCollection) {
                 localTarget = elementCollection.target();
-                edge = PathResolver.toManyOrNull(mapping.tableName(), mapping.idColumn(),
+                edge = JoinEdges.toManyOrNull(mapping.tableName(), mapping.idColumn(),
                         elementCollection.childTable(), elementCollection.parentFkColumn());
                 if (edge == null) {
                     continue; // a child table / parent fk still unresolved: nothing to join from
@@ -396,7 +397,7 @@ public final class TypeMappingGenerator {
             if (target == null || target.tableName() == null || target.idColumn() == null) {
                 return null;
             }
-            return PathResolver.toOneOrNull(owner.tableName(), ref.fkColumn(),
+            return JoinEdges.toOneOrNull(owner.tableName(), ref.fkColumn(),
                     target.tableName(), target.idColumn());
         }
         if (prop instanceof Prop.EntityCollection list) {
@@ -405,7 +406,7 @@ public final class TypeMappingGenerator {
                 return null;
             }
             String childTable = list.targetTable() != null ? list.targetTable() : target.tableName();
-            return PathResolver.toManyOrNull(owner.tableName(), owner.idColumn(),
+            return JoinEdges.toManyOrNull(owner.tableName(), owner.idColumn(),
                     childTable, list.inverseFkColumn());
         }
         return null;

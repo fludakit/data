@@ -6,11 +6,10 @@ import com.squareup.javapoet.TypeName;
 import com.squareup.javapoet.TypeVariableName;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
-import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
-import io.github.fludakit.data.processor.analysis.TypeShapes;
+import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
+import io.github.fludakit.data.processor.analysis.TypeMirrors;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.model.EntityRelationship;
-import io.github.fludakit.data.processor.generator.rowmapper.RowWrites;
 import io.github.fludakit.data.processor.model.WriteCascade;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.support.GeneratedKeyCoercion;
@@ -25,6 +24,8 @@ import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.VariableElement;
 import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
+import javax.lang.model.util.Elements;
+import javax.lang.model.util.Types;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -44,9 +45,10 @@ import java.util.Map;
  * statement share one {@code SQL_...} constant. Nothing here writes a source file or claims a type
  * name: the {@code MethodSpec.Builder} it is handed belongs to the caller's implementation class.</p>
  *
- * <p>It holds no {@code Types}. The two questions it asks about a declared type — is this parameter
- * the entity, and what does a sequence parameter carry — are {@link TypeShapes}, which was split out
- * precisely because this emitter and the validator each had their own copy of both.</p>
+ * <p>It holds a raw {@link Types}/{@link Elements} pair. The two questions it asks about a declared
+ * type — is this parameter the entity, and what does a sequence parameter carry — are
+ * {@link TypeMirrors}, which was split out precisely because this emitter and the validator each had
+ * their own copy of both.</p>
  */
 public final class WriteMethodEmitter {
 
@@ -56,8 +58,9 @@ public final class WriteMethodEmitter {
      * it writes comes from the {@link TypeMapping} it is handed.
      */
     private final AttributeTypes attributeTypes;
-    private final TypeModelBuilder typeMappingBuilder;
-    private final TypeShapes typeShapes;
+    private final TypeModelRegistry typeMappingBuilder;
+    private final Types types;
+    private final Elements elements;
     private final Diagnostics diagnostics;
     private final SqlDialect sqlDialect;
     /** The row-level statements every write is built from — see {@link RowWrites}. */
@@ -65,11 +68,12 @@ public final class WriteMethodEmitter {
     /** The child-cascade statements: element collections, owned entity collections, compositions. */
     private final ChildCascadeEmitter childCascade;
 
-    public WriteMethodEmitter(AttributeTypes attributeTypes, TypeModelBuilder typeMappingBuilder,
-                       TypeShapes typeShapes, Diagnostics diagnostics, SqlDialect sqlDialect) {
+    public WriteMethodEmitter(AttributeTypes attributeTypes, TypeModelRegistry typeMappingBuilder,
+                       Types types, Elements elements, Diagnostics diagnostics, SqlDialect sqlDialect) {
         this.attributeTypes = attributeTypes;
         this.typeMappingBuilder = typeMappingBuilder;
-        this.typeShapes = typeShapes;
+        this.types = types;
+        this.elements = elements;
         this.diagnostics = diagnostics;
         this.sqlDialect = sqlDialect;
         this.rowWrites = new RowWrites(attributeTypes, sqlDialect, typeMappingBuilder);
@@ -124,8 +128,8 @@ public final class WriteMethodEmitter {
                                     TypeMapping<?> entity, Map<String, String> constants,
                                     WriteCascade cascade) {
         String values = MemberNames.parameterName(parameter, "entities");
-        TypeMirror valueType = typeShapes.sequenceElementType(parameterType);
-        TypeName entityType = typeShapes.erasedTypeName(valueType);
+        TypeMirror valueType = TypeMirrors.sequenceElementType(parameterType);
+        TypeName entityType = TypeName.get(types.erasure(valueType));
         builder.beginControlFlow("for ($T entity : $L)", entityType, values);
         if (method.getAnnotation(Insert.class) != null) {
             appendInsertAndChildCascades(builder, "entity", entity, constants, cascade);
@@ -143,7 +147,7 @@ public final class WriteMethodEmitter {
     }
 
     public boolean isEntitySequenceParameter(TypeMirror parameterType, TypeMapping<?> entity) {
-        TypeMirror elementType = typeShapes.sequenceElementType(parameterType);
+        TypeMirror elementType = TypeMirrors.sequenceElementType(parameterType);
         return elementType != null && isEntityParameter(elementType, entity);
     }
 
@@ -265,6 +269,6 @@ public final class WriteMethodEmitter {
     }
 
     public boolean isEntityParameter(TypeMirror parameterType, TypeMapping<?> entity) {
-        return typeShapes.isEntity(parameterType, entity);
+        return TypeMirrors.isEntity(types, elements, parameterType, entity);
     }
 }

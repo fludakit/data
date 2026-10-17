@@ -18,7 +18,7 @@
  * └────────────────────────────────────┬────────────────────────────────────────────────┘
  *                                      ▼
  * ┌─────────────────────────────────────────────────────────────────────────────────────┐
- * │  2. GENERATE METADATA  (emit/)                                                      │
+ * │  2. GENERATE METADATA  (generator/)                                                │
  * │     TypeMappingGenerator → <Entity>Metadata (reflection-free TypeMapping impl)         │
  * │     RowMapperGenerator → <Entity>RowMapper (reflection-free ResultSet reader)       │
  * │     MetamodelGenerator → _Entity static metamodel + navigable member classes        │
@@ -31,7 +31,7 @@
  * └────────────────────────────────────┬────────────────────────────────────────────────┘
  *                                      ▼
  * ┌─────────────────────────────────────────────────────────────────────────────────────┐
- * │  4. COMPILE METHODS  (emit/)                                                        │
+ * │  4. COMPILE METHODS  (generator/)                                                   │
  * │     RepositoryMethodValidator → reject unsupported shapes                           │
  * │     RepositoryMethodCompiler → one MethodSpec per abstract method:                  │
  * │       • @Query → native SQL, bind parameters                                        │
@@ -41,7 +41,7 @@
  * └────────────────────────────────────┬────────────────────────────────────────────────┘
  *                                      ▼
  * ┌─────────────────────────────────────────────────────────────────────────────────────┐
- * │  5. WRITE  (emit/)                                                                  │
+ * │  5. WRITE  (generator/)                                                             │
  * │     RepositoryShellEmitter → <Repository>Impl (@ApplicationScoped, JdbcClient)      │
  * │     QueryDefinitionWriter → <Repository>Queries (QueryDefinition per query-by-name method)  │
  * └────────────────────────────────────┬────────────────────────────────────────────────┘
@@ -61,16 +61,16 @@
  *
  * <ul>
  *   <li><strong>this package</strong> — entry point ({@link RepositoryProcessor}) and round
- *       assembly ({@link RoundWiring}). No logic here; just wiring.</li>
+ *       assembly ({@link Round}). No logic here; just wiring.</li>
  *   <li><strong>{@code analysis/}</strong> — compile-time model building. Reads entity fields,
  *       resolves generic types, validates methods, plans loads and cascades. Produces the
  *       {@code TypeMapping} every generator consumes.</li>
- *   <li><strong>{@code emit/}</strong> — code generation. Writes JavaPoet {@code MethodSpec} and
+ *   <li><strong>{@code generator/}</strong> — code generation. Writes JavaPoet {@code MethodSpec} and
  *       {@code TypeSpec} objects. One class per generated artifact or per method shape.</li>
  *   <li><strong>{@code model/}</strong> — internal data structures. Records and value objects that
  *       flow between analysis and emit. Not exposed outside the processor.</li>
- *   <li><strong>{@code support/}</strong> — infrastructure. Diagnostics, generated-artifact registry,
- *       naming constants. The only package that names {@code Messager} or {@code Filer}.</li>
+ *   <li><strong>{@code support/}</strong> — infrastructure. Diagnostics and naming/key-coercion
+ *       constants. The only package that names {@code Messager} or {@code Filer}.</li>
  * </ul>
  *
  * <h2>Key concepts</h2>
@@ -79,14 +79,14 @@
  * repositories in the same round (e.g., {@code OrderRepository} and {@code ItemRepository} both
  * reference {@code Customer}). The first repository to need {@code _Customer}, {@code CustomerMetadata},
  * or {@code CustomerRowMapper} triggers generation; later requests hit the cache in
- * {@link io.github.fludakit.data.processor.support.GeneratedArtifactRegistry}. See
+ * {@link io.github.fludakit.data.processor.GeneratedArtifacts}. See
  * {@link io.github.fludakit.data.processor.generator.ArtifactCoordinator} for the protocol.</p>
  *
  * <p><strong>Session-scoped vs round-scoped.</strong> Two caches outlive a round:
- * {@code GeneratedArtifactRegistry} (what has been emitted or claimed) and
+ * {@code GeneratedArtifacts} (what has been emitted or claimed) and
  * {@link io.github.fludakit.data.processor.analysis.TypeModelBuilder} (the descriptor memo that
  * prevents a value object reached from two owners from being analyzed twice). Everything else is
- * rebuilt per round; see {@link RoundWiring} for the construction order.</p>
+ * rebuilt per round; see {@link Round} for the construction order.</p>
  *
  * <p><strong>SQL rendering.</strong> All SQL flows through {@code SqlBuilder} and the configured
  * {@code SqlDialect} (H2 or PostgreSQL). The processor bakes the rendered SQL into the generated
@@ -100,8 +100,8 @@
  * </ul>
  *
  * @see RepositoryProcessor
- * @see RoundWiring
+ * @see Round
  * @see io.github.fludakit.data.processor.analysis
- * @see io.github.fludakit.data.processor.emit
+ * @see io.github.fludakit.data.processor.generator
  */
 package io.github.fludakit.data.processor;

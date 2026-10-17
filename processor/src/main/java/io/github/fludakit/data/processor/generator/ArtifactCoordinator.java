@@ -3,11 +3,11 @@ package io.github.fludakit.data.processor.generator;
 import com.squareup.javapoet.ClassName;
 
 import io.github.fludakit.data.metadata.TypeMapping;
-import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
+import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
 import io.github.fludakit.data.processor.generator.metadata.TypeMappingGenerator;
 import io.github.fludakit.data.processor.generator.metadata.MetamodelGenerator;
 import io.github.fludakit.data.processor.generator.rowmapper.RowMapperGenerator;
-import io.github.fludakit.data.processor.support.GeneratedArtifactRegistry;
+import io.github.fludakit.data.processor.GeneratedArtifacts;
 import javax.lang.model.element.TypeElement;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -22,23 +22,23 @@ import java.util.Set;
  * generation. It lives in {@code generate} so that {@code analysis} (and its model output) no longer
  * imports anything from {@code generate}, which is what keeps the analysis → plan → generate layers
  * pointing one way. The analysis-side half — building the compile-time {@link TypeMapping} model — is
- * {@link TypeModelBuilder}, which this coordinator reads.
+ * {@link TypeModelRegistry}, which this coordinator reads.
  *
  * <p>Idempotent at the artifact level: the name-claiming and cache checks in
- * {@link GeneratedArtifactRegistry} mean two repositories over the same entity (or a repository and a
+ * {@link GeneratedArtifacts} mean two repositories over the same entity (or a repository and a
  * relationship target's planner) can each ask for the same artifact and only the first one writes it.
  */
 public final class ArtifactCoordinator {
 
-    private final TypeModelBuilder typeMappingBuilder;
+    private final TypeModelRegistry typeMappingBuilder;
     private final TypeMappingGenerator metadataGenerator;
     private final MetamodelGenerator metamodelGenerator;
     private final RowMapperGenerator rowMapperGenerator;
-    private final GeneratedArtifactRegistry registry;
+    private final GeneratedArtifacts registry;
 
-    public ArtifactCoordinator(TypeModelBuilder typeMappingBuilder,
+    public ArtifactCoordinator(TypeModelRegistry typeMappingBuilder,
                         TypeMappingGenerator metadataGenerator, MetamodelGenerator metamodelGenerator,
-                        RowMapperGenerator rowMapperGenerator, GeneratedArtifactRegistry registry) {
+                        RowMapperGenerator rowMapperGenerator, GeneratedArtifacts registry) {
         this.typeMappingBuilder = typeMappingBuilder;
         this.metadataGenerator = metadataGenerator;
         this.metamodelGenerator = metamodelGenerator;
@@ -89,9 +89,9 @@ public final class ArtifactCoordinator {
 
     /**
      * Emits the aggregate's {@code _Entity} static metamodel (idempotent via
-     * {@link GeneratedArtifactRegistry#hasMetamodel}) and, when {@code withMetadata} asks for it, its
+     * {@link GeneratedArtifacts#hasMetamodel}) and, when {@code withMetadata} asks for it, its
      * {@code <Entity>Metadata} descriptor (idempotent via
-     * {@link GeneratedArtifactRegistry#hasMetadata}). Each emitter derives the member list it needs
+     * {@link GeneratedArtifacts#hasMetadata}). Each emitter derives the member list it needs
      * from the same descriptor, so the descriptor's {@code id()}/{@code attributes()} return the very
      * metamodel field instances; value objects have no metamodel and their metadata falls back to
      * record literals.

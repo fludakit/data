@@ -1,4 +1,4 @@
-package io.github.fludakit.data.processor.generator.rowmapper;
+package io.github.fludakit.data.processor.generator;
 
 import com.squareup.javapoet.CodeBlock;
 import com.squareup.javapoet.MethodSpec;
@@ -6,8 +6,7 @@ import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
-import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
-import io.github.fludakit.data.processor.generator.SqlConstants;
+import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
 import io.github.fludakit.data.processor.support.GeneratedKeyCoercion;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.sql.SqlBuilder;
@@ -38,7 +37,7 @@ public final class RowWrites {
 
     private final AttributeTypes attributeTypes;
     private final SqlDialect sqlDialect;
-    private final TypeModelBuilder typeMappingBuilder;
+    private final TypeModelRegistry typeMappingBuilder;
 
     /**
      * @param attributeTypes for {@code isEnumProp} — whether a property's declared type is an
@@ -48,7 +47,7 @@ public final class RowWrites {
      *                       {@code Elements} to answer it
      */
     public RowWrites(AttributeTypes attributeTypes, SqlDialect sqlDialect,
-                     TypeModelBuilder typeMappingBuilder) {
+                     TypeModelRegistry typeMappingBuilder) {
         this.attributeTypes = attributeTypes;
         this.sqlDialect = sqlDialect;
         this.typeMappingBuilder = typeMappingBuilder;

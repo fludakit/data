@@ -1,18 +1,14 @@
 package io.github.fludakit.data.processor.generator.method;
 
 import com.squareup.javapoet.MethodSpec;
-import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
+import io.github.fludakit.data.processor.analysis.MethodResults;
+import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
 import io.github.fludakit.data.processor.generator.CrudReadEmitter;
 import io.github.fludakit.data.processor.generator.RepositoryContext;
 import io.github.fludakit.data.processor.generator.WriteMethodEmitter;
-import io.github.fludakit.data.processor.support.GeneratedArtifactRegistry;
+import io.github.fludakit.data.processor.GeneratedArtifacts;
 import io.github.fludakit.data.processor.support.GeneratedKeyCoercion;
 import io.github.fludakit.data.processor.support.MemberNames;
-import io.github.fludakit.data.query.LimitSpec;
-import io.github.fludakit.data.query.Operator;
-import io.github.fludakit.data.query.PagingMode;
-import io.github.fludakit.data.query.ParamBinding;
-import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
 import jakarta.data.repository.Delete;
@@ -40,12 +36,12 @@ public final class CrudWriteMethodGenerator implements MethodGenerator {
     private final WriteMethodEmitter writeMethodEmitter;
     private final CrudReadEmitter crudReads;
     private final MethodResults methodResults;
-    private final TypeModelBuilder typeMappingBuilder;
-    private final GeneratedArtifactRegistry registry;
+    private final TypeModelRegistry typeMappingBuilder;
+    private final GeneratedArtifacts registry;
 
     public CrudWriteMethodGenerator(WriteMethodEmitter writeMethodEmitter, CrudReadEmitter crudReads,
-                             MethodResults methodResults, TypeModelBuilder typeMappingBuilder,
-                             GeneratedArtifactRegistry registry) {
+                             MethodResults methodResults, TypeModelRegistry typeMappingBuilder,
+                             GeneratedArtifacts registry) {
         this.writeMethodEmitter = writeMethodEmitter;
         this.crudReads = crudReads;
         this.methodResults = methodResults;
@@ -132,7 +128,7 @@ public final class CrudWriteMethodGenerator implements MethodGenerator {
         }
         // 8. Remaining CRUD built-ins — findById, deleteById, findAll.
         if (arity == 1 && name.equals("findById")) {
-            QueryDefinitions.publish(registry, emission, name, findById(emission, kind));
+            QueryDefinitions.publish(registry, emission, name, CrudReadMethodGenerator.findById(emission, kind));
             crudReads.emitFindById(builder, MemberNames.parameterName(parameters.get(0), MemberNames.ID_PARAM),
                     emission, kind);
             return true;
@@ -144,7 +140,7 @@ public final class CrudWriteMethodGenerator implements MethodGenerator {
             return true;
         }
         if (name.equals("findAll") && arity == 0) {
-            QueryDefinitions.publish(registry, emission, name, findAll(kind));
+            QueryDefinitions.publish(registry, emission, name, CrudReadMethodGenerator.findAll(kind));
             crudReads.emitFindAll(builder, emission, kind);
             return true;
         }
@@ -194,18 +190,6 @@ public final class CrudWriteMethodGenerator implements MethodGenerator {
             definition = new QueryDefinition.DeleteById(writeKind);
         }
         QueryDefinitions.publish(registry, emission, name, definition);
-    }
-
-    private QueryDefinition.Read findById(RepositoryContext emission, ResultKind kind) {
-        return new QueryDefinition.Read(kind,
-                List.of(Predicate.of(emission.entity().id().name(), Operator.EQ, MemberNames.ID_PARAM)),
-                List.of(), PagingMode.NONE, LimitSpec.none(), List.of(),
-                List.of(new ParamBinding(0, MemberNames.ID_PARAM)), false);
-    }
-
-    private QueryDefinition.Read findAll(ResultKind kind) {
-        return new QueryDefinition.Read(kind, List.of(), List.of(), PagingMode.NONE, LimitSpec.none(),
-                List.of(), List.of(), false);
     }
 
     private ResultKind writeKind(TypeMirror returnMirror, RepositoryContext emission) {

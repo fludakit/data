@@ -1,4 +1,4 @@
-package io.github.fludakit.data.processor.support;
+package io.github.fludakit.data.processor;
 
 import com.squareup.javapoet.ClassName;
 
@@ -27,7 +27,7 @@ import java.util.Set;
  * <p>Pure state: no {@code ProcessingEnvironment}, no {@code Filer}, no generator. That is what makes
  * the name-claiming rules testable without driving javac.</p>
  */
-public class GeneratedArtifactRegistry {
+public class GeneratedArtifacts {
 
     /** Entity FQN → generated {@code <Entity>RowMapper} type. */
     private final Map<String, ClassName> rowMappers = new LinkedHashMap<>();

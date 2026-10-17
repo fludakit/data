@@ -1,7 +1,7 @@
 package io.github.fludakit.data.processor.generator.method;
 
 import io.github.fludakit.data.processor.generator.RepositoryContext;
-import io.github.fludakit.data.processor.support.GeneratedArtifactRegistry;
+import io.github.fludakit.data.processor.GeneratedArtifacts;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.query.QueryDefinition;
 
@@ -18,7 +18,7 @@ public final class QueryDefinitions {
     private QueryDefinitions() {
     }
 
-    public static void publish(GeneratedArtifactRegistry registry, RepositoryContext context,
+    public static void publish(GeneratedArtifacts registry, RepositoryContext context,
                                String methodName, QueryDefinition definition) {
         String name = MemberNames.capitalize(methodName) + "Query";
         int clash = context.queryDefinitionNames().merge(name, 1, Integer::sum);

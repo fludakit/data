@@ -30,6 +30,7 @@ import javax.lang.model.element.VariableElement;
 import javax.lang.model.type.ArrayType;
 import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
+import javax.lang.model.util.Types;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -46,10 +47,9 @@ import java.util.Map;
  * {@code Like} suffix silently override an {@code @By}.</p>
  *
  * <p>The plan is a value: nothing here writes source, claims a type name, or touches
- * {@code ProcessingEnvironment}. It holds no {@link Types} either — the erasure tests that recognise
- * the paging parameters ({@code PageRequest}, {@code Sort}, {@code Limit}, {@code Order}), which are
- * positional rather than named, are {@link TypeShapes#erasedName}, so the one compile-time query this
- * compiler makes is not one it has to be able to perform.</p>
+ * {@code ProcessingEnvironment}. It holds a raw {@link Types} for the erasure tests that recognise the
+ * paging parameters ({@code PageRequest}, {@code Sort}, {@code Limit}, {@code Order}), which are
+ * positional rather than named.</p>
  */
 public final class QueryPlanBuilder {
 
@@ -58,16 +58,16 @@ public final class QueryPlanBuilder {
     public static final String LIMIT = "jakarta.data.Limit";
     public static final String SORT = "jakarta.data.Sort";
 
-    private final TypeShapes typeShapes;
+    private final Types types;
 
-    public QueryPlanBuilder(TypeShapes typeShapes) {
-        this.typeShapes = typeShapes;
+    public QueryPlanBuilder(Types types) {
+        this.types = types;
     }
 
     public String specialParameter(List<? extends VariableElement> parameters,
                                     List<? extends TypeMirror> parameterTypes, String erasedType) {
         for (int i = 0; i < parameters.size(); i++) {
-            if (erasedType.equals(typeShapes.erasedName(parameterTypes.get(i)))) {
+            if (erasedType.equals(types.erasure(parameterTypes.get(i)).toString())) {
                 return parameters.get(i).getSimpleName().toString();
             }
         }
@@ -193,13 +193,13 @@ public final class QueryPlanBuilder {
     }
 
     public boolean isSpecial(TypeMirror type) {
-        String erased = typeShapes.erasedName(type);
+        String erased = types.erasure(type).toString();
         if (PAGE_REQUEST.equals(erased) || ORDER.equals(erased) || LIMIT.equals(erased) || SORT.equals(erased)) {
             return true;
         }
         if (type.getKind() == TypeKind.ARRAY) {
             TypeMirror component = ((ArrayType) type).getComponentType();
-            return SORT.equals(typeShapes.erasedName(component));
+            return SORT.equals(types.erasure(component).toString());
         }
         return false;
     }

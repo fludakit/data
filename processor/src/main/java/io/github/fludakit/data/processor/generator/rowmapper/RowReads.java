@@ -1,5 +1,8 @@
 package io.github.fludakit.data.processor.generator.rowmapper;
 
+import com.squareup.javapoet.ClassName;
+import com.squareup.javapoet.CodeBlock;
+import com.squareup.javapoet.MethodSpec;
 import com.squareup.javapoet.TypeName;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
@@ -41,6 +44,38 @@ public final class RowReads {
             default -> throw new IllegalStateException(
                     "No JDBC getter for primitive type " + type + " of property '" + property + "'");
         };
+    }
+
+    /**
+     * The read expression for one boxed (non-primitive) column: {@code getObject} for an ordinary
+     * type, {@code getString + Enum.valueOf} for an enum — enums persist as their name, so they read
+     * through the string and convert, null-safe for a nullable column. {@code label} is the caller's
+     * own way of naming the column: the metadata constant in a standalone mapper, or a literal
+     * {@code <alias>_join_<column>} in a joined projection.
+     */
+    public static CodeBlock boxedRead(TypeName type, CodeBlock label, boolean isEnum) {
+        if (isEnum) {
+            return CodeBlock.of("rs.getString($L) == null ? null : $T.valueOf($T.class, rs.getString($L))",
+                    label, Enum.class, type, label);
+        }
+        return CodeBlock.of("rs.getObject($L, $T.class)", label, type);
+    }
+
+    /**
+     * Emits the read of one primitive column into {@code local}, followed by the {@code wasNull()}
+     * guard: a primitive cannot hold NULL, so a NULL database value fails fast with a
+     * {@code SQLException} rather than corrupting the entity. {@code property} only names the getter's
+     * diagnostic; {@code label} is the column reference, and {@code columnName}/{@code entityPath}
+     * build the message.
+     */
+    public static void appendPrimitiveRead(MethodSpec.Builder builder, TypeName type, String local,
+                                           String property, CodeBlock label, String columnName,
+                                           String entityPath) {
+        builder.addStatement("$T $L = rs.$L($L)", type, local, primitiveGetter(property, type), label);
+        builder.beginControlFlow("if (rs.wasNull())");
+        builder.addStatement("throw new $T($S)", ClassName.get("java.sql", "SQLException"),
+                "NULL value in non-nullable primitive column \"" + columnName + "\" mapped to " + entityPath);
+        builder.endControlFlow();
     }
 
     /**

@@ -7,7 +7,7 @@ import com.squareup.javapoet.TypeName;
 import io.github.fludakit.data.Names;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
-import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
+import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
 import io.github.fludakit.data.processor.generator.metadata.Literals;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.processor.support.Props;
@@ -31,10 +31,10 @@ public final class EmbeddedValueReader {
         CodeBlock read(TypeName type, ClassName metadataType, String property);
     }
 
-    private final TypeModelBuilder typeMappingBuilder;
+    private final TypeModelRegistry typeMappingBuilder;
     private final ReadExpression readExpression;
 
-    public EmbeddedValueReader(TypeModelBuilder typeMappingBuilder, ReadExpression readExpression) {
+    public EmbeddedValueReader(TypeModelRegistry typeMappingBuilder, ReadExpression readExpression) {
         this.typeMappingBuilder = typeMappingBuilder;
         this.readExpression = readExpression;
     }
@@ -73,13 +73,9 @@ public final class EmbeddedValueReader {
                 presence.add(local + " != null");
                 continue;
             }
-            mapRow.addStatement("$T $L = rs.$L($T.$L)", type, local, RowReads.primitiveGetter(path, type),
-                    ownerMetadata, Literals.constName(local));
-            mapRow.beginControlFlow("if (rs.wasNull())");
-            mapRow.addStatement("throw new $T($S)", ClassName.get("java.sql", "SQLException"),
-                    "NULL value in non-nullable primitive column \"" + local
-                            + "\" mapped to " + entityName + "." + path);
-            mapRow.endControlFlow();
+            RowReads.appendPrimitiveRead(mapRow, type, local, path,
+                    CodeBlock.of("$T.$L", ownerMetadata, Literals.constName(local)),
+                    local, entityName + "." + path);
         }
     }
 

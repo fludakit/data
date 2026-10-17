@@ -1,7 +1,7 @@
 package io.github.fludakit.data.processor;
 
 import com.squareup.javapoet.ClassName;
-import io.github.fludakit.data.processor.support.GeneratedArtifactRegistry;
+import io.github.fludakit.data.processor.GeneratedArtifacts;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * The name-claiming and dedup rules behind every generated type name, pinned WITHOUT driving javac.
  *
- * <p>{@link GeneratedArtifactRegistry} is the only collaborator in this package that touches no
+ * <p>{@link GeneratedArtifacts} is the only collaborator in this package that touches no
  * {@code ProcessingEnvironment}: it holds four maps and a set, and every rule the generator relies on
  * — a claimed name stays claimed, a metadata type is visible to whoever asks next, a row mapper asked
  * for before it is emitted yields {@code null} rather than a placeholder — is expressible as a
@@ -31,7 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * what has actually been written, and the bug that produces is one source file written twice — which
  * {@code Filer} reports as an error about a type the user never declared.</p>
  */
-class GeneratedArtifactRegistryTest {
+class GeneratedArtifactsTest {
 
     private static final ClassName MAPPER = ClassName.get("relpath", "OrderRowMapper");
     private static final ClassName METADATA = ClassName.get("relpath", "OrderMetadata");
@@ -39,7 +39,7 @@ class GeneratedArtifactRegistryTest {
 
     @Test
     void aClaimedNameStaysClaimedAndAnUnclaimedOneIsNot() {
-        GeneratedArtifactRegistry registry = new GeneratedArtifactRegistry();
+        GeneratedArtifacts registry = new GeneratedArtifacts();
         assertFalse(registry.isClaimed("relpath._Order"), "nothing has been claimed yet");
 
         registry.claim("relpath._Order");
@@ -54,7 +54,7 @@ class GeneratedArtifactRegistryTest {
 
     @Test
     void aPreClaimedMetamodelNameIsAlreadyTakenWhenANavClassAsks() {
-        GeneratedArtifactRegistry registry = new GeneratedArtifactRegistry();
+        GeneratedArtifacts registry = new GeneratedArtifacts();
         // The round pre-scan claims every aggregate-root metamodel BEFORE any nav class is generated,
         // which is what makes the outcome independent of the order the repositories are processed in.
         registry.claim("relpath._OrderItem");
@@ -66,7 +66,7 @@ class GeneratedArtifactRegistryTest {
 
     @Test
     void theMetadataMapIsHandedOutLiveSoTheGeneratorThatFillsItIsTheOneCallersDedupeAgainst() {
-        GeneratedArtifactRegistry registry = new GeneratedArtifactRegistry();
+        GeneratedArtifacts registry = new GeneratedArtifacts();
         Map<String, ClassName> shared = registry.metadataTypes();
         assertFalse(registry.hasMetadata(ORDER));
 
@@ -83,7 +83,7 @@ class GeneratedArtifactRegistryTest {
 
     @Test
     void aRowMapperAskedForBeforeItIsEmittedYieldsNullNotAPlaceholder() {
-        GeneratedArtifactRegistry registry = new GeneratedArtifactRegistry();
+        GeneratedArtifacts registry = new GeneratedArtifacts();
         assertNull(registry.rowMapper(ORDER),
                 "a target whose mapper is not emitted yet must read as absent, not as a guess: the"
                         + " caller turns null into the on-demand emission path");
@@ -98,7 +98,7 @@ class GeneratedArtifactRegistryTest {
 
     @Test
     void aMetamodelIsRememberedOnceSoSeveralRepositoriesOverOneEntityProduceOne() {
-        GeneratedArtifactRegistry registry = new GeneratedArtifactRegistry();
+        GeneratedArtifacts registry = new GeneratedArtifacts();
         assertFalse(registry.hasMetamodel(ORDER),
                 "the first repository over an entity must be the one that emits its _Entity metamodel");
 
@@ -116,7 +116,7 @@ class GeneratedArtifactRegistryTest {
 
     @Test
     void managedEntitiesStartEmptyAndAreReplacedWholeEachRound() {
-        GeneratedArtifactRegistry registry = new GeneratedArtifactRegistry();
+        GeneratedArtifacts registry = new GeneratedArtifacts();
         assertEquals(Set.of(), registry.managedEntities(),
                 "before the round pre-scan nothing is managed, so no relationship is eligible to"
                         + " hydrate — an unmanaged target has no row mapper to delegate to");

@@ -7,8 +7,7 @@ import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
-import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
-import io.github.fludakit.data.processor.generator.rowmapper.RowWrites;
+import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
 import io.github.fludakit.data.processor.model.EntityRelationship;
 import io.github.fludakit.data.processor.model.WriteCascade;
 import io.github.fludakit.data.processor.support.GeneratedKeyCoercion;
@@ -43,7 +42,7 @@ public final class ChildCascadeEmitter {
     private final SqlDialect sqlDialect;
     private final RowWrites rowWrites;
     private final AttributeTypes attributeTypes;
-    private final TypeModelBuilder typeMappingBuilder;
+    private final TypeModelRegistry typeMappingBuilder;
 
     /**
      * No {@code Elements} and no {@code Types} of its own: every member this emitter writes was
@@ -56,7 +55,7 @@ public final class ChildCascadeEmitter {
      * collaborator that owns that lookup, so this class still holds no environment service.</p>
      */
     public ChildCascadeEmitter(SqlDialect sqlDialect, RowWrites rowWrites,
-                               AttributeTypes attributeTypes, TypeModelBuilder typeMappingBuilder) {
+                               AttributeTypes attributeTypes, TypeModelRegistry typeMappingBuilder) {
         this.sqlDialect = sqlDialect;
         this.rowWrites = rowWrites;
         this.attributeTypes = attributeTypes;

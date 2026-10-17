@@ -216,8 +216,12 @@ public interface TypeMapping<T> extends TableSchema, ColumnResolver {
         return new ColumnPlacement(leaf);
     }
 
-    /** The join edge a traversable relation property contributes, or {@code null} when unbuildable. */
-    private static JoinEdge relationEdge(TypeMapping<?> owner, Prop prop) {
+    /**
+     * The join edge a traversable relation property contributes, or {@code null} when unbuildable
+     * (or when the property is a write-only back-reference). Public so the processor's path resolver
+     * reuses this one rule instead of duplicating it against its compile-time model.
+     */
+    public static JoinEdge relationEdge(TypeMapping<?> owner, Prop prop) {
         if (prop instanceof Prop.Reference reference && !reference.backReference()) {
             if (reference.targetTable() == null || reference.targetIdColumn() == null) {
                 return null;

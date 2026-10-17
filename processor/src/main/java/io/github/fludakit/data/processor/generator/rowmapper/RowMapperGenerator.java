@@ -99,14 +99,14 @@ public final class RowMapperGenerator {
      * fails closed.
      */
     public boolean canGenerateRowMapper(TypeMapping<?> entity) {
-        if (entity.id() != null && !Literals.isJdbcSafe(idType(entity)) && !isEnumType(idType(entity))) {
+        if (entity.id() != null && !JdbcTypes.isJdbcSafe(idType(entity)) && !isEnumType(idType(entity))) {
             return false;
         }
         for (Prop p : entity.rowProps()) {
             if (p instanceof Prop.Reference) {
                 continue; // FK-only, or hydrated by the relationship loaders
             }
-            if (Literals.isJdbcSafe(typeMappingBuilder.memberType(entity.typeName(), p.name())) || isEnumType(typeMappingBuilder.memberType(entity.typeName(), p.name()))) {
+            if (JdbcTypes.isJdbcSafe(typeMappingBuilder.memberType(entity.typeName(), p.name())) || isEnumType(typeMappingBuilder.memberType(entity.typeName(), p.name()))) {
                 continue;
             }
             if (p instanceof Prop.Embedded && ((Prop.Embedded) p).target() != null
@@ -123,7 +123,7 @@ public final class RowMapperGenerator {
      *
      * <p>Not {@code entity.id().typeFqn()} turned back into a name: a synthesized {@code long id}
      * resolves to {@code java.lang.Long} through {@link AttributeTypes#classArgOf} only by accident,
-     * and a primitive must stay primitive for {@code Literals.isJdbcSafe} and for the
+     * and a primitive must stay primitive for {@code JdbcTypes.isJdbcSafe} and for the
      * {@code wasNull()} guard to be emitted. The scan recorded it, so the scan is asked.</p>
      */
     private TypeName idType(TypeMapping<?> entity) {
@@ -250,7 +250,7 @@ public final class RowMapperGenerator {
         if (targetModel.id() == null) {
             return "the target " + fqn + " has no identifier";
         }
-        if (!Literals.isJdbcSafe(typeMappingBuilder.memberType(targetModel.typeName(),
+        if (!JdbcTypes.isJdbcSafe(typeMappingBuilder.memberType(targetModel.typeName(),
                 targetModel.id().name()).box())) {
             return "the target " + fqn + " id type "
                 + typeMappingBuilder.memberType(targetModel.typeName(), targetModel.id().name())

@@ -151,8 +151,7 @@ public final class PathResolver {
             if (leaf == null) {
                 return new PathResolution.Unknown();
             }
-            JoinEdge edge = toManyOrNull(mapping.tableName(), mapping.idColumn(),
-                    elementCollection.childTable(), elementCollection.parentFkColumn());
+            JoinEdge edge = TypeMapping.relationEdge(mapping, elementCollection);
             if (edge == null) {
                 return new PathResolution.UnresolvedRelation();
             }
@@ -168,7 +167,7 @@ public final class PathResolver {
         if (target == null) {
             return new PathResolution.UnresolvedRelation();
         }
-        JoinEdge edge = relationEdge(mapping, target, prop);
+        JoinEdge edge = TypeMapping.relationEdge(mapping, prop);
         if (edge == null) {
             return new PathResolution.UnresolvedRelation();
         }
@@ -198,32 +197,6 @@ public final class PathResolver {
             }
         }
         return new PathResolution.Unknown();
-    }
-
-    /** The relation edge for a Reference / EntityCollection / ElementCollection traversal; {@code null} when unbuildable. */
-    public static JoinEdge relationEdge(TypeMapping<?> root, TypeMapping<?> target, Prop prop) {
-        if (prop instanceof Prop.Reference reference) {
-            if (reference.targetTable() == null || target.idColumn() == null) {
-                return null;
-            }
-            return toOneOrNull(root.tableName(), reference.fkColumn(),
-                    reference.targetTable(), target.idColumn());
-        }
-        if (prop instanceof Prop.EntityCollection list) {
-            if (list.targetTable() == null || list.inverseFkColumn() == null) {
-                return null;
-            }
-            return toManyOrNull(root.tableName(), root.idColumn(),
-                    list.targetTable(), list.inverseFkColumn());
-        }
-        if (prop instanceof Prop.ElementCollection elementCollection) {
-            if (elementCollection.childTable() == null || elementCollection.parentFkColumn() == null) {
-                return null;
-            }
-            return toManyOrNull(root.tableName(), root.idColumn(),
-                    elementCollection.childTable(), elementCollection.parentFkColumn());
-        }
-        return null;
     }
 
     /**

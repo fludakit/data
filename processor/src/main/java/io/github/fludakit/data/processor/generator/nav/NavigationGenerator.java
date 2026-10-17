@@ -62,12 +62,13 @@ public final class NavigationGenerator {
                         RowMapperGenerator rowMapperGenerator, RepositorySourceWriter sourceWriter,
                         Set<String> managedEntities) {
         this.sourceWriter = sourceWriter;
-        // One generator per member kind, sharing the leaf/field plumbing: see NavSupport.
-        NavSupport support = new NavSupport(attributeTypes, diagnostics, typeMappingBuilder);
-        this.embedded = new EmbeddedNavGenerator(attributeTypes, support);
-        this.relations = new RelationNavGenerator(attributeTypes, typeMappingBuilder,
-                rowMapperGenerator, support, managedEntities);
-        this.elementCollections = new ElementCollectionNavGenerator(attributeTypes, relations, support);
+        // One hub shared by the three member-kind generators: the leaf/field plumbing, the target
+        // flattening, and the nav-class skeleton (see NavSupport).
+        NavSupport support = new NavSupport(attributeTypes, diagnostics, typeMappingBuilder,
+                rowMapperGenerator, managedEntities);
+        this.embedded = new EmbeddedNavGenerator(support);
+        this.relations = new RelationNavGenerator(support);
+        this.elementCollections = new ElementCollectionNavGenerator(support);
     }
 
     /**

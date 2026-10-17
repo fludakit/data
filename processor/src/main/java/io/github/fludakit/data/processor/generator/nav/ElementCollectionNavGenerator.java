@@ -1,16 +1,8 @@
 package io.github.fludakit.data.processor.generator.nav;
 
-import com.squareup.javapoet.AnnotationSpec;
-import com.squareup.javapoet.ClassName;
-import com.squareup.javapoet.CodeBlock;
-import com.squareup.javapoet.ParameterizedTypeName;
 import com.squareup.javapoet.TypeName;
-import com.squareup.javapoet.TypeSpec;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
-import io.github.fludakit.data.processor.RepositoryProcessor;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
-import io.github.fludakit.data.processor.generator.nav.NavUnit;
-import javax.lang.model.element.Modifier;
 import javax.lang.model.element.TypeElement;
 import java.util.HashSet;
 import java.util.List;
@@ -25,14 +17,9 @@ import java.util.Set;
  */
 public final class ElementCollectionNavGenerator {
 
-    private final AttributeTypes attributeTypes;
-    private final RelationNavGenerator relations;
     private final NavSupport support;
 
-    public ElementCollectionNavGenerator(AttributeTypes attributeTypes,
-                                  RelationNavGenerator relations, NavSupport support) {
-        this.attributeTypes = attributeTypes;
-        this.relations = relations;
+    public ElementCollectionNavGenerator(NavSupport support) {
         this.support = support;
     }
 
@@ -41,29 +28,18 @@ public final class ElementCollectionNavGenerator {
                                        String navSimple, String path,
                                        Prop.ElementCollection elementCollection,
                                        Set<String> claimed) {
-        String fqn = packageName + "." + navSimple;
-        if (!claimed.add(fqn)) {
-            support.navCollision(origin, fqn, path);
+        String targetFqn = elementCollection.elementTypeName();
+        NavDraft draft = support.beginNav(origin, packageName, owner, navSimple, path,
+                AttributeTypes.FM_EC, targetFqn, claimed);
+        if (draft == null) {
             return List.of();
         }
-        String targetFqn = elementCollection.elementTypeName();
-        TypeName targetType = attributeTypes.classArgOf(targetFqn);
-        TypeSpec.Builder builder = TypeSpec.classBuilder(navSimple)
-                .addModifiers(Modifier.PUBLIC, Modifier.FINAL)
-                .addSuperinterface(ParameterizedTypeName.get(AttributeTypes.FM_EC, owner, targetType))
-                .addAnnotation(AnnotationSpec.builder(AttributeTypes.MM_GENERATED)
-                        .addMember("value", "$S", RepositoryProcessor.class.getName()).build());
         Set<String> taken = new HashSet<>();
-        // The gate resolved the target by this same name already, so the second resolve that used to
-        // sit here was dead: it could only re-answer a question the gate had answered true.
-        if (relations.relationTargetResolved(targetFqn, true)) {
+        if (support.relationTarget(targetFqn, true) != null) {
             for (Prop ep : elementCollection.target().props()) {
-                relations.addRelationLeaf(builder, taken, origin, owner, path, "", ep);
+                support.addRelationLeaf(draft.builder(), taken, origin, owner, path, "", ep);
             }
         }
-        builder.addMethod(NavSupport.overrideAccessor("name", String.class, CodeBlock.of("$S", NavSupport.lastPathSegment(path))));
-        builder.addMethod(NavSupport.overrideAccessor("path", String.class, CodeBlock.of("$S", path)));
-        return List.of(new NavUnit(fqn, ClassName.get(packageName, navSimple),
-                NavSupport.navFile(packageName, builder)));
+        return List.of(support.finishNav(draft, path, NavSupport.lastPathSegment(path)));
     }
 }

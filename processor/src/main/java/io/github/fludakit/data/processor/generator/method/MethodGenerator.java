@@ -1,7 +1,7 @@
 package io.github.fludakit.data.processor.generator.method;
 
 import com.squareup.javapoet.MethodSpec;
-import io.github.fludakit.data.processor.generator.RepositoryEmission;
+import io.github.fludakit.data.processor.generator.RepositoryContext;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.type.ExecutableType;
 
@@ -26,5 +26,5 @@ public interface MethodGenerator {
      * generator in the list.
      */
     boolean generate(MethodSpec.Builder builder, ExecutableElement method, ExecutableType resolved,
-                     RepositoryEmission emission);
+                     RepositoryContext emission);
 }

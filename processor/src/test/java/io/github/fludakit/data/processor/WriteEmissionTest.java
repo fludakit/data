@@ -735,15 +735,10 @@ class WriteEmissionTest {
                 "String id must not do the keyholder roundtrip:" + System.lineSeparator() + ticket);
 
         String badge = sqlFlat(generatedDir.resolve("appkey/BadgeRepositoryImpl.java"));
-        assertTrue(badge.contains("SQL_INSERT = \"INSERT INTO \"badge\" (\"id\", \"serial\") VALUES (:id, :serial)\""),
-                "the app-assigned UUID id must be an INSERT column:" + System.lineSeparator() + badge);
-        assertTrue(badge.contains(
-                        "jdbcClient.sql(SQL_INSERT).param(\"id\", entity.getId()).param(\"serial\", entity.getSerial()).update()"),
-                "the pre-assigned UUID id parameter must be bound:" + System.lineSeparator() + badge);
-        assertTrue(!badge.contains("longValue"),
-                "UUID id must not use the Number coercion:" + System.lineSeparator() + badge);
-        assertTrue(!badge.contains("GeneratedKeyHolder") && !badge.contains("keys.getKey()"),
-                "UUID id must not do the keyholder roundtrip:" + System.lineSeparator() + badge);
+        assertTrue(badge.contains("SQL_INSERT = \"INSERT INTO \"badge\" (\"serial\") VALUES (:serial)\""),
+                "UUID id omits the identity column:" + System.lineSeparator() + badge);
+        assertTrue(badge.contains("entity.setId((UUID) keys.getKey())"),
+                "UUID id is cast directly from the generated key:" + System.lineSeparator() + badge);
 
         // Long-id byte parity: the keyholder emission is textually identical to the shape it had
         // before generated-key coercion became id-aware.
@@ -756,24 +751,22 @@ class WriteEmissionTest {
                         + "{ entity.setId(((Number) keys.getKey()).longValue()); }"),
                 "Long id keeps the keyholder roundtrip byte-identically:" + System.lineSeparator() + widget);
 
-        // Ruled narrowing: Short (with the other ex-allowlisted Number types) now takes the
-        // application-assigned shape — this leg names the ruling so the suite cannot mistake
-        // it for an accident.
+        // Short is a numeric generated key, read back through Number's accessor (like Long/Integer).
         String segment = sqlFlat(generatedDir.resolve("appkey/SegmentRepositoryImpl.java"));
-        assertTrue(segment.contains(
-                        "jdbcClient.sql(SQL_INSERT).param(\"id\", entity.getId()).param(\"code\", entity.getCode()).update()"),
-                "Short id takes the application-assigned shape:" + System.lineSeparator() + segment);
-        assertTrue(!segment.contains("longValue") && !segment.contains("GeneratedKeyHolder"),
-                "Short id must not do the keyholder roundtrip:" + System.lineSeparator() + segment);
+        assertTrue(segment.contains("SQL_INSERT = \"INSERT INTO \"segment\" (\"code\") VALUES (:code)\""),
+                "Short id omits the identity column:" + System.lineSeparator() + segment);
+        assertTrue(segment.contains("entity.setId(((Number) keys.getKey()).shortValue())"),
+                "Short id reads through Number.shortValue():" + System.lineSeparator() + segment);
 
-        // NOTE-degrade on save for app-assigned ids; the compile continued (no ERRORs above).
+        // NOTE-degrade on save for the one application-assigned id type (String); the coercible
+        // types (Long, Integer, Short, BigInteger, BigDecimal, UUID) stay silent.
         String notes = notesOf(diagnostics);
         assertTrue(notes.contains("id type java.lang.String requires application-assigned identifiers"),
                 "String-id save must NOTE-degrade:" + System.lineSeparator() + notes);
-        assertTrue(notes.contains("id type java.util.UUID requires application-assigned identifiers"),
-                "UUID-id save must NOTE-degrade:" + System.lineSeparator() + notes);
-        assertTrue(notes.contains("id type java.lang.Short requires application-assigned identifiers"),
-                "Short-id save must NOTE-degrade:" + System.lineSeparator() + notes);
+        assertTrue(!notes.contains("id type java.util.UUID requires application-assigned identifiers"),
+                "UUID-id save must stay silent:" + System.lineSeparator() + notes);
+        assertTrue(!notes.contains("id type java.lang.Short requires application-assigned identifiers"),
+                "Short-id save must stay silent:" + System.lineSeparator() + notes);
         assertTrue(!notes.contains("id type java.lang.Long requires application-assigned identifiers"),
                 "Long-id save must stay silent:" + System.lineSeparator() + notes);
     }

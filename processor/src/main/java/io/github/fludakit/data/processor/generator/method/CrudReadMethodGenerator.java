@@ -3,7 +3,7 @@ package io.github.fludakit.data.processor.generator.method;
 import com.squareup.javapoet.MethodSpec;
 import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.processor.generator.CrudReadEmitter;
-import io.github.fludakit.data.processor.generator.RepositoryEmission;
+import io.github.fludakit.data.processor.generator.RepositoryContext;
 import io.github.fludakit.data.processor.support.GeneratedArtifactRegistry;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.query.LimitSpec;
@@ -44,7 +44,7 @@ public final class CrudReadMethodGenerator implements MethodGenerator {
 
     @Override
     public boolean generate(MethodSpec.Builder builder, ExecutableElement method, ExecutableType resolved,
-                            RepositoryEmission emission) {
+                            RepositoryContext emission) {
         String name = method.getSimpleName().toString();
         List<? extends VariableElement> parameters = method.getParameters();
         int arity = parameters.size();
@@ -53,26 +53,26 @@ public final class CrudReadMethodGenerator implements MethodGenerator {
 
         if (name.equals("findAll") && arity == 2) {
             QueryDefinitions.publish(registry, emission, name, findAllPage(emission, kind));
-            crudReads.emitFindAllPage(builder, parameters, emission.readContext());
+            crudReads.emitFindAllPage(builder, parameters, emission);
             return true;
         }
         if (emission.crudFullMapper() != null) {
             if (arity == 1 && name.equals("findById")) {
                 QueryDefinitions.publish(registry, emission, name, findById(emission, kind));
                 crudReads.emitFindById(builder, MemberNames.parameterName(parameters.get(0), MemberNames.ID_PARAM),
-                        emission.readContext(), kind);
+                        emission, kind);
                 return true;
             }
             if (arity == 0 && name.equals("findAll")) {
                 QueryDefinitions.publish(registry, emission, name, findAll(kind));
-                crudReads.emitFindAll(builder, emission.readContext(), kind);
+                crudReads.emitFindAll(builder, emission, kind);
                 return true;
             }
         }
         return false;
     }
 
-    private QueryDefinition.Read findById(RepositoryEmission emission, ResultKind kind) {
+    private QueryDefinition.Read findById(RepositoryContext emission, ResultKind kind) {
         return new QueryDefinition.Read(kind,
                 List.of(Predicate.of(emission.entity().id().name(), Operator.EQ, MemberNames.ID_PARAM)),
                 List.of(), PagingMode.NONE, LimitSpec.none(), List.of(),
@@ -84,7 +84,7 @@ public final class CrudReadMethodGenerator implements MethodGenerator {
                 List.of(), List.of(), false);
     }
 
-    private QueryDefinition.Read findAllPage(RepositoryEmission emission, ResultKind kind) {
+    private QueryDefinition.Read findAllPage(RepositoryContext emission, ResultKind kind) {
         return new QueryDefinition.Read(kind, List.of(), List.of(), PagingMode.OFFSET, LimitSpec.none(),
                 List.of(new SeekTerm(new ColumnRef.Simple(emission.entity().idColumn(), emission.entity().tableName()), true)),
                 List.of(), false);

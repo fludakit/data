@@ -63,7 +63,7 @@ public final class RepositoryMethodCompiler {
     }
 
     public MethodSpec generateMethod(ExecutableElement method, DeclaredType repositoryType,
-                              RepositoryEmission emission) {
+                              RepositoryContext emission) {
         ExecutableType resolved = typeShapes.resolved(repositoryType, method);
         MethodSpec.Builder builder = typeShapes.overriding(method, repositoryType);
         rebindTypeVariables(builder, method, typeMappingBuilder.classNameFor(emission.entity().typeName()));

@@ -7,7 +7,7 @@ import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
 import io.github.fludakit.data.processor.analysis.QueryPlanBuilder;
 import io.github.fludakit.data.processor.generator.QueryInvocations;
-import io.github.fludakit.data.processor.generator.RepositoryEmission;
+import io.github.fludakit.data.processor.generator.RepositoryContext;
 import io.github.fludakit.data.processor.generator.SqlConstants;
 import io.github.fludakit.data.processor.support.GeneratedArtifactRegistry;
 import io.github.fludakit.data.processor.support.MemberNames;
@@ -43,7 +43,7 @@ public final class NativeQueryGenerator implements MethodGenerator {
 
     @Override
     public boolean generate(MethodSpec.Builder builder, ExecutableElement method, ExecutableType resolved,
-                            RepositoryEmission emission) {
+                            RepositoryContext emission) {
         Query query = method.getAnnotation(Query.class);
         if (query == null) {
             return false;
@@ -53,7 +53,7 @@ public final class NativeQueryGenerator implements MethodGenerator {
     }
 
     private void emitQuery(MethodSpec.Builder builder, ExecutableElement method, Query query, TypeMirror returnMirror,
-                           RepositoryEmission emission) {
+                           RepositoryContext emission) {
         TypeMapping<?> entity = emission.entity();
         String name = method.getSimpleName().toString();
         String constant = SqlConstants.register(emission.constants(), "SQL_" + MemberNames.upperSnake(name), query.value());

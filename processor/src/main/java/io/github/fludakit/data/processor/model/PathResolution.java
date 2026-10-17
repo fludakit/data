@@ -1,37 +1,60 @@
 package io.github.fludakit.data.processor.model;
 
 import io.github.fludakit.data.metadata.ColumnPlacement;
-import io.github.fludakit.data.metadata.ColumnRef;
-import io.github.fludakit.data.processor.RepositoryProcessor;
-import io.github.fludakit.data.processor.analysis.PathResolver;
 
 /**
- * The outcome of resolving a method-name property path against a {@code TypeMapping}. The carried
- * {@link ColumnPlacement} is the whole answer: the relation edges ({@code edges()}) say how to
- * reach the column, the leaf ({@code ref()}) says where it lives, and being one value they cannot
- * be handed over mismatched. A resolved path is either a plain local column (no edges) or a
- * relation-traversing column carrying its head edge(s); {@code multiHop} flags a path that would
- * need two or more joins (rejected with a NOTE), and {@code unresolvedRelation} flags a path whose
- * relation head names a target that could not be resolved (degraded with a NOTE). Both degrade
- * the caller back to the legacy unqualified rendering; neither aborts the compile.
- * {@code existential} marks a ref whose single head is a to-many
- * {@code EntityCollection}/{@code ElementCollection}: the caller renders it as an
- * EXISTS semi-join conjunct and splices NO join.
+ * The outcome of resolving one entity-rooted attribute path against a {@code TypeMapping}.
  *
- * <p>Lives outside {@link RepositoryProcessor} because both the processor and {@link PathResolver}
- * name it, and a nested type would force one to qualify the other's.</p>
+ * <p>Four outcomes, modeled as four types rather than one record with three boolean flags:</p>
+ * <ul>
+ *   <li>{@link Resolved} — the path names a column, reached with zero or more relation edges. Its
+ *       {@code existential} flag is true when the head is a to-many relation, which the caller renders
+ *       as an EXISTS semi-join instead of a JOIN.</li>
+ *   <li>{@link MultiHop} — the path would need two or more joins; not supported, degraded.</li>
+ *   <li>{@link UnresolvedRelation} — the relation head names a target that cannot be resolved; degraded.</li>
+ *   <li>{@link Unknown} — the path names no known property.</li>
+ * </ul>
  *
- * <p>Pure data: construction is through the record constructor. Factory methods for the common
- * shapes (resolved, unresolved, multi-hop, etc.) live in {@link PathResolver}, the only caller.</p>
+ * <p>The {@link #placement()} / {@link #attributePath()} / {@link #existential()} accessors answer
+ * {@code null} / {@code false} for every non-{@link Resolved} outcome, so a caller that only needs the
+ * column reads them uniformly; a caller that must distinguish the reasons switches on the subtype.</p>
  */
-public record PathResolution(ColumnPlacement placement, boolean multiHop, boolean unresolvedRelation,
-                      boolean existential, String attributePath) {
+public sealed interface PathResolution {
 
-    /** This resolution at an EXPLICIT entity-relative attribute path. */
-    public PathResolution at(String path) {
-        return new PathResolution(placement, multiHop, unresolvedRelation, existential, path);
+    /** The column a path resolved to. {@code existential} is true when the head is a to-many. */
+    record Resolved(ColumnPlacement placement, String attributePath, boolean existential)
+            implements PathResolution {
+
+        /** This resolution at an explicit entity-relative attribute path. */
+        public Resolved at(String path) {
+            return new Resolved(placement, path, existential);
+        }
     }
 
-    /** The resolved leaf column, or null when the path did not resolve. */
-    public ColumnRef ref() { return placement == null ? null : placement.leaf(); }
+    /** The path would need two or more joins — not supported. */
+    record MultiHop() implements PathResolution {
+    }
+
+    /** The path's relation head names a target that could not be resolved. */
+    record UnresolvedRelation() implements PathResolution {
+    }
+
+    /** The path names no known property. */
+    record Unknown() implements PathResolution {
+    }
+
+    /** The resolved column placement, or {@code null} for a non-{@link Resolved} outcome. */
+    default ColumnPlacement placement() {
+        return this instanceof Resolved r ? r.placement() : null;
+    }
+
+    /** The authoritative attribute path, or {@code null} for a non-{@link Resolved} outcome. */
+    default String attributePath() {
+        return this instanceof Resolved r ? r.attributePath() : null;
+    }
+
+    /** Whether the head is a to-many relation; always false for a non-{@link Resolved} outcome. */
+    default boolean existential() {
+        return this instanceof Resolved r && r.existential();
+    }
 }

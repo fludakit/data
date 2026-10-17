@@ -11,7 +11,7 @@ import io.github.fludakit.data.page.SimplePage;
 import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
 import io.github.fludakit.data.processor.analysis.PathResolver;
 import io.github.fludakit.data.processor.generator.metadata.TypeMappingGenerator;
-import io.github.fludakit.data.processor.generator.EmissionContext;
+import io.github.fludakit.data.processor.generator.RepositoryContext;
 import io.github.fludakit.data.processor.model.PagedRead;
 import io.github.fludakit.data.processor.model.PathResolution;
 import io.github.fludakit.data.processor.support.Diagnostics;
@@ -75,7 +75,7 @@ public final class PagingEmitter {
      * not resolve; the ERROR naming the property is reported against that method, and no statements
      * have been added at that point because the whole body is appended after the sort loop.</p>
      */
-    public void emitPaged(MethodSpec.Builder builder, EmissionContext ctx, PagedRead read) {
+    public void emitPaged(MethodSpec.Builder builder, RepositoryContext ctx, PagedRead read) {
         List<SortSpec> effective = read.sorts().isEmpty()
                 ? List.of(SortSpec.of(ctx.entity().id().name(), true, false))
                 : read.sorts();
@@ -96,7 +96,7 @@ public final class PagingEmitter {
                 // aggregate subquery term (the same string the runtime isToManyPath/aggregateSortTerm
                 // pair produces). This is the recovery branch, not an error: a to-many sort is legal.
                 PathResolution resolution = pathResolver.resolveCompilePath(ctx.entity(), s.property());
-                if (resolution.ref() != null && resolution.existential()) {
+                if (resolution.placement() != null && resolution.existential()) {
                     aggregatePlacement = resolution.placement();
                     column = null;
                     toManySort = true;

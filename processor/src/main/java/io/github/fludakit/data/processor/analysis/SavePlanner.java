@@ -64,8 +64,8 @@ public final class SavePlanner {
         if (target.tableName() == null) {
             return "target table metadata is unresolved";
         }
-        if (GeneratedKeyCoercion.forIdType(
-                typeMappingBuilder.memberType(target.typeName(), target.id().name())) == null) {
+        if (!GeneratedKeyCoercion.isCoercible(
+                typeMappingBuilder.memberType(target.typeName(), target.id().name()))) {
             return "target id type " + typeMappingBuilder.memberType(target.typeName(), target.id().name()).box()
                     + " is not generated-key coercible";
         }

@@ -3,7 +3,7 @@ package io.github.fludakit.data.processor.generator.method;
 import com.squareup.javapoet.MethodSpec;
 import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
 import io.github.fludakit.data.processor.generator.CrudReadEmitter;
-import io.github.fludakit.data.processor.generator.RepositoryEmission;
+import io.github.fludakit.data.processor.generator.RepositoryContext;
 import io.github.fludakit.data.processor.generator.WriteMethodEmitter;
 import io.github.fludakit.data.processor.support.GeneratedArtifactRegistry;
 import io.github.fludakit.data.processor.support.GeneratedKeyCoercion;
@@ -55,7 +55,7 @@ public final class CrudWriteMethodGenerator implements MethodGenerator {
 
     @Override
     public boolean generate(MethodSpec.Builder builder, ExecutableElement method, ExecutableType resolved,
-                            RepositoryEmission emission) {
+                            RepositoryContext emission) {
         String name = method.getSimpleName().toString();
         List<? extends VariableElement> parameters = method.getParameters();
         List<? extends TypeMirror> parameterTypes = resolved.getParameterTypes();
@@ -134,7 +134,7 @@ public final class CrudWriteMethodGenerator implements MethodGenerator {
         if (arity == 1 && name.equals("findById")) {
             QueryDefinitions.publish(registry, emission, name, findById(emission, kind));
             crudReads.emitFindById(builder, MemberNames.parameterName(parameters.get(0), MemberNames.ID_PARAM),
-                    emission.readContext(), kind);
+                    emission, kind);
             return true;
         }
         if (arity == 1 && name.equals("deleteById")) {
@@ -145,7 +145,7 @@ public final class CrudWriteMethodGenerator implements MethodGenerator {
         }
         if (name.equals("findAll") && arity == 0) {
             QueryDefinitions.publish(registry, emission, name, findAll(kind));
-            crudReads.emitFindAll(builder, emission.readContext(), kind);
+            crudReads.emitFindAll(builder, emission, kind);
             return true;
         }
         // 9. Single-entity annotated writes — @Insert, @Update, @Save, @Delete.
@@ -181,7 +181,7 @@ public final class CrudWriteMethodGenerator implements MethodGenerator {
         return false;
     }
 
-    private void publishLifecycleBatch(RepositoryEmission emission, String name, ExecutableElement method,
+    private void publishLifecycleBatch(RepositoryContext emission, String name, ExecutableElement method,
                                        ResultKind writeKind, boolean applicationId) {
         QueryDefinition definition;
         if (method.getAnnotation(Insert.class) != null) {
@@ -196,7 +196,7 @@ public final class CrudWriteMethodGenerator implements MethodGenerator {
         QueryDefinitions.publish(registry, emission, name, definition);
     }
 
-    private QueryDefinition.Read findById(RepositoryEmission emission, ResultKind kind) {
+    private QueryDefinition.Read findById(RepositoryContext emission, ResultKind kind) {
         return new QueryDefinition.Read(kind,
                 List.of(Predicate.of(emission.entity().id().name(), Operator.EQ, MemberNames.ID_PARAM)),
                 List.of(), PagingMode.NONE, LimitSpec.none(), List.of(),
@@ -208,12 +208,12 @@ public final class CrudWriteMethodGenerator implements MethodGenerator {
                 List.of(), List.of(), false);
     }
 
-    private ResultKind writeKind(TypeMirror returnMirror, RepositoryEmission emission) {
+    private ResultKind writeKind(TypeMirror returnMirror, RepositoryContext emission) {
         return methodResults.writeResultKindOf(returnMirror, methodResults.resultKindOf(returnMirror), emission.entity());
     }
 
-    private boolean applicationAssignedId(RepositoryEmission emission) {
-        return GeneratedKeyCoercion.forIdType(
-                typeMappingBuilder.memberType(emission.entity().typeName(), emission.entity().id().name())) == null;
+    private boolean applicationAssignedId(RepositoryContext emission) {
+        return !GeneratedKeyCoercion.isCoercible(
+                typeMappingBuilder.memberType(emission.entity().typeName(), emission.entity().id().name()));
     }
 }

@@ -79,7 +79,7 @@ public final class WriteMethodEmitter {
     public void emitSave(MethodSpec.Builder builder, ExecutableElement method, String value,
                           TypeMapping<?> entity, Map<String, String> constants,
                           WriteCascade cascade) {
-        if (GeneratedKeyCoercion.forIdType(typeMappingBuilder.memberType(entity.typeName(), entity.id().name())) == null) {
+        if (!GeneratedKeyCoercion.isCoercible(typeMappingBuilder.memberType(entity.typeName(), entity.id().name()))) {
             // The null-id discrimination routes an application-assigned entity with no id yet into an
             // INSERT that would bind NULL into the identity column — warn and keep compiling.
             diagnostics.note(
@@ -155,7 +155,8 @@ public final class WriteMethodEmitter {
 
     private void appendRootInsertAndChildInserts(MethodSpec.Builder builder, String value, TypeMapping<?> entity,
                                                  Map<String, String> constants, WriteCascade cascade) {
-        String coercion = GeneratedKeyCoercion.forIdType(typeMappingBuilder.memberType(entity.typeName(), entity.id().name()));
+        CodeBlock coercion = GeneratedKeyCoercion.coercion(
+                typeMappingBuilder.memberType(entity.typeName(), entity.id().name()), "keys");
         if (coercion == null) {
             // An id type no GeneratedKeyHolder key can produce (String, UUID, ...) is
             // application-assigned: the identity column joins the INSERT and binds from the entity, so
@@ -164,12 +165,10 @@ public final class WriteMethodEmitter {
         } else {
             // includeId=false: the generated key is read back through GeneratedKeyHolder, so the identity
             // column must be omitted from the INSERT (H2 and most databases reject an explicit NULL).
-            // the coercion method follows the id type — Long renders longValue() byte-identically
-            // to the original hardcoded emission, Integer renders intValue() so its impl compiles.
             rowWrites.appendRowInsert(builder, value, entity, constants, "SQL_INSERT", false, "keys");
             builder.beginControlFlow("if (keys.getKey() != null)");
-            builder.addStatement("$L.$L((($T) keys.getKey()).$L())",
-                    value, MemberNames.setter(entity.id().name()), Number.class, coercion);
+            builder.addStatement("$L.$L($L)",
+                    value, MemberNames.setter(entity.id().name()), coercion);
             builder.endControlFlow();
         }
 

@@ -1,7 +1,7 @@
 package io.github.fludakit.data.processor.generator.method;
 
 import com.squareup.javapoet.MethodSpec;
-import io.github.fludakit.data.processor.generator.RepositoryEmission;
+import io.github.fludakit.data.processor.generator.RepositoryContext;
 import jakarta.data.repository.Delete;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.type.ExecutableType;
@@ -21,7 +21,7 @@ public final class QueryByMethodNameGenerator implements MethodGenerator {
 
     @Override
     public boolean generate(MethodSpec.Builder builder, ExecutableElement method, ExecutableType resolved,
-                            RepositoryEmission emission) {
+                            RepositoryContext emission) {
         finderEmitter.emit(builder, method, resolved, emission, false, method.getAnnotation(Delete.class) != null);
         return true;
     }

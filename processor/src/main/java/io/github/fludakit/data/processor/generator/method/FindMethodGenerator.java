@@ -1,7 +1,7 @@
 package io.github.fludakit.data.processor.generator.method;
 
 import com.squareup.javapoet.MethodSpec;
-import io.github.fludakit.data.processor.generator.RepositoryEmission;
+import io.github.fludakit.data.processor.generator.RepositoryContext;
 import jakarta.data.repository.Find;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.type.ExecutableType;
@@ -20,7 +20,7 @@ public final class FindMethodGenerator implements MethodGenerator {
 
     @Override
     public boolean generate(MethodSpec.Builder builder, ExecutableElement method, ExecutableType resolved,
-                            RepositoryEmission emission) {
+                            RepositoryContext emission) {
         if (method.getAnnotation(Find.class) == null) {
             return false;
         }

@@ -11,7 +11,7 @@ import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
 import io.github.fludakit.data.processor.analysis.PathResolver;
 import io.github.fludakit.data.processor.generator.metadata.Literals;
 import io.github.fludakit.data.processor.generator.metadata.TypeMappingGenerator;
-import io.github.fludakit.data.processor.generator.EmissionContext;
+import io.github.fludakit.data.processor.generator.RepositoryContext;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.query.LimitSpec;
 import io.github.fludakit.data.query.Operator;
@@ -34,7 +34,7 @@ import java.util.List;
  * The reads a repository interface INHERITS rather than declares: {@code findById}, {@code findAll}
  * and the paged {@code findAll(PageRequest, Sort)}.
  *
- * <p>All three answer from one {@link EmissionContext} and they differ only in their predicate and in
+ * <p>All three answer from one {@link RepositoryContext} and they differ only in their predicate and in
  * their terminal, which is what puts them in one class: the terminal is chosen from the declared
  * return shape, and a mistake there compiles into the consumer's application.</p>
  *
@@ -81,7 +81,7 @@ public final class CrudReadEmitter {
      * LIMIT or COUNT onto join rows — which is precisely why to-one is safe to project and to-many is
      * not.</p>
      */
-    private String joinedReadSql(EmissionContext ctx, List<Predicate> predicates, List<SortSpec> sorts,
+    private String joinedReadSql(RepositoryContext ctx, List<Predicate> predicates, List<SortSpec> sorts,
                                  int limit) {
         TypeMapping<?> mapping = ctx.entity();
         List<JoinEdge> edges = new ArrayList<>();
@@ -103,13 +103,13 @@ public final class CrudReadEmitter {
     }
 
     /** The row mapper a read uses: the JOIN-projection mapper when one was generated, else the base one. */
-    private CodeBlock readMapper(EmissionContext ctx) {
+    private CodeBlock readMapper(RepositoryContext ctx) {
         return ctx.crudFullMapper() != null
                 ? CodeBlock.of("(rs, rowNum) -> $L(rs, rowNum)", ctx.crudFullMapper())
                 : QueryInvocations.queryArg(typeMappingBuilder.classNameFor(ctx.entity().typeName()), ctx.mapperType());
     }
 
-    public void emitFindById(MethodSpec.Builder builder, String value, EmissionContext ctx, ResultKind kind) {
+    public void emitFindById(MethodSpec.Builder builder, String value, RepositoryContext ctx, ResultKind kind) {
         List<Predicate> predicates = List.of(Predicate.of(ctx.entity().id().name(), Operator.EQ, MemberNames.ID_PARAM));
         boolean joined = ctx.crudFullMapper() != null;
         String constant = SqlConstants.register(ctx.constants(), joined ? "SQL_FIND_BY_ID_JOINED" : "SQL_FIND_BY_ID",
@@ -130,7 +130,7 @@ public final class CrudReadEmitter {
         builder.addStatement("return $L", kind == ResultKind.OPTIONAL ? "found" : "found.get()");
     }
 
-    public void emitFindAll(MethodSpec.Builder builder, EmissionContext ctx, ResultKind kind) {
+    public void emitFindAll(MethodSpec.Builder builder, RepositoryContext ctx, ResultKind kind) {
         boolean joined = ctx.crudFullMapper() != null;
         String constant = SqlConstants.register(ctx.constants(), joined ? "SQL_FIND_ALL_JOINED" : "SQL_FIND_ALL",
                 joined ? joinedReadSql(ctx, List.of(), List.of(), 0)
@@ -169,7 +169,7 @@ public final class CrudReadEmitter {
     }
 
     public void emitFindAllPage(MethodSpec.Builder builder, List<? extends VariableElement> parameters,
-                                 EmissionContext ctx) {
+                                 RepositoryContext ctx) {
         String pageRequest = MemberNames.parameterName(parameters.get(0), "pageRequest");
         String sortBy = MemberNames.parameterName(parameters.get(1), "sortBy");
         // When composing to-one targets are JOIN-projected, the base constant already carries their

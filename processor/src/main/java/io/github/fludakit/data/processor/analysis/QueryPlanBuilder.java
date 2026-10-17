@@ -1,6 +1,8 @@
 package io.github.fludakit.data.processor.analysis;
 
 import io.github.fludakit.data.processor.model.QueryPlan;
+import io.github.fludakit.data.processor.model.ResolvedPredicate;
+import io.github.fludakit.data.processor.model.ResolvedSort;
 
 import io.github.fludakit.data.metadata.ColumnPlacement;
 import io.github.fludakit.data.metadata.ColumnRef;
@@ -213,28 +215,27 @@ public final class QueryPlanBuilder {
                                                   ResultKind kind, ResultKind resultKind,
                                                   QueryPlan plan, boolean distinct) {
         List<Predicate> logicalPredicates = new ArrayList<>();
-        for (int i = 0; i < plan.predicates().size(); i++) {
-            Predicate predicate = plan.predicates().get(i);
-            String authoritative = plan.predicateAttributePaths().get(i);
+        for (ResolvedPredicate rp : plan.predicates()) {
+            Predicate predicate = rp.predicate();
+            String authoritative = rp.attributePath();
             logicalPredicates.add(Predicate.of(
                     authoritative != null ? authoritative
-                            : resolvedAttributePath(plan.mapping(), plan.predicateRefs().get(i), predicate.property()),
+                            : resolvedAttributePath(plan.mapping(), rp.placement(), predicate.property()),
                     predicate.operator(), predicate.param(), predicate.connector(), predicate.ignoreCase()));
         }
-        List<SortSpec> logicalSorts = new ArrayList<>(plan.sorts());
-        for (int i = 0; i < plan.sorts().size(); i++) {
-            SortSpec sort = plan.sorts().get(i);
-            String sortPath = plan.sortAttributePaths().get(i);
-            logicalSorts.set(i, SortSpec.of(
+        List<SortSpec> logicalSorts = new ArrayList<>();
+        for (ResolvedSort rs : plan.sorts()) {
+            SortSpec sort = rs.sort();
+            String sortPath = rs.attributePath();
+            logicalSorts.add(SortSpec.of(
                     sortPath != null ? sortPath
-                            : resolvedAttributePath(plan.mapping(), plan.sortRefs().get(i), sort.property()),
+                            : resolvedAttributePath(plan.mapping(), rs.placement(), sort.property()),
                     sort.ascending(), sort.ignoreCase()));
-
         }
         PagingMode paging = kind == ResultKind.PAGE ? PagingMode.OFFSET
                 : kind == ResultKind.CURSORED_PAGE ? PagingMode.CURSOR : PagingMode.NONE;
         List<SeekTerm> seekTerms = paging == PagingMode.NONE ? List.of()
-                : seekTerms(plan.mapping(), plan.sortRefs(), plan.existentialSorts(), logicalSorts);
+                : seekTerms(plan.mapping(), plan.sorts(), logicalSorts);
         // ParamBindings are pre-built in resolvedBindings; no conversion needed.
         QueryDefinition.Criteria definition = switch (operation) {
             case COUNT -> new QueryDefinition.Count(logicalPredicates, plan.paramBindings(), distinct);
@@ -274,18 +275,17 @@ public final class QueryPlanBuilder {
      * last term is not already an ascending id — the same rule {@link RepositoryProcessor#emitPaged} applies to the
      * runtime {@code props}/{@code dirs} lists, kept here so the published model matches the wiring.
      */
-    private static List<SeekTerm> seekTerms(TypeMapping<?> mapping, List<ColumnPlacement> sortRefs,
-                                            List<Boolean> existentialSorts, List<SortSpec> sorts) {
+    private static List<SeekTerm> seekTerms(TypeMapping<?> mapping, List<ResolvedSort> sorts, List<SortSpec> logicalSorts) {
         ColumnRef idRef = new ColumnRef.Simple(mapping.idColumn(), mapping.tableName());
         if (sorts.isEmpty()) {
             return List.of(new SeekTerm(idRef, true));
         }
         List<SeekTerm> out = new ArrayList<>();
         for (int i = 0; i < sorts.size(); i++) {
-            out.add(new SeekTerm(sortRefs.get(i).leaf(), sorts.get(i).ascending()));
+            out.add(new SeekTerm(sorts.get(i).placement().leaf(), logicalSorts.get(i).ascending()));
         }
-        boolean toManySort = existentialSorts.stream().anyMatch(Boolean.TRUE::equals);
-        SortSpec last = sorts.get(sorts.size() - 1);
+        boolean toManySort = sorts.stream().anyMatch(ResolvedSort::existential);
+        SortSpec last = logicalSorts.get(logicalSorts.size() - 1);
         boolean lastIsIdAsc = mapping.id().name().equals(last.property()) && last.ascending();
         if (toManySort && !lastIsIdAsc) {
             out.add(new SeekTerm(idRef, true));

@@ -9,7 +9,7 @@ import io.github.fludakit.data.processor.analysis.RepositoryTypeResolver;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.model.EntityRelationship;
 import io.github.fludakit.data.processor.model.LoadPlan;
-import io.github.fludakit.data.processor.generator.RepositoryEmission;
+import io.github.fludakit.data.processor.generator.RepositoryContext;
 import io.github.fludakit.data.processor.analysis.RepositoryFlavour;
 import io.github.fludakit.data.processor.model.WriteCascade;
 import io.github.fludakit.data.processor.support.MemberNames;
@@ -22,9 +22,6 @@ import javax.lang.model.element.TypeElement;
 import javax.lang.model.type.DeclaredType;
 import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -58,11 +55,11 @@ public class RepositoryImplGenerator {
         TypeElement entityElement = (TypeElement) entityErasure.asElement();
         TypeMapping<?> entity = wiring.typeMappingBuilder().buildEntity(entityElement);
         ClassName mapperType = ensureRowMapper(entityElement, entity);
-        LoadPlan loadPlan = wiring.loadPlanner().plan(entityElement, entity);
-        RepositoryEmission emission = newEmission(repository, entity, mapperType, loadPlan,
+        RepositoryContext context = newContext(repository, entity, mapperType,
+                wiring.loadPlanner().plan(entityElement, entity),
                 wiring.savePlanner().plan(entityElement, entity));
-        generateMembers(repository, emission, loadPlan);
-        writeArtifacts(repository, emission);
+        generateMembers(repository, context);
+        writeArtifacts(repository, context);
     }
 
     /**
@@ -119,8 +116,8 @@ public class RepositoryImplGenerator {
      * both derived rather than passed in, because they are consequences of what the planners decided
      * and nothing outside this class needs to see them separately.
      */
-    private RepositoryEmission newEmission(TypeElement repository, TypeMapping<?> entity, ClassName mapperType,
-                                           LoadPlan loadPlan, WriteCascade cascade) {
+    private RepositoryContext newContext(TypeElement repository, TypeMapping<?> entity, ClassName mapperType,
+                                         LoadPlan loadPlan, WriteCascade cascade) {
         boolean hydrate = wiring.hydrationEmitter().hasGeneratedHydration(mapperType,
                 loadPlan.hydratedCollections(), loadPlan.hydratedRelationships());
         List<Prop.Reference> joinedReferences = loadPlan.joinedReferences();
@@ -129,33 +126,31 @@ public class RepositoryImplGenerator {
         // shared by every CRUD read shape.
         boolean joinProjected = mapperType != null && !joinedReferences.isEmpty();
         String crudFullMapper = joinProjected ? "mapRow_full_crud" : null;
-        // Decided ONCE, not per method: what the interface inherits cannot change between its methods,
-        // and asking per method meant two supertype walks for every abstract member.
+        // Decided ONCE, not per method: what the interface inherits cannot change between its methods.
         RepositoryFlavour flavour = wiring.repositoryTypeResolver().flavourOf(repository);
-        return new RepositoryEmission(entity, flavour, new LinkedHashMap<>(), mapperType, hydrate, crudFullMapper,
-                joinedReferences, new ArrayList<>(), repository.getQualifiedName().toString(), new HashMap<>(),
-                cascade);
+        return new RepositoryContext(entity, flavour, loadPlan, cascade, mapperType, hydrate,
+                crudFullMapper, repository.getQualifiedName().toString());
     }
 
     /**
      * Every method the {@code <Repository>Impl} gets: one per abstract inherited member, then the
      * JOIN-projection mapper the read shapes share, then the hydration umbrella and its loaders.
      */
-    private void generateMembers(TypeElement repository, RepositoryEmission emission, LoadPlan loadPlan) {
+    private void generateMembers(TypeElement repository, RepositoryContext context) {
         for (Element member : wiring.elements().getAllMembers(repository)) {
-            MethodSpec method = methodFor(member, repository, emission);
+            MethodSpec method = methodFor(member, repository, context);
             if (method != null) {
-                emission.auxMethods().add(method);
+                context.auxMethods().add(method);
             }
         }
-        if (emission.crudFullMapper() != null) {
-            emission.auxMethods().add(wiring.joinedProjections().buildFullMapper(emission.crudFullMapper(),
-                    emission.entity(), emission.mapperType(), emission.joinedReferences()));
+        if (context.crudFullMapper() != null) {
+            context.auxMethods().add(wiring.joinedProjections().buildFullMapper(context.crudFullMapper(),
+                    context.entity(), context.mapperType(), context.joinedReferences()));
         }
         // Registered after the member loop on purpose, so the loaders' SELECT constants render as
         // fields of the class the member loop just filled.
-        if (emission.hydrate()) {
-            appendHydration(emission, loadPlan);
+        if (context.hydrate()) {
+            appendHydration(context);
         }
     }
 
@@ -164,7 +159,7 @@ public class RepositoryImplGenerator {
      * repository's business: non-methods, concrete/default methods, {@code Object}'s, and any method
      * the validator rejected (having already reported why).
      */
-    private MethodSpec methodFor(Element member, TypeElement repository, RepositoryEmission emission) {
+    private MethodSpec methodFor(Element member, TypeElement repository, RepositoryContext context) {
         if (member.getKind() != ElementKind.METHOD) {
             return null;
         }
@@ -188,41 +183,39 @@ public class RepositoryImplGenerator {
                     .addStatement("return $L", MemberNames.JDBC_CLIENT_FIELD)
                     .build();
         }
-        if (!wiring.methodValidator().validate(method, repositoryType, emission.entity(),
-                emission.flavour())) {
+        if (!wiring.methodValidator().validate(method, repositoryType, context.entity(),
+                context.flavour())) {
             return null;
         }
-        return wiring.methodCompiler().generateMethod(method, repositoryType, emission);
+        return wiring.methodCompiler().generateMethod(method, repositoryType, context);
     }
 
     /**
      * One umbrella reached from every read shape, delegating to a loader per hydrated collection and
      * per hydrated entity relationship.
      */
-    private void appendHydration(RepositoryEmission emission, LoadPlan loadPlan) {
-        List<Prop.ElementCollection> hydratedCollections = loadPlan.hydratedCollections();
-        List<EntityRelationship> hydratedRelationships = loadPlan.hydratedRelationships();
-        emission.auxMethods().add(wiring.hydrationEmitter().hydrationUmbrella(emission.entity(),
-                hydratedCollections, hydratedRelationships));
-        for (Prop.ElementCollection c : hydratedCollections) {
-            emission.auxMethods().add(wiring.hydrationEmitter().appendCollectionHydration(
-                    emission.constants(), emission.entity(), c, ClassName.bestGuess(loadPlan.collectionMappers().get(c.name()))));
+    private void appendHydration(RepositoryContext context) {
+        context.auxMethods().add(wiring.hydrationEmitter().hydrationUmbrella(context.entity(),
+                context.hydratedCollections(), context.hydratedRelationships()));
+        for (Prop.ElementCollection c : context.hydratedCollections()) {
+            context.auxMethods().add(wiring.hydrationEmitter().appendCollectionHydration(
+                    context.constants(), context.entity(), c, ClassName.bestGuess(context.collectionMappers().get(c.name()))));
         }
         // Only ONE_TO_MANY members reach here: a composing MANY_TO_ONE is JOIN-projected onto the
         // parent's own row (see joinedReferences), so it needs no loader of its own.
-        for (EntityRelationship r : hydratedRelationships) {
-            emission.auxMethods().add(wiring.hydrationEmitter().appendOneToManyHydration(
-                    emission.constants(), emission.entity(), r));
+        for (EntityRelationship r : context.hydratedRelationships()) {
+            context.auxMethods().add(wiring.hydrationEmitter().appendOneToManyHydration(
+                    context.constants(), context.entity(), r));
         }
     }
 
-    private void writeArtifacts(TypeElement repository, RepositoryEmission emission) {
+    private void writeArtifacts(TypeElement repository, RepositoryContext context) {
         String packageName = ClassName.get(repository).packageName();
         String implementationName = repository.getSimpleName() + "Impl";
         wiring.repositoryWriter().write(repository, packageName, implementationName,
-                emission.constants(), emission.auxMethods());
+                context.constants(), context.auxMethods());
         Map<String, QueryDefinition> queryDefinitions =
-                wiring.registry().queryDefinitions(emission.repositoryFqn());
+                wiring.registry().queryDefinitions(context.repositoryFqn());
         if (!queryDefinitions.isEmpty()) {
             wiring.queriesWriter().write(repository, packageName,
                     repository.getSimpleName() + "Queries", queryDefinitions);

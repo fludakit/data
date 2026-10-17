@@ -7,17 +7,19 @@ import io.github.fludakit.data.metadata.ColumnPlacement;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.analysis.TypeModelBuilder;
-import io.github.fludakit.data.processor.model.PathOrigin;
+import io.github.fludakit.data.processor.model.PathStrictness;
 import io.github.fludakit.data.processor.model.PathResolution;
 import io.github.fludakit.data.processor.analysis.PathResolver;
 import io.github.fludakit.data.processor.model.PagedRead;
 import io.github.fludakit.data.processor.model.QueryPlan;
+import io.github.fludakit.data.processor.model.ResolvedPredicate;
+import io.github.fludakit.data.processor.model.ResolvedSort;
 import io.github.fludakit.data.processor.analysis.QueryPlanBuilder;
-import io.github.fludakit.data.processor.generator.EmissionContext;
+import io.github.fludakit.data.processor.generator.RepositoryContext;
 import io.github.fludakit.data.processor.generator.JoinedProjectionEmitter;
 import io.github.fludakit.data.processor.generator.PagingEmitter;
 import io.github.fludakit.data.processor.generator.QueryInvocations;
-import io.github.fludakit.data.processor.generator.RepositoryEmission;
+import io.github.fludakit.data.processor.generator.RepositoryContext;
 import io.github.fludakit.data.processor.generator.SqlConstants;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.support.GeneratedArtifactRegistry;
@@ -83,8 +85,8 @@ public final class FinderEmitter {
      * name is parsed as a query-by-method-name.
      */
     public void emit(MethodSpec.Builder builder, ExecutableElement method, ExecutableType resolved,
-                     RepositoryEmission emission, boolean explicitFind, boolean explicitDelete) {
-        new Emission(builder, method, resolved, emission.readContext(), emission.auxMethods(),
+                     RepositoryContext emission, boolean explicitFind, boolean explicitDelete) {
+        new Emission(builder, method, resolved, emission, emission.auxMethods(),
                 emission.repositoryFqn(), emission.queryDefinitionNames(), explicitFind, explicitDelete).run();
     }
 
@@ -93,12 +95,11 @@ public final class FinderEmitter {
      * argument bindings, the predicates and their compile-time column refs, and the collision-suffixed
      * query-definition name.
      */
-    private record FindInput(String name, List<? extends VariableElement> parameters,
+    private record MethodContext(String name, List<? extends VariableElement> parameters,
                              Object parsed, Operation operation, boolean distinct,
                              List<? extends TypeMirror> parameterTypes, List<ParamBinding> paramBindings,
                              TypeMirror returnMirror, ResultKind kind, String queryDefinitionName,
-                             List<Predicate> predicates, List<ColumnPlacement> predicateRefs,
-                             List<String> predicateAttributePaths) {
+                             List<ResolvedPredicate> predicates) {
     }
 
     /**
@@ -107,7 +108,7 @@ public final class FinderEmitter {
      * @return the resolved input, or {@code null} when a declared predicate property does not resolve —
      *         the ERROR is already reported, so the method must be skipped
      */
-    private FindInput resolveFindInput(ExecutableElement method, ExecutableType resolved,
+    private MethodContext resolveFindInput(ExecutableElement method, ExecutableType resolved,
                                        TypeMapping<?> entity, Map<String, Integer> queryDefinitionNames,
                                        boolean explicitFind, boolean explicitDelete) {
         String name = method.getSimpleName().toString();
@@ -130,16 +131,19 @@ public final class FinderEmitter {
             queryDefinitionName = queryDefinitionName + nameClash; // overload collision: declaration-order suffix
         }
         boolean annotatedParams = parameters.stream().anyMatch(p -> p.getAnnotation(By.class) != null);
-        PathOrigin origin = (parsed != null || annotatedParams) ? PathOrigin.DECLARED : PathOrigin.INFERRED;
+        PathStrictness strictness = (parsed != null || annotatedParams) ? PathStrictness.STRICT : PathStrictness.LENIENT;
         List<PathResolution> predicatePaths = pathResolver.resolveCompilePaths(entity,
-                predicates.stream().map(Predicate::property).toList(), method, origin);
-        if (origin.failsOnUnresolved() && predicatePaths.stream().anyMatch(p -> p.placement() == null)) {
+                predicates.stream().map(Predicate::property).toList(), method, strictness);
+        if (strictness.failsOnUnresolved() && predicatePaths.stream().anyMatch(p -> p.placement() == null)) {
             return null;
         }
-        return new FindInput(name, parameters, parsed, operation, distinct, parameterTypes, paramBindings,
-                returnMirror, kind, queryDefinitionName, predicates,
-                predicatePaths.stream().map(PathResolution::placement).toList(),
-                predicatePaths.stream().map(PathResolution::attributePath).toList());
+        List<ResolvedPredicate> resolvedPredicates = new ArrayList<>();
+        for (int i = 0; i < predicates.size(); i++) {
+            resolvedPredicates.add(new ResolvedPredicate(predicates.get(i),
+                    predicatePaths.get(i).placement(), predicatePaths.get(i).attributePath()));
+        }
+        return new MethodContext(name, parameters, parsed, operation, distinct, parameterTypes, paramBindings,
+                returnMirror, kind, queryDefinitionName, resolvedPredicates);
     }
 
     /** One method's emission: the per-method state the private helpers share. */
@@ -147,7 +151,7 @@ public final class FinderEmitter {
         private final MethodSpec.Builder builder;
         private final ExecutableElement method;
         private final ExecutableType resolved;
-        private final EmissionContext ctx;
+        private final RepositoryContext ctx;
         private final List<MethodSpec> auxMethods;
         private final String repositoryFqn;
         private final Map<String, Integer> queryDefinitionNames;
@@ -155,7 +159,7 @@ public final class FinderEmitter {
         private final boolean explicitDelete;
 
         Emission(MethodSpec.Builder builder, ExecutableElement method, ExecutableType resolved,
-                 EmissionContext ctx, List<MethodSpec> auxMethods, String repositoryFqn,
+                 RepositoryContext ctx, List<MethodSpec> auxMethods, String repositoryFqn,
                  Map<String, Integer> queryDefinitionNames, boolean explicitFind, boolean explicitDelete) {
             this.builder = builder;
             this.method = method;
@@ -169,7 +173,7 @@ public final class FinderEmitter {
         }
 
         void run() {
-            FindInput input = resolveFindInput(method, resolved, ctx.entity(), queryDefinitionNames,
+            MethodContext input = resolveFindInput(method, resolved, ctx.entity(), queryDefinitionNames,
                     explicitFind, explicitDelete);
             if (input == null) {
                 return;
@@ -188,7 +192,7 @@ public final class FinderEmitter {
          * name in the session registry (the source the {@code <Repository>Queries} holder is written
          * from), and returns it so the caller renders the SQL constant from the very same object.
          */
-        private QueryDefinition.Criteria publish(FindInput input, QueryPlan plan, boolean distinct,
+        private QueryDefinition.Criteria publish(MethodContext input, QueryPlan plan, boolean distinct,
                 Operation operation, ResultKind kind, ResultKind resultKind) {
             QueryDefinition.Criteria definition =
                     QueryPlanBuilder.queryDefinitionOf(operation, kind, resultKind, plan, distinct);
@@ -196,11 +200,9 @@ public final class FinderEmitter {
             return definition;
         }
 
-        private void emitCountOrExists(FindInput input) {
+        private void emitCountOrExists(MethodContext input) {
             QueryDefinition.Criteria definition = publish(input,
-                    new QueryPlan(ctx.entity(), input.predicates(), input.predicateRefs(),
-                            input.predicateAttributePaths(), List.of(), List.of(), List.of(), List.of(), 0,
-                            input.paramBindings(), input.parameters()),
+                    new QueryPlan(ctx.entity(), input.predicates(), List.of(), 0, input.paramBindings(), input.parameters()),
                     input.distinct(), input.operation(), input.kind(), input.kind());
             String constant = SqlConstants.register(ctx.constants(), "SQL_" + MemberNames.upperSnake(input.name()),
                     new SqlBuilder(ctx.entity(), ctx.entity(), definition).dialect(sqlDialect).count());
@@ -216,27 +218,22 @@ public final class FinderEmitter {
             }
         }
 
-        private void emitDelete(FindInput input) {
-            List<ColumnPlacement> predicateRefs = input.predicateRefs();
-            List<String> predicatePaths = input.predicateAttributePaths();
-            List<ColumnPlacement> deleteRefs = predicateRefs;
-            List<String> deletePaths = predicatePaths;
-            for (int i = 0; i < predicateRefs.size(); i++) {
-                ColumnPlacement ref = predicateRefs.get(i);
-                if (ref != null && ref.edges().size() > 1) {
-                    diagnostics.note(
-                            "path '" + input.predicates().get(i).property() + "' traverses more than one relation; not supported", method);
-                    if (deleteRefs == predicateRefs) {
-                        deleteRefs = new ArrayList<>(predicateRefs);
-                    }
-                    deletePaths = new ArrayList<>(predicatePaths);
-                    deletePaths.set(i, null);
-                    deleteRefs.set(i, PathResolver.placementOf(PathResolver.snakeCasedLocalColumnRef(input.predicates().get(i).property())));
+        private void emitDelete(MethodContext input) {
+            // A delete whose predicate traverses more than one relation would need a nested EXISTS,
+            // which is not rendered yet: degrade each such predicate to a bare column with a null path.
+            List<ResolvedPredicate> deletePredicates = new ArrayList<>();
+            for (ResolvedPredicate rp : input.predicates()) {
+                if (rp.placement() != null && rp.placement().edges().size() > 1) {
+                    diagnostics.note("path '" + rp.predicate().property()
+                            + "' traverses more than one relation; not supported", method);
+                    deletePredicates.add(new ResolvedPredicate(rp.predicate(),
+                            PathResolver.placementOf(PathResolver.snakeCasedLocalColumnRef(rp.predicate().property())), null));
+                } else {
+                    deletePredicates.add(rp);
                 }
             }
             QueryDefinition.Criteria definition = publish(input,
-                    new QueryPlan(ctx.entity(), input.predicates(), deleteRefs, deletePaths,
-                            List.of(), List.of(), List.of(), List.of(), 0, input.paramBindings(), input.parameters()),
+                    new QueryPlan(ctx.entity(), deletePredicates, List.of(), 0, input.paramBindings(), input.parameters()),
                     false, Operation.DELETE, input.kind(),
                     methodResults.writeResultKindOf(input.returnMirror(), input.kind(), ctx.entity()));
             String constant = SqlConstants.register(ctx.constants(), "SQL_" + MemberNames.upperSnake(input.name()),
@@ -251,7 +248,7 @@ public final class FinderEmitter {
             }
         }
 
-        private void emitFindRead(FindInput input) {
+        private void emitFindRead(MethodContext input) {
             List<SortSpec> methodSorts = queryPlanCompiler.sorts(method, input.parsed());
             for (SortSpec sort : methodSorts) {
                 if (!sort.ignoreCase()) {
@@ -274,7 +271,7 @@ public final class FinderEmitter {
             }
         }
 
-        private void emitPagedFind(FindInput input, List<SortSpec> methodSorts) {
+        private void emitPagedFind(MethodContext input, List<SortSpec> methodSorts) {
             String pageRequest = queryPlanCompiler.specialParameter(input.parameters(), input.parameterTypes(), QueryPlanBuilder.PAGE_REQUEST);
             if (pageRequest == null) {
                 diagnostics.error(
@@ -282,28 +279,24 @@ public final class FinderEmitter {
                                 + " requires a PageRequest parameter", method);
                 return;
             }
-            if (!joinedProjections.collectTraversedReferences(ctx.entity(), input.predicateRefs(), List.of()).isEmpty()) {
+            if (!joinedProjections.collectTraversedReferences(ctx.entity(),
+                    input.predicates().stream().map(ResolvedPredicate::placement).toList(), List.of()).isEmpty()) {
                 diagnostics.note(
                         input.name() + ": full materialisation through joins is not supported for paged finders;"
                                 + " association fields materialize as id-only partials", method);
             }
-            List<PathResolution> pagedSortPaths = methodSorts.stream()
-                    .map(s -> pathResolver.resolveCompilePath(ctx.entity(), s.property()))
-                    .toList();
-            List<ColumnPlacement> pagedSortRefs = new ArrayList<>();
-            List<Boolean> pagedExistentialSorts = new ArrayList<>();
-            List<String> pagedSortAttributePaths = new ArrayList<>();
-            for (int i = 0; i < pagedSortPaths.size(); i++) {
-                ColumnPlacement ref = pagedSortPaths.get(i).placement();
-                pagedSortRefs.add(ref == null
-                        ? PathResolver.placementOf(PathResolver.snakeCasedLocalColumnRef(methodSorts.get(i).property())) : ref);
-                pagedExistentialSorts.add(ref != null && pagedSortPaths.get(i).existential());
-                pagedSortAttributePaths.add(ref != null ? pagedSortPaths.get(i).attributePath() : null);
+            List<ResolvedSort> resolvedSorts = new ArrayList<>();
+            for (int i = 0; i < methodSorts.size(); i++) {
+                PathResolution pr = pathResolver.resolveCompilePath(ctx.entity(), methodSorts.get(i).property());
+                ColumnPlacement original = pr.placement();
+                ColumnPlacement ref = original == null
+                        ? PathResolver.placementOf(PathResolver.snakeCasedLocalColumnRef(methodSorts.get(i).property()))
+                        : original;
+                resolvedSorts.add(new ResolvedSort(methodSorts.get(i), ref,
+                        original == null ? null : pr.attributePath(), original != null && pr.existential()));
             }
             QueryDefinition.Criteria definition = publish(input,
-                    new QueryPlan(ctx.entity(), input.predicates(), input.predicateRefs(), input.predicateAttributePaths(),
-                            methodSorts, pagedSortRefs, pagedSortAttributePaths, pagedExistentialSorts, 0,
-                            input.paramBindings(), input.parameters()),
+                    new QueryPlan(ctx.entity(), input.predicates(), resolvedSorts, 0, input.paramBindings(), input.parameters()),
                     input.distinct(), Operation.FIND, input.kind(), input.kind());
             String constant = SqlConstants.register(ctx.constants(), "SQL_" + MemberNames.upperSnake(input.name()),
                     new SqlBuilder(ctx.entity(), ctx.entity(), definition).dialect(sqlDialect).select());
@@ -311,19 +304,23 @@ public final class FinderEmitter {
                     input.paramBindings(), input.parameters(), input.kind() == ResultKind.CURSORED_PAGE));
         }
 
-        private void emitPlainFind(FindInput input, List<SortSpec> methodSorts) {
-            PathOrigin sortOrigin = (input.parsed() != null || method.getAnnotationsByType(OrderBy.class).length > 0)
-                    ? PathOrigin.DECLARED : PathOrigin.INFERRED;
+        private void emitPlainFind(MethodContext input, List<SortSpec> methodSorts) {
+            PathStrictness sortStrictness = (input.parsed() != null || method.getAnnotationsByType(OrderBy.class).length > 0)
+                    ? PathStrictness.STRICT : PathStrictness.LENIENT;
             List<PathResolution> sortPaths = pathResolver.resolveCompilePaths(ctx.entity(),
-                    methodSorts.stream().map(SortSpec::property).toList(), method, sortOrigin);
-            if (sortOrigin.failsOnUnresolved() && sortPaths.stream().anyMatch(p -> p.placement() == null)) {
+                    methodSorts.stream().map(SortSpec::property).toList(), method, sortStrictness);
+            if (sortStrictness.failsOnUnresolved() && sortPaths.stream().anyMatch(p -> p.placement() == null)) {
                 return;
             }
-            List<ColumnPlacement> sortRefs = sortPaths.stream().map(PathResolution::placement).toList();
-            List<Boolean> existentialSorts = sortPaths.stream().map(PathResolution::existential).toList();
-            List<String> sortAttributePaths = sortPaths.stream().map(PathResolution::attributePath).toList();
+            List<ResolvedSort> resolvedSorts = new ArrayList<>();
+            for (int i = 0; i < methodSorts.size(); i++) {
+                resolvedSorts.add(new ResolvedSort(methodSorts.get(i), sortPaths.get(i).placement(),
+                        sortPaths.get(i).attributePath(), sortPaths.get(i).existential()));
+            }
+            List<ColumnPlacement> sortRefs = resolvedSorts.stream().map(ResolvedSort::placement).toList();
 
-            List<Prop.Reference> traversed = joinedProjections.collectTraversedReferences(ctx.entity(), input.predicateRefs(), sortRefs);
+            List<Prop.Reference> traversed = joinedProjections.collectTraversedReferences(ctx.entity(),
+                    input.predicates().stream().map(ResolvedPredicate::placement).toList(), sortRefs);
             boolean fullMaterialisation = !traversed.isEmpty() && ctx.mapperType() != null
                     && input.operation() == Operation.FIND && input.kind() != ResultKind.VOID;
             String extraProjection = fullMaterialisation ? joinedProjections.joinedProjection(ctx.entity(), traversed) : "";
@@ -335,8 +332,7 @@ public final class FinderEmitter {
                 queryArgForMethod = CodeBlock.of("(rs, rowNum) -> $L(rs, rowNum)", fullMapper);
             }
             QueryDefinition.Criteria queryDefinition = publish(input,
-                    new QueryPlan(ctx.entity(), input.predicates(), input.predicateRefs(), input.predicateAttributePaths(),
-                            methodSorts, sortRefs, sortAttributePaths, existentialSorts,
+                    new QueryPlan(ctx.entity(), input.predicates(), resolvedSorts,
                             input.parsed() != null ? ((io.github.fludakit.data.qbn.ParsedMethodName) input.parsed()).limit() : 0, input.paramBindings(), input.parameters()),
                     input.distinct(), Operation.FIND, input.kind(), input.kind());
             String sql = new SqlBuilder(ctx.entity(), ctx.entity(), queryDefinition)
@@ -347,7 +343,7 @@ public final class FinderEmitter {
             emitFindTerminal(input, call, queryArgForMethod);
         }
 
-        private void emitFindTerminal(FindInput input, CodeBlock.Builder call, CodeBlock queryArgForMethod) {
+        private void emitFindTerminal(MethodContext input, CodeBlock.Builder call, CodeBlock queryArgForMethod) {
             if (input.kind() == ResultKind.ARRAY) {
                 call.add(".query($L).list()", queryArgForMethod);
                 if (!ctx.hydrate()) {

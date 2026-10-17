@@ -113,8 +113,8 @@ public final class ChildCascadeEmitter {
         sql.add(".update(childKeys)");
         builder.addStatement("$L", sql.build());
         builder.beginControlFlow("if (childKeys.getKey() != null)");
-        builder.addStatement("item.$L((($T) childKeys.getKey()).$L())", MemberNames.setter(target.id().name()),
-                Number.class, GeneratedKeyCoercion.forIdType(typeMappingBuilder.memberType(target.typeName(), target.id().name())));
+        builder.addStatement("item.$L($L)", MemberNames.setter(target.id().name()),
+                GeneratedKeyCoercion.coercion(typeMappingBuilder.memberType(target.typeName(), target.id().name()), "childKeys"));
         builder.endControlFlow();
         builder.endControlFlow();
         builder.endControlFlow();
@@ -252,8 +252,8 @@ public final class ChildCascadeEmitter {
         insertSql.add(".update(childKeys)");
         builder.addStatement("$L", insertSql.build());
         builder.beginControlFlow("if (childKeys.getKey() != null)");
-        builder.addStatement("item.$L((($T) childKeys.getKey()).$L())", MemberNames.setter(target.id().name()),
-                Number.class, GeneratedKeyCoercion.forIdType(typeMappingBuilder.memberType(target.typeName(), target.id().name())));
+        builder.addStatement("item.$L($L)", MemberNames.setter(target.id().name()),
+                GeneratedKeyCoercion.coercion(typeMappingBuilder.memberType(target.typeName(), target.id().name()), "childKeys"));
         builder.endControlFlow();
         builder.endControlFlow();
         // A child the upsert/insert gave a key is not an orphan — remove it from the doomed set.

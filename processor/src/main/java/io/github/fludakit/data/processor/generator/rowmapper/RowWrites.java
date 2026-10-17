@@ -61,8 +61,8 @@ public final class RowWrites {
     public void appendRowWrite(MethodSpec.Builder builder, String value, TypeMapping<?> model,
                                 Map<String, String> constants, String insertName, String upsertName,
                                 String updateName, String keysVar) {
-        String coercion = GeneratedKeyCoercion.forIdType(
-                typeMappingBuilder.memberType(model.typeName(), model.id().name()));
+        CodeBlock coercion = GeneratedKeyCoercion.coercion(
+                typeMappingBuilder.memberType(model.typeName(), model.id().name()), keysVar);
         builder.beginControlFlow("if ($L == null)", value + "." + MemberNames.getter(model.id().name()) + "()");
         if (coercion == null) {
             // An id type no GeneratedKeyHolder key can produce is application-assigned: the identity
@@ -71,8 +71,8 @@ public final class RowWrites {
         } else {
             appendRowInsert(builder, value, model, constants, insertName, false, keysVar);
             builder.beginControlFlow("if ($L.getKey() != null)", keysVar);
-            builder.addStatement("$L.$L((($T) $L.getKey()).$L())",
-                    value, MemberNames.setter(model.id().name()), Number.class, keysVar, coercion);
+            builder.addStatement("$L.$L($L)",
+                    value, MemberNames.setter(model.id().name()), coercion);
             builder.endControlFlow();
         }
         builder.nextControlFlow("else");

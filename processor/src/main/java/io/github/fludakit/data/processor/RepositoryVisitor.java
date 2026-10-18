@@ -11,6 +11,7 @@ import io.github.fludakit.data.processor.context.RepositoryContext;
 import io.github.fludakit.data.processor.emitter.FindEmitter;
 import io.github.fludakit.data.processor.emitter.LifecycleEmitter;
 import io.github.fludakit.data.processor.emitter.MetamodelEmitter;
+import io.github.fludakit.data.processor.emitter.QueryModelEmitter;
 import io.github.fludakit.data.processor.emitter.RowMapperEmitter;
 import io.github.fludakit.data.processor.emitter.TypeModelEmitter;
 import io.github.fludakit.data.processor.emitter.WriteEmitter;
@@ -191,6 +192,9 @@ final class RepositoryVisitor {
                 ctx.auxMethods().add(emitted);
             }
         }
+
+        // 6e. Emit QueryModel (static QueryDefinition fields)
+        new QueryModelEmitter(filer).emit(repository, ctx, methods);
 
         // 7. Generate skeleton Repository_ class
         emitSkeleton(ctx);

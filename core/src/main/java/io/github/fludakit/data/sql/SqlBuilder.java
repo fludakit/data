@@ -134,6 +134,11 @@ public final class SqlBuilder {
         return QueryCompiler.selectBy(dialect, schema, predicates, sorts, limit, cursorClause);
     }
 
+    /** Renders a classic no-join SELECT over the builder's schema, optionally {@code DISTINCT}. */
+    public String selectBy(List<Predicate> predicates, List<SortSpec> sorts, int limit, String cursorClause, boolean distinct) {
+        return QueryCompiler.selectBy(dialect, schema, predicates, sorts, limit, cursorClause, distinct);
+    }
+
     /** Renders a classic no-join COUNT over the builder's schema. */
     public String countBy(List<Predicate> predicates) {
         return QueryCompiler.countBy(dialect, schema, predicates, false);

@@ -92,7 +92,8 @@ public final class FindEmitter {
                 method.predicates(),
                 method.sorts(),
                 0,
-                null
+                null,
+                method.distinct()
         );
     }
 

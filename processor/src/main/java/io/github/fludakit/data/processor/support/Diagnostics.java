@@ -20,6 +20,10 @@ public final class Diagnostics {
     }
 
     public void note(String message, Element element) {
-        messager.printMessage(Diagnostic.Kind.NOTE, message, element);
+        if (element != null) {
+            messager.printMessage(Diagnostic.Kind.NOTE, message, element);
+        } else {
+            messager.printMessage(Diagnostic.Kind.NOTE, message);
+        }
     }
 }

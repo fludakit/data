@@ -8,6 +8,7 @@ import com.squareup.javapoet.TypeSpec;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.RepositoryContext;
+import io.github.fludakit.data.processor.emitter.MetamodelEmitter;
 import io.github.fludakit.data.processor.emitter.RowMapperEmitter;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.qbn.ParsedMethodName;
@@ -111,6 +112,10 @@ final class RepositoryVisitor {
             // Fallback placeholder for entities with references/collections (not row-mappable)
             rowMapperType = ClassName.bestGuess(entityFqn + "RowMapper");
         }
+
+        // 4b. Generate static metamodel (_Entity interface + navigable member classes)
+        MetamodelEmitter metamodelEmitter = new MetamodelEmitter(filer, diagnostics);
+        metamodelEmitter.emit(entityMapping);
 
         // 5. Create RepositoryContext
         RepositoryContext ctx = new RepositoryContext(

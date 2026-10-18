@@ -31,6 +31,7 @@ import jakarta.data.repository.Delete;
 import jakarta.data.repository.Find;
 import jakarta.data.repository.Insert;
 import jakarta.data.repository.OrderBy;
+import jakarta.data.repository.Param;
 import jakarta.data.repository.Query;
 import jakarta.data.repository.Save;
 import jakarta.data.repository.Update;
@@ -49,6 +50,8 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Visits a single {@code @Repository}-annotated interface, resolves its entity type and methods,
@@ -64,6 +67,9 @@ final class RepositoryVisitor {
     private static final String PAGE = "jakarta.data.page.Page";
     private static final String CURSORED_PAGE = "jakarta.data.page.CursoredPage";
 
+    /** Pattern matching named parameters in @Query SQL (e.g. {@code :name}). */
+    private static final Pattern NAMED_PARAM_PATTERN = Pattern.compile(":([a-zA-Z_]\\w*)");
+
     private final TypeElement repository;
     private final RepositoryProcessor host;
     private final Types types;
@@ -74,6 +80,9 @@ final class RepositoryVisitor {
 
     /** Method contexts built during visit — consumed by later emitter tasks. */
     private final List<MethodContext> methods = new ArrayList<>();
+
+    /** JdbcClient accessor methods that need a pass-through override. */
+    private final List<ExecutableElement> jdbcClientAccessors = new ArrayList<>();
 
     RepositoryVisitor(TypeElement repository, RepositoryProcessor host) {
         this.repository = repository;
@@ -155,11 +164,20 @@ final class RepositoryVisitor {
             // Skip methods declared on java.lang.Object
             if (isObjectMethod(method)) continue;
 
-            // Skip JdbcClient accessor methods
-            if (isJdbcClientAccessor(method)) continue;
+            // Handle JdbcClient accessor methods
+            if (isJdbcClientAccessor(method)) {
+                jdbcClientAccessors.add(method);
+                continue;
+            }
 
-            // Skip @Query-annotated methods (handled in Task 14)
-            if (method.getAnnotation(Query.class) != null) continue;
+            // Handle @Query-annotated methods
+            if (method.getAnnotation(Query.class) != null) {
+                MethodContext queryCtx = resolveQueryMethod(method);
+                if (queryCtx != null) {
+                    methods.add(queryCtx);
+                }
+                continue;
+            }
 
             MethodContext methodCtx = resolveMethod(method, entityMapping);
             if (methodCtx != null) {
@@ -532,6 +550,87 @@ final class RepositoryVisitor {
         return name.startsWith("get") || name.startsWith("jdbcClient");
     }
 
+    // ── @Query method resolution ─────────────────────────────────────────
+
+    /**
+     * Resolves a {@code @Query}-annotated method into a {@link MethodContext}.
+     * Extracts the raw SQL, determines the operation type, builds param bindings
+     * from {@code @Param} annotations or parameter names matching named parameters
+     * in the SQL.
+     */
+    private MethodContext resolveQueryMethod(ExecutableElement method) {
+        Query query = method.getAnnotation(Query.class);
+        if (query == null) return null;
+
+        String sql = query.value();
+        String methodName = method.getSimpleName().toString();
+
+        // Determine operation: DELETE SQL → DELETE, otherwise FIND
+        Operation operation = sql.trim().toUpperCase().startsWith("DELETE")
+                ? Operation.DELETE : Operation.FIND;
+
+        // Determine result kind from return type
+        ResultKind resultKind = resolveResultKind(method, operation);
+
+        // Extract named parameters from SQL
+        List<String> namedParams = extractNamedParams(sql);
+
+        // Build param bindings matching method parameters to named SQL parameters
+        List<ParamBinding> bindings = buildQueryBindings(method, namedParams);
+
+        return new MethodContext(method, methodName, operation, resultKind, false,
+                method.getParameters(), bindings, List.of(), List.of(), PagingMode.NONE, sql);
+    }
+
+    /**
+     * Extracts unique named parameter names from SQL in order of first appearance.
+     * Matches patterns like {@code :name} while ignoring string literals.
+     */
+    private List<String> extractNamedParams(String sql) {
+        List<String> params = new ArrayList<>();
+        Matcher matcher = NAMED_PARAM_PATTERN.matcher(sql);
+        while (matcher.find()) {
+            String name = matcher.group(1);
+            if (!params.contains(name)) {
+                params.add(name);
+            }
+        }
+        return params;
+    }
+
+    /**
+     * Builds {@link ParamBinding}s for a {@code @Query} method by matching method parameters
+     * to named SQL parameters. Uses {@code @Param} annotation value if present, otherwise
+     * falls back to the parameter name.
+     */
+    private List<ParamBinding> buildQueryBindings(ExecutableElement method, List<String> namedParams) {
+        List<ParamBinding> bindings = new ArrayList<>();
+        List<? extends VariableElement> params = method.getParameters();
+
+        for (int i = 0; i < params.size(); i++) {
+            VariableElement param = params.get(i);
+            String paramFqn = erasureFqn(param.asType());
+
+            // Skip paging parameters
+            if (PAGE_REQUEST.equals(paramFqn)) continue;
+
+            // Determine the SQL parameter name: @Param value or parameter name
+            String paramName;
+            Param paramAnnotation = param.getAnnotation(Param.class);
+            if (paramAnnotation != null) {
+                paramName = paramAnnotation.value();
+            } else {
+                paramName = param.getSimpleName().toString();
+            }
+
+            // Only bind if this name appears in the SQL named parameters
+            if (namedParams.contains(paramName)) {
+                bindings.add(new ParamBinding(i, paramName, LikePattern.NONE));
+            }
+        }
+        return bindings;
+    }
+
     // ── Skeleton emission ────────────────────────────────────────────────
 
     private void emitSkeleton(RepositoryContext ctx) {
@@ -569,6 +668,13 @@ final class RepositoryVisitor {
         // Add generated method overrides
         for (MethodSpec auxMethod : ctx.auxMethods()) {
             shell.addMethod(auxMethod);
+        }
+
+        // Add JdbcClient accessor overrides
+        for (ExecutableElement accessor : jdbcClientAccessors) {
+            shell.addMethod(MethodSpec.overriding(accessor)
+                    .addStatement("return this.$L", "jdbcClient")
+                    .build());
         }
 
         try {

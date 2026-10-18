@@ -54,11 +54,16 @@ public final class FindEmitter {
     }
 
     /**
-     * Generates a method override for a finder, count, exists, or deleteBy method.
+     * Generates a method override for a finder, count, exists, deleteBy, or @Query method.
      *
      * @return the method spec, or {@code null} if the method is not handled by this emitter
      */
     public MethodSpec emit(RepositoryContext ctx, MethodContext method) {
+        // Custom @Query methods
+        if (method.customSql() != null) {
+            return emitCustomQuery(ctx, method);
+        }
+
         Operation op = method.operation();
         PagingMode pm = method.pagingMode();
 
@@ -454,6 +459,46 @@ public final class FindEmitter {
         body.add("    .execute();");
         builder.addStatement(body.build());
 
+        return builder.build();
+    }
+
+    // ── Custom @Query methods ────────────────────────────────────────────
+
+    /**
+     * Generates a method override for a {@code @Query}-annotated method.
+     * Uses the raw SQL from the annotation, binds parameters by name,
+     * and handles the return type (SINGLE, LIST, OPTIONAL, etc.).
+     */
+    private MethodSpec emitCustomQuery(RepositoryContext ctx, MethodContext method) {
+        MethodSpec.Builder builder = MethodSpec.overriding(method.method());
+
+        String sql = method.customSql();
+        String constBase = toSqlConstantName(method.name());
+        String constName = ctx.registerConstant(constBase, sql);
+
+        List<ParamBinding> bindings = method.paramBindings();
+        ClassName rowMapperType = ctx.rowMapperType();
+        Operation op = method.operation();
+
+        CodeBlock.Builder body = CodeBlock.builder();
+
+        if (op == Operation.DELETE) {
+            // DELETE query: jdbcClient.sql(SQL).param(...).execute()
+            body.add("return jdbcClient\n");
+            body.add("    .sql($L)\n", constName);
+            appendParamBindings(body, bindings, method);
+            body.add("    .execute();");
+        } else {
+            // SELECT query: jdbcClient.sql(SQL).param(...).query(new RowMapper()).terminal()
+            body.add("return jdbcClient\n");
+            body.add("    .sql($L)\n", constName);
+            appendParamBindings(body, bindings, method);
+            body.add("    .query(new $T())\n", rowMapperType);
+            emitTerminal(body, method.resultKind(), ctx);
+            body.add(";");
+        }
+
+        builder.addStatement(body.build());
         return builder.build();
     }
 

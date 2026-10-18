@@ -12,6 +12,7 @@ import io.github.fludakit.data.processor.emitter.FindEmitter;
 import io.github.fludakit.data.processor.emitter.LifecycleEmitter;
 import io.github.fludakit.data.processor.emitter.MetamodelEmitter;
 import io.github.fludakit.data.processor.emitter.RowMapperEmitter;
+import io.github.fludakit.data.processor.emitter.TypeModelEmitter;
 import io.github.fludakit.data.processor.emitter.WriteEmitter;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.qbn.ParsedMethodName;
@@ -129,6 +130,9 @@ final class RepositoryVisitor {
         }
 
         metamodelEmitter.emit(entityMapping);
+
+        // 4c. Generate TypeModel (runtime TypeMapping implementation)
+        new TypeModelEmitter(filer).emit(entityMapping);
 
         // 5. Create RepositoryContext
         RepositoryContext ctx = new RepositoryContext(

@@ -8,6 +8,7 @@ import com.squareup.javapoet.TypeSpec;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.RepositoryContext;
+import io.github.fludakit.data.processor.emitter.FindEmitter;
 import io.github.fludakit.data.processor.emitter.MetamodelEmitter;
 import io.github.fludakit.data.processor.emitter.RowMapperEmitter;
 import io.github.fludakit.data.processor.support.Diagnostics;
@@ -42,6 +43,7 @@ import javax.lang.model.util.Types;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Visits a single {@code @Repository}-annotated interface, resolves its entity type and methods,
@@ -154,6 +156,15 @@ final class RepositoryVisitor {
             MethodContext methodCtx = resolveMethod(method, entityMapping);
             if (methodCtx != null) {
                 methods.add(methodCtx);
+            }
+        }
+
+        // 6b. Emit plain finder methods
+        FindEmitter findEmitter = new FindEmitter();
+        for (MethodContext mc : methods) {
+            MethodSpec emitted = findEmitter.emit(ctx, mc);
+            if (emitted != null) {
+                ctx.auxMethods().add(emitted);
             }
         }
 
@@ -500,6 +511,19 @@ final class RepositoryVisitor {
                         .addParameter(jdbcClientClass, "jdbcClient")
                         .addStatement("this.jdbcClient = jdbcClient")
                         .build());
+
+        // Add SQL constants as public static final fields
+        for (Map.Entry<String, String> entry : ctx.constants().entrySet()) {
+            shell.addField(FieldSpec.builder(String.class, entry.getKey(),
+                            Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
+                    .initializer("$S", entry.getValue())
+                    .build());
+        }
+
+        // Add generated method overrides
+        for (MethodSpec auxMethod : ctx.auxMethods()) {
+            shell.addMethod(auxMethod);
+        }
 
         try {
             JavaFile.builder(repoClassName.packageName(), shell.build())

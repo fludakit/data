@@ -70,6 +70,8 @@ public final class MetamodelEmitter {
             ClassName.get(METAMODEL_PACKAGE, "ScalarAttributeRecord");
     private static final ClassName ENTITY_ATTRIBUTE_RECORD =
             ClassName.get(METAMODEL_PACKAGE, "EntityAttributeRecord");
+    private static final ClassName EMBEDDABLE_ATTRIBUTE_RECORD =
+            ClassName.get(METAMODEL_PACKAGE, "EmbeddableAttributeRecord");
 
     /** Types whose scalar attribute is {@link TextScalarAttribute}. */
     private static final Set<String> TEXT_TYPES = Set.of(
@@ -214,7 +216,16 @@ public final class MetamodelEmitter {
         String navFqn = packageName + "." + navClassName;
 
         if (claimedMetamodelFqns.contains(navFqn)) {
-            // Collision: degrade to plain entity attribute record
+            // Collision: degrade to plain EmbeddableAttribute record field
+            ClassName voType = embedded.target() != null
+                    ? ClassName.bestGuess(embedded.target().typeName())
+                    : ClassName.get("java.lang", "Object");
+            TypeName fieldType = ParameterizedTypeName.get(EMBEDDABLE_ATTRIBUTE, entityType, voType);
+            TypeName recordType = ParameterizedTypeName.get(EMBEDDABLE_ATTRIBUTE_RECORD, entityType, voType);
+            builder.addField(FieldSpec.builder(fieldType, embedded.name(),
+                            Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
+                    .initializer("new $T($S, $L)", recordType, embedded.name(), constName)
+                    .build());
             diagnostics.note("static metamodel collision on navigable member '" + embedded.name()
                     + "': type '" + navFqn + "' already claimed", null);
             return;

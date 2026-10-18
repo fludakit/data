@@ -258,22 +258,22 @@ public final class TypeModelEmitter {
             } else if (p instanceof Prop.Reference reference) {
                 out.add(new ColumnRef.Simple(reference.fkColumn(), tableName));
             } else if (p instanceof Prop.Embedded embedded && embedded.target() != null) {
-                flattenEmbeddedColumns(embedded.target(), embedded.name(), tableName, out);
+                String prefix = io.github.fludakit.data.Names.columnBase(embedded.name()) + "_";
+                flattenEmbeddedColumns(embedded.target(), prefix, tableName, out);
             }
             // EntityCollection / ElementCollection carry no column on this table
         }
         return out;
     }
 
-    private void flattenEmbeddedColumns(ValueObjectMapping<?> vo, String fieldName,
+    private void flattenEmbeddedColumns(ValueObjectMapping<?> vo, String columnPrefix,
                                          String tableName, List<ColumnRef> out) {
-        String prefix = io.github.fludakit.data.Names.columnBase(fieldName) + "_";
         for (Prop p : vo.props()) {
             if (p instanceof Prop.Scalar scalar) {
-                out.add(new ColumnRef.Simple(prefix + scalar.column(), tableName));
+                out.add(new ColumnRef.Simple(columnPrefix + scalar.column(), tableName));
             } else if (p instanceof Prop.Embedded embedded && embedded.target() != null) {
-                flattenEmbeddedColumns(embedded.target(), fieldName + "." + embedded.name(),
-                        tableName, out);
+                String nestedPrefix = columnPrefix + io.github.fludakit.data.Names.columnBase(embedded.name()) + "_";
+                flattenEmbeddedColumns(embedded.target(), nestedPrefix, tableName, out);
             }
         }
     }

@@ -40,7 +40,7 @@ public final class TypeModelRegistry {
     private final Elements elements;
     private final Function<TypeElement, TypeMapping<?>> descriptorScan;
 
-    private final Map<String, TypeMapping> descriptorCache = new HashMap<>();
+    private final Map<String, TypeMapping<?>> descriptorCache = new HashMap<>();
     private final Set<String> descriptorsInProgress = new HashSet<>();
 
     /**

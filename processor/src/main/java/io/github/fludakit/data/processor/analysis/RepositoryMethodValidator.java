@@ -141,7 +141,7 @@ public final class RepositoryMethodValidator {
             // application names freely — so no query-by-method-name check applies.
             return true;
         }
-        String entityName = entity.typeName().toString();
+        String entityName = entity.typeName();
         error(method, "Repository method '" + name + "' carries a lifecycle annotation and must accept a single "
                 + entityName + ", List<" + entityName + ">, or " + entityName + "[]");
         return false;

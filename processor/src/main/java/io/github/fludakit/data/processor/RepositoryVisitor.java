@@ -8,6 +8,7 @@ import com.squareup.javapoet.TypeSpec;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.RepositoryContext;
+import io.github.fludakit.data.processor.emitter.RowMapperEmitter;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.qbn.ParsedMethodName;
 import io.github.fludakit.data.qbn.QueryByMethodNameParser;
@@ -103,8 +104,13 @@ final class RepositoryVisitor {
         // 3. Determine repository flavour
         boolean crud = extendsInterface(CRUD_REPOSITORY);
 
-        // 4. Build row mapper ClassName (placeholder — Task 5 will fill it in)
-        ClassName rowMapperType = ClassName.bestGuess(entityFqn + "RowMapper");
+        // 4. Generate row mapper (or null if not eligible)
+        RowMapperEmitter rowMapperEmitter = new RowMapperEmitter(types, elements, filer);
+        ClassName rowMapperType = rowMapperEmitter.emit(entityMapping);
+        if (rowMapperType == null) {
+            // Fallback placeholder for entities with references/collections (not row-mappable)
+            rowMapperType = ClassName.bestGuess(entityFqn + "RowMapper");
+        }
 
         // 5. Create RepositoryContext
         RepositoryContext ctx = new RepositoryContext(

@@ -284,15 +284,9 @@ public final class WriteEmitter {
         String childUpdateConst = ctx.registerConstant(
                 "EC_UPDATE_" + ec.name().toUpperCase(), childUpdateSql);
 
-        // The FK column on the child that points back to the parent
-        String fkColumn = ec.inverseFkColumn();
-        String fkSetter = "set" + Character.toUpperCase(fkColumn.charAt(0)) + fkColumn.substring(1);
-
         CodeBlock.Builder cascade = CodeBlock.builder();
         cascade.add("if ($L != null) {\n", collectionGetter);
         cascade.add("    for (var $L : $L) {\n", childVar, collectionGetter);
-        // Set the FK on the child to point to the parent
-        cascade.add("        $L.$L($L.getId());\n", childVar, fkSetter, entityVar);
 
         if (childStrategy == IdStrategy.APP_ASSIGNED) {
             cascade.add("        jdbcClient.sql($L)", childUpdateConst);

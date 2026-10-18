@@ -135,7 +135,7 @@ public final class FindEmitter {
             body.add("    .sql($L)\n", sqlConstantName);
             appendParamBindings(body, bindings, method);
             body.add("    .query(new $T())\n", rowMapperType);
-            emitTerminalSingle(body, method.resultKind());
+            emitTerminalSingle(body, method.resultKind(), ctx);
             body.add(";\n");
             emitHydrationCall(body, method.resultKind());
             body.add("return $L;", "result");
@@ -563,12 +563,16 @@ public final class FindEmitter {
     /**
      * Emits a terminal operation that captures the result in a variable (no return).
      */
-    private void emitTerminalSingle(CodeBlock.Builder body, ResultKind resultKind) {
+    private void emitTerminalSingle(CodeBlock.Builder body, ResultKind resultKind, RepositoryContext ctx) {
         switch (resultKind) {
             case SINGLE -> body.add(".single()");
             case OPTIONAL -> body.add(".optional()");
             case LIST -> body.add(".list()");
-            case ARRAY -> body.add(".list().toArray(new $T[0])", Object.class);
+            case ARRAY -> {
+                String entityFqn = ctx.entity().typeName();
+                ClassName entityType = ClassName.bestGuess(entityFqn);
+                body.add(".list().toArray(new $T[0])", entityType);
+            }
             case STREAM -> body.add(".list().stream()");
             case SET -> body.add(".list().stream().collect($T.toSet())",
                     ClassName.get("java.util.stream", "Collectors"));

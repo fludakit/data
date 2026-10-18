@@ -9,6 +9,7 @@ import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.RepositoryContext;
 import io.github.fludakit.data.processor.emitter.FindEmitter;
+import io.github.fludakit.data.processor.emitter.HydrationEmitter;
 import io.github.fludakit.data.processor.emitter.LifecycleEmitter;
 import io.github.fludakit.data.processor.emitter.MetamodelEmitter;
 import io.github.fludakit.data.processor.emitter.QueryModelEmitter;
@@ -193,7 +194,24 @@ final class RepositoryVisitor {
             }
         }
 
-        // 6e. Emit QueryModel (static QueryDefinition fields)
+        // 6e. Emit hydration methods for aggregate roots
+        if (entityMapping.ownsAggregateLifecycle()) {
+            HydrationEmitter hydrationEmitter = new HydrationEmitter();
+            if (hydrationEmitter.hasCollectionsToHydrate(entityMapping)) {
+                MethodSpec hydrateMethod = hydrationEmitter.emitHydrate(ctx);
+                if (hydrateMethod != null) {
+                    ctx.auxMethods().add(hydrateMethod);
+                }
+                MethodSpec hydrateListMethod = hydrationEmitter.emitHydrateList(ctx);
+                if (hydrateListMethod != null) {
+                    ctx.auxMethods().add(hydrateListMethod);
+                }
+                List<MethodSpec> loaders = hydrationEmitter.emitCollectionLoaders(ctx);
+                ctx.auxMethods().addAll(loaders);
+            }
+        }
+
+        // 6f. Emit QueryModel (static QueryDefinition fields)
         new QueryModelEmitter(filer).emit(repository, ctx, methods);
 
         // 7. Generate skeleton Repository_ class

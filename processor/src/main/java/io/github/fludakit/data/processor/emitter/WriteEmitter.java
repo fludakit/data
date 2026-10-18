@@ -162,7 +162,285 @@ public final class WriteEmitter {
         }
 
         builder.addStatement(body.build());
+
+        // Cascade writes for aggregate roots
+        if (ctx.entity().ownsAggregateLifecycle()) {
+            emitCascadeWrites(builder, ctx, entityVar);
+        }
+
         return builder.build();
+    }
+
+    /**
+     * Emits cascade write logic for aggregate root entities.
+     * - Prop.Reference with composition=true: save the composed child (backfill FK)
+     * - Prop.EntityCollection: save each child with parent FK set
+     * - Prop.ElementCollection: delete all + re-insert (replace-all)
+     */
+    private void emitCascadeWrites(MethodSpec.Builder builder, RepositoryContext ctx, String entityVar) {
+        TypeMapping<?> entity = ctx.entity();
+
+        for (TypeMapping.Prop prop : entity.props()) {
+            if (prop instanceof TypeMapping.Prop.Reference ref && ref.composition() && ref.target() != null) {
+                // Composition to-one: cascade save to the composed child
+                emitCompositionSave(builder, ctx, entityVar, ref);
+            } else if (prop instanceof TypeMapping.Prop.EntityCollection ec && ec.target() != null) {
+                // Entity collection: save each child with parent FK
+                emitEntityCollectionSave(builder, ctx, entityVar, ec);
+            } else if (prop instanceof TypeMapping.Prop.ElementCollection ec && ec.target() != null) {
+                // Element collection: replace-all (delete + re-insert)
+                emitElementCollectionReplace(builder, ctx, entityVar, ec);
+            }
+        }
+    }
+
+    /**
+     * Cascade save for a composition Reference: save the child entity, then backfill the FK
+     * on the parent if needed.
+     */
+    private void emitCompositionSave(MethodSpec.Builder builder, RepositoryContext ctx,
+                                      String entityVar, TypeMapping.Prop.Reference ref) {
+        TypeMapping<?> childMapping = ref.target();
+        String childVar = entityVar + "." + getter(ref.name()) + "()";
+        String childTypeFqn = childMapping.typeName();
+
+        // Build insert SQL for the child
+        SqlBuilder childSb = new SqlBuilder(childMapping);
+        childSb.dialect(dialect);
+        String childIdTypeFqn = childMapping.id().typeFqn();
+        IdStrategy childStrategy = idStrategy(childIdTypeFqn);
+        String childInsertSql = childStrategy == IdStrategy.APP_ASSIGNED
+                ? childSb.insert(true)
+                : childSb.insert(false);
+        String childInsertConst = ctx.registerConstant(
+                "CASCADE_INSERT_" + ref.name().toUpperCase(), childInsertSql);
+
+        // Build update SQL for the child
+        String childUpdateSql = childSb.update();
+        String childUpdateConst = ctx.registerConstant(
+                "CASCADE_UPDATE_" + ref.name().toUpperCase(), childUpdateSql);
+
+        CodeBlock.Builder cascade = CodeBlock.builder();
+        cascade.add("if ($L != null) {\n", childVar);
+
+        if (childStrategy == IdStrategy.APP_ASSIGNED) {
+            // Simple upsert
+            cascade.add("    jdbcClient.sql($L)", childUpdateConst);
+            appendAllBindings(cascade, childMapping, childVar);
+            cascade.add(".update();\n");
+        } else {
+            // Generated key: check if child has ID
+            cascade.add("    if ($L.getId() == null) {\n", childVar);
+            cascade.add("        $T $L = new $T();\n", GENERATED_KEY_HOLDER,
+                    "childKeys_" + ref.name(), GENERATED_KEY_HOLDER);
+            cascade.add("        jdbcClient.sql($L)", childInsertConst);
+            appendNonIdBindings(cascade, childMapping, childVar);
+            cascade.add(".update($L);\n", "childKeys_" + ref.name());
+            if (childStrategy == IdStrategy.NUMERIC) {
+                cascade.add("        if ($L.getKey() != null) {\n", "childKeys_" + ref.name());
+                cascade.add("            $L.setId((($T) $L.getKey()).$L());\n",
+                        childVar, Number.class, "childKeys_" + ref.name(), numericAccessor(childIdTypeFqn));
+                cascade.add("        }\n");
+            } else {
+                // UUID
+                cascade.add("        if ($L.getKey() != null) {\n", "childKeys_" + ref.name());
+                cascade.add("            $L.setId(($T) $L.getKey());\n",
+                        childVar, ClassName.bestGuess(childIdTypeFqn), "childKeys_" + ref.name());
+                cascade.add("        }\n");
+            }
+            cascade.add("    } else {\n");
+            cascade.add("        jdbcClient.sql($L)", childUpdateConst);
+            appendAllBindings(cascade, childMapping, childVar);
+            cascade.add(".update();\n");
+            cascade.add("    }\n");
+        }
+
+        cascade.add("}");
+        builder.addStatement(cascade.build());
+    }
+
+    /**
+     * Cascade save for an EntityCollection: iterate children, set parent FK, save each.
+     */
+    private void emitEntityCollectionSave(MethodSpec.Builder builder, RepositoryContext ctx,
+                                           String entityVar, TypeMapping.Prop.EntityCollection ec) {
+        TypeMapping<?> childMapping = ec.target();
+        String collectionGetter = entityVar + "." + getter(ec.name()) + "()";
+        String childVar = "child_" + ec.name();
+
+        // Build insert SQL for the child
+        SqlBuilder childSb = new SqlBuilder(childMapping);
+        childSb.dialect(dialect);
+        String childIdTypeFqn = childMapping.id().typeFqn();
+        IdStrategy childStrategy = idStrategy(childIdTypeFqn);
+        String childInsertSql = childStrategy == IdStrategy.APP_ASSIGNED
+                ? childSb.insert(true)
+                : childSb.insert(false);
+        String childInsertConst = ctx.registerConstant(
+                "EC_INSERT_" + ec.name().toUpperCase(), childInsertSql);
+
+        // Build update SQL for the child
+        String childUpdateSql = childSb.update();
+        String childUpdateConst = ctx.registerConstant(
+                "EC_UPDATE_" + ec.name().toUpperCase(), childUpdateSql);
+
+        // The FK column on the child that points back to the parent
+        String fkColumn = ec.inverseFkColumn();
+        String fkSetter = "set" + Character.toUpperCase(fkColumn.charAt(0)) + fkColumn.substring(1);
+
+        CodeBlock.Builder cascade = CodeBlock.builder();
+        cascade.add("if ($L != null) {\n", collectionGetter);
+        cascade.add("    for (var $L : $L) {\n", childVar, collectionGetter);
+        // Set the FK on the child to point to the parent
+        cascade.add("        $L.$L($L.getId());\n", childVar, fkSetter, entityVar);
+
+        if (childStrategy == IdStrategy.APP_ASSIGNED) {
+            cascade.add("        jdbcClient.sql($L)", childUpdateConst);
+            appendAllBindings(cascade, childMapping, childVar);
+            cascade.add(".update();\n");
+        } else {
+            cascade.add("        if ($L.getId() == null) {\n", childVar);
+            cascade.add("            $T $L = new $T();\n", GENERATED_KEY_HOLDER,
+                    "ecKeys_" + ec.name(), GENERATED_KEY_HOLDER);
+            cascade.add("            jdbcClient.sql($L)", childInsertConst);
+            appendNonIdBindings(cascade, childMapping, childVar);
+            cascade.add(".update($L);\n", "ecKeys_" + ec.name());
+            if (childStrategy == IdStrategy.NUMERIC) {
+                cascade.add("            if ($L.getKey() != null) {\n", "ecKeys_" + ec.name());
+                cascade.add("                $L.setId((($T) $L.getKey()).$L());\n",
+                        childVar, Number.class, "ecKeys_" + ec.name(), numericAccessor(childIdTypeFqn));
+                cascade.add("            }\n");
+            } else {
+                cascade.add("            if ($L.getKey() != null) {\n", "ecKeys_" + ec.name());
+                cascade.add("                $L.setId(($T) $L.getKey());\n",
+                        childVar, ClassName.bestGuess(childIdTypeFqn), "ecKeys_" + ec.name());
+                cascade.add("            }\n");
+            }
+            cascade.add("        } else {\n");
+            cascade.add("            jdbcClient.sql($L)", childUpdateConst);
+            appendAllBindings(cascade, childMapping, childVar);
+            cascade.add(".update();\n");
+            cascade.add("        }\n");
+        }
+
+        cascade.add("    }\n");
+        cascade.add("}");
+        builder.addStatement(cascade.build());
+    }
+
+    /**
+     * Replace-all for an ElementCollection: delete all existing rows, then insert new ones.
+     */
+    private void emitElementCollectionReplace(MethodSpec.Builder builder, RepositoryContext ctx,
+                                               String entityVar, TypeMapping.Prop.ElementCollection ec) {
+        String childTable = dialect.quoteIdentifier(ec.childTable());
+        String fkColumn = dialect.quoteIdentifier(ec.parentFkColumn());
+
+        // DELETE SQL: DELETE FROM child_table WHERE fk_column = :parentId
+        String deleteSql = "DELETE FROM " + childTable + " WHERE " + fkColumn + " = :parentId";
+        String deleteConst = ctx.registerConstant("EC_DELETE_" + ec.name().toUpperCase(), deleteSql);
+
+        // INSERT SQL for element collection items
+        TypeMapping<?> voMapping = ec.target();
+        List<TypeMapping.Prop> voProps = voMapping.props(); // value object props (no id)
+        String voTable = dialect.quoteIdentifier(voMapping.tableName());
+
+        // Build column list: fk_column + vo columns
+        StringBuilder insertCols = new StringBuilder();
+        insertCols.append(fkColumn);
+        for (TypeMapping.Prop vp : voProps) {
+            insertCols.append(", ");
+            if (vp instanceof TypeMapping.Prop.Scalar s) {
+                insertCols.append(dialect.quoteIdentifier(s.column()));
+            } else if (vp instanceof TypeMapping.Prop.Reference r) {
+                insertCols.append(dialect.quoteIdentifier(r.fkColumn()));
+            } else if (vp instanceof TypeMapping.Prop.Embedded emb) {
+                // Flatten embedded columns
+                if (emb.target() != null) {
+                    for (TypeMapping.Prop ep : emb.target().props()) {
+                        if (ep instanceof TypeMapping.Prop.Scalar es) {
+                            insertCols.append(", ");
+                            insertCols.append(dialect.quoteIdentifier(
+                                    io.github.fludakit.data.Names.columnBase(emb.name()) + "_" + es.column()));
+                        }
+                    }
+                }
+                // Remove the last comma since we handle it in the loop
+                continue;
+            }
+        }
+
+        // Build param list
+        StringBuilder insertParams = new StringBuilder();
+        insertParams.append(":parentId");
+        for (TypeMapping.Prop vp : voProps) {
+            insertParams.append(", ");
+            if (vp instanceof TypeMapping.Prop.Scalar s) {
+                insertParams.append(":").append(s.name());
+            } else if (vp instanceof TypeMapping.Prop.Reference r) {
+                insertParams.append(":").append(r.name());
+            } else if (vp instanceof TypeMapping.Prop.Embedded emb) {
+                if (emb.target() != null) {
+                    for (TypeMapping.Prop ep : emb.target().props()) {
+                        if (ep instanceof TypeMapping.Prop.Scalar es) {
+                            insertParams.append(", :");
+                            insertParams.append(io.github.fludakit.data.Names.columnBase(emb.name()) + "_" + es.name());
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+
+        String insertSql = "INSERT INTO " + voTable + " (" + insertCols + ") VALUES (" + insertParams + ")";
+        String insertConst = ctx.registerConstant("EC_INSERT_" + ec.name().toUpperCase(), insertSql);
+
+        String collectionGetter = entityVar + "." + getter(ec.name()) + "()";
+        String itemVar = "item_" + ec.name();
+
+        CodeBlock.Builder cascade = CodeBlock.builder();
+        // Delete all existing
+        cascade.add("jdbcClient.sql($L).param($S, $L.getId()).update();\n",
+                deleteConst, "parentId", entityVar);
+        // Insert new items
+        cascade.add("if ($L != null) {\n", collectionGetter);
+        cascade.add("    for (var $L : $L) {\n", itemVar, collectionGetter);
+        cascade.add("        jdbcClient.sql($L)", insertConst);
+        cascade.add(".param($S, $L.getId())", "parentId", entityVar);
+        // Bind value object properties
+        appendElementBindings(cascade, voProps, itemVar, "");
+        cascade.add(".update();\n");
+        cascade.add("    }\n");
+        cascade.add("}");
+        builder.addStatement(cascade.build());
+    }
+
+    /** Appends .param() calls for element collection value object properties. */
+    private void appendElementBindings(CodeBlock.Builder body, List<TypeMapping.Prop> voProps,
+                                        String itemVar, String prefix) {
+        for (TypeMapping.Prop prop : voProps) {
+            if (prop instanceof TypeMapping.Prop.Scalar scalar) {
+                String paramName = prefix.isEmpty() ? scalar.name() : prefix + scalar.name();
+                body.add(".param($S, $L.$L())", paramName, itemVar, getter(scalar.name()));
+            } else if (prop instanceof TypeMapping.Prop.Reference ref) {
+                String paramName = prefix.isEmpty() ? ref.name() : prefix + ref.name();
+                body.add(".param($S, $L.$L() == null ? null : $L.$L().getId())",
+                        paramName, itemVar, getter(ref.name()), itemVar, getter(ref.name()));
+            } else if (prop instanceof TypeMapping.Prop.Embedded embedded) {
+                if (embedded.target() != null) {
+                    String newPrefix = prefix.isEmpty()
+                            ? io.github.fludakit.data.Names.columnBase(embedded.name()) + "_"
+                            : prefix + io.github.fludakit.data.Names.columnBase(embedded.name()) + "_";
+                    for (TypeMapping.Prop ep : embedded.target().props()) {
+                        if (ep instanceof TypeMapping.Prop.Scalar scalar) {
+                            String paramName = newPrefix + scalar.name();
+                            body.add(".param($S, $L.$L().$L())",
+                                    paramName, itemVar, getter(embedded.name()), getter(scalar.name()));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // ── INSERT ───────────────────────────────────────────────────────────

@@ -124,14 +124,29 @@ public final class FindEmitter {
                                      MethodContext method, String sqlConstantName) {
         ClassName rowMapperType = ctx.rowMapperType();
         List<ParamBinding> bindings = method.paramBindings();
+        boolean needsHydration = ctx.entity().ownsAggregateLifecycle()
+                && hasToManyCollections(ctx.entity());
 
         CodeBlock.Builder body = CodeBlock.builder();
-        body.add("return $L\n", "jdbcClient");
-        body.add("    .sql($L)\n", sqlConstantName);
-        appendParamBindings(body, bindings, method);
-        body.add("    .query(new $T())\n", rowMapperType);
-        emitTerminal(body, method.resultKind(), ctx);
-        body.add(";");
+
+        if (needsHydration) {
+            // For aggregate roots, capture result in a variable and hydrate before returning
+            body.add("var $L = jdbcClient\n", "result");
+            body.add("    .sql($L)\n", sqlConstantName);
+            appendParamBindings(body, bindings, method);
+            body.add("    .query(new $T())\n", rowMapperType);
+            emitTerminalSingle(body, method.resultKind());
+            body.add(";\n");
+            emitHydrationCall(body, method.resultKind());
+            body.add("return $L;", "result");
+        } else {
+            body.add("return $L\n", "jdbcClient");
+            body.add("    .sql($L)\n", sqlConstantName);
+            appendParamBindings(body, bindings, method);
+            body.add("    .query(new $T())\n", rowMapperType);
+            emitTerminal(body, method.resultKind(), ctx);
+            body.add(";");
+        }
         builder.addStatement(body.build());
     }
 
@@ -528,6 +543,49 @@ public final class FindEmitter {
             case TRUE -> col + " = TRUE";
             case FALSE -> col + " = FALSE";
         };
+    }
+
+    // ── Hydration helpers ────────────────────────────────────────────────
+
+    /**
+     * Returns whether the entity has to-many collections that need hydration.
+     */
+    private boolean hasToManyCollections(io.github.fludakit.data.metadata.TypeMapping<?> entity) {
+        for (io.github.fludakit.data.metadata.TypeMapping.Prop prop : entity.props()) {
+            if (prop instanceof io.github.fludakit.data.metadata.TypeMapping.Prop.EntityCollection
+                    || prop instanceof io.github.fludakit.data.metadata.TypeMapping.Prop.ElementCollection) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Emits a terminal operation that captures the result in a variable (no return).
+     */
+    private void emitTerminalSingle(CodeBlock.Builder body, ResultKind resultKind) {
+        switch (resultKind) {
+            case SINGLE -> body.add(".single()");
+            case OPTIONAL -> body.add(".optional()");
+            case LIST -> body.add(".list()");
+            case ARRAY -> body.add(".list().toArray(new $T[0])", Object.class);
+            case STREAM -> body.add(".list().stream()");
+            case SET -> body.add(".list().stream().collect($T.toSet())",
+                    ClassName.get("java.util.stream", "Collectors"));
+            default -> body.add(".list()");
+        }
+    }
+
+    /**
+     * Emits the hydration call appropriate for the result kind.
+     */
+    private void emitHydrationCall(CodeBlock.Builder body, ResultKind resultKind) {
+        switch (resultKind) {
+            case SINGLE -> body.add("hydrate(result);\n");
+            case OPTIONAL -> body.add("result.ifPresent(this::hydrate);\n");
+            case LIST, SET, ARRAY, STREAM -> body.add("hydrateList(result);\n");
+            default -> { }
+        }
     }
 
     // ── Naming utilities ─────────────────────────────────────────────────

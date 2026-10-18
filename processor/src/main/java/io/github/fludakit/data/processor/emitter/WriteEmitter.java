@@ -6,6 +6,7 @@ import com.squareup.javapoet.MethodSpec;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.RepositoryContext;
+import io.github.fludakit.data.processor.support.MethodOverrides;
 import io.github.fludakit.data.query.Operation;
 import io.github.fludakit.data.query.ResultKind;
 import io.github.fludakit.data.sql.H2Dialect;
@@ -13,9 +14,13 @@ import io.github.fludakit.data.sql.SqlBuilder;
 import io.github.fludakit.data.sql.SqlDialect;
 import io.github.fludakit.data.sql.UpsertForm;
 
+import javax.lang.model.element.ElementKind;
+import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.Modifier;
+import javax.lang.model.element.TypeElement;
 import javax.lang.model.element.VariableElement;
 import javax.lang.model.type.DeclaredType;
+import javax.lang.model.util.Elements;
 import javax.lang.model.util.Types;
 import java.util.ArrayList;
 import java.util.List;
@@ -35,16 +40,27 @@ public final class WriteEmitter {
 
     private final SqlDialect dialect;
     private final Types types;
-    private final DeclaredType repositoryType;
+    private final Elements elements;
+    private final DeclaredType baseRepositoryType;
+    private final DeclaredType repositoryOwnType;
 
-    public WriteEmitter(SqlDialect dialect, Types types, DeclaredType repositoryType) {
+    public WriteEmitter(SqlDialect dialect, Types types, Elements elements, DeclaredType baseRepositoryType, DeclaredType repositoryOwnType) {
         this.dialect = dialect;
         this.types = types;
-        this.repositoryType = repositoryType;
+        this.elements = elements;
+        this.baseRepositoryType = baseRepositoryType;
+        this.repositoryOwnType = repositoryOwnType;
     }
 
-    public WriteEmitter(Types types, DeclaredType repositoryType) {
-        this(H2Dialect.INSTANCE, types, repositoryType);
+    public WriteEmitter(Types types, Elements elements, DeclaredType baseRepositoryType, DeclaredType repositoryOwnType) {
+        this(H2Dialect.INSTANCE, types, elements, baseRepositoryType, repositoryOwnType);
+    }
+
+    private DeclaredType resolveTypeFor(ExecutableElement method) {
+        if (method.getEnclosingElement().equals(repositoryOwnType.asElement())) {
+            return repositoryOwnType;
+        }
+        return baseRepositoryType;
     }
 
     private static final ClassName GENERATED_KEY_HOLDER =
@@ -60,7 +76,8 @@ public final class WriteEmitter {
 
         // Skip batch lifecycle methods — handled by LifecycleEmitter
         String name = method.name();
-        if ("saveAll".equals(name) || "deleteAll".equals(name) || "deleteByIds".equals(name)) {
+        if ("saveAll".equals(name) || "deleteAll".equals(name) || "deleteByIds".equals(name)
+                || "insertAll".equals(name) || "updateAll".equals(name)) {
             return null;
         }
 
@@ -82,7 +99,7 @@ public final class WriteEmitter {
     // ── SAVE ─────────────────────────────────────────────────────────────
 
     private MethodSpec emitSave(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
+        MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
         TypeMapping<?> entity = ctx.entity();
         String entityVar = "entity";
         String idTypeFqn = entity.id().typeFqn();
@@ -120,7 +137,6 @@ public final class WriteEmitter {
                 body.add("jdbcClient.sql($L)", upsertConstName);
                 appendAllBindings(body, entity, entityVar);
                 body.add(".update();");
-                if (returnsEntity) body.add("\nreturn $L;", entityVar);
             } else {
                 // Update; if 0 rows, insert
                 body.add("int $L = jdbcClient.sql($L)", "updated", upsertConstName);
@@ -131,7 +147,6 @@ public final class WriteEmitter {
                 appendAllBindings(body, entity, entityVar);
                 body.add(".update();\n");
                 body.add("}");
-                if (returnsEntity) body.add("\nreturn $L;", entityVar);
             }
         } else {
             // Generated key strategy: null id → insert, non-null id → upsert
@@ -163,14 +178,20 @@ public final class WriteEmitter {
             appendAllBindings(body, entity, entityVar);
             body.add(".update();\n");
             body.add("}");
-            if (returnsEntity) body.add("\nreturn $L;", entityVar);
         }
 
         builder.addCode(body.build());
 
-        // Cascade writes for aggregate roots
+        // Cascade writes: aggregate roots get full cascade; plain entities save element collections only
         if (ctx.entity().ownsAggregateLifecycle()) {
             emitCascadeWrites(builder, ctx, entityVar);
+        } else {
+            emitElementCollectionWrites(builder, ctx, entityVar);
+        }
+
+        // Return after cascade so the return statement isn't placed before cascade code
+        if (returnsEntity) {
+            builder.addStatement("return $L", entityVar);
         }
 
         return builder.build();
@@ -194,6 +215,21 @@ public final class WriteEmitter {
                 emitEntityCollectionSave(builder, ctx, entityVar, ec);
             } else if (prop instanceof TypeMapping.Prop.ElementCollection ec && ec.target() != null) {
                 // Element collection: replace-all (delete + re-insert)
+                emitElementCollectionReplace(builder, ctx, entityVar, ec);
+            }
+        }
+    }
+
+    /**
+     * Emits element-collection writes for plain @Entity owners.
+     * Plain entities save their element collections (value objects) but skip
+     * entity collections and composition references.
+     */
+    private void emitElementCollectionWrites(MethodSpec.Builder builder, RepositoryContext ctx, String entityVar) {
+        TypeMapping<?> entity = ctx.entity();
+
+        for (TypeMapping.Prop prop : entity.props()) {
+            if (prop instanceof TypeMapping.Prop.ElementCollection ec && ec.target() != null) {
                 emitElementCollectionReplace(builder, ctx, entityVar, ec);
             }
         }
@@ -265,13 +301,17 @@ public final class WriteEmitter {
     }
 
     /**
-     * Cascade save for an EntityCollection: iterate children, set parent FK, save each.
+     * Cascade save for an EntityCollection using diff sync:
+     * 1. Load existing child IDs from DB
+     * 2. Upsert each in-memory child (insert if null id, update if non-null)
+     * 3. Delete children whose IDs are no longer in the collection
      */
     private void emitEntityCollectionSave(MethodSpec.Builder builder, RepositoryContext ctx,
                                            String entityVar, TypeMapping.Prop.EntityCollection ec) {
         TypeMapping<?> childMapping = ec.target();
         String collectionGetter = entityVar + "." + getter(ec.name()) + "()";
         String childVar = "child_" + ec.name();
+        String parentIdExpr = entityVar + ".getId()";
 
         // Build insert SQL for the child
         SqlBuilder childSb = new SqlBuilder(childMapping);
@@ -289,20 +329,46 @@ public final class WriteEmitter {
         String childUpdateConst = ctx.registerConstant(
                 "EC_UPDATE_" + ec.name().toUpperCase(), childUpdateSql);
 
+        // Build delete SQL: DELETE FROM child_table WHERE id = :id AND fk_column = :parentId
+        String childTable = dialect.quoteIdentifier(childMapping.tableName());
+        String fkColumn = dialect.quoteIdentifier(ec.inverseFkColumn());
+        String idColumn = dialect.quoteIdentifier(childMapping.id().column());
+        String deleteSql = "DELETE FROM " + childTable + " WHERE " + idColumn + " = :childId AND " + fkColumn + " = :parentId";
+        String deleteConst = ctx.registerConstant("EC_DELETE_" + ec.name().toUpperCase(), deleteSql);
+
+        // Build select-existing-IDs SQL: SELECT id FROM child_table WHERE fk_column = :parentId
+        String selectIdsSql = "SELECT " + idColumn + " FROM " + childTable + " WHERE " + fkColumn + " = :parentId";
+        String selectIdsConst = ctx.registerConstant("EC_IDS_" + ec.name().toUpperCase(), selectIdsSql);
+
         CodeBlock.Builder cascade = CodeBlock.builder();
+
+        // Load existing child IDs into a set
+        cascade.add("$T<$T> $L = new $T<>(jdbcClient\n",
+                java.util.Set.class, Long.class, "existingIds_" + ec.name(), java.util.HashSet.class);
+        cascade.add("    .sql($L)\n", selectIdsConst);
+        cascade.add("    .param($S, $L)\n", "parentId", parentIdExpr);
+        cascade.add("    .query($T.class)\n", Long.class);
+        cascade.add("    .list());\n");
+
+        // Track which IDs are still in the collection
+        cascade.add("$T<$T> $L = new $T<>();\n",
+                java.util.Set.class, Long.class, "currentIds_" + ec.name(), java.util.HashSet.class);
+
+        // Upsert each in-memory child
         cascade.add("if ($L != null) {\n", collectionGetter);
         cascade.add("    for (var $L : $L) {\n", childVar, collectionGetter);
 
         if (childStrategy == IdStrategy.APP_ASSIGNED) {
             cascade.add("        jdbcClient.sql($L)", childUpdateConst);
-            appendAllBindings(cascade, childMapping, childVar);
+            appendChildPropBindings(cascade, childMapping, childVar, parentIdExpr, ec.inverseName());
             cascade.add(".update();\n");
+            cascade.add("        $L.add($L.getId());\n", "currentIds_" + ec.name(), childVar);
         } else {
             cascade.add("        if ($L.getId() == null) {\n", childVar);
             cascade.add("            $T $L = new $T();\n", GENERATED_KEY_HOLDER,
                     "ecKeys_" + ec.name(), GENERATED_KEY_HOLDER);
             cascade.add("            jdbcClient.sql($L)", childInsertConst);
-            appendNonIdBindings(cascade, childMapping, childVar);
+            appendChildNonIdBindings(cascade, childMapping, childVar, parentIdExpr, ec.inverseName());
             cascade.add(".update($L);\n", "ecKeys_" + ec.name());
             if (childStrategy == IdStrategy.NUMERIC) {
                 cascade.add("            if ($L.getKey() != null) {\n", "ecKeys_" + ec.name());
@@ -317,13 +383,22 @@ public final class WriteEmitter {
             }
             cascade.add("        } else {\n");
             cascade.add("            jdbcClient.sql($L)", childUpdateConst);
-            appendAllBindings(cascade, childMapping, childVar);
+            appendChildPropBindings(cascade, childMapping, childVar, parentIdExpr, ec.inverseName());
             cascade.add(".update();\n");
             cascade.add("        }\n");
+            cascade.add("        $L.add($L.getId());\n", "currentIds_" + ec.name(), childVar);
         }
 
         cascade.add("    }\n");
+        cascade.add("}\n");
+
+        // Delete orphans: existing IDs that are not in the current collection
+        cascade.add("$L.removeAll($L);\n", "existingIds_" + ec.name(), "currentIds_" + ec.name());
+        cascade.add("for ($T $L : $L) {\n", Long.class, "orphanId", "existingIds_" + ec.name());
+        cascade.add("    jdbcClient.sql($L).param($S, $L).param($S, $L).update();\n",
+                deleteConst, "childId", "orphanId", "parentId", parentIdExpr);
         cascade.add("}");
+
         builder.addStatement(cascade.build());
     }
 
@@ -445,7 +520,7 @@ public final class WriteEmitter {
     // ── INSERT ───────────────────────────────────────────────────────────
 
     private MethodSpec emitInsert(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
+        MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
         TypeMapping<?> entity = ctx.entity();
         String entityVar = "entity";
         String idTypeFqn = entity.id().typeFqn();
@@ -494,7 +569,7 @@ public final class WriteEmitter {
     // ── UPDATE ───────────────────────────────────────────────────────────
 
     private MethodSpec emitUpdate(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
+        MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
         TypeMapping<?> entity = ctx.entity();
         String entityVar = "entity";
 
@@ -510,6 +585,14 @@ public final class WriteEmitter {
         body.add("jdbcClient.sql($L)", constName);
         appendNonIdBindings(body, entity, entityVar);
         body.add(".param($S, $L.getId()).update();", "id", entityVar);
+
+        // Cascade writes for aggregate roots (same diff sync as save)
+        if (ctx.entity().ownsAggregateLifecycle()) {
+            emitCascadeWrites(builder, ctx, entityVar);
+        } else {
+            emitElementCollectionWrites(builder, ctx, entityVar);
+        }
+
         if (returnsEntity) body.add("\nreturn $L;", entityVar);
 
         builder.addCode(body.build());
@@ -519,7 +602,7 @@ public final class WriteEmitter {
     // ── DELETE BY ID ─────────────────────────────────────────────────────
 
     private MethodSpec emitDeleteById(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
+        MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
         TypeMapping<?> entity = ctx.entity();
 
         SqlBuilder sb = new SqlBuilder(entity);
@@ -553,6 +636,46 @@ public final class WriteEmitter {
         appendPropBindings(body, entity, varName);
     }
 
+    /**
+     * Appends .param() calls for all props of a child entity in an entity collection.
+     * The inverse FK (back-reference to parent) is bound to the parent's ID.
+     */
+    private void appendChildPropBindings(CodeBlock.Builder body, TypeMapping<?> childMapping,
+                                          String childVar, String parentIdExpr,
+                                          String inverseName) {
+        String idParamName = childMapping.id().name();
+        body.add(".param($S, $L.getId())", idParamName, childVar);
+        for (TypeMapping.Prop prop : childMapping.props()) {
+            appendChildPropBinding(body, prop, childVar, "", parentIdExpr, inverseName);
+        }
+    }
+
+    /**
+     * Appends .param() calls for non-id props of a child entity in an entity collection.
+     * The inverse FK (back-reference to parent) is bound to the parent's ID.
+     */
+    private void appendChildNonIdBindings(CodeBlock.Builder body, TypeMapping<?> childMapping,
+                                           String childVar, String parentIdExpr,
+                                           String inverseName) {
+        for (TypeMapping.Prop prop : childMapping.props()) {
+            appendChildPropBinding(body, prop, childVar, "", parentIdExpr, inverseName);
+        }
+    }
+
+    /**
+     * Appends one .param() call for a child property. The inverse FK uses the parent ID expression.
+     */
+    private void appendChildPropBinding(CodeBlock.Builder body, TypeMapping.Prop prop,
+                                         String varName, String prefix, String parentIdExpr,
+                                         String inverseName) {
+        if (prop instanceof TypeMapping.Prop.Reference ref && ref.name().equals(inverseName)) {
+            String paramName = prefix.isEmpty() ? ref.name() : prefix + ref.name();
+            body.add(".param($S, $L)", paramName, parentIdExpr);
+        } else {
+            appendPropBinding(body, prop, varName, prefix);
+        }
+    }
+
     /** Appends .param() calls for each property (non-id). */
     private void appendPropBindings(CodeBlock.Builder body, TypeMapping<?> entity, String varName) {
         for (TypeMapping.Prop prop : entity.props()) {
@@ -576,8 +699,24 @@ public final class WriteEmitter {
                                     String varName, String prefix) {
         if (prop instanceof TypeMapping.Prop.Scalar scalar) {
             String paramName = prefix.isEmpty() ? scalar.name() : prefix + scalar.name();
-            String getter = buildGetterChain(varName, prefix, scalar.name());
-            body.add(".param($S, $L)", paramName, getter);
+            if (prefix.isEmpty()) {
+                // Top-level scalar: direct getter, with enum conversion
+                if (isEnum(scalar.typeFqn())) {
+                    body.add(".param($S, $L.$L() == null ? null : $L.$L().name())",
+                            paramName, varName, getter(scalar.name()), varName, getter(scalar.name()));
+                } else {
+                    body.add(".param($S, $L.$L())", paramName, varName, getter(scalar.name()));
+                }
+            } else {
+                // Nested scalar (inside embedded): null-guard the embedded chain
+                if (isEnum(scalar.typeFqn())) {
+                    String nullGuarded = buildNullGuardedGetter(varName, prefix, scalar.name());
+                    body.add(".param($S, $L == null ? null : $L.name())", paramName, nullGuarded, nullGuarded);
+                } else {
+                    String nullGuarded = buildNullGuardedGetter(varName, prefix, scalar.name());
+                    body.add(".param($S, $L)", paramName, nullGuarded);
+                }
+            }
         } else if (prop instanceof TypeMapping.Prop.Reference ref) {
             if (ref.backReference()) {
                 // Back-reference: bind fk column from the target's id
@@ -602,6 +741,35 @@ public final class WriteEmitter {
             }
         }
         // EntityCollection and ElementCollection are not bound on the parent row
+    }
+
+    /**
+     * Builds a null-guarded getter chain for nested embedded paths.
+     * E.g., for prefix="address_point_" and name="lat", produces:
+     * {@code entity.getAddress() == null || entity.getAddress().getPoint() == null ? null : entity.getAddress().getPoint().getLat()}
+     */
+    private String buildNullGuardedGetter(String varName, String prefix, String simpleName) {
+        String[] segments = prefix.split("_");
+        int segCount = segments.length;
+        if (segCount > 0 && segments[segCount - 1].isEmpty()) segCount--;
+
+        if (segCount == 0) {
+            return varName + "." + getter(simpleName) + "()";
+        }
+
+        // Build null check: check each intermediate level
+        StringBuilder nullCheck = new StringBuilder();
+        StringBuilder chain = new StringBuilder(varName);
+        for (int i = 0; i < segCount; i++) {
+            if (i > 0) nullCheck.append(" || ");
+            chain.append(".").append(getter(segments[i])).append("()");
+            nullCheck.append(chain).append(" == null");
+        }
+
+        // Build the full getter: entity.getAddress().getPoint().getLat()
+        String fullGetter = chain + "." + getter(simpleName) + "()";
+
+        return nullCheck + " ? null : " + fullGetter;
     }
 
     /** Builds a getter chain like "entity.getAddress().getStreet()" for embedded paths. */
@@ -659,5 +827,10 @@ public final class WriteEmitter {
      */
     static String toSqlConstantName(String methodName) {
         return FindEmitter.toSqlConstantName(methodName);
+    }
+
+    private boolean isEnum(String typeFqn) {
+        TypeElement typeElement = elements.getTypeElement(typeFqn);
+        return typeElement != null && typeElement.getKind() == ElementKind.ENUM;
     }
 }

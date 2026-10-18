@@ -64,9 +64,9 @@ public class RepositoryProcessor extends AbstractProcessor {
             try {
                 new RepositoryVisitor(repository, this).visit();
             } catch (RuntimeException e) {
+                String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getName();
                 diagnostics.error(
-                    "fluda-data could not generate " + repository.getSimpleName() + "_: "
-                        + e.getMessage() + " -- the repository shape is not supported",
+                    "fluda-data could not generate " + repository.getSimpleName() + "_: " + msg,
                     repository);
             }
         }

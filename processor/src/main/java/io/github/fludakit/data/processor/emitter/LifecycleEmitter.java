@@ -7,9 +7,12 @@ import com.squareup.javapoet.ParameterizedTypeName;
 import com.squareup.javapoet.TypeName;
 import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.RepositoryContext;
+import io.github.fludakit.data.processor.support.MethodOverrides;
 import io.github.fludakit.data.query.Operation;
 
+import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.type.DeclaredType;
+import javax.lang.model.util.Elements;
 import javax.lang.model.util.Types;
 import java.util.ArrayList;
 import java.util.List;
@@ -24,11 +27,22 @@ import java.util.List;
 public final class LifecycleEmitter {
 
     private final Types types;
-    private final DeclaredType repositoryType;
+    private final Elements elements;
+    private final DeclaredType baseRepositoryType;
+    private final DeclaredType repositoryOwnType;
 
-    public LifecycleEmitter(Types types, DeclaredType repositoryType) {
+    public LifecycleEmitter(Types types, Elements elements, DeclaredType baseRepositoryType, DeclaredType repositoryOwnType) {
         this.types = types;
-        this.repositoryType = repositoryType;
+        this.elements = elements;
+        this.baseRepositoryType = baseRepositoryType;
+        this.repositoryOwnType = repositoryOwnType;
+    }
+
+    private DeclaredType resolveTypeFor(ExecutableElement method) {
+        if (method.getEnclosingElement().equals(repositoryOwnType.asElement())) {
+            return repositoryOwnType;
+        }
+        return baseRepositoryType;
     }
 
     /**
@@ -43,6 +57,12 @@ public final class LifecycleEmitter {
         if (op == Operation.SAVE && "saveAll".equals(name)) {
             return emitSaveAll(ctx, method);
         }
+        if (op == Operation.INSERT && "insertAll".equals(name)) {
+            return emitInsertAll(ctx, method);
+        }
+        if (op == Operation.UPDATE && "updateAll".equals(name)) {
+            return emitUpdateAll(ctx, method);
+        }
         if (op == Operation.DELETE && "deleteAll".equals(name)) {
             return emitDeleteAll(ctx, method);
         }
@@ -55,11 +75,11 @@ public final class LifecycleEmitter {
     // ── saveAll ──────────────────────────────────────────────────────────
 
     private MethodSpec emitSaveAll(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
+        MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
         ClassName entityClass = ClassName.bestGuess(ctx.entity().typeName());
 
         // Register the SAVE SQL constant (same as single save)
-        WriteEmitter writeEmitter = new WriteEmitter(types, repositoryType);
+        WriteEmitter writeEmitter = new WriteEmitter(types, elements, baseRepositoryType, repositoryOwnType);
         String saveSql = buildSaveSql(ctx);
         ctx.registerConstant("SAVE_ALL", saveSql);
 
@@ -80,10 +100,50 @@ public final class LifecycleEmitter {
         return builder.build();
     }
 
+    // ── insertAll ────────────────────────────────────────────────────────
+
+    private MethodSpec emitInsertAll(RepositoryContext ctx, MethodContext method) {
+        MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
+        ClassName entityClass = ClassName.bestGuess(ctx.entity().typeName());
+        TypeName listTypeArg = resolveListTypeArg(method, entityClass);
+        TypeName arrayListType = ParameterizedTypeName.get(ClassName.get(ArrayList.class), listTypeArg);
+
+        CodeBlock.Builder body = CodeBlock.builder();
+        body.add("$T result = new $T();\n", List.class, arrayListType);
+        body.add("for ($T entity : entities) {\n", listTypeArg);
+        body.add("    insert(entity);\n");
+        body.add("    result.add(entity);\n");
+        body.add("}\n");
+        body.add("return result;");
+
+        builder.addCode(body.build());
+        return builder.build();
+    }
+
+    // ── updateAll ────────────────────────────────────────────────────────
+
+    private MethodSpec emitUpdateAll(RepositoryContext ctx, MethodContext method) {
+        MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
+        ClassName entityClass = ClassName.bestGuess(ctx.entity().typeName());
+        TypeName listTypeArg = resolveListTypeArg(method, entityClass);
+        TypeName arrayListType = ParameterizedTypeName.get(ClassName.get(ArrayList.class), listTypeArg);
+
+        CodeBlock.Builder body = CodeBlock.builder();
+        body.add("$T result = new $T();\n", List.class, arrayListType);
+        body.add("for ($T entity : entities) {\n", listTypeArg);
+        body.add("    update(entity);\n");
+        body.add("    result.add(entity);\n");
+        body.add("}\n");
+        body.add("return result;");
+
+        builder.addCode(body.build());
+        return builder.build();
+    }
+
     // ── deleteAll(Iterable<E>) ───────────────────────────────────────────
 
     private MethodSpec emitDeleteAll(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
+        MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
         ClassName entityClass = ClassName.bestGuess(ctx.entity().typeName());
 
         CodeBlock.Builder body = CodeBlock.builder();
@@ -98,7 +158,7 @@ public final class LifecycleEmitter {
     // ── deleteByIds(Iterable<ID>) ────────────────────────────────────────
 
     private MethodSpec emitDeleteByIds(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
+        MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
         String idTypeFqn = ctx.entity().id().typeFqn();
         ClassName idClass = ClassName.bestGuess(idTypeFqn);
 

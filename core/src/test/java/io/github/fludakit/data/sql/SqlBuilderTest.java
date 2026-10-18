@@ -391,8 +391,8 @@ class SqlBuilderTest {
         return TestMappings.aggregateRoot("Profile", "profile",
                 new Prop.Id("id", "id", "java.lang.Long"),
                 List.of(
-                        new Prop.EntityCollection("contacts", null, null, null),
-                        new Prop.EntityCollection("workHistory", null, null, null),
+                        new Prop.EntityCollection("contacts", null, null, null, null),
+                        new Prop.EntityCollection("workHistory", null, null, null, null),
                         new Prop.Reference("customer", "customer_id", null, null, false, false)),
                 List.of(new ColumnRef.Simple("id", "profile"),
                         new ColumnRef.Simple("customer_id", "profile"),

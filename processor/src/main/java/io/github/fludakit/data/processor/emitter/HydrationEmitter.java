@@ -41,12 +41,15 @@ public final class HydrationEmitter {
     }
 
     /**
-     * Returns whether the entity has any to-many collections that need hydration.
+     * Returns whether the entity has any to-many collections or composing references that need hydration.
      */
     public boolean hasCollectionsToHydrate(TypeMapping<?> entity) {
         for (TypeMapping.Prop prop : entity.props()) {
             if (prop instanceof TypeMapping.Prop.EntityCollection
                     || prop instanceof TypeMapping.Prop.ElementCollection) {
+                return true;
+            }
+            if (prop instanceof TypeMapping.Prop.Reference ref && ref.composition()) {
                 return true;
             }
         }
@@ -77,6 +80,8 @@ public final class HydrationEmitter {
                 body.add("load$L(entity);\n", capitalize(ec.name()));
             } else if (prop instanceof TypeMapping.Prop.ElementCollection ec) {
                 body.add("load$L(entity);\n", capitalize(ec.name()));
+            } else if (prop instanceof TypeMapping.Prop.Reference ref && ref.composition()) {
+                body.add("load$L(entity);\n", capitalize(ref.name()));
             }
         }
 
@@ -126,6 +131,11 @@ public final class HydrationEmitter {
                 }
             } else if (prop instanceof TypeMapping.Prop.ElementCollection ec) {
                 MethodSpec loader = emitElementCollectionLoader(ctx, ec);
+                if (loader != null) {
+                    methods.add(loader);
+                }
+            } else if (prop instanceof TypeMapping.Prop.Reference ref && ref.composition()) {
+                MethodSpec loader = emitCompositionReferenceLoader(ctx, ref);
                 if (loader != null) {
                     methods.add(loader);
                 }
@@ -262,6 +272,69 @@ public final class HydrationEmitter {
         body.add("    .query(new $T())\n", elementRowMapper);
         body.add("    .list();\n");
         body.add("entity.$L(items);", setterName);
+
+        builder.addCode(body.build());
+        return builder.build();
+    }
+
+    /**
+     * Emits a loader method for a composing Reference: loads the full child entity by ID
+     * from the child table, replacing the id-only partial set by the row mapper.
+     */
+    private MethodSpec emitCompositionReferenceLoader(RepositoryContext ctx,
+                                                       TypeMapping.Prop.Reference ref) {
+        TypeMapping<?> childMapping = ref.target();
+        if (childMapping == null) return null;
+
+        ClassName entityClass = ClassName.bestGuess(ctx.entity().typeName());
+        ClassName childClass = ClassName.bestGuess(childMapping.typeName());
+        String methodName = "load" + capitalize(ref.name());
+
+        // Build SELECT SQL for the child by ID
+        String childTable = dialect.quoteIdentifier(childMapping.tableName());
+        String idColumn = dialect.quoteIdentifier(childMapping.id().column());
+
+        // Build column list from child mapping
+        java.util.List<String> columns = new java.util.ArrayList<>();
+        if (childMapping.id() != null) {
+            columns.add(dialect.quoteIdentifier(childMapping.id().column()) + " AS "
+                    + dialect.quoteIdentifier(childMapping.id().name()));
+        }
+        for (TypeMapping.Prop prop : childMapping.rowProps()) {
+            if (prop instanceof TypeMapping.Prop.Scalar s) {
+                columns.add(dialect.quoteIdentifier(s.column()) + " AS "
+                        + dialect.quoteIdentifier(s.name()));
+            } else if (prop instanceof TypeMapping.Prop.Reference r && !r.backReference()) {
+                columns.add(dialect.quoteIdentifier(r.fkColumn()) + " AS "
+                        + dialect.quoteIdentifier(r.name()));
+            }
+        }
+
+        String selectSql = "SELECT " + String.join(", ", columns)
+                + " FROM " + childTable
+                + " WHERE " + idColumn + " = :childId";
+        String constName = ctx.registerConstant("HYDRATE_" + ref.name().toUpperCase(), selectSql);
+
+        // Derive child row mapper class name
+        ClassName childRowMapper = deriveRowMapperType(childMapping.typeName());
+
+        String getter = "get" + Character.toUpperCase(ref.name().charAt(0)) + ref.name().substring(1);
+        String setter = "set" + Character.toUpperCase(ref.name().charAt(0)) + ref.name().substring(1);
+
+        MethodSpec.Builder builder = MethodSpec.methodBuilder(methodName)
+                .addModifiers(Modifier.PRIVATE)
+                .addParameter(entityClass, "entity")
+                .returns(void.class);
+
+        CodeBlock.Builder body = CodeBlock.builder();
+        body.add("if (entity.$L() != null && entity.$L().getId() != null) {\n", getter, getter);
+        body.add("    $T full = jdbcClient\n", childClass);
+        body.add("        .sql($L)\n", constName);
+        body.add("        .param($S, entity.$L().getId())\n", "childId", getter);
+        body.add("        .query(new $T())\n", childRowMapper);
+        body.add("        .single();\n");
+        body.add("    entity.$L(full);\n", setter);
+        body.add("}");
 
         builder.addCode(body.build());
         return builder.build();

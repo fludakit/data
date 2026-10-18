@@ -67,6 +67,18 @@ final class RepositoryVisitor {
     private static final String PAGE = "jakarta.data.page.Page";
     private static final String CURSORED_PAGE = "jakarta.data.page.CursoredPage";
 
+    // QBN module is optional — check if it's on the classpath
+    private static final boolean QBN_AVAILABLE = isQbnAvailable();
+
+    private static boolean isQbnAvailable() {
+        try {
+            Class.forName("io.github.fludakit.data.qbn.QueryByMethodNameParser");
+            return true;
+        } catch (ClassNotFoundException e) {
+            return false;
+        }
+    }
+
     /** Pattern matching named parameters in @Query SQL (e.g. {@code :name}). */
     private static final Pattern NAMED_PARAM_PATTERN = Pattern.compile(":([a-zA-Z_]\\w*)");
 
@@ -129,6 +141,13 @@ final class RepositoryVisitor {
             rowMapperType = ClassName.bestGuess(entityFqn + "RowMapper");
         }
 
+        // 4a. Generate row mappers for VO types used in element collections
+        for (TypeMapping.Prop prop : entityMapping.props()) {
+            if (prop instanceof TypeMapping.Prop.ElementCollection ec && ec.target() != null) {
+                rowMapperEmitter.emit(ec.target());
+            }
+        }
+
         // 4b. Generate static metamodel (_Entity interface + navigable member classes)
         MetamodelEmitter metamodelEmitter = new MetamodelEmitter(filer, diagnostics);
 
@@ -182,12 +201,23 @@ final class RepositoryVisitor {
             MethodContext methodCtx = resolveMethod(method, entityMapping);
             if (methodCtx != null) {
                 methods.add(methodCtx);
+            } else {
+                // Method could not be resolved — throw error suggesting @Query
+                String methodName = method.getSimpleName().toString();
+                String repoName = repository.getQualifiedName().toString();
+                throw new IllegalStateException(
+                    "Cannot resolve method '" + methodName + "' in repository " + 
+                    repoName + ". Either add a lifecycle annotation " +
+                    "(@Find, @Save, @Insert, @Update, @Delete), use a recognized CRUD method name " +
+                    "(findById, save, etc.), use Query By Name (findByXxx), or add a custom @Query annotation."
+                );
             }
         }
 
         // 6b. Emit plain finder methods
         DeclaredType repositoryDeclaredType = resolveRepositoryDeclaredType();
-        FindEmitter findEmitter = new FindEmitter(types, repositoryDeclaredType);
+        DeclaredType repositoryOwnType = (DeclaredType) repository.asType();
+        FindEmitter findEmitter = new FindEmitter(types, repositoryDeclaredType, repositoryOwnType);
         for (MethodContext mc : methods) {
             MethodSpec emitted = findEmitter.emit(ctx, mc);
             if (emitted != null) {
@@ -196,7 +226,7 @@ final class RepositoryVisitor {
         }
 
         // 6c. Emit batch lifecycle methods (saveAll, deleteAll, deleteByIds)
-        LifecycleEmitter lifecycleEmitter = new LifecycleEmitter(types, repositoryDeclaredType);
+        LifecycleEmitter lifecycleEmitter = new LifecycleEmitter(types, elements, repositoryDeclaredType, repositoryOwnType);
         for (MethodContext mc : methods) {
             MethodSpec emitted = lifecycleEmitter.emit(ctx, mc);
             if (emitted != null) {
@@ -205,7 +235,7 @@ final class RepositoryVisitor {
         }
 
         // 6d. Emit write methods (save, insert, update, deleteById)
-        WriteEmitter writeEmitter = new WriteEmitter(types, repositoryDeclaredType);
+        WriteEmitter writeEmitter = new WriteEmitter(types, elements, repositoryDeclaredType, repositoryOwnType);
         for (MethodContext mc : methods) {
             MethodSpec emitted = writeEmitter.emit(ctx, mc);
             if (emitted != null) {
@@ -213,21 +243,19 @@ final class RepositoryVisitor {
             }
         }
 
-        // 6e. Emit hydration methods for aggregate roots
-        if (entityMapping.ownsAggregateLifecycle()) {
-            HydrationEmitter hydrationEmitter = new HydrationEmitter();
-            if (hydrationEmitter.hasCollectionsToHydrate(entityMapping)) {
-                MethodSpec hydrateMethod = hydrationEmitter.emitHydrate(ctx);
-                if (hydrateMethod != null) {
-                    ctx.auxMethods().add(hydrateMethod);
-                }
-                MethodSpec hydrateListMethod = hydrationEmitter.emitHydrateList(ctx);
-                if (hydrateListMethod != null) {
-                    ctx.auxMethods().add(hydrateListMethod);
-                }
-                List<MethodSpec> loaders = hydrationEmitter.emitCollectionLoaders(ctx);
-                ctx.auxMethods().addAll(loaders);
+        // 6e. Emit hydration methods for entities with to-many collections
+        HydrationEmitter hydrationEmitter = new HydrationEmitter();
+        if (hydrationEmitter.hasCollectionsToHydrate(entityMapping)) {
+            MethodSpec hydrateMethod = hydrationEmitter.emitHydrate(ctx);
+            if (hydrateMethod != null) {
+                ctx.auxMethods().add(hydrateMethod);
             }
+            MethodSpec hydrateListMethod = hydrationEmitter.emitHydrateList(ctx);
+            if (hydrateListMethod != null) {
+                ctx.auxMethods().add(hydrateListMethod);
+            }
+            List<MethodSpec> loaders = hydrationEmitter.emitCollectionLoaders(ctx);
+            ctx.auxMethods().addAll(loaders);
         }
 
         // 6f. Emit QueryModel (static QueryDefinition fields)
@@ -325,25 +353,131 @@ final class RepositoryVisitor {
     private MethodContext resolveMethod(ExecutableElement method, TypeMapping<?> entityMapping) {
         String methodName = method.getSimpleName().toString();
 
-        // Determine operation from annotations
-        Operation operation = resolveOperation(method, methodName);
-        if (operation == null) {
-            // Try QBN parsing
+        // Priority 1: Lifecycle annotations (@Save, @Insert, @Update, @Delete, @Find)
+        // These are first-class citizens and can appear on any interface method
+        Operation annotatedOp = resolveLifecycleAnnotation(method);
+        if (annotatedOp != null) {
+            return resolveAnnotatedMethod(method, methodName, annotatedOp, entityMapping);
+        }
+
+        // Priority 2 & 3 only apply to Jakarta Data-derived repositories
+        boolean isJakartaDataRepository = extendsJakartaDataInterface();
+
+        // Priority 2: Built-in CRUD methods from Jakarta Data standard interfaces
+        // Fixed list with known semantics — skip annotation processing
+        if (isJakartaDataRepository && isBuiltInCrudMethod(methodName)) {
+            Operation op = resolveBuiltInOperation(methodName);
+            return resolveBuiltInCrudMethod(method, methodName, op, entityMapping);
+        }
+
+        // Priority 3: Query By Name (QBN) parsing
+        if (isJakartaDataRepository) {
             ParsedMethodName parsed = tryParseQbn(methodName);
             if (parsed != null) {
                 return resolveQbnMethod(method, methodName, parsed, entityMapping);
             }
-            // Not a recognized method — skip
-            return null;
         }
 
-        // Annotated method (non-QBN)
+        // Not a recognized method — skip
+        return null;
+    }
+
+    /**
+     * Checks if the repository extends a Jakarta Data interface (CrudRepository, BasicRepository, or DataRepository).
+     */
+    private boolean extendsJakartaDataInterface() {
+        // Check superclass
+        if (isJakartaDataInterface(repository.getSuperclass())) return true;
+        
+        // Check direct interfaces
+        for (TypeMirror iface : repository.getInterfaces()) {
+            if (isJakartaDataInterface(iface)) return true;
+        }
+        
+        // Check transitive interfaces
+        for (TypeMirror iface : getAllInterfaces(repository)) {
+            if (isJakartaDataInterface(iface)) return true;
+        }
+        
+        return false;
+    }
+
+    private boolean isJakartaDataInterface(TypeMirror type) {
+        if (type == null || type.getKind() != TypeKind.DECLARED) return false;
+        TypeElement te = (TypeElement) ((DeclaredType) type).asElement();
+        String fqn = te.getQualifiedName().toString();
+        return fqn.equals(CRUD_REPOSITORY) || 
+               fqn.equals("jakarta.data.repository.BasicRepository") ||
+               fqn.equals(DATA_REPOSITORY);
+    }
+
+    private Operation resolveLifecycleAnnotation(ExecutableElement method) {
+        if (method.getAnnotation(Save.class) != null) return Operation.SAVE;
+        if (method.getAnnotation(Insert.class) != null) return Operation.INSERT;
+        if (method.getAnnotation(Update.class) != null) return Operation.UPDATE;
+        if (method.getAnnotation(Delete.class) != null) return Operation.DELETE;
+        if (method.getAnnotation(Find.class) != null) return Operation.FIND;
+        return null;
+    }
+
+    private MethodContext resolveAnnotatedMethod(ExecutableElement method, String methodName,
+                                                  Operation operation, TypeMapping<?> entityMapping) {
         ResultKind resultKind = resolveResultKind(method, operation);
         PagingMode pagingMode = resolvePagingMode(method, resultKind);
         List<Predicate> predicates = resolveByAnnotations(method, entityMapping);
+        
+        // Replace Jakarta Data's "id(this)" JDQL convention with the actual ID property name
+        predicates = replaceIdThis(predicates, entityMapping);
+        
         List<SortSpec> sorts = resolveOrderByAnnotations(method);
         List<ParamBinding> paramBindings = buildParamBindings(method, predicates);
         boolean distinct = false;
+
+        return new MethodContext(method, methodName, operation, resultKind, distinct,
+                method.getParameters(), paramBindings, predicates, sorts, pagingMode, null);
+    }
+
+    private boolean isBuiltInCrudMethod(String methodName) {
+        return switch (methodName) {
+            case "findById", "deleteById", "findAll", "save", "saveAll",
+                 "insert", "insertAll", "update", "updateAll",
+                 "delete", "deleteAll", "deleteAllById", "deleteByIds",
+                 "findAllById" -> true;
+            default -> false;
+        };
+    }
+
+    private Operation resolveBuiltInOperation(String methodName) {
+        return switch (methodName) {
+            case "save", "saveAll" -> Operation.SAVE;
+            case "insert", "insertAll" -> Operation.INSERT;
+            case "update", "updateAll" -> Operation.UPDATE;
+            case "delete", "deleteAll", "deleteById", "deleteAllById", "deleteByIds" -> Operation.DELETE;
+            case "findById", "findAll", "findAllById" -> Operation.FIND;
+            default -> throw new IllegalStateException("Not a built-in CRUD method: " + methodName);
+        };
+    }
+
+    private MethodContext resolveBuiltInCrudMethod(ExecutableElement method, String methodName,
+                                                    Operation operation, TypeMapping<?> entityMapping) {
+        ResultKind resultKind = resolveResultKind(method, operation);
+        PagingMode pagingMode = resolvePagingMode(method, resultKind);
+        boolean distinct = false;
+
+        // Create predicates based on method name
+        List<Predicate> predicates = switch (methodName) {
+            case "findById", "deleteById" -> {
+                if (entityMapping.id() == null) {
+                    yield List.of();
+                }
+                String idProp = entityMapping.id().name();
+                yield List.of(Predicate.of(idProp, io.github.fludakit.data.query.Operator.EQ, "id"));
+            }
+            default -> List.of();
+        };
+
+        List<SortSpec> sorts = List.of();
+        List<ParamBinding> paramBindings = buildParamBindings(method, predicates);
 
         return new MethodContext(method, methodName, operation, resultKind, distinct,
                 method.getParameters(), paramBindings, predicates, sorts, pagingMode, null);
@@ -358,6 +492,8 @@ final class RepositoryVisitor {
 
         // Predicates from parsed method name
         List<Predicate> predicates = new ArrayList<>(parsed.predicates());
+        // Resolve camelCase paths against entity structure (e.g., "workHistoryCompany" → "workHistory.company")
+        predicates = resolveCamelCasePaths(predicates, entityMapping);
         // Add @By predicates if present (these supplement QBN predicates)
         predicates.addAll(resolveByAnnotations(method, entityMapping));
 
@@ -371,32 +507,87 @@ final class RepositoryVisitor {
                 method.getParameters(), paramBindings, predicates, sorts, pagingMode, null);
     }
 
+    /**
+     * Attempts to resolve camelCase property paths by splitting them at entity property boundaries.
+     * For example, "workHistoryCompany" becomes "workHistory.company" if "workHistory" is a property.
+     */
+    private List<Predicate> resolveCamelCasePaths(List<Predicate> predicates, TypeMapping<?> entityMapping) {
+        List<Predicate> resolved = new ArrayList<>(predicates.size());
+        for (Predicate p : predicates) {
+            String path = p.property();
+            if (path.contains(".")) {
+                resolved.add(p);
+                continue;
+            }
+            // Try to split the camelCase path
+            String resolvedPath = trySplitCamelCasePath(path, entityMapping);
+            if (resolvedPath != null && !resolvedPath.equals(path)) {
+                resolved.add(new Predicate(resolvedPath, p.operator(), p.param(), p.connector(), p.ignoreCase()));
+            } else {
+                resolved.add(p);
+            }
+        }
+        return resolved;
+    }
+
+    /**
+     * Tries to split a camelCase path at entity property boundaries.
+     * Returns the dot-separated path if successful, or the original path if no split is found.
+     */
+    private String trySplitCamelCasePath(String path, TypeMapping<?> mapping) {
+        // Try splitting at each uppercase letter
+        for (int i = 1; i < path.length(); i++) {
+            if (Character.isUpperCase(path.charAt(i))) {
+                String head = path.substring(0, i);
+                String tail = Character.toLowerCase(path.charAt(i)) + path.substring(i + 1);
+                // Check if head is a property
+                try {
+                    mapping.prop(head);
+                    // head is a property, check if tail resolves in the target
+                    String fullPath = head + "." + tail;
+                    try {
+                        mapping.resolve(fullPath);
+                        return fullPath;
+                    } catch (Exception e) {
+                        // tail doesn't resolve, try deeper splits
+                        String resolvedTail = trySplitCamelCasePath(tail, getTargetMapping(mapping, head));
+                        if (resolvedTail != null && !resolvedTail.equals(tail)) {
+                            return head + "." + resolvedTail;
+                        }
+                    }
+                } catch (Exception e) {
+                    // head is not a property, continue
+                }
+            }
+        }
+        return path;
+    }
+
+    /**
+     * Gets the target TypeMapping for a property name, or null if not resolvable.
+     */
+    private TypeMapping<?> getTargetMapping(TypeMapping<?> mapping, String propName) {
+        try {
+            var prop = mapping.prop(propName);
+            if (prop instanceof TypeMapping.Prop.Reference ref) return ref.target();
+            if (prop instanceof TypeMapping.Prop.EntityCollection ec) return ec.target();
+            if (prop instanceof TypeMapping.Prop.ElementCollection ec) return ec.target();
+            if (prop instanceof TypeMapping.Prop.Embedded emb) return emb.target();
+        } catch (Exception e) {
+            // ignore
+        }
+        return null;
+    }
+
     private ParsedMethodName tryParseQbn(String methodName) {
+        if (!QBN_AVAILABLE) {
+            return null;
+        }
         try {
             return new QueryByMethodNameParser().parse(methodName);
         } catch (IllegalArgumentException e) {
             return null;
         }
-    }
-
-    // ── Operation resolution ─────────────────────────────────────────────
-
-    private Operation resolveOperation(ExecutableElement method, String methodName) {
-        if (method.getAnnotation(Save.class) != null) return Operation.SAVE;
-        if (method.getAnnotation(Insert.class) != null) return Operation.INSERT;
-        if (method.getAnnotation(Update.class) != null) return Operation.UPDATE;
-        if (method.getAnnotation(Delete.class) != null) return Operation.DELETE;
-        if (method.getAnnotation(Find.class) != null) return Operation.FIND;
-
-        // CRUD method name conventions
-        return switch (methodName) {
-            case "save", "saveAll" -> Operation.SAVE;
-            case "insert", "insertAll" -> Operation.INSERT;
-            case "update", "updateAll" -> Operation.UPDATE;
-            case "delete", "deleteAll", "deleteById", "deleteAllById", "deleteByIds" -> Operation.DELETE;
-            case "findById", "findAll", "findAllById" -> Operation.FIND;
-            default -> null;
-        };
     }
 
     // ── ResultKind resolution ────────────────────────────────────────────
@@ -477,6 +668,26 @@ final class RepositoryVisitor {
             }
         }
         return predicates;
+    }
+
+    /**
+     * Replaces Jakarta Data's {@code "id(this)"} JDQL convention with the entity's actual ID property name.
+     * This processor does not implement JDQL, so {@code "id(this)"} is replaced with the real column.
+     */
+    private List<Predicate> replaceIdThis(List<Predicate> predicates, TypeMapping<?> entityMapping) {
+        if (predicates.isEmpty() || entityMapping.id() == null) {
+            return predicates;
+        }
+        String idPropName = entityMapping.id().name();
+        List<Predicate> result = new ArrayList<>(predicates.size());
+        for (Predicate p : predicates) {
+            if ("id(this)".equals(p.property())) {
+                result.add(Predicate.of(idPropName, p.operator(), p.param(), p.connector(), p.ignoreCase()));
+            } else {
+                result.add(p);
+            }
+        }
+        return result;
     }
 
     // ── Sort resolution ──────────────────────────────────────────────────
@@ -695,19 +906,36 @@ final class RepositoryVisitor {
      * interface itself.
      */
     private DeclaredType resolveRepositoryDeclaredType() {
-        // Walk the type hierarchy to find CrudRepository/BasicRepository/DataRepository
-        for (TypeMirror iface : getAllInterfaces(repository)) {
-            if (iface.getKind() == TypeKind.DECLARED) {
-                DeclaredType dt = (DeclaredType) iface;
-                TypeElement te = (TypeElement) dt.asElement();
-                String fqn = te.getQualifiedName().toString();
-                if (fqn.equals(CRUD_REPOSITORY) || fqn.equals(BASIC_REPOSITORY) || fqn.equals(DATA_REPOSITORY)) {
-                    return dt;
-                }
-            }
+        // Check superclass first (e.g. TaskRepository extends CrudRepository<Task, Long>)
+        TypeMirror superclass = repository.getSuperclass();
+        DeclaredType found = matchBaseRepositoryType(superclass);
+        if (found != null) return found;
+
+        // Check direct interfaces
+        for (TypeMirror iface : repository.getInterfaces()) {
+            found = matchBaseRepositoryType(iface);
+            if (found != null) return found;
         }
+
+        // Walk transitive interfaces
+        for (TypeMirror iface : getAllInterfaces(repository)) {
+            found = matchBaseRepositoryType(iface);
+            if (found != null) return found;
+        }
+
         // Fallback to the repository's own type if no base repository found
         return (DeclaredType) repository.asType();
+    }
+
+    private DeclaredType matchBaseRepositoryType(TypeMirror type) {
+        if (type == null || type.getKind() != TypeKind.DECLARED) return null;
+        DeclaredType dt = (DeclaredType) type;
+        TypeElement te = (TypeElement) dt.asElement();
+        String fqn = te.getQualifiedName().toString();
+        if (fqn.equals(CRUD_REPOSITORY) || fqn.equals(BASIC_REPOSITORY) || fqn.equals(DATA_REPOSITORY)) {
+            return dt;
+        }
+        return null;
     }
 
     // ── Utility methods ──────────────────────────────────────────────────

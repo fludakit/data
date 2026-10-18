@@ -5,17 +5,21 @@ import com.squareup.javapoet.CodeBlock;
 import com.squareup.javapoet.MethodSpec;
 import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.RepositoryContext;
+import io.github.fludakit.data.processor.support.MethodOverrides;
 import io.github.fludakit.data.query.LikePattern;
+import io.github.fludakit.data.query.LimitSpec;
 import io.github.fludakit.data.query.Operation;
 import io.github.fludakit.data.query.ParamBinding;
 import io.github.fludakit.data.query.PagingMode;
 import io.github.fludakit.data.query.Predicate;
+import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
 import io.github.fludakit.data.query.SortSpec;
 import io.github.fludakit.data.sql.H2Dialect;
 import io.github.fludakit.data.sql.SqlBuilder;
 import io.github.fludakit.data.sql.SqlDialect;
 
+import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.VariableElement;
 import javax.lang.model.type.DeclaredType;
 import javax.lang.model.util.Types;
@@ -46,17 +50,31 @@ public final class FindEmitter {
 
     private final SqlDialect dialect;
     private final Types types;
-    private final DeclaredType repositoryType;
+    private final DeclaredType baseRepositoryType;
+    private final DeclaredType repositoryOwnType;
 
-    public FindEmitter(SqlDialect dialect, Types types, DeclaredType repositoryType) {
+    public FindEmitter(SqlDialect dialect, Types types, DeclaredType baseRepositoryType, DeclaredType repositoryOwnType) {
         this.dialect = dialect;
         this.types = types;
-        this.repositoryType = repositoryType;
+        this.baseRepositoryType = baseRepositoryType;
+        this.repositoryOwnType = repositoryOwnType;
     }
 
     /** Default constructor using H2 dialect. */
-    public FindEmitter(Types types, DeclaredType repositoryType) {
-        this(H2Dialect.INSTANCE, types, repositoryType);
+    public FindEmitter(Types types, DeclaredType baseRepositoryType, DeclaredType repositoryOwnType) {
+        this(H2Dialect.INSTANCE, types, baseRepositoryType, repositoryOwnType);
+    }
+
+    /**
+     * Returns the appropriate DeclaredType for overriding the given method.
+     * If the method is declared on the repository interface itself, use the repository's own type.
+     * If the method is inherited from a base repository (CrudRepository etc.), use the parameterized base type.
+     */
+    private DeclaredType resolveTypeFor(ExecutableElement method) {
+        if (method.getEnclosingElement().equals(repositoryOwnType.asElement())) {
+            return repositoryOwnType;
+        }
+        return baseRepositoryType;
     }
 
     /**
@@ -109,7 +127,7 @@ public final class FindEmitter {
     // ── Plain finder ─────────────────────────────────────────────────────
 
     private MethodSpec emitPlainFinder(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
+        MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
 
         String sql = buildSelectSql(ctx, method);
         String constBase = toSqlConstantName(method.name());
@@ -122,34 +140,42 @@ public final class FindEmitter {
     private String buildSelectSql(RepositoryContext ctx, MethodContext method) {
         SqlBuilder sqlBuilder = new SqlBuilder(ctx.entity());
         sqlBuilder.dialect(dialect);
-        return sqlBuilder.selectBy(
-                method.predicates(),
-                method.sorts(),
-                0,
-                null,
-                method.distinct()
-        );
+        ResultKind rk = method.resultKind() == ResultKind.COUNT || method.resultKind() == ResultKind.EXISTS
+                ? ResultKind.LIST : method.resultKind();
+        return sqlBuilder.render(new QueryDefinition.Read(
+                rk, method.predicates(), method.sorts(),
+                PagingMode.NONE, LimitSpec.none(), List.of(), List.of(), method.distinct()));
     }
 
     private void addPlainFinderBody(MethodSpec.Builder builder, RepositoryContext ctx,
                                      MethodContext method, String sqlConstantName) {
         ClassName rowMapperType = ctx.rowMapperType();
         List<ParamBinding> bindings = method.paramBindings();
-        boolean needsHydration = ctx.entity().ownsAggregateLifecycle()
-                && hasToManyCollections(ctx.entity());
+        boolean needsHydration = hasToManyCollections(ctx.entity());
 
         CodeBlock.Builder body = CodeBlock.builder();
 
         if (needsHydration) {
             // For aggregate roots, capture result in a variable and hydrate before returning
-            body.add("var $L = jdbcClient\n", "result");
-            body.add("    .sql($L)\n", sqlConstantName);
-            appendParamBindings(body, bindings, method);
-            body.add("    .query(new $T())\n", rowMapperType);
-            emitTerminalSingle(body, method.resultKind(), ctx);
-            body.add(";\n");
-            emitHydrationCall(body, method.resultKind());
-            body.add("return $L;", "result");
+            if (method.resultKind() == ResultKind.STREAM) {
+                // Stream: get list first, hydrate, then convert to stream
+                body.add("var $L = jdbcClient\n", "result");
+                body.add("    .sql($L)\n", sqlConstantName);
+                appendParamBindings(body, bindings, method);
+                body.add("    .query(new $T())\n", rowMapperType);
+                body.add("    .list();\n");
+                body.add("hydrateList($L);\n", "result");
+                body.add("return $L.stream();", "result");
+            } else {
+                body.add("var $L = jdbcClient\n", "result");
+                body.add("    .sql($L)\n", sqlConstantName);
+                appendParamBindings(body, bindings, method);
+                body.add("    .query(new $T())\n", rowMapperType);
+                emitTerminalSingle(body, method.resultKind(), ctx);
+                body.add(";\n");
+                emitHydrationCall(body, method.resultKind());
+                body.add("return $L;", "result");
+            }
         } else {
             body.add("return $L\n", "jdbcClient");
             body.add("    .sql($L)\n", sqlConstantName);
@@ -164,7 +190,7 @@ public final class FindEmitter {
     // ── Offset-paged finder ──────────────────────────────────────────────
 
     private MethodSpec emitOffsetPagedFinder(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
+        MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
 
         String entityFqn = ctx.entity().typeName();
         ClassName entityType = ClassName.bestGuess(entityFqn);
@@ -220,13 +246,13 @@ public final class FindEmitter {
     private String buildCountSql(RepositoryContext ctx, MethodContext method) {
         SqlBuilder sqlBuilder = new SqlBuilder(ctx.entity());
         sqlBuilder.dialect(dialect);
-        return sqlBuilder.countBy(method.predicates());
+        return sqlBuilder.render(new QueryDefinition.Count(method.predicates(), List.of(), false));
     }
 
     // ── Cursor-paged finder ──────────────────────────────────────────────
 
     private MethodSpec emitCursorPagedFinder(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
+        MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
 
         String entityFqn = ctx.entity().typeName();
         ClassName entityType = ClassName.bestGuess(entityFqn);
@@ -234,10 +260,12 @@ public final class FindEmitter {
         List<SortSpec> sorts = method.sorts();
 
         // Build the base SELECT SQL shell (no ORDER BY, no seek clause, no LIMIT).
-        // Pass empty sorts so selectBy produces no ORDER BY — the ORDER BY below is the sole source.
+        // Pass empty sorts so the render produces no ORDER BY — the ORDER BY below is the sole source.
         SqlBuilder sqlBuilder = new SqlBuilder(ctx.entity());
         sqlBuilder.dialect(dialect);
-        String baseSql = sqlBuilder.selectBy(method.predicates(), List.of(), 0, null, method.distinct());
+        String baseSql = sqlBuilder.render(new QueryDefinition.Read(
+                ResultKind.LIST, method.predicates(), List.of(),
+                PagingMode.NONE, LimitSpec.none(), List.of(), List.of(), method.distinct()));
         boolean shellHasWhere = !method.predicates().isEmpty();
 
         // Build sort terms and ascending flags for seek clause
@@ -285,18 +313,18 @@ public final class FindEmitter {
         // String sql = SEEK_SQL + " LIMIT :limit";
         body.addStatement("$T sql = $L + $S", String.class, seekConstName, dialect.limitClause(":limit"));
 
-        // var stmt = jdbcClient.sql(sql).param("limit", pageRequest.size());
-        body.add("var $L = jdbcClient\n", "stmt");
+        // var content = jdbcClient.sql(sql).param("limit", pageRequest.size());
+        body.add("var $L = jdbcClient\n", "content");
         body.add("    .sql(sql)\n");
         body.add("    .param($S, $L.size())\n", "limit", pageRequestParam);
 
         // Bind cursor keys if cursor is present
         if (!terms.isEmpty()) {
-            body.add("    .param($S, $L.cursor().isPresent() ? $L.cursor().get().key(0) : null)\n",
+            body.add("    .param($S, $L.cursor().isPresent() ? $L.cursor().get().get(0) : null)\n",
                     "cursor0", pageRequestParam, pageRequestParam);
             // For multi-key cursors, add more bindings
             for (int i = 1; i < terms.size(); i++) {
-                body.add("    .param($S, $L.cursor().isPresent() ? $L.cursor().get().key($L) : null)\n",
+                body.add("    .param($S, $L.cursor().isPresent() ? $L.cursor().get().get($L) : null)\n",
                         "cursor" + i, pageRequestParam, pageRequestParam, i);
             }
         }
@@ -342,12 +370,37 @@ public final class FindEmitter {
                 // Handle dot paths by chaining getters
                 if (prop.contains(".")) {
                     String[] parts = prop.split("\\.");
-                    StringBuilder accessor = new StringBuilder("entity");
-                    for (String part : parts) {
-                        String g = "get" + Character.toUpperCase(part.charAt(0)) + part.substring(1);
-                        accessor.append(".").append(g).append("()");
+                    // Generate runtime type check for to-many paths
+                    String firstGetter = "get" + Character.toUpperCase(parts[0].charAt(0)) + parts[0].substring(1);
+                    // Resolve the element type for the collection (if to-many)
+                    String elementTypeName = resolveCollectionElementType(ctx, parts[0]);
+
+                    body.add("        case $S -> {\n", prop);
+                    body.add("            var $L = entity.$L();\n", "v0", firstGetter);
+                    body.add("            if ($L instanceof $T) {\n", "v0", java.util.List.class);
+                    // To-many: stream().map().toList()
+                    String itemVar = parts[0] + "i";
+                    if (elementTypeName != null) {
+                        StringBuilder chain = new StringBuilder("((" + ClassName.bestGuess(elementTypeName) + ") " + itemVar + ")");
+                        for (int i = 1; i < parts.length; i++) {
+                            String g = "get" + Character.toUpperCase(parts[i].charAt(0)) + parts[i].substring(1);
+                            chain.append(".").append(g).append("()");
+                        }
+                        body.add("                yield (($T<?>) $L).stream().map($L -> $L).toList();\n",
+                                java.util.List.class, "v0", itemVar, chain.toString());
+                    } else {
+                        // Fallback: use entity type as cast target
+                        body.add("                yield (($T<?>) $L).stream().map($L -> (($T) $L).$L()).toList();\n",
+                                java.util.List.class, "v0", itemVar,
+                                ClassName.bestGuess(ctx.entity().typeName()), itemVar,
+                                "get" + Character.toUpperCase(parts[parts.length - 1].charAt(0)) + parts[parts.length - 1].substring(1));
                     }
-                    body.add("        case $S -> $L;\n", prop, accessor.toString());
+                    body.add("            } else {\n");
+                    // To-one: this branch handles non-collection intermediate values
+                    // For dot paths starting from a collection, this is unreachable
+                    body.add("                yield null;\n");
+                    body.add("            }\n");
+                    body.add("        }\n");
                 } else {
                     body.add("        case $S -> entity.$L();\n", prop, getter);
                 }
@@ -385,10 +438,38 @@ public final class FindEmitter {
         return String.join(", ", terms);
     }
 
+    private boolean isToManyPath(RepositoryContext ctx, String firstSegment) {
+        for (io.github.fludakit.data.metadata.TypeMapping.Prop prop : ctx.entity().props()) {
+            if (prop instanceof io.github.fludakit.data.metadata.TypeMapping.Prop.EntityCollection ec
+                    && ec.name().equals(firstSegment)) {
+                return true;
+            }
+            if (prop instanceof io.github.fludakit.data.metadata.TypeMapping.Prop.ElementCollection ec
+                    && ec.name().equals(firstSegment)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String resolveCollectionElementType(RepositoryContext ctx, String firstSegment) {
+        for (io.github.fludakit.data.metadata.TypeMapping.Prop prop : ctx.entity().props()) {
+            if (prop instanceof io.github.fludakit.data.metadata.TypeMapping.Prop.EntityCollection ec
+                    && ec.name().equals(firstSegment)) {
+                return ec.targetTypeName();
+            }
+            if (prop instanceof io.github.fludakit.data.metadata.TypeMapping.Prop.ElementCollection ec
+                    && ec.name().equals(firstSegment) && ec.target() != null) {
+                return ec.target().typeName();
+            }
+        }
+        return null;
+    }
+
     // ── Count ────────────────────────────────────────────────────────────
 
     private MethodSpec emitCount(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
+        MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
 
         String sql = buildCountSql(ctx, method);
         String constBase = toSqlConstantName(method.name());
@@ -409,7 +490,7 @@ public final class FindEmitter {
     // ── Exists ───────────────────────────────────────────────────────────
 
     private MethodSpec emitExists(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
+        MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
 
         String sql = buildExistsSql(ctx, method);
         String constBase = toSqlConstantName(method.name());
@@ -428,41 +509,32 @@ public final class FindEmitter {
     }
 
     private String buildExistsSql(RepositoryContext ctx, MethodContext method) {
-        String table = dialect.quoteIdentifier(ctx.entity().tableName());
-        StringBuilder sb = new StringBuilder("SELECT EXISTS(SELECT 1 FROM ").append(table);
-        List<Predicate> predicates = method.predicates();
-        if (!predicates.isEmpty()) {
-            sb.append(" WHERE ");
-            List<String> conjuncts = new ArrayList<>();
-            for (Predicate p : predicates) {
-                String col = dialect.quoteIdentifier(
-                        io.github.fludakit.data.Names.columnBase(p.property()));
-                conjuncts.add(renderOperator(p.operator(), col, p.param(), p.ignoreCase()));
-            }
-            sb.append(String.join(" AND ", conjuncts));
-        }
-        sb.append(")");
-        return sb.toString();
+        SqlBuilder sqlBuilder = new SqlBuilder(ctx.entity());
+        sqlBuilder.dialect(dialect);
+        return sqlBuilder.render(new QueryDefinition.Exists(method.predicates(), List.of()));
     }
 
     // ── DeleteBy ─────────────────────────────────────────────────────────
 
     private MethodSpec emitDeleteBy(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
+        MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
 
         SqlBuilder sqlBuilder = new SqlBuilder(ctx.entity());
         sqlBuilder.dialect(dialect);
-        String sql = sqlBuilder.deleteBy(method.predicates());
+        ResultKind rk = method.resultKind() == ResultKind.VOID ? ResultKind.VOID : method.resultKind();
+        String sql = sqlBuilder.render(new QueryDefinition.DeleteWhere(method.predicates(), List.of(), rk));
         String constBase = toSqlConstantName(method.name());
         String constName = ctx.registerConstant(constBase, sql);
 
         List<ParamBinding> bindings = method.paramBindings();
 
         CodeBlock.Builder body = CodeBlock.builder();
-        body.add("return jdbcClient\n");
+        boolean isVoid = method.resultKind() == ResultKind.VOID;
+        if (!isVoid) body.add("return ");
+        body.add("jdbcClient\n");
         body.add("    .sql($L)\n", constName);
         appendParamBindings(body, bindings, method);
-        body.add("    .execute();");
+        body.add("    .update();");
         builder.addCode(body.build());
 
         return builder.build();
@@ -476,7 +548,7 @@ public final class FindEmitter {
      * and handles the return type (SINGLE, LIST, OPTIONAL, etc.).
      */
     private MethodSpec emitCustomQuery(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
+        MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
 
         String sql = method.customSql();
         String constBase = toSqlConstantName(method.name());
@@ -489,11 +561,13 @@ public final class FindEmitter {
         CodeBlock.Builder body = CodeBlock.builder();
 
         if (op == Operation.DELETE) {
-            // DELETE query: jdbcClient.sql(SQL).param(...).execute()
-            body.add("return jdbcClient\n");
+            // DELETE query: jdbcClient.sql(SQL).param(...).update()
+            boolean isVoid = method.resultKind() == ResultKind.VOID;
+            if (!isVoid) body.add("return ");
+            body.add("jdbcClient\n");
             body.add("    .sql($L)\n", constName);
             appendParamBindings(body, bindings, method);
-            body.add("    .execute();");
+            body.add("    .update();");
         } else {
             // SELECT query: jdbcClient.sql(SQL).param(...).query(new RowMapper()).terminal()
             body.add("return jdbcClient\n");

@@ -71,8 +71,6 @@ public final class RowMapperEmitter {
      * @return the {@link ClassName} of the generated row mapper, or {@code null} if not eligible
      */
     public ClassName emit(TypeMapping<?> mapping) {
-        if (!isEligible(mapping)) return null;
-
         String typeFqn = mapping.typeName();
         String packageName = packageNameOf(typeFqn);
         String simpleName = simpleNameOf(typeFqn);
@@ -124,7 +122,11 @@ public final class RowMapperEmitter {
         if (prop instanceof Prop.Embedded embedded) {
             return isEmbeddedEligible(embedded.target());
         }
-        // Reference, EntityCollection, ElementCollection are NOT eligible
+        if (prop instanceof Prop.Reference ref) {
+            // Non-back-reference references are eligible (read FK + id-only partial)
+            return !ref.backReference();
+        }
+        // EntityCollection, ElementCollection are NOT eligible
         return false;
     }
 
@@ -148,6 +150,7 @@ public final class RowMapperEmitter {
                 .addModifiers(Modifier.PUBLIC)
                 .returns(entityType)
                 .addParameter(RESULT_SET, "rs")
+                .addParameter(int.class, "rowNum")
                 .addException(ClassName.get("java.sql", "SQLException"));
 
         // Create entity instance
@@ -180,8 +183,12 @@ public final class RowMapperEmitter {
         } else if (prop instanceof Prop.Embedded embedded) {
             addEmbeddedRead(method, entityVar, embedded.name(),
                     columnPrefix, embedded.target(), rsVar);
+        } else if (prop instanceof Prop.Reference ref) {
+            if (!ref.backReference()) {
+                addReferenceRead(method, entityVar, ref, rsVar);
+            }
         }
-        // Id is handled separately; Reference/EntityCollection/ElementCollection are ineligible
+        // Id is handled separately; EntityCollection/ElementCollection are ineligible
     }
 
     // ── Scalar reading ───────────────────────────────────────────────────
@@ -227,11 +234,11 @@ public final class RowMapperEmitter {
             return CodeBlock.of("$L.getBytes($S)", rsVar, column);
         }
 
-        // Enum types
+        // Enum types — null-safe: return null when column is NULL
         if (isEnum(typeFqn)) {
             ClassName enumType = ClassName.bestGuess(typeFqn);
-            return CodeBlock.of("$T.valueOf($T.class, $L.getString($S))",
-                    Enum.class, enumType, rsVar, column);
+            return CodeBlock.of("$L.getString($S) == null ? null : $T.valueOf($T.class, $L.getString($S))",
+                    rsVar, column, Enum.class, enumType, rsVar, column);
         }
 
         // Boxed types and well-known object types → getObject(column, Type.class)
@@ -250,7 +257,8 @@ public final class RowMapperEmitter {
     /**
      * Generates code to read an embedded value object's fields from the ResultSet.
      * The VO's columns are flattened into the same ResultSet with a prefix derived from
-     * the embedded field name.
+     * the embedded field name. The VO is only set on the parent when at least one leaf
+     * value is non-null (presence rule).
      */
     private void addEmbeddedRead(MethodSpec.Builder method, String entityVar,
                                  String fieldName, String columnPrefix,
@@ -262,22 +270,152 @@ public final class RowMapperEmitter {
         String voVar = fieldName;
         String newPrefix = columnPrefix + io.github.fludakit.data.Names.columnBase(fieldName) + "_";
 
-        // Create VO instance
-        method.addStatement("$T $L = new $T()", voType, voVar, voType);
+        java.util.List<String> nullCheckVars = new java.util.ArrayList<>();
+        java.util.List<Runnable> setters = new java.util.ArrayList<>();
 
-        // Read VO props
         for (Prop prop : voMapping.props()) {
             if (prop instanceof Prop.Scalar scalar) {
                 String column = newPrefix + scalar.column();
-                addScalarRead(method, voVar, scalar.name(), column, scalar.typeFqn(), rsVar);
+                String tempVar = voVar + "_" + scalar.name();
+                addScalarReadToVar(method, tempVar, column, scalar.typeFqn(), rsVar);
+                nullCheckVars.add(tempVar);
+                setters.add(() -> method.addStatement("$L.$L($L)", voVar, setterName(scalar.name()), tempVar));
             } else if (prop instanceof Prop.Embedded embedded) {
-                addEmbeddedRead(method, voVar, embedded.name(),
+                String nestedVar = voVar + "_" + embedded.name();
+                addEmbeddedReadReturning(method, nestedVar, embedded.name(),
                         newPrefix, embedded.target(), rsVar);
+                nullCheckVars.add(nestedVar);
+                setters.add(() -> method.addStatement("$L.$L($L)", voVar, setterName(embedded.name()), nestedVar));
             }
         }
 
-        // Set VO on entity
+        method.beginControlFlow("if ($L)", buildPresenceCheck(nullCheckVars));
+        method.addStatement("$T $L = new $T()", voType, voVar, voType);
+        for (Runnable setter : setters) {
+            setter.run();
+        }
         method.addStatement("$L.$L($L)", entityVar, setterName(fieldName), voVar);
+        method.nextControlFlow("else");
+        method.addStatement("$T $L = null", voType, voVar);
+        method.endControlFlow();
+    }
+
+    /**
+     * Like {@link #addEmbeddedRead} but guarantees the nested VO variable is always declared
+     * (either to a new instance or null), so the parent can reference it in its presence check.
+     */
+    private void addEmbeddedReadReturning(MethodSpec.Builder method, String voVar,
+                                           String fieldName, String columnPrefix,
+                                           ValueObjectMapping<?> voMapping, String rsVar) {
+        if (voMapping == null) {
+            method.addStatement("$T $L = null", ClassName.get(Object.class), voVar);
+            return;
+        }
+
+        String voTypeFqn = voMapping.typeName();
+        ClassName voType = ClassName.bestGuess(voTypeFqn);
+        String newPrefix = columnPrefix + io.github.fludakit.data.Names.columnBase(fieldName) + "_";
+
+        java.util.List<String> nullCheckVars = new java.util.ArrayList<>();
+        java.util.List<Runnable> setters = new java.util.ArrayList<>();
+
+        for (Prop prop : voMapping.props()) {
+            if (prop instanceof Prop.Scalar scalar) {
+                String column = newPrefix + scalar.column();
+                String tempVar = voVar + "_" + scalar.name();
+                addScalarReadToVar(method, tempVar, column, scalar.typeFqn(), rsVar);
+                nullCheckVars.add(tempVar);
+                setters.add(() -> method.addStatement("$L.$L($L)", voVar, setterName(scalar.name()), tempVar));
+            } else if (prop instanceof Prop.Embedded embedded) {
+                String nestedVar = voVar + "_" + embedded.name();
+                addEmbeddedReadReturning(method, nestedVar, embedded.name(),
+                        newPrefix, embedded.target(), rsVar);
+                nullCheckVars.add(nestedVar);
+                setters.add(() -> method.addStatement("$L.$L($L)", voVar, setterName(embedded.name()), nestedVar));
+            }
+        }
+
+        method.addStatement("$T $L", voType, voVar);
+        method.beginControlFlow("if ($L)", buildPresenceCheck(nullCheckVars));
+        method.addStatement("$L = new $T()", voVar, voType);
+        for (Runnable setter : setters) {
+            setter.run();
+        }
+        method.nextControlFlow("else");
+        method.addStatement("$L = null", voVar);
+        method.endControlFlow();
+    }
+    private void addScalarReadToVar(MethodSpec.Builder method, String varName,
+                                     String column, String typeFqn, String rsVar) {
+        CodeBlock readExpr = buildReadExpression(column, typeFqn, rsVar);
+        TypeName javaType = boxType(typeFqn);
+        method.addStatement("$T $L = $L", javaType, varName, readExpr);
+    }
+
+    /**
+     * Builds a presence-check expression: {@code true} if the list is empty (no leaves to check),
+     * otherwise {@code var1 != null || var2 != null || ...}.
+     */
+    private static String buildPresenceCheck(java.util.List<String> nullCheckVars) {
+        if (nullCheckVars.isEmpty()) return "false";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < nullCheckVars.size(); i++) {
+            if (i > 0) sb.append(" || ");
+            sb.append(nullCheckVars.get(i)).append(" != null");
+        }
+        return sb.toString();
+    }
+
+    // ── Reference reading ────────────────────────────────────────────────
+
+    /**
+     * Generates code to read a to-one reference from the ResultSet.
+     * Reads the FK column and creates an id-only partial of the target type.
+     * If the FK is null, the reference is set to null.
+     */
+    private void addReferenceRead(MethodSpec.Builder method, String entityVar,
+                                  Prop.Reference ref, String rsVar) {
+        String targetFqn = ref.targetTypeName();
+        if (targetFqn == null) return;
+
+        ClassName targetType = ClassName.bestGuess(targetFqn);
+        String fkColumn = ref.fkColumn();
+        String fkVar = ref.name() + "_fk";
+
+        // Determine the ID type from the target's id
+        String idTypeFqn = "java.lang.Long"; // default
+        if (ref.target() != null && ref.target().id() != null) {
+            idTypeFqn = ref.target().id().typeFqn();
+        }
+        String idColumn = ref.targetIdColumn() != null ? ref.targetIdColumn() : "id";
+
+        // Read FK value
+        CodeBlock fkRead = buildReadExpression(fkColumn, idTypeFqn, rsVar);
+        method.addStatement("$T $L = $L", boxType(idTypeFqn), fkVar, fkRead);
+
+        // If FK is not null, create id-only partial
+        method.beginControlFlow("if ($L != null)", fkVar);
+        method.addStatement("$T $L = new $T()", targetType, ref.name(), targetType);
+        method.addStatement("$L.$L($L)", ref.name(), setterName("id"), fkVar);
+        method.addStatement("$L.$L($L)", entityVar, setterName(ref.name()), ref.name());
+        method.endControlFlow();
+    }
+
+    /**
+     * Returns the boxed type for a primitive type, or the type itself if already boxed.
+     */
+    private static TypeName boxType(String typeFqn) {
+        return switch (typeFqn) {
+            case "boolean" -> ClassName.get(Boolean.class);
+            case "byte" -> ClassName.get(Byte.class);
+            case "short" -> ClassName.get(Short.class);
+            case "int" -> ClassName.get(Integer.class);
+            case "long" -> ClassName.get(Long.class);
+            case "float" -> ClassName.get(Float.class);
+            case "double" -> ClassName.get(Double.class);
+            case "char" -> ClassName.get(Character.class);
+            default -> ClassName.bestGuess(typeFqn);
+        };
     }
 
     // ── Type utilities ───────────────────────────────────────────────────

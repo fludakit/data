@@ -179,8 +179,8 @@ final class TypeMappingVisitor {
                 return buildElementCollection(fieldName, elementType, elementTE,
                         ownerTable, ownerSingular);
             }
-            if (isAggregate && isEntityOrAggregate(elementTE)) {
-                // List<@Entity> on @AggregateRoot → EntityCollection
+            if (isEntityOrAggregate(elementTE)) {
+                // List<@Entity> on @Entity or @AggregateRoot → EntityCollection
                 return buildEntityCollection(fieldName, elementType, elementTE,
                         ownerSingular, ownerFqn);
             }
@@ -229,7 +229,13 @@ final class TypeMappingVisitor {
             EmbeddedValueObjectMapping<?> voMapping = buildEmbeddedVO(fieldTypeElement);
             return new Prop.Embedded(fieldName, voMapping);
         }
-        // Scalar (VOs may only contain scalars and embedded VOs)
+        if (fieldTypeElement != null && field.getAnnotation(Association.class) != null) {
+            String targetFqn = fieldTypeElement.getQualifiedName().toString();
+            TypeMapping<?> target = cache.get(targetFqn);
+            return new Prop.Reference(fieldName, Names.fkColumn(fieldName),
+                    targetFqn, target, false, false);
+        }
+        // Scalar (VOs may only contain scalars, embedded VOs, and @Association references)
         return new Prop.Scalar(fieldName, Names.toSnakeCase(fieldName), typeFqn(fieldType));
     }
 
@@ -315,7 +321,7 @@ final class TypeMappingVisitor {
                     .put(fieldName, targetFqn);
         }
 
-        return new Prop.EntityCollection(fieldName, target, inverseName, inverseFkColumn);
+        return new Prop.EntityCollection(fieldName, targetFqn, target, inverseName, inverseFkColumn);
     }
 
     // ── Resolution pass ──────────────────────────────────────────────────
@@ -369,7 +375,7 @@ final class TypeMappingVisitor {
                 if (targetFqn != null) {
                     TypeMapping<?> target = cache.get(targetFqn);
                     if (target != null) {
-                        return new Prop.EntityCollection(ec.name(), target,
+                        return new Prop.EntityCollection(ec.name(), ec.targetTypeName(), target,
                                 ec.inverseName(), ec.inverseFkColumn());
                     }
                 }

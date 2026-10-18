@@ -1515,7 +1515,7 @@ class ReadProjectionTest {
         // pin the one-to-many inverse-fk join). What stays pinned here: a List<@Entity> in a
         // value object exposes the navigable list attribute with the ENTITY element type and
         // never contributes a column of its own.
-        assertTrue(vmd.contains("new TypeMapping.Prop.EntityCollection(\"things\", null, null, null)"),
+        assertTrue(vmd.contains("new TypeMapping.Prop.EntityCollection(\"things\""),
                 "a List<@Entity> in a value object must expose a navigable entity-typed list attribute:"
                         + System.lineSeparator() + vmd);
         assertTrue(!vmd.contains("new ColumnRef(\"things"),

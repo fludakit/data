@@ -92,7 +92,7 @@ class TypeMappingTest {
                 List.of(new Prop.Scalar("status", "status", "java.lang.String"),
                         new Prop.Embedded("address", geo()),
                         new Prop.Reference("customer", "customer_id", "test.Customer", customer(), false, false),
-                        new Prop.EntityCollection("lines", line, "order", "order_id"),
+                        new Prop.EntityCollection("lines", "test.Line", line, "order", "order_id"),
                         new Prop.ElementCollection("tags", tags)));
 
         Map<String, ColumnRef> refs = order.columnRefs();
@@ -134,7 +134,7 @@ class TypeMappingTest {
     void stereotypeAndToManyAndLookups() {
         TypeMapping<?> parent = new AggregateTypeMapping("test.Parent", "parent",
                 new Prop.Id("id", "id", "java.lang.Long"),
-                List.of(new Prop.EntityCollection("children", customer(), "owner", "owner_id")));
+                List.of(new Prop.EntityCollection("children", "test.Customer", customer(), "owner", "owner_id")));
         assertTrue(parent.isToManyPath("children.id"));
         assertFalse(parent.isToManyPath("id"));
         assertFalse(parent.isToManyPath("unknown"));

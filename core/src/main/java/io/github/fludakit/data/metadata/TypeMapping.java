@@ -384,13 +384,8 @@ public interface TypeMapping<T> extends TableSchema, ColumnResolver {
          * until relation resolution completes. The target is a {@link TypeMapping} so an aggregate
          * root can be the collection's element type.
          */
-        record EntityCollection(String name, TypeMapping<?> target,
+        record EntityCollection(String name, String targetTypeName, TypeMapping<?> target,
                                 String inverseName, String inverseFkColumn) implements Prop {
-
-            /** Target entity type, or {@code null} until resolved. */
-            public String targetTypeName() {
-                return target == null ? null : target.typeName();
-            }
 
             /** Target table, or {@code null} until resolved. */
             public String targetTable() {

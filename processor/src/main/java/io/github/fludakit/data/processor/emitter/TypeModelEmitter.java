@@ -205,9 +205,10 @@ public final class TypeModelEmitter {
                     PROP_REFERENCE, ref.name(), ref.fkColumn(),
                     ref.targetTypeName(), ref.composition(), ref.backReference());
         } else if (prop instanceof Prop.EntityCollection ec) {
-            // Target is null in generated descriptors
-            return CodeBlock.of("new $T($S, null, $S, $S)",
+            // Target is null in generated descriptors, but targetTypeName is preserved
+            return CodeBlock.of("new $T($S, $S, null, $S, $S)",
                     PROP_ENTITY_COLLECTION, ec.name(),
+                    ec.targetTypeName() == null ? "" : ec.targetTypeName(),
                     ec.inverseName() == null ? "" : ec.inverseName(),
                     ec.inverseFkColumn() == null ? "" : ec.inverseFkColumn());
         } else if (prop instanceof Prop.ElementCollection ec) {

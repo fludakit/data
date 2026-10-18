@@ -238,11 +238,23 @@ final class TypeMappingVisitor {
     /**
      * Builds an {@link EmbeddedValueObjectMapping} for a VO field by scanning its declared fields
      * recursively. VOs may only contain scalars and other embedded VOs.
+     *
+     * <p>If a VO cycle is detected (the VO FQN is already being scanned higher in the call stack),
+     * returns an empty placeholder mapping and emits a diagnostic note to avoid
+     * {@link StackOverflowError}.
      */
     private EmbeddedValueObjectMapping<?> buildEmbeddedVO(TypeElement voType) {
         String voFqn = voType.getQualifiedName().toString();
-        List<Prop> voProps = scanVOProps(voType);
-        return new EmbeddedValueObjectMapping<>(voFqn, voProps);
+        if (!inProgress.add(voFqn)) {
+            diagnostics.note("Cycle detected in VO scanning: " + voFqn + " — skipping embedded fields", voType);
+            return new EmbeddedValueObjectMapping<>(voFqn, Collections.emptyList());
+        }
+        try {
+            List<Prop> voProps = scanVOProps(voType);
+            return new EmbeddedValueObjectMapping<>(voFqn, voProps);
+        } finally {
+            inProgress.remove(voFqn);
+        }
     }
 
     /**

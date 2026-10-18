@@ -40,9 +40,6 @@ import java.util.regex.Pattern;
  */
 public final class RepositoryMethodValidator {
 
-    /** The query-by-method-name parser: an OPTIONAL compile dependency, probed before use. */
-    private static final String QBN_PARSER = "io.github.fludakit.data.qbn.QueryByMethodNameParser";
-
     /** Method names {@code CrudRepository}/{@code BasicRepository} contribute. */
     private static final Set<String> BUILT_IN_METHODS = Set.of(
             "save", "saveAll", "insert", "insertAll", "update", "updateAll",
@@ -53,22 +50,9 @@ public final class RepositoryMethodValidator {
     private static final Set<String> SEQUENCE_LIFECYCLE_METHODS = Set.of("saveAll", "insertAll", "updateAll", "deleteAll");
     private static final Set<String> IDENTIFIER_METHODS = Set.of("findById", "deleteById", "existsById");
 
-    /**
-     * The action prefixes a query-by-method name starts with. See
-     * {@link #isQueryMethodName(String)} for why they are spelled out here instead of being read
-     * from {@code qbn}.
-     */
-    private static final List<String> QUERY_METHOD_PREFIXES = List.of("find", "count", "delete", "exists");
-
-    /** A query method name carrying no criteria: {@code findBy}, {@code count}, {@code deleteBy}, ... */
-    private static final Pattern BARE_QUERY_NAME =
-            Pattern.compile("(?:find|count|delete|exists)By?");
-
     private final Diagnostics diagnostics;
     private final Types types;
     private final Elements elements;
-    private boolean queryByNameChecked;
-    private boolean queryByNameAvailable;
 
     public RepositoryMethodValidator(Diagnostics diagnostics, Types types, Elements elements) {
         this.diagnostics = diagnostics;
@@ -146,7 +130,7 @@ public final class RepositoryMethodValidator {
                                       TypeMapping<?> entity) {
         boolean delete = method.getAnnotation(Delete.class) != null;
         if (parameterTypes.size() == 1) {
-            TypeMirror parameter = parameterTypes.get(0);
+            TypeMirror parameter = parameterTypes.getFirst();
             if (TypeMirrors.isEntity(types, elements, parameter, entity) || isEntitySequence(parameter, entity)) {
                 return true;
             }
@@ -175,9 +159,9 @@ public final class RepositoryMethodValidator {
         int arity = parameterTypes.size();
         boolean ok;
         if (ENTITY_LIFECYCLE_METHODS.contains(name)) {
-            ok = arity == 1 && TypeMirrors.isEntity(types, elements, parameterTypes.get(0), entity);
+            ok = arity == 1 && TypeMirrors.isEntity(types, elements, parameterTypes.getFirst(), entity);
         } else if (SEQUENCE_LIFECYCLE_METHODS.contains(name)) {
-            ok = arity == 1 && isEntitySequence(parameterTypes.get(0), entity);
+            ok = arity == 1 && isEntitySequence(parameterTypes.getFirst(), entity);
         } else if (IDENTIFIER_METHODS.contains(name)) {
             ok = arity == 1;
         } else if ("findAll".equals(name)) {
@@ -200,23 +184,23 @@ public final class RepositoryMethodValidator {
      * and rejected name are reported separately because they have different fixes.
      */
     private boolean validateQueryByName(ExecutableElement method, String name) {
-        if (!isQueryMethodName(name)) {
+        if (!QbnSupport.isQueryMethodName(name)) {
             error(method, "Repository method '" + name + "' is not a query-by-method name and carries no Jakarta"
                     + " Data query annotation; annotate it with @Query to supply the statement");
             return false;
         }
         // A bare action (with or without 'By') declares no criteria — a paged read over the whole
         // table — so there is nothing for the parser to resolve.
-        if (BARE_QUERY_NAME.matcher(name).matches()) {
+        if (QbnSupport.isBareQueryName(name)) {
             return true;
         }
-        if (!queryByNameAvailable()) {
+        if (!QbnSupport.isAvailable()) {
             error(method, "Repository method '" + name + "' needs query-by-method-name support: add"
                     + " fluda-data-qbn to the annotation processor path (-processorpath /"
                     + " annotationProcessorPaths), or annotate the method with @Query");
             return false;
         }
-        String rejected = rejectionOf(name);
+        String rejected = QbnSupport.rejectionOf(name);
         if (rejected != null) {
             // The REASON the parser gave, not a restatement of the shape it failed. The parser knows
             // why the name is wrong — Not on an operator the spec does not negate, Distinct on an
@@ -227,64 +211,6 @@ public final class RepositoryMethodValidator {
             return false;
         }
         return true;
-    }
-
-    /**
-     * Whether {@code name} starts with one of the four query-by-method-name action prefixes.
-     *
-     * <p>These four strings repeat {@code io.github.fludakit.data.qbn.Action} on purpose. The parser
-     * is an OPTIONAL compile dependency, so this test must still answer when {@code fluda-data-qbn}
-     * is absent from the annotation processor path — that absence is exactly what the caller
-     * diagnoses next. Reaching for the qbn enum here would answer the question with a
-     * {@code NoClassDefFoundError} instead of a {@code boolean}.</p>
-     */
-    public static boolean isQueryMethodName(String name) {
-        for (String prefix : QUERY_METHOD_PREFIXES) {
-            if (name.startsWith(prefix)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /** Whether the optional {@code fluda-data-qbn} parser is on this processor's classpath. */
-    private boolean queryByNameAvailable() {
-        if (!queryByNameChecked) {
-            queryByNameChecked = true;
-            queryByNameAvailable = probe();
-        }
-        return queryByNameAvailable;
-    }
-
-    private static boolean probe() {
-        try {
-            Class.forName(QBN_PARSER);
-            return true;
-        } catch (ClassNotFoundException | LinkageError absent) {
-            return false;
-        }
-    }
-
-    /**
-     * Why {@code name} is not a query-by-method name, or {@code null} when it is one.
-     *
-     * <p>The reason comes back rather than a {@code boolean} because the parser computes it and the
-     * old {@code boolean} threw it away: {@code findByPriceNotLessThan} was reported as "not a valid
-     * query-by-method name" when the parser had already determined that {@code Not} cannot be
-     * combined with {@code LESS_THAN}. A {@code boolean} cannot carry that, so the diagnostic had to
-     * be written at the point that knew least about it.</p>
-     *
-     * <p>Fully qualified on purpose: {@code fluda-data-qbn} is an OPTIONAL dependency, so this class
-     * is compiled and loaded without it on the classpath. The import that would name the type is the
-     * thing that cannot be present.</p>
-     */
-    private static String rejectionOf(String name) {
-        try {
-            new io.github.fludakit.data.qbn.QueryByMethodNameParser().parse(name);
-            return null;
-        } catch (RuntimeException | LinkageError rejected) {
-            return rejected.getMessage();
-        }
     }
 
     // ------------------------------------------------------------------- helpers
@@ -337,5 +263,61 @@ public final class RepositoryMethodValidator {
         count += method.getAnnotation(Save.class) == null ? 0 : 1;
         count += method.getAnnotation(Delete.class) == null ? 0 : 1;
         return count;
+    }
+
+    /**
+     * The query-by-method-name parser is an OPTIONAL compile dependency; every question about it —
+     * whether a name is a query-by-method name, whether the parser is on the classpath, and what it
+     * returns or rejects — is answered here, through fully-qualified names and a classpath probe, so
+     * no other class reaches for {@code io.github.fludakit.data.qbn} directly.
+     */
+    static final class QbnSupport {
+
+        private static final String QBN_PARSER = "io.github.fludakit.data.qbn.QueryByMethodNameParser";
+        private static final List<String> QUERY_METHOD_PREFIXES = List.of("find", "count", "delete", "exists");
+        private static final Pattern BARE_QUERY_NAME = Pattern.compile("(?:find|count|delete|exists)By?");
+        private static Boolean available;
+
+        static boolean isQueryMethodName(String name) {
+            for (String prefix : QUERY_METHOD_PREFIXES) {
+                if (name.startsWith(prefix)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        static boolean isBareQueryName(String name) {
+            return BARE_QUERY_NAME.matcher(name).matches();
+        }
+
+        static boolean isAvailable() {
+            if (available == null) {
+                try {
+                    Class.forName(QBN_PARSER);
+                    available = true;
+                } catch (ClassNotFoundException | LinkageError absent) {
+                    available = false;
+                }
+            }
+            return available;
+        }
+
+        static Object parseOrNull(String name) {
+            try {
+                return new io.github.fludakit.data.qbn.QueryByMethodNameParser().parse(name);
+            } catch (RuntimeException | LinkageError rejected) {
+                return null;
+            }
+        }
+
+        static String rejectionOf(String name) {
+            try {
+                new io.github.fludakit.data.qbn.QueryByMethodNameParser().parse(name);
+                return null;
+            } catch (RuntimeException | LinkageError rejected) {
+                return rejected.getMessage();
+            }
+        }
     }
 }

@@ -39,7 +39,7 @@ public final class TypeMirrors {
         if (mirror instanceof DeclaredType declared
                 && LIST.equals(declared.asElement().toString())
                 && declared.getTypeArguments().size() == 1) {
-            return declared.getTypeArguments().get(0);
+            return declared.getTypeArguments().getFirst();
         }
         return null;
     }

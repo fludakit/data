@@ -4,6 +4,7 @@ import com.squareup.javapoet.CodeBlock;
 import com.squareup.javapoet.MethodSpec;
 import io.github.fludakit.data.Names;
 import io.github.fludakit.data.metadata.ColumnPlacement;
+import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.analysis.MethodResults;
@@ -26,8 +27,13 @@ import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.GeneratedArtifacts;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.query.Operation;
+import io.github.fludakit.data.query.LimitSpec;
+import io.github.fludakit.data.query.PagingMode;
+import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
+import io.github.fludakit.data.query.SeekTerm;
+import io.github.fludakit.data.query.SortSpec;
 import io.github.fludakit.data.sql.SqlBuilder;
 import io.github.fludakit.data.sql.SqlDialect;
 import jakarta.data.repository.OrderBy;
@@ -71,6 +77,78 @@ public final class FinderEmitter {
         this.registry = registry;
         this.methodResults = methodResults;
         this.resolver = resolver;
+    }
+
+    /**
+     * Folds a resolved {@link QueryPlan} into the published {@link QueryDefinition.Criteria}. The
+     * finder emitter is its only caller, so it lives here rather than as a top-level helper.
+     */
+    private static final class PlanPublisher {
+
+        private PlanPublisher() {
+        }
+
+        static QueryDefinition.Criteria queryDefinitionOf(Operation operation,
+                                                          ResultKind kind, ResultKind resultKind,
+                                                          QueryPlan plan, boolean distinct) {
+            List<Predicate> logicalPredicates = new ArrayList<>();
+            for (ResolvedPredicate rp : plan.predicates()) {
+                Predicate predicate = rp.predicate();
+                String authoritative = rp.attributePath();
+                logicalPredicates.add(Predicate.of(
+                        authoritative != null ? authoritative
+                                : resolvedAttributePath(plan.mapping(), rp.placement(), predicate.property()),
+                        predicate.operator(), predicate.param(), predicate.connector(), predicate.ignoreCase()));
+            }
+            List<SortSpec> logicalSorts = new ArrayList<>();
+            for (ResolvedSort rs : plan.sorts()) {
+                SortSpec sort = rs.sort();
+                String sortPath = rs.attributePath();
+                logicalSorts.add(SortSpec.of(
+                        sortPath != null ? sortPath
+                                : resolvedAttributePath(plan.mapping(), rs.placement(), sort.property()),
+                        sort.ascending(), sort.ignoreCase()));
+            }
+            PagingMode paging = kind == ResultKind.PAGE ? PagingMode.OFFSET
+                    : kind == ResultKind.CURSORED_PAGE ? PagingMode.CURSOR : PagingMode.NONE;
+            List<SeekTerm> seekTerms = paging == PagingMode.NONE ? List.of()
+                    : seekTerms(plan.mapping(), plan.sorts(), logicalSorts);
+            QueryDefinition.Criteria definition = switch (operation) {
+                case COUNT -> new QueryDefinition.Count(logicalPredicates, plan.paramBindings(), distinct);
+                case EXISTS -> new QueryDefinition.Exists(logicalPredicates, plan.paramBindings());
+                case DELETE -> new QueryDefinition.DeleteWhere(logicalPredicates, plan.paramBindings(), resultKind);
+                default -> new QueryDefinition.Read(resultKind, logicalPredicates, logicalSorts,
+                        paging, new LimitSpec(plan.limit(), 0), seekTerms, plan.paramBindings(), distinct);
+            };
+            return definition;
+        }
+
+        private static String resolvedAttributePath(TypeMapping<?> mapping, ColumnPlacement placement, String fallback) {
+            if (placement.local()) {
+                for (Map.Entry<String, ColumnRef> entry : mapping.columnRefs().entrySet()) {
+                    if (entry.getValue().equals(placement.leaf())) return entry.getKey();
+                }
+            }
+            return fallback;
+        }
+
+        private static List<SeekTerm> seekTerms(TypeMapping<?> mapping, List<ResolvedSort> sorts, List<SortSpec> logicalSorts) {
+            ColumnRef idRef = new ColumnRef.Simple(mapping.idColumn(), mapping.tableName());
+            if (sorts.isEmpty()) {
+                return List.of(new SeekTerm(idRef, true));
+            }
+            List<SeekTerm> out = new ArrayList<>();
+            for (int i = 0; i < sorts.size(); i++) {
+                out.add(new SeekTerm(sorts.get(i).placement().leaf(), logicalSorts.get(i).ascending()));
+            }
+            boolean toManySort = sorts.stream().anyMatch(ResolvedSort::existential);
+            SortSpec last = logicalSorts.getLast();
+            boolean lastIsIdAsc = mapping.id().name().equals(last.property()) && last.ascending();
+            if (toManySort && !lastIsIdAsc) {
+                out.add(new SeekTerm(idRef, true));
+            }
+            return out;
+        }
     }
 
     /**
@@ -139,7 +217,7 @@ public final class FinderEmitter {
                 queryDefinitionName = queryDefinitionName + nameClash;
             }
             QueryDefinition.Criteria definition =
-                    QueryPlanBuilder.queryDefinitionOf(operation, kind, resultKind, plan, distinct);
+                    PlanPublisher.queryDefinitionOf(operation, kind, resultKind, plan, distinct);
             registry.queryDefinitions(repositoryFqn).put(queryDefinitionName, definition);
             return definition;
         }

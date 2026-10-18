@@ -60,7 +60,7 @@ public final class CrudReadMethodGenerator implements MethodGenerator {
         if (emission.crudFullMapper() != null) {
             if (arity == 1 && name.equals("findById")) {
                 QueryDefinitions.publish(registry, emission, name, findById(emission, kind));
-                crudReads.emitFindById(builder, MemberNames.parameterName(parameters.get(0), MemberNames.ID_PARAM),
+                crudReads.emitFindById(builder, MemberNames.parameterName(parameters.getFirst(), MemberNames.ID_PARAM),
                         emission, kind);
                 return true;
             }

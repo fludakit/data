@@ -19,6 +19,7 @@ import io.github.fludakit.data.metadata.UnknownAttributePathException;
 import io.github.fludakit.data.processor.analysis.PathResolver;
 import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
 import io.github.fludakit.data.processor.generator.RepositorySourceWriter;
+import io.github.fludakit.data.processor.generator.nav.NavCase;
 import io.github.fludakit.data.processor.support.JoinEdges;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.support.MemberNames;
@@ -70,6 +71,7 @@ public final class TypeMappingGenerator {
     private final Map<String, ClassName> metadataTypes;
     /** The reflection-free {@code ValueAccess.value(...)} emitter, split from the descriptor structure. */
     private final ValueAccessGenerator valueAccessGenerator;
+    private final NavigationAnalysis navigationAnalysis;
 
     public TypeMappingGenerator(Diagnostics diagnostics, TypeModelRegistry typeMappingBuilder,
                       PathResolver pathResolver, RepositorySourceWriter sourceWriter,
@@ -80,6 +82,7 @@ public final class TypeMappingGenerator {
         this.sourceWriter = sourceWriter;
         this.metadataTypes = metadataTypes;
         this.valueAccessGenerator = new ValueAccessGenerator(diagnostics, typeMappingBuilder);
+        this.navigationAnalysis = new NavigationAnalysis();
     }
 
     /**
@@ -216,7 +219,7 @@ public final class TypeMappingGenerator {
         // columns as placements, and resolve() is every path the entity can answer, including the
         // relation-traversing ones that need an edge. columnRefs() holds placements ONLY — a column
         // reached across an edge has no business in a map that cannot express the edge.
-        List<NavCase> navs = navCases(entityElement, entity);
+        List<NavCase> navs = navigationAnalysis.navCases(entityElement, entity);
         ClassName pathKey = ClassName.get(String.class);
         MethodSpec.Builder columnRefs = MethodSpec.methodBuilder("columnRefs").addModifiers(Modifier.PUBLIC)
                 .addAnnotation(Override.class)
@@ -292,7 +295,7 @@ public final class TypeMappingGenerator {
         Map<String, JoinEdge> heads = new LinkedHashMap<>();
         for (NavCase nav : navs) {
             String head = nav.path().substring(0, nav.path().indexOf('.'));
-            heads.putIfAbsent(head, nav.placement().edges().get(0));
+            heads.putIfAbsent(head, nav.placement().edges().getFirst());
         }
         List<FieldSpec> constants = new ArrayList<>();
         Map<String, String> constantNames = new LinkedHashMap<>();
@@ -325,91 +328,6 @@ public final class TypeMappingGenerator {
                 entityElement.getQualifiedName().toString());
         resolve.endControlFlow();
         return new ResolverParts(resolve.build(), constants);
-    }
-
-    /** The relation-traversing leaf cases of one entity — the ONE enumeration both the value()
-     *  switch and the generated resolve() are built from (the loop moved verbatim out of
-     *  valueSwitch; resolve() consumes the full list, so its path set is a SUPERSET of
-     *  the value()-switch relation-path set: putValueCase may NOTE-drop a path from the switch
-     *  only, and valueExtractor may omit the whole switch). Head-level guards keep the
-     *  historical NOTE-degrade semantics: an unmapped target or accessor-less head drops the
-     *  head from BOTH surfaces). */
-    private List<NavCase> navCases(TypeElement entityElement, TypeMapping<?> entity) {
-        TypeMapping<?> mapping = entity;
-        List<NavCase> out = new ArrayList<>();
-        for (Prop p : mapping.props()) {
-            if (!PathResolver.isTraversable(p)) {
-                continue;
-            }
-            String targetFqn = Props.targetFqn(p);
-            TypeMapping<?> target = pathResolver.descriptorByFqn(targetFqn);
-            TypeElement targetElement = target == null ? null
-                    : typeMappingBuilder.elementFor(PathResolver.stripGenerics(target.typeName()));
-            String headGetter = MemberNames.getter(p.name());
-            if (targetElement == null || !typeMappingBuilder.hasMethod(entityElement, headGetter)) {
-                continue; // an unmapped target or a bean-less head is unnavigable at runtime as well
-            }
-            CodeBlock head = CodeBlock.of("e.$L()", headGetter);
-            boolean toOne = p instanceof Prop.Reference;
-            TypeMapping<?> localTarget;
-            JoinEdge edge;
-            if (p instanceof Prop.ElementCollection elementCollection) {
-                localTarget = elementCollection.target();
-                edge = JoinEdges.toManyOrNull(mapping.tableName(), mapping.idColumn(),
-                        elementCollection.childTable(), elementCollection.parentFkColumn());
-                if (edge == null) {
-                    continue; // a child table / parent fk still unresolved: nothing to join from
-                }
-            } else {
-                localTarget = target;
-                edge = referenceOrListJoin(p, mapping, target);
-                if (edge == null) {
-                    continue; // unbuildable join: the compile paths unresolvedRelation drop
-                }
-            }
-            for (Map.Entry<String, ColumnRef> leaf : localTarget.localColumnRefs().entrySet()) {
-                out.add(new NavCase(p.name() + "." + leaf.getKey(),
-                        new ColumnPlacement(leaf.getValue(), List.of(edge)),
-                        targetElement, localTarget, head, toOne));
-            }
-        }
-        return out;
-    }
-
-    /**
-     * Builds the join edge that reaches {@code target} through {@code p}, or null when the
-     * relationship shape cannot produce one.
-     *
-     * <p>A to-one reference crosses its OWN FK — {@code owner.fkColumn = target.idColumn} — not the
-     * owner's identifier. A to-many entity collection crosses the FK stored on the child table, so
-     * the edge runs the other way: {@code owner.idColumn = childTable.inverseFkColumn}. The two are
-     * different {@link JoinEdge} cases because they permit different SQL: a {@code ToOne} edge may be
-     * spliced as a {@code LEFT JOIN}, a {@code ToMany} may not.</p>
-     *
-     * <p>An ASSOCIATION (non-composing to-one) is crossed exactly as a composition is — it is still
-     * the owner's own FK column, so the edge is identical and its target's leaves stay navigable.
-     * Returns null rather than a placeholder so {@code navCases} can skip the unbuildable case — the
-     * corresponding compile path is already dropped as an unresolved relation, so no generated code
-     * ever references a missing edge.</p>
-     */
-    private static JoinEdge referenceOrListJoin(Prop prop, TypeMapping<?> owner, TypeMapping<?> target) {
-        if (prop instanceof Prop.Reference ref) {
-            if (target == null || target.tableName() == null || target.idColumn() == null) {
-                return null;
-            }
-            return JoinEdges.toOneOrNull(owner.tableName(), ref.fkColumn(),
-                    target.tableName(), target.idColumn());
-        }
-        if (prop instanceof Prop.EntityCollection list) {
-            if (target == null || target.tableName() == null || list.inverseFkColumn() == null
-                    || owner.idColumn() == null) {
-                return null;
-            }
-            String childTable = list.targetTable() != null ? list.targetTable() : target.tableName();
-            return JoinEdges.toManyOrNull(owner.tableName(), owner.idColumn(),
-                    childTable, list.inverseFkColumn());
-        }
-        return null;
     }
 
     /**
@@ -461,4 +379,73 @@ public final class TypeMappingGenerator {
         return ClassName.get(pkg, rawName.substring(dot + 1) + "Metadata");
     }
 
+    /**
+     * The navigation analysis behind the generated descriptor: which relation-traversing paths a
+     * mapped type can answer, each with its resolved placement and the join edge that reaches it.
+     * Nested here because the descriptor emitter is its only caller.
+     */
+    private final class NavigationAnalysis {
+
+        List<NavCase> navCases(TypeElement entityElement, TypeMapping<?> entity) {
+            TypeMapping<?> mapping = entity;
+            List<NavCase> out = new ArrayList<>();
+            for (Prop p : mapping.props()) {
+                if (!PathResolver.isTraversable(p)) {
+                    continue;
+                }
+                String targetFqn = Props.targetFqn(p);
+                TypeMapping<?> target = pathResolver.descriptorByFqn(targetFqn);
+                TypeElement targetElement = target == null ? null
+                        : typeMappingBuilder.elementFor(PathResolver.stripGenerics(target.typeName()));
+                String headGetter = MemberNames.getter(p.name());
+                if (targetElement == null || !typeMappingBuilder.hasMethod(entityElement, headGetter)) {
+                    continue; // an unmapped target or a bean-less head is unnavigable at runtime as well
+                }
+                CodeBlock head = CodeBlock.of("e.$L()", headGetter);
+                boolean toOne = p instanceof Prop.Reference;
+                TypeMapping<?> localTarget;
+                JoinEdge edge;
+                if (p instanceof Prop.ElementCollection elementCollection) {
+                    localTarget = elementCollection.target();
+                    edge = JoinEdges.toManyOrNull(mapping.tableName(), mapping.idColumn(),
+                            elementCollection.childTable(), elementCollection.parentFkColumn());
+                    if (edge == null) {
+                        continue; // a child table / parent fk still unresolved: nothing to join from
+                    }
+                } else {
+                    localTarget = target;
+                    edge = referenceOrListJoin(p, mapping, target);
+                    if (edge == null) {
+                        continue; // unbuildable join: the compile paths unresolvedRelation drop
+                    }
+                }
+                for (Map.Entry<String, ColumnRef> leaf : localTarget.localColumnRefs().entrySet()) {
+                    out.add(new NavCase(p.name() + "." + leaf.getKey(),
+                            new ColumnPlacement(leaf.getValue(), List.of(edge)),
+                            targetElement, localTarget, head, toOne));
+                }
+            }
+            return out;
+        }
+
+        private JoinEdge referenceOrListJoin(Prop prop, TypeMapping<?> owner, TypeMapping<?> target) {
+            if (prop instanceof Prop.Reference ref) {
+                if (target == null || target.tableName() == null || target.idColumn() == null) {
+                    return null;
+                }
+                return JoinEdges.toOneOrNull(owner.tableName(), ref.fkColumn(),
+                        target.tableName(), target.idColumn());
+            }
+            if (prop instanceof Prop.EntityCollection list) {
+                if (target == null || target.tableName() == null || list.inverseFkColumn() == null
+                        || owner.idColumn() == null) {
+                    return null;
+                }
+                String childTable = list.targetTable() != null ? list.targetTable() : target.tableName();
+                return JoinEdges.toManyOrNull(owner.tableName(), owner.idColumn(),
+                        childTable, list.inverseFkColumn());
+            }
+            return null;
+        }
+    }
 }

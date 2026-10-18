@@ -63,27 +63,28 @@ public final class NavSupport {
      * superinterface parameterised by owner and target, and the {@code @Generated} marker. Returns
      * {@code null} when the name was already claimed (the collision is reported).
      */
-    public NavDraft beginNav(TypeElement origin, String packageName, TypeName owner, String navSimple,
-                             String path, ClassName attrInterface, String targetFqn, Set<String> claimed) {
+    public TypeSpec.Builder beginNav(TypeElement origin, String packageName, TypeName owner, String navSimple,
+                                     String path, ClassName attrInterface, String targetFqn, Set<String> claimed) {
         String fqn = packageName + "." + navSimple;
         if (!claimed.add(fqn)) {
             navCollision(origin, fqn, path);
             return null;
         }
         TypeName targetType = attributeTypes.classArgOf(targetFqn);
-        TypeSpec.Builder builder = TypeSpec.classBuilder(navSimple)
+        return TypeSpec.classBuilder(navSimple)
                 .addModifiers(Modifier.PUBLIC, Modifier.FINAL)
                 .addSuperinterface(ParameterizedTypeName.get(attrInterface, owner, targetType))
                 .addAnnotation(AnnotationSpec.builder(AttributeTypes.MM_GENERATED)
                         .addMember("value", "$S", RepositoryProcessor.class.getName()).build());
-        return new NavDraft(fqn, packageName, navSimple, builder);
     }
 
     /** Appends the {@code name()}/{@code path()} accessors and returns the finished class. */
-    public NavUnit finishNav(NavDraft draft, String path, String name) {
-        draft.builder().addMethod(overrideAccessor("name", String.class, CodeBlock.of("$S", name)));
-        draft.builder().addMethod(overrideAccessor("path", String.class, CodeBlock.of("$S", path)));
-        return draft.unit();
+    public NavUnit finishNav(String packageName, String navSimple, TypeSpec.Builder builder,
+                             String path, String name) {
+        builder.addMethod(overrideAccessor("name", String.class, CodeBlock.of("$S", name)));
+        builder.addMethod(overrideAccessor("path", String.class, CodeBlock.of("$S", path)));
+        return new NavUnit(packageName + "." + navSimple, ClassName.get(packageName, navSimple),
+                navFile(packageName, builder));
     }
 
     // ------------------------------------------------------------ member declaration

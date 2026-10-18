@@ -10,6 +10,7 @@ import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.metadata.UnknownAttributePathException;
 import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
 import io.github.fludakit.data.processor.analysis.PathResolver;
+import io.github.fludakit.data.processor.generator.nav.NavCase;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.support.MemberNames;
 import java.util.LinkedHashMap;

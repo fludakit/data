@@ -1,24 +1,10 @@
 package io.github.fludakit.data.processor.analysis;
 
-import io.github.fludakit.data.processor.model.QueryPlan;
-import io.github.fludakit.data.processor.model.ResolvedPredicate;
-import io.github.fludakit.data.processor.model.ResolvedSort;
-
-import io.github.fludakit.data.metadata.ColumnPlacement;
-import io.github.fludakit.data.metadata.ColumnRef;
-import io.github.fludakit.data.metadata.TypeMapping;
-import io.github.fludakit.data.processor.RepositoryProcessor;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.query.LikePattern;
-import io.github.fludakit.data.query.LimitSpec;
-import io.github.fludakit.data.query.Operation;
 import io.github.fludakit.data.query.Operator;
-import io.github.fludakit.data.query.PagingMode;
 import io.github.fludakit.data.query.ParamBinding;
 import io.github.fludakit.data.query.Predicate;
-import io.github.fludakit.data.query.QueryDefinition;
-import io.github.fludakit.data.query.ResultKind;
-import io.github.fludakit.data.query.SeekTerm;
 import io.github.fludakit.data.query.SortSpec;
 import io.github.fludakit.data.query.Connector;
 import io.github.fludakit.data.sql.SqlBuilder;
@@ -33,13 +19,12 @@ import javax.lang.model.type.TypeMirror;
 import javax.lang.model.util.Types;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 
 /**
  * Turns ONE repository method declaration into the plan behind its SQL: the parsed method name, the
- * {@code @By}/{@code @OrderBy} annotations, the argument bindings, the {@link Predicate}s and
- * {@link SortSpec}s they become, the keyset seek terms a cursor uses, and the published
- * {@link QueryDefinition.Criteria} that carries all of it into {@code <Repository>Queries}.
+ * {@code @By}/{@code @OrderBy} annotations, the argument bindings, and the {@link Predicate}s and
+ * {@link SortSpec}s they become. Folding that plan into a {@code QueryDefinition} is
+ * {@link PlanPublisher}'s job.
  *
  * <p>This is the only place the method NAME is interpreted. Two vocabularies feed it and they must
  * not mix: a query-by-method-name name is parsed, while an {@code @Find}/{@code @Delete} method is
@@ -146,7 +131,7 @@ public final class QueryPlanBuilder {
             int at = cursor + i;
             taken.add(at < indices.size() ? indices.get(at) : at);
         }
-        String param = taken.isEmpty() ? property : parameters.get(taken.get(0)).getSimpleName().toString();
+        String param = taken.isEmpty() ? property : parameters.get(taken.getFirst()).getSimpleName().toString();
         predicates.add(Predicate.of(property, operator, param, connector, ignoreCase));
         LikePattern pattern = LikePattern.of(operator);
         List<String> tokenNames = SqlBuilder.paramNames(operator, param);
@@ -170,16 +155,8 @@ public final class QueryPlanBuilder {
     public Object tryParse(String name) {
         // A qbn-free prefix test: fluda-data-qbn is an OPTIONAL dependency, so the name is classified
         // before any qbn class is touched. RepositoryMethodValidator reports the diagnostics.
-        if (!RepositoryMethodValidator.isQueryMethodName(name)) {
-            return null;
-        }
-        try {
-            return new io.github.fludakit.data.qbn.QueryByMethodNameParser().parse(name);
-        } catch (RuntimeException | LinkageError e) {
-            // Unparseable name, or fluda-data-qbn absent from the annotation processor path.
-            // RepositoryMethodValidator reports the diagnostic; there is nothing to emit.
-            return null;
-        }
+        return RepositoryMethodValidator.QbnSupport.isQueryMethodName(name)
+                ? RepositoryMethodValidator.QbnSupport.parseOrNull(name) : null;
     }
 
     public List<Integer> nonSpecialIndices(List<? extends TypeMirror> parameterTypes) {
@@ -202,94 +179,5 @@ public final class QueryPlanBuilder {
             return SORT.equals(types.erasure(component).toString());
         }
         return false;
-    }
-
-    /**
-     * Fold one query-by-names method's resolved lists into a {@link QueryDefinition.Criteria}. The paging
-     * mode and result kind come from the return {@link ResultKind} plus the parsed action; seek terms are
-     * the runtime cursor key for CURSOR and the published default key for the other paged modes
-     * (E1's base constant drops sorts/limit at render time, so the
-     * declared sorts stay in the model for introspection).
-     */
-    public static QueryDefinition.Criteria queryDefinitionOf(Operation operation,
-                                                  ResultKind kind, ResultKind resultKind,
-                                                  QueryPlan plan, boolean distinct) {
-        List<Predicate> logicalPredicates = new ArrayList<>();
-        for (ResolvedPredicate rp : plan.predicates()) {
-            Predicate predicate = rp.predicate();
-            String authoritative = rp.attributePath();
-            logicalPredicates.add(Predicate.of(
-                    authoritative != null ? authoritative
-                            : resolvedAttributePath(plan.mapping(), rp.placement(), predicate.property()),
-                    predicate.operator(), predicate.param(), predicate.connector(), predicate.ignoreCase()));
-        }
-        List<SortSpec> logicalSorts = new ArrayList<>();
-        for (ResolvedSort rs : plan.sorts()) {
-            SortSpec sort = rs.sort();
-            String sortPath = rs.attributePath();
-            logicalSorts.add(SortSpec.of(
-                    sortPath != null ? sortPath
-                            : resolvedAttributePath(plan.mapping(), rs.placement(), sort.property()),
-                    sort.ascending(), sort.ignoreCase()));
-        }
-        PagingMode paging = kind == ResultKind.PAGE ? PagingMode.OFFSET
-                : kind == ResultKind.CURSORED_PAGE ? PagingMode.CURSOR : PagingMode.NONE;
-        List<SeekTerm> seekTerms = paging == PagingMode.NONE ? List.of()
-                : seekTerms(plan.mapping(), plan.sorts(), logicalSorts);
-        // ParamBindings are pre-built in resolvedBindings; no conversion needed.
-        QueryDefinition.Criteria definition = switch (operation) {
-            case COUNT -> new QueryDefinition.Count(logicalPredicates, plan.paramBindings(), distinct);
-            case EXISTS -> new QueryDefinition.Exists(logicalPredicates, plan.paramBindings());
-            case DELETE -> new QueryDefinition.DeleteWhere(logicalPredicates, plan.paramBindings(), resultKind);
-            default -> new QueryDefinition.Read(resultKind, logicalPredicates, logicalSorts,
-                    paging, new LimitSpec(plan.limit(), 0), seekTerms, plan.paramBindings(), distinct);
-        };
-        return definition;
-    }
-
-    /**
-     * The logical attribute path a resolved ref should be PUBLISHED under.
-     *
-     * <p>A local leaf is recovered by matching it back against the descriptor's own column index, so
-     * the published model names properties the way the entity declares them. A relation-traversing
-     * leaf has no local column to match, so the only available name is the caller's fallback — which
-     * for a query-by-method-name property is the CONCATENATED, snake-cased token
-     * ({@code order_items_quantity}). {@code SqlBuilder} resolves a definition's properties against the
-     * descriptor with {@code visit}, which speaks ENTITY paths ({@code orderItems.quantity}), so a
-     * concatenated token must be mapped back onto the attribute path that produced it — otherwise the
-     * walk fails and the predicate degrades to a column literally named {@code order_items_quantity},
-     * losing both the join and the EXISTS semi-join.
-     */
-    private static String resolvedAttributePath(TypeMapping<?> mapping, ColumnPlacement placement, String fallback) {
-        if (placement.local()) {
-            for (Map.Entry<String, ColumnRef> entry : mapping.columnRefs().entrySet()) {
-                if (entry.getValue().equals(placement.leaf())) return entry.getKey();
-            }
-        }
-        return fallback;
-    }
-
-    /**
-     * The keyset seek terms a cursor uses: the declared sorts (or the {@code id ASC} default when the
-     * method declares none), plus the root-id tiebreak exactly when a to-many sort is present and the
-     * last term is not already an ascending id — the same rule {@link RepositoryProcessor#emitPaged} applies to the
-     * runtime {@code props}/{@code dirs} lists, kept here so the published model matches the wiring.
-     */
-    private static List<SeekTerm> seekTerms(TypeMapping<?> mapping, List<ResolvedSort> sorts, List<SortSpec> logicalSorts) {
-        ColumnRef idRef = new ColumnRef.Simple(mapping.idColumn(), mapping.tableName());
-        if (sorts.isEmpty()) {
-            return List.of(new SeekTerm(idRef, true));
-        }
-        List<SeekTerm> out = new ArrayList<>();
-        for (int i = 0; i < sorts.size(); i++) {
-            out.add(new SeekTerm(sorts.get(i).placement().leaf(), logicalSorts.get(i).ascending()));
-        }
-        boolean toManySort = sorts.stream().anyMatch(ResolvedSort::existential);
-        SortSpec last = logicalSorts.get(logicalSorts.size() - 1);
-        boolean lastIsIdAsc = mapping.id().name().equals(last.property()) && last.ascending();
-        if (toManySort && !lastIsIdAsc) {
-            out.add(new SeekTerm(idRef, true));
-        }
-        return out;
     }
 }

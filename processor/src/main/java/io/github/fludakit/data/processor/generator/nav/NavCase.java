@@ -1,4 +1,4 @@
-package io.github.fludakit.data.processor.generator.metadata;
+package io.github.fludakit.data.processor.generator.nav;
 
 import com.squareup.javapoet.CodeBlock;
 import io.github.fludakit.data.metadata.ColumnPlacement;
@@ -13,6 +13,6 @@ import javax.lang.model.element.TypeElement;
  * switch (which reads the head/target/toOne), because the two surfaces enumerate the same paths and
  * must never disagree about which paths exist.
  */
-record NavCase(String path, ColumnPlacement placement, TypeElement targetElement,
-               TypeMapping<?> target, CodeBlock head, boolean toOne) {
+public record NavCase(String path, ColumnPlacement placement, TypeElement targetElement,
+                      TypeMapping<?> target, CodeBlock head, boolean toOne) {
 }

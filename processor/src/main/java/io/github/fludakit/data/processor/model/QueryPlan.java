@@ -14,7 +14,7 @@ import java.util.List;
  * <p>Each predicate and sort is a self-contained {@link ResolvedPredicate}/{@link ResolvedSort}, so
  * there are no index-aligned parallel lists to keep in step. What is NOT here is what the method
  * DECLARES rather than what it asks for — the operation, the declared and published result shape and
- * {@code distinct} — which stay arguments to {@link io.github.fludakit.data.processor.analysis.QueryPlanBuilder#queryDefinitionOf}.</p>
+ * {@code distinct} — which stay arguments to {@link io.github.fludakit.data.processor.analysis.PlanPublisher#queryDefinitionOf}.</p>
  */
 public record QueryPlan(TypeMapping<?> mapping, List<ResolvedPredicate> predicates, List<ResolvedSort> sorts,
                  int limit, List<ParamBinding> paramBindings, List<? extends VariableElement> parameters) {

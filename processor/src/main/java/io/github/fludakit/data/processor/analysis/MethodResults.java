@@ -60,7 +60,7 @@ public final class MethodResults {
         }
         if (returnType instanceof DeclaredType declared && declared.getTypeArguments().size() == 1
                 && CONTAINER_TYPES.contains(types.erasure(declared).toString())) {
-            return concrete(TypeName.get(declared.getTypeArguments().get(0)), fallback);
+            return concrete(TypeName.get(declared.getTypeArguments().getFirst()), fallback);
         }
         return concrete(TypeName.get(returnType).box(), fallback);
     }

@@ -82,7 +82,7 @@ public final class JoinedProjectionEmitter {
             // Prop.Reference from it (the ColumnRef no longer carries the property name). The head
             // may be a to-one Reference edge or a to-many Collection edge, so ask the edge for
             // its child table rather than assuming a case.
-            String childTable = childTableOf(ref.edges().get(0));
+            String childTable = childTableOf(ref.edges().getFirst());
             if (childTable == null) {
                 continue;
             }

@@ -171,7 +171,7 @@ public final class CrudReadEmitter {
 
     public void emitFindAllPage(MethodSpec.Builder builder, List<? extends VariableElement> parameters,
                                  RepositoryContext ctx) {
-        String pageRequest = MemberNames.parameterName(parameters.get(0), "pageRequest");
+        String pageRequest = MemberNames.parameterName(parameters.getFirst(), "pageRequest");
         String sortBy = MemberNames.parameterName(parameters.get(1), "sortBy");
         // When composing to-one targets are JOIN-projected, the base constant already carries their
         // joins and their labelled columns, so it is the ONLY valid base — the qualified variant would

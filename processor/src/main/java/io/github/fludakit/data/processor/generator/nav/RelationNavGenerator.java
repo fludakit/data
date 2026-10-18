@@ -1,6 +1,7 @@
 package io.github.fludakit.data.processor.generator.nav;
 
 import com.squareup.javapoet.TypeName;
+import com.squareup.javapoet.TypeSpec;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
@@ -31,9 +32,9 @@ public final class RelationNavGenerator {
         Prop p = member.prop();
         boolean fk = p instanceof Prop.Reference;
         String targetFqn = Props.targetFqn(p);
-        NavDraft draft = support.beginNav(origin, packageName, owner, navSimple, member.path(),
+        TypeSpec.Builder builder = support.beginNav(origin, packageName, owner, navSimple, member.path(),
                 fk ? AttributeTypes.FM_FK : AttributeTypes.FM_OTM, targetFqn, claimed);
-        if (draft == null) {
+        if (builder == null) {
             return List.of();
         }
         Set<String> taken = new HashSet<>();
@@ -41,12 +42,12 @@ public final class RelationNavGenerator {
         TypeMapping<?> target = support.relationTarget(targetFqn, false);
         if (target != null) {
             if (target.id() != null) {
-                support.addRelationLeaf(draft.builder(), taken, origin, owner, member.path(), "", target.id());
+                support.addRelationLeaf(builder, taken, origin, owner, member.path(), "", target.id());
             }
             for (Prop tp : target.props()) {
-                support.addRelationLeaf(draft.builder(), taken, origin, owner, member.path(), "", tp);
+                support.addRelationLeaf(builder, taken, origin, owner, member.path(), "", tp);
             }
         }
-        return List.of(support.finishNav(draft, member.path(), member.prop().name()));
+        return List.of(support.finishNav(packageName, navSimple, builder, member.path(), member.prop().name()));
     }
 }

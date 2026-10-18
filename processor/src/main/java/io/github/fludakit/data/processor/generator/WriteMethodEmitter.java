@@ -234,7 +234,7 @@ public final class WriteMethodEmitter {
                            TypeMapping<?> entity, String delegate) {
         TypeVariableName element = method.getTypeParameters().isEmpty()
                 ? TypeVariableName.get("S", typeMappingBuilder.classNameFor(entity.typeName()))
-                : TypeVariableName.get(method.getTypeParameters().get(0).getSimpleName().toString(),
+                : TypeVariableName.get(method.getTypeParameters().getFirst().getSimpleName().toString(),
                         typeMappingBuilder.classNameFor(entity.typeName()));
         builder.addStatement("$T<$T> result = new $T<>()", List.class, element, ArrayList.class);
         builder.beginControlFlow("for ($T entity : $L)", element, MemberNames.parameterName(parameter, "entities"));

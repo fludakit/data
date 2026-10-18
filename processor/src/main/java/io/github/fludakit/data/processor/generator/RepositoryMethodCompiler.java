@@ -82,7 +82,7 @@ public final class RepositoryMethodCompiler {
         if (!builder.typeVariables.isEmpty() && !method.getTypeParameters().isEmpty()) {
             builder.typeVariables.clear();
             builder.typeVariables.add(TypeVariableName.get(
-                    method.getTypeParameters().get(0).getSimpleName().toString(), entityType));
+                    method.getTypeParameters().getFirst().getSimpleName().toString(), entityType));
         }
     }
 }

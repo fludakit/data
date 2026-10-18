@@ -259,7 +259,7 @@ public final class QueryCompiler {
         if (!includeId) {
             cols = cols.stream()
                     .filter(c -> schema.idColumn() == null || !c.column().equals(schema.idColumn()))
-                    .collect(Collectors.toList());
+                    .toList();
         }
         if (cols.isEmpty()) {
             // An entity whose only column is a database-generated identifier binds NOTHING, and
@@ -290,9 +290,9 @@ public final class QueryCompiler {
      */
     public static String upsert(SqlDialect dialect, TableSchema schema, ColumnResolver attributes) {
         List<ColumnRef> cols = schema.columns();
-        List<String> names = cols.stream().map(ColumnRef::column).collect(Collectors.toList());
+        List<String> names = cols.stream().map(ColumnRef::column).toList();
         List<String> params = cols.stream().map(c -> ":" + paramName(attributePath(attributes, c)))
-                .collect(Collectors.toList());
+                .toList();
         return dialect.upsertStatement(schema.tableName(), schema.idColumn(), names, params);
     }
 
@@ -382,7 +382,7 @@ public final class QueryCompiler {
      */
     public static String existsConjunct(SqlDialect dialect, Predicate predicate, ColumnPlacement placement) {
         List<JoinEdge> edges = placement.edges();
-        JoinEdge join = edges.get(edges.size() - 1);
+        JoinEdge join = edges.getLast();
         String owner = join.ownerTable();
         return "EXISTS (SELECT 1 FROM " + dialect.quoteIdentifier(join.childTable()) + " "
                 + dialect.quoteIdentifier(join.childTable())
@@ -408,7 +408,7 @@ public final class QueryCompiler {
         if (edges.isEmpty()) {
             throw new IllegalArgumentException("aggregate sort term requires a relation path");
         }
-        JoinEdge head = edges.get(0);
+        JoinEdge head = edges.getFirst();
         String owner = head.ownerTable();
         StringBuilder sb = new StringBuilder("(SELECT ")
                 .append(ascending ? "MIN(" : "MAX(")
@@ -640,11 +640,11 @@ public final class QueryCompiler {
             case NOT_LIKE, NOT_CONTAINS, NOT_STARTS_WITH, NOT_ENDS_WITH -> column + " NOT LIKE :" + param;
             case BETWEEN -> {
                 List<String> bounds = paramNames(operator, param);
-                yield column + " BETWEEN :" + bounds.get(0) + " AND :" + bounds.get(1);
+                yield column + " BETWEEN :" + bounds.getFirst() + " AND :" + bounds.get(1);
             }
             case NOT_BETWEEN -> {
                 List<String> bounds = paramNames(operator, param);
-                yield column + " NOT BETWEEN :" + bounds.get(0) + " AND :" + bounds.get(1);
+                yield column + " NOT BETWEEN :" + bounds.getFirst() + " AND :" + bounds.get(1);
             }
             case IN -> column + " IN (:" + param + ")";
             case NOT_IN -> column + " NOT IN (:" + param + ")";

@@ -36,9 +36,9 @@ public final class EmbeddedNavGenerator {
      */
     public List<NavUnit> embeddedNav(NavContext ctx, NavLevel level, Prop.Embedded embedded) {
         ValueObjectMapping<?> target = embedded.target();
-        NavDraft draft = support.beginNav(ctx.origin(), ctx.packageName(), ctx.owner(), level.navSimple(),
+        TypeSpec.Builder builder = support.beginNav(ctx.origin(), ctx.packageName(), ctx.owner(), level.navSimple(),
                 level.path(), AttributeTypes.FM_EMBEDDED, target == null ? null : target.typeName(), ctx.claimed());
-        if (draft == null) {
+        if (builder == null) {
             return List.of();
         }
         Set<String> taken = new HashSet<>();
@@ -47,14 +47,15 @@ public final class EmbeddedNavGenerator {
         List<NavUnit> nested = new ArrayList<>();
         if (target != null) {
             if (target.id() != null) {
-                nested.addAll(addNavLeaf(draft.builder(), taken, ctx, level, target.id()));
+                nested.addAll(addNavLeaf(builder, taken, ctx, level, target.id()));
             }
             for (Prop p : target.props()) {
-                nested.addAll(addNavLeaf(draft.builder(), taken, ctx, level, p));
+                nested.addAll(addNavLeaf(builder, taken, ctx, level, p));
             }
         }
         List<NavUnit> units = new ArrayList<>();
-        units.add(support.finishNav(draft, level.path(), NavSupport.lastPathSegment(level.path())));
+        units.add(support.finishNav(ctx.packageName(), level.navSimple(), builder, level.path(),
+                NavSupport.lastPathSegment(level.path())));
         units.addAll(nested);
         return units;
     }

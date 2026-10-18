@@ -1,6 +1,7 @@
 package io.github.fludakit.data.processor.generator.nav;
 
 import com.squareup.javapoet.TypeName;
+import com.squareup.javapoet.TypeSpec;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
 import javax.lang.model.element.TypeElement;
@@ -29,17 +30,17 @@ public final class ElementCollectionNavGenerator {
                                        Prop.ElementCollection elementCollection,
                                        Set<String> claimed) {
         String targetFqn = elementCollection.elementTypeName();
-        NavDraft draft = support.beginNav(origin, packageName, owner, navSimple, path,
+        TypeSpec.Builder builder = support.beginNav(origin, packageName, owner, navSimple, path,
                 AttributeTypes.FM_EC, targetFqn, claimed);
-        if (draft == null) {
+        if (builder == null) {
             return List.of();
         }
         Set<String> taken = new HashSet<>();
         if (support.relationTarget(targetFqn, true) != null) {
             for (Prop ep : elementCollection.target().props()) {
-                support.addRelationLeaf(draft.builder(), taken, origin, owner, path, "", ep);
+                support.addRelationLeaf(builder, taken, origin, owner, path, "", ep);
             }
         }
-        return List.of(support.finishNav(draft, path, NavSupport.lastPathSegment(path)));
+        return List.of(support.finishNav(packageName, navSimple, builder, path, NavSupport.lastPathSegment(path)));
     }
 }

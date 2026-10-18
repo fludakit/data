@@ -213,7 +213,7 @@ public final class TypeModelBuilder {
                 || !"java.util.List".equals(types.erasure(declared).toString())) {
             return null;
         }
-        TypeMirror argument = declared.getTypeArguments().get(0);
+        TypeMirror argument = declared.getTypeArguments().getFirst();
         if (!(argument instanceof DeclaredType element)
                 || !(element.asElement() instanceof TypeElement typeElement)) {
             return null;

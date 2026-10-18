@@ -59,7 +59,7 @@ public final class RepositoryTypeResolver {
             if (ENTITY_REPOSITORIES.contains(types.erasure(declared).toString())) {
                 List<? extends TypeMirror> arguments = declared.getTypeArguments();
                 if (!arguments.isEmpty()) {
-                    return arguments.get(0);
+                    return arguments.getFirst();
                 }
             }
             TypeMirror resolved = entityType(declared, visited);
@@ -153,7 +153,7 @@ public final class RepositoryTypeResolver {
                 ExecutableType resolved = (ExecutableType) types.asMemberOf(
                         (DeclaredType) repository.asType(), method);
                 if (!resolved.getParameterTypes().isEmpty()) {
-                    TypeMirror candidate = entityResultType(resolved.getParameterTypes().get(0));
+                    TypeMirror candidate = entityResultType(resolved.getParameterTypes().getFirst());
                     if (candidate != null) {
                         candidates.add(candidate);
                     }
@@ -163,7 +163,7 @@ public final class RepositoryTypeResolver {
         if (candidates.isEmpty()) {
             return null;
         }
-        TypeMirror first = candidates.get(0);
+        TypeMirror first = candidates.getFirst();
         for (TypeMirror candidate : candidates) {
             if (!types.isSameType(types.erasure(first), types.erasure(candidate))) {
                 return null;
@@ -184,7 +184,7 @@ public final class RepositoryTypeResolver {
         if (Set.of("java.util.List", "java.util.Collection", "java.util.Set",
                 "java.util.Optional", "java.util.stream.Stream", "jakarta.data.page.Page",
                 "jakarta.data.page.CursoredPage").contains(raw)) {
-            return arguments.size() == 1 ? arguments.get(0) : null;
+            return arguments.size() == 1 ? arguments.getFirst() : null;
         }
         return type;
     }

@@ -62,17 +62,17 @@ public final class CrudWriteMethodGenerator implements MethodGenerator {
         boolean applicationId = applicationAssignedId(emission);
 
         // 5. Lifecycle batch — List<E> or E[] with @Insert/@Update/@Save/@Delete.
-        if (arity == 1 && writeMethodEmitter.isEntitySequenceParameter(parameterTypes.get(0), emission.entity())
+        if (arity == 1 && writeMethodEmitter.isEntitySequenceParameter(parameterTypes.getFirst(), emission.entity())
                 && (method.getAnnotation(Insert.class) != null || method.getAnnotation(Update.class) != null
                 || method.getAnnotation(Save.class) != null || method.getAnnotation(Delete.class) != null)) {
             publishLifecycleBatch(emission, name, method, writeKind, applicationId);
-            writeMethodEmitter.emitLifecycleBatch(builder, method, parameters.get(0), parameterTypes.get(0),
+            writeMethodEmitter.emitLifecycleBatch(builder, method, parameters.getFirst(), parameterTypes.getFirst(),
                     emission.entity(), emission.constants(), emission.cascade());
             return true;
         }
         // 6. Single-entity CRUD by name — save, insert, update, delete.
-        if (arity == 1 && writeMethodEmitter.isEntityParameter(parameterTypes.get(0), emission.entity())) {
-            String value = MemberNames.parameterName(parameters.get(0), "entity");
+        if (arity == 1 && writeMethodEmitter.isEntityParameter(parameterTypes.getFirst(), emission.entity())) {
+            String value = MemberNames.parameterName(parameters.getFirst(), "entity");
             if (name.equals("delete")) {
                 QueryDefinitions.publish(registry, emission, name, new QueryDefinition.DeleteById(writeKind));
                 builder.addStatement("deleteById($L.$L())", value, MemberNames.getter(emission.entity().id().name()));
@@ -104,23 +104,23 @@ public final class CrudWriteMethodGenerator implements MethodGenerator {
         if (arity == 1) {
             if (name.equals("saveAll")) {
                 QueryDefinitions.publish(registry, emission, name, new QueryDefinition.Upsert(writeKind));
-                writeMethodEmitter.emitBatch(builder, method, parameters.get(0), emission.entity(), "save");
+                writeMethodEmitter.emitBatch(builder, method, parameters.getFirst(), emission.entity(), "save");
                 return true;
             }
             if (name.equals("insertAll") && emission.flavour().crud()) {
                 QueryDefinitions.publish(registry, emission, name, new QueryDefinition.Insert(writeKind, applicationId));
-                writeMethodEmitter.emitBatch(builder, method, parameters.get(0), emission.entity(), "insert");
+                writeMethodEmitter.emitBatch(builder, method, parameters.getFirst(), emission.entity(), "insert");
                 return true;
             }
             if (name.equals("updateAll") && emission.flavour().crud()) {
                 QueryDefinitions.publish(registry, emission, name, new QueryDefinition.Update(writeKind));
-                writeMethodEmitter.emitBatch(builder, method, parameters.get(0), emission.entity(), "update");
+                writeMethodEmitter.emitBatch(builder, method, parameters.getFirst(), emission.entity(), "update");
                 return true;
             }
             if (name.equals("deleteAll")) {
                 QueryDefinitions.publish(registry, emission, name, new QueryDefinition.DeleteById(writeKind));
                 builder.beginControlFlow("for ($T entity : $L)", typeMappingBuilder.classNameFor(emission.entity().typeName()),
-                        MemberNames.parameterName(parameters.get(0), "entities"));
+                        MemberNames.parameterName(parameters.getFirst(), "entities"));
                 builder.addStatement("delete(entity)");
                 builder.endControlFlow();
                 return true;
@@ -129,13 +129,13 @@ public final class CrudWriteMethodGenerator implements MethodGenerator {
         // 8. Remaining CRUD built-ins — findById, deleteById, findAll.
         if (arity == 1 && name.equals("findById")) {
             QueryDefinitions.publish(registry, emission, name, CrudReadMethodGenerator.findById(emission, kind));
-            crudReads.emitFindById(builder, MemberNames.parameterName(parameters.get(0), MemberNames.ID_PARAM),
+            crudReads.emitFindById(builder, MemberNames.parameterName(parameters.getFirst(), MemberNames.ID_PARAM),
                     emission, kind);
             return true;
         }
         if (arity == 1 && name.equals("deleteById")) {
             QueryDefinitions.publish(registry, emission, name, new QueryDefinition.DeleteById(writeKind));
-            writeMethodEmitter.emitDeleteById(builder, MemberNames.parameterName(parameters.get(0), MemberNames.ID_PARAM),
+            writeMethodEmitter.emitDeleteById(builder, MemberNames.parameterName(parameters.getFirst(), MemberNames.ID_PARAM),
                     emission.entity(), emission.constants(), emission.cascade());
             return true;
         }
@@ -145,8 +145,8 @@ public final class CrudWriteMethodGenerator implements MethodGenerator {
             return true;
         }
         // 9. Single-entity annotated writes — @Insert, @Update, @Save, @Delete.
-        if (arity == 1 && writeMethodEmitter.isEntityParameter(parameterTypes.get(0), emission.entity())) {
-            String value = MemberNames.parameterName(parameters.get(0), "entity");
+        if (arity == 1 && writeMethodEmitter.isEntityParameter(parameterTypes.getFirst(), emission.entity())) {
+            String value = MemberNames.parameterName(parameters.getFirst(), "entity");
             if (method.getAnnotation(Insert.class) != null) {
                 QueryDefinitions.publish(registry, emission, name, new QueryDefinition.Insert(writeKind, applicationId));
                 writeMethodEmitter.appendInsertAndChildCascades(builder, value, emission.entity(), emission.constants(), emission.cascade());

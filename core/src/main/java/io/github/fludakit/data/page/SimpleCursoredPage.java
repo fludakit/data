@@ -30,11 +30,11 @@ public final class SimpleCursoredPage<T> implements CursoredPage<T> {
     @Override public PageRequest.Cursor cursor(int index) { return cursors.get(index); }
     @Override public PageRequest nextPageRequest() {
         if (!hasNext()) throw new NoSuchElementException();
-        return pageRequest.afterCursor(cursors.get(cursors.size() - 1));
+        return pageRequest.afterCursor(cursors.getLast());
     }
     @Override public PageRequest previousPageRequest() {
         if (!hasPrevious()) throw new NoSuchElementException();
-        return pageRequest.beforeCursor(cursors.get(0));
+        return pageRequest.beforeCursor(cursors.getFirst());
     }
     @Override public boolean hasTotals() { return pageRequest.requestTotal(); }
     @Override public long totalElements() {

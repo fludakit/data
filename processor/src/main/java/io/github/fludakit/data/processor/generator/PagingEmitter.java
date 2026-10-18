@@ -121,8 +121,8 @@ public final class PagingEmitter {
                     : new SqlBuilder(ctx.entity()).dialect(sqlDialect)
                             .aggregateSortTerm(aggregatePlacement, s.ascending()));
         }
-        if (toManySort && !("true".equals(directions.get(directions.size() - 1))
-                && ctx.entity().id().name().equals(properties.get(properties.size() - 1)))) {
+        if (toManySort && !("true".equals(directions.getLast())
+                && ctx.entity().id().name().equals(properties.getLast()))) {
             // Keyset uniqueness: the aggregate edge is not unique per root row — append the
             // root-qualified id ASC term and grow props/dirs (index-aligned) with "id",
             // skipped only when the last sort already IS the ascending id.

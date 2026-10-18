@@ -201,10 +201,10 @@ final class SqlQuery implements Sql.QueryDraft, Sql.Predicated, Sql.Ordered, Sql
         // projection is ambiguous the moment the joined table shares a column name.
         List<ColumnPlacement> refs = columns.stream()
                 .map(path -> QueryCompiler.resolveColumn(schema, resolver, path))
-                .collect(Collectors.toList());
+                .toList();
         List<JoinEdge> projectionEdges = refs.stream()
                 .flatMap(ref -> ref.edges().stream())
-                .collect(Collectors.toList());
+                .toList();
         QueryCompiler.Plan plan = QueryCompiler.plan(schema, resolver, dialect, model, projectionEdges);
         SqlFragment fragment = QueryCompiler.fragment(schema, dialect, model, plan, null);
         if (!refs.isEmpty()) {

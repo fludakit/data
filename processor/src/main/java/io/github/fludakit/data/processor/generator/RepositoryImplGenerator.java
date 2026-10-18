@@ -4,8 +4,9 @@ import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.MethodSpec;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 
-import io.github.fludakit.data.processor.Round;
-import io.github.fludakit.data.processor.analysis.RepositoryTypeResolver;
+import io.github.fludakit.data.processor.Session;
+import io.github.fludakit.data.processor.Analysis;
+import io.github.fludakit.data.processor.Generators;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.model.EntityRelationship;
 import io.github.fludakit.data.processor.model.LoadPlan;
@@ -38,17 +39,22 @@ import java.util.Map;
  * write the two files. Each step is a named method below, so the file reads top-down: the step a
  * reader is looking for is the one whose name it is, not a line number inside a hundred-line body.</p>
  *
- * <p>Per-round, and it holds nothing but the round's collaborator assembly — see {@link Round}.
+ * <p>Per-round, and it holds nothing but the three collaborator bundles — {@link Session},
+ * {@link Analysis} and {@link Generators}.
  * Every call it makes is idempotent at the artifact level, so two repositories over the same entity
  * (or a repository and a relationship target's planner) can each ask for the same artifact and only
  * the first one writes it.</p>
  */
 public class RepositoryImplGenerator {
 
-    private final Round wiring;
+    private final Session session;
+    private final Analysis analysis;
+    private final Generators generators;
 
-    public RepositoryImplGenerator(Round wiring) {
-        this.wiring = wiring;
+    public RepositoryImplGenerator(Session session, Analysis analysis, Generators generators) {
+        this.session = session;
+        this.analysis = analysis;
+        this.generators = generators;
     }
 
     public void generate(TypeElement repository) {
@@ -57,11 +63,11 @@ public class RepositoryImplGenerator {
             return;
         }
         TypeElement entityElement = (TypeElement) entityErasure.asElement();
-        TypeMapping<?> entity = wiring.typeMappingBuilder().buildEntity(entityElement);
+        TypeMapping<?> entity = session.typeMappingBuilder().buildEntity(entityElement);
         ClassName mapperType = ensureRowMapper(entityElement, entity);
         RepositoryContext context = newContext(repository, entity, mapperType,
-                wiring.loadPlanner().plan(entityElement, entity),
-                wiring.savePlanner().plan(entityElement, entity));
+                generators.loadPlanner().plan(entityElement, entity),
+                generators.savePlanner().plan(entityElement, entity));
         preResolveMethods(repository, (DeclaredType) repository.asType(), entity);
         generateMembers(repository, context);
         writeArtifacts(repository, context);
@@ -72,17 +78,17 @@ public class RepositoryImplGenerator {
      * that case has already been reported, and the caller stops.
      */
     private DeclaredType entityErasureOf(TypeElement repository) {
-        TypeMirror entityMirror = wiring.repositoryTypeResolver().entityType(repository);
+        TypeMirror entityMirror = analysis.repositoryTypeResolver().entityType(repository);
         if (entityMirror == null || entityMirror.getKind() == TypeKind.TYPEVAR
                 || entityMirror.getKind() == TypeKind.WILDCARD
-                || !(wiring.types().erasure(entityMirror) instanceof DeclaredType)) {
-            wiring.diagnostics().error(
+                || !(session.types().erasure(entityMirror) instanceof DeclaredType)) {
+            session.diagnostics().error(
                     "@Repository interface " + repository.getQualifiedName()
                             + " must extend DataRepository/BasicRepository/CrudRepository with a concrete entity type",
                     repository);
             return null;
         }
-        return (DeclaredType) wiring.types().erasure(entityMirror);
+        return (DeclaredType) session.types().erasure(entityMirror);
     }
 
     /**
@@ -95,23 +101,23 @@ public class RepositoryImplGenerator {
         String entityFqn = entityElement.getQualifiedName().toString();
         ClassName mapperType = null;
         boolean mapperPending = false;
-        if (wiring.rowMapperGenerator().canGenerateRowMapper(entity)) {
-            mapperType = wiring.registry().rowMapper(entityFqn);
+        if (generators.rowMapperGenerator().canGenerateRowMapper(entity)) {
+            mapperType = session.registry().rowMapper(entityFqn);
             mapperPending = mapperType == null;
         }
         // Jakarta Data 1.0 §3.3 static metamodel + <Entity>Metadata descriptor: the metamodel is
         // additive for aggregate roots (it references no JDBC types) and its field instances ARE the
         // descriptor's attributes. Value objects surface only as navigable member
         // classes (_<Entity><Field> chains) of their owner's metamodel, never as `_VO` classes.
-        wiring.artifactCoordinator().ensureDescriptorArtifacts(entityElement, entity, true);
+        generators.artifactCoordinator().ensureDescriptorArtifacts(entityElement, entity, true);
         if (mapperPending) {
-            mapperType = wiring.rowMapperGenerator().generateRowMapper(entityElement, entity,
-                    wiring.registry().metadataType(entityFqn));
-            wiring.registry().rememberRowMapper(entityFqn, mapperType);
+            mapperType = generators.rowMapperGenerator().generateRowMapper(entityElement, entity,
+                    session.registry().metadataType(entityFqn));
+            session.registry().rememberRowMapper(entityFqn, mapperType);
         }
         // EMBEDDED value objects carry descriptor metadata even when the owner's mapper gate skips
         // them; the generated <VO>Metadata classes are what the owner's attributes() reference.
-        wiring.metadataGenerator().generateEmbeddedDescriptors(entity);
+        generators.metadataGenerator().generateEmbeddedDescriptors(entity);
         return mapperType;
     }
 
@@ -123,7 +129,7 @@ public class RepositoryImplGenerator {
      */
     private RepositoryContext newContext(TypeElement repository, TypeMapping<?> entity, ClassName mapperType,
                                          LoadPlan loadPlan, WriteCascade cascade) {
-        boolean hydrate = wiring.hydrationEmitter().hasGeneratedHydration(mapperType,
+        boolean hydrate = generators.hydrationEmitter().hasGeneratedHydration(mapperType,
                 loadPlan.hydratedCollections(), loadPlan.hydratedRelationships());
         List<Prop.Reference> joinedReferences = loadPlan.joinedReferences();
         // A composing to-one target is JOIN-projected onto the parent's own row instead of being
@@ -132,7 +138,7 @@ public class RepositoryImplGenerator {
         boolean joinProjected = mapperType != null && !joinedReferences.isEmpty();
         String crudFullMapper = joinProjected ? "mapRow_full_crud" : null;
         // Decided ONCE, not per method: what the interface inherits cannot change between its methods.
-        RepositoryFlavour flavour = wiring.repositoryTypeResolver().flavourOf(repository);
+        RepositoryFlavour flavour = analysis.repositoryTypeResolver().flavourOf(repository);
         return new RepositoryContext(entity, flavour, loadPlan, cascade, mapperType, hydrate,
                 crudFullMapper, repository.getQualifiedName().toString());
     }
@@ -145,7 +151,7 @@ public class RepositoryImplGenerator {
      */
     private void preResolveMethods(TypeElement repository, DeclaredType repositoryType, TypeMapping<?> entity) {
         String fqn = repository.getQualifiedName().toString();
-        for (Element member : wiring.elements().getAllMembers(repository)) {
+        for (Element member : session.elements().getAllMembers(repository)) {
             if (member.getKind() != ElementKind.METHOD) {
                 continue;
             }
@@ -153,11 +159,11 @@ public class RepositoryImplGenerator {
             if (!method.getModifiers().contains(Modifier.ABSTRACT)
                     || method.getAnnotation(Query.class) != null
                     || MemberNames.isJdbcClientAccessor(method,
-                            wiring.types().erasure(method.getReturnType()).toString())) {
+                            session.types().erasure(method.getReturnType()).toString())) {
                 continue;
             }
-            ExecutableType resolved = (ExecutableType) wiring.types().asMemberOf(repositoryType, method);
-            wiring.repositoryMethodResolver().resolveFindMethod(method, resolved, entity,
+            ExecutableType resolved = (ExecutableType) session.types().asMemberOf(repositoryType, method);
+            analysis.repositoryMethodResolver().resolveFindMethod(method, resolved, entity,
                     method.getAnnotation(Find.class) != null, method.getAnnotation(Delete.class) != null, fqn);
         }
     }
@@ -167,14 +173,14 @@ public class RepositoryImplGenerator {
      * JOIN-projection mapper the read shapes share, then the hydration umbrella and its loaders.
      */
     private void generateMembers(TypeElement repository, RepositoryContext context) {
-        for (Element member : wiring.elements().getAllMembers(repository)) {
+        for (Element member : session.elements().getAllMembers(repository)) {
             MethodSpec method = methodFor(member, repository, context);
             if (method != null) {
                 context.auxMethods().add(method);
             }
         }
         if (context.crudFullMapper() != null) {
-            context.auxMethods().add(wiring.joinedProjections().buildFullMapper(context.crudFullMapper(),
+            context.auxMethods().add(generators.joinedProjections().buildFullMapper(context.crudFullMapper(),
                     context.entity(), context.mapperType(), context.joinedReferences()));
         }
         // Registered after the member loop on purpose, so the loaders' SELECT constants render as
@@ -208,16 +214,16 @@ public class RepositoryImplGenerator {
         // branch: `JdbcClient getJdbcClient();` returns the injected client, and anything else
         // still falls through to the ordinary path.
         if (MemberNames.isJdbcClientAccessor(method,
-                wiring.types().erasure(method.getReturnType()).toString())) {
-            return MethodSpec.overriding(method, repositoryType, wiring.types())
+                session.types().erasure(method.getReturnType()).toString())) {
+            return MethodSpec.overriding(method, repositoryType, session.types())
                     .addStatement("return $L", MemberNames.JDBC_CLIENT_FIELD)
                     .build();
         }
-        if (!wiring.methodValidator().validate(method, repositoryType, context.entity(),
+        if (!analysis.repositoryMethodValidator().validate(method, repositoryType, context.entity(),
                 context.flavour())) {
             return null;
         }
-        return wiring.methodCompiler().generateMethod(method, repositoryType, context);
+        return generators.methodCompiler().generateMethod(method, repositoryType, context);
     }
 
     /**
@@ -225,16 +231,16 @@ public class RepositoryImplGenerator {
      * per hydrated entity relationship.
      */
     private void appendHydration(RepositoryContext context) {
-        context.auxMethods().add(wiring.hydrationEmitter().hydrationUmbrella(context.entity(),
+        context.auxMethods().add(generators.hydrationEmitter().hydrationUmbrella(context.entity(),
                 context.hydratedCollections(), context.hydratedRelationships()));
         for (Prop.ElementCollection c : context.hydratedCollections()) {
-            context.auxMethods().add(wiring.hydrationEmitter().appendCollectionHydration(
+            context.auxMethods().add(generators.hydrationEmitter().appendCollectionHydration(
                     context.constants(), context.entity(), c, ClassName.bestGuess(context.collectionMappers().get(c.name()))));
         }
         // Only ONE_TO_MANY members reach here: a composing MANY_TO_ONE is JOIN-projected onto the
         // parent's own row (see joinedReferences), so it needs no loader of its own.
         for (EntityRelationship r : context.hydratedRelationships()) {
-            context.auxMethods().add(wiring.hydrationEmitter().appendOneToManyHydration(
+            context.auxMethods().add(generators.hydrationEmitter().appendOneToManyHydration(
                     context.constants(), context.entity(), r));
         }
     }
@@ -242,12 +248,12 @@ public class RepositoryImplGenerator {
     private void writeArtifacts(TypeElement repository, RepositoryContext context) {
         String packageName = ClassName.get(repository).packageName();
         String implementationName = repository.getSimpleName() + "Impl";
-        wiring.repositoryWriter().write(repository, packageName, implementationName,
+        generators.repositoryWriter().write(repository, packageName, implementationName,
                 context.constants(), context.auxMethods());
         Map<String, QueryDefinition> queryDefinitions =
-                wiring.registry().queryDefinitions(context.repositoryFqn());
+                session.registry().queryDefinitions(context.repositoryFqn());
         if (!queryDefinitions.isEmpty()) {
-            wiring.queriesWriter().write(repository, packageName,
+            generators.queriesWriter().write(repository, packageName,
                     repository.getSimpleName() + "Queries", queryDefinitions);
         }
     }

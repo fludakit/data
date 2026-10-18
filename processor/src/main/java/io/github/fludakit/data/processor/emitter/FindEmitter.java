@@ -17,6 +17,8 @@ import io.github.fludakit.data.sql.SqlBuilder;
 import io.github.fludakit.data.sql.SqlDialect;
 
 import javax.lang.model.element.VariableElement;
+import javax.lang.model.type.DeclaredType;
+import javax.lang.model.util.Types;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -43,14 +45,18 @@ public final class FindEmitter {
     private static final ClassName VALUE_ACCESS = ClassName.get("io.github.fludakit.data.metadata", "ValueAccess");
 
     private final SqlDialect dialect;
+    private final Types types;
+    private final DeclaredType repositoryType;
 
-    public FindEmitter(SqlDialect dialect) {
+    public FindEmitter(SqlDialect dialect, Types types, DeclaredType repositoryType) {
         this.dialect = dialect;
+        this.types = types;
+        this.repositoryType = repositoryType;
     }
 
     /** Default constructor using H2 dialect. */
-    public FindEmitter() {
-        this(H2Dialect.INSTANCE);
+    public FindEmitter(Types types, DeclaredType repositoryType) {
+        this(H2Dialect.INSTANCE, types, repositoryType);
     }
 
     /**
@@ -103,7 +109,7 @@ public final class FindEmitter {
     // ── Plain finder ─────────────────────────────────────────────────────
 
     private MethodSpec emitPlainFinder(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method());
+        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
 
         String sql = buildSelectSql(ctx, method);
         String constBase = toSqlConstantName(method.name());
@@ -152,13 +158,13 @@ public final class FindEmitter {
             emitTerminal(body, method.resultKind(), ctx);
             body.add(";");
         }
-        builder.addStatement(body.build());
+        builder.addCode(body.build());
     }
 
     // ── Offset-paged finder ──────────────────────────────────────────────
 
     private MethodSpec emitOffsetPagedFinder(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method());
+        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
 
         String entityFqn = ctx.entity().typeName();
         ClassName entityType = ClassName.bestGuess(entityFqn);
@@ -207,7 +213,7 @@ public final class FindEmitter {
         // return new SimplePage<>(pageRequest, content, total);
         body.addStatement("return new $T<>($L, $L, $L)", SIMPLE_PAGE, pageRequestParam, "content", "total");
 
-        builder.addStatement(body.build());
+        builder.addCode(body.build());
         return builder.build();
     }
 
@@ -220,7 +226,7 @@ public final class FindEmitter {
     // ── Cursor-paged finder ──────────────────────────────────────────────
 
     private MethodSpec emitCursorPagedFinder(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method());
+        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
 
         String entityFqn = ctx.entity().typeName();
         ClassName entityType = ClassName.bestGuess(entityFqn);
@@ -366,7 +372,7 @@ public final class FindEmitter {
         body.addStatement("return new $T<>($L, $L, $L, $L)",
                 SIMPLE_CURSORED_PAGE, pageRequestParam, "content", "cursors", "total");
 
-        builder.addStatement(body.build());
+        builder.addCode(body.build());
         return builder.build();
     }
 
@@ -382,7 +388,7 @@ public final class FindEmitter {
     // ── Count ────────────────────────────────────────────────────────────
 
     private MethodSpec emitCount(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method());
+        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
 
         String sql = buildCountSql(ctx, method);
         String constBase = toSqlConstantName(method.name());
@@ -395,7 +401,7 @@ public final class FindEmitter {
         body.add("    .sql($L)\n", constName);
         appendParamBindings(body, bindings, method);
         body.add("    .query($T.class).single();", Long.class);
-        builder.addStatement(body.build());
+        builder.addCode(body.build());
 
         return builder.build();
     }
@@ -403,7 +409,7 @@ public final class FindEmitter {
     // ── Exists ───────────────────────────────────────────────────────────
 
     private MethodSpec emitExists(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method());
+        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
 
         String sql = buildExistsSql(ctx, method);
         String constBase = toSqlConstantName(method.name());
@@ -416,7 +422,7 @@ public final class FindEmitter {
         body.add("    .sql($L)\n", constName);
         appendParamBindings(body, bindings, method);
         body.add("    .query($T.class).single();", Boolean.class);
-        builder.addStatement(body.build());
+        builder.addCode(body.build());
 
         return builder.build();
     }
@@ -442,7 +448,7 @@ public final class FindEmitter {
     // ── DeleteBy ─────────────────────────────────────────────────────────
 
     private MethodSpec emitDeleteBy(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method());
+        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
 
         SqlBuilder sqlBuilder = new SqlBuilder(ctx.entity());
         sqlBuilder.dialect(dialect);
@@ -457,7 +463,7 @@ public final class FindEmitter {
         body.add("    .sql($L)\n", constName);
         appendParamBindings(body, bindings, method);
         body.add("    .execute();");
-        builder.addStatement(body.build());
+        builder.addCode(body.build());
 
         return builder.build();
     }
@@ -470,7 +476,7 @@ public final class FindEmitter {
      * and handles the return type (SINGLE, LIST, OPTIONAL, etc.).
      */
     private MethodSpec emitCustomQuery(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method());
+        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
 
         String sql = method.customSql();
         String constBase = toSqlConstantName(method.name());
@@ -498,7 +504,7 @@ public final class FindEmitter {
             body.add(";");
         }
 
-        builder.addStatement(body.build());
+        builder.addCode(body.build());
         return builder.build();
     }
 

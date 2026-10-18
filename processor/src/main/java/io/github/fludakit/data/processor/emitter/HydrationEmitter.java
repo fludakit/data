@@ -9,6 +9,8 @@ import io.github.fludakit.data.processor.context.RepositoryContext;
 import io.github.fludakit.data.sql.SqlDialect;
 
 import javax.lang.model.element.Modifier;
+import javax.lang.model.type.DeclaredType;
+import javax.lang.model.util.Types;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -78,7 +80,7 @@ public final class HydrationEmitter {
             }
         }
 
-        builder.addStatement(body.build());
+        builder.addCode(body.build());
         return builder.build();
     }
 
@@ -104,7 +106,7 @@ public final class HydrationEmitter {
         body.add("    hydrate(entity);\n");
         body.add("}");
 
-        builder.addStatement(body.build());
+        builder.addCode(body.build());
         return builder.build();
     }
 
@@ -190,7 +192,7 @@ public final class HydrationEmitter {
         body.add("    .list();\n");
         body.add("entity.$L(items);", setterName);
 
-        builder.addStatement(body.build());
+        builder.addCode(body.build());
         return builder.build();
     }
 
@@ -261,7 +263,7 @@ public final class HydrationEmitter {
         body.add("    .list();\n");
         body.add("entity.$L(items);", setterName);
 
-        builder.addStatement(body.build());
+        builder.addCode(body.build());
         return builder.build();
     }
 

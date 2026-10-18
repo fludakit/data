@@ -9,6 +9,8 @@ import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.RepositoryContext;
 import io.github.fludakit.data.query.Operation;
 
+import javax.lang.model.type.DeclaredType;
+import javax.lang.model.util.Types;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -20,6 +22,14 @@ import java.util.List;
  * corresponding single-entity method (save, deleteById).</p>
  */
 public final class LifecycleEmitter {
+
+    private final Types types;
+    private final DeclaredType repositoryType;
+
+    public LifecycleEmitter(Types types, DeclaredType repositoryType) {
+        this.types = types;
+        this.repositoryType = repositoryType;
+    }
 
     /**
      * Generates a method override for a batch lifecycle method.
@@ -45,11 +55,11 @@ public final class LifecycleEmitter {
     // ── saveAll ──────────────────────────────────────────────────────────
 
     private MethodSpec emitSaveAll(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method());
+        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
         ClassName entityClass = ClassName.bestGuess(ctx.entity().typeName());
 
         // Register the SAVE SQL constant (same as single save)
-        WriteEmitter writeEmitter = new WriteEmitter();
+        WriteEmitter writeEmitter = new WriteEmitter(types, repositoryType);
         String saveSql = buildSaveSql(ctx);
         ctx.registerConstant("SAVE_ALL", saveSql);
 
@@ -66,14 +76,14 @@ public final class LifecycleEmitter {
         body.add("}\n");
         body.add("return result;");
 
-        builder.addStatement(body.build());
+        builder.addCode(body.build());
         return builder.build();
     }
 
     // ── deleteAll(Iterable<E>) ───────────────────────────────────────────
 
     private MethodSpec emitDeleteAll(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method());
+        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
         ClassName entityClass = ClassName.bestGuess(ctx.entity().typeName());
 
         CodeBlock.Builder body = CodeBlock.builder();
@@ -81,14 +91,14 @@ public final class LifecycleEmitter {
         body.add("    deleteById(entity.getId());\n");
         body.add("}");
 
-        builder.addStatement(body.build());
+        builder.addCode(body.build());
         return builder.build();
     }
 
     // ── deleteByIds(Iterable<ID>) ────────────────────────────────────────
 
     private MethodSpec emitDeleteByIds(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method());
+        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
         String idTypeFqn = ctx.entity().id().typeFqn();
         ClassName idClass = ClassName.bestGuess(idTypeFqn);
 
@@ -97,7 +107,7 @@ public final class LifecycleEmitter {
         body.add("    deleteById(id);\n");
         body.add("}");
 
-        builder.addStatement(body.build());
+        builder.addCode(body.build());
         return builder.build();
     }
 

@@ -186,7 +186,7 @@ final class RepositoryVisitor {
         }
 
         // 6b. Emit plain finder methods
-        FindEmitter findEmitter = new FindEmitter();
+        FindEmitter findEmitter = new FindEmitter(types, (DeclaredType) repository.asType());
         for (MethodContext mc : methods) {
             MethodSpec emitted = findEmitter.emit(ctx, mc);
             if (emitted != null) {
@@ -195,7 +195,7 @@ final class RepositoryVisitor {
         }
 
         // 6c. Emit batch lifecycle methods (saveAll, deleteAll, deleteByIds)
-        LifecycleEmitter lifecycleEmitter = new LifecycleEmitter();
+        LifecycleEmitter lifecycleEmitter = new LifecycleEmitter(types, (DeclaredType) repository.asType());
         for (MethodContext mc : methods) {
             MethodSpec emitted = lifecycleEmitter.emit(ctx, mc);
             if (emitted != null) {
@@ -204,7 +204,7 @@ final class RepositoryVisitor {
         }
 
         // 6d. Emit write methods (save, insert, update, deleteById)
-        WriteEmitter writeEmitter = new WriteEmitter();
+        WriteEmitter writeEmitter = new WriteEmitter(types, (DeclaredType) repository.asType());
         for (MethodContext mc : methods) {
             MethodSpec emitted = writeEmitter.emit(ctx, mc);
             if (emitted != null) {

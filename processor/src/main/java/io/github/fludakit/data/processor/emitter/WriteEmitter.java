@@ -15,6 +15,8 @@ import io.github.fludakit.data.sql.UpsertForm;
 
 import javax.lang.model.element.Modifier;
 import javax.lang.model.element.VariableElement;
+import javax.lang.model.type.DeclaredType;
+import javax.lang.model.util.Types;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -31,19 +33,22 @@ import java.util.List;
  */
 public final class WriteEmitter {
 
+    private final SqlDialect dialect;
+    private final Types types;
+    private final DeclaredType repositoryType;
+
+    public WriteEmitter(SqlDialect dialect, Types types, DeclaredType repositoryType) {
+        this.dialect = dialect;
+        this.types = types;
+        this.repositoryType = repositoryType;
+    }
+
+    public WriteEmitter(Types types, DeclaredType repositoryType) {
+        this(H2Dialect.INSTANCE, types, repositoryType);
+    }
+
     private static final ClassName GENERATED_KEY_HOLDER =
             ClassName.get("org.springframework.jdbc.support", "GeneratedKeyHolder");
-
-    private final SqlDialect dialect;
-
-    public WriteEmitter(SqlDialect dialect) {
-        this.dialect = dialect;
-    }
-
-    /** Default constructor using H2 dialect. */
-    public WriteEmitter() {
-        this(H2Dialect.INSTANCE);
-    }
 
     /**
      * Generates a method override for a write method.
@@ -77,7 +82,7 @@ public final class WriteEmitter {
     // ── SAVE ─────────────────────────────────────────────────────────────
 
     private MethodSpec emitSave(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method());
+        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
         TypeMapping<?> entity = ctx.entity();
         String entityVar = "entity";
         String idTypeFqn = entity.id().typeFqn();
@@ -161,7 +166,7 @@ public final class WriteEmitter {
             if (returnsEntity) body.add("\nreturn $L;", entityVar);
         }
 
-        builder.addStatement(body.build());
+        builder.addCode(body.build());
 
         // Cascade writes for aggregate roots
         if (ctx.entity().ownsAggregateLifecycle()) {
@@ -440,7 +445,7 @@ public final class WriteEmitter {
     // ── INSERT ───────────────────────────────────────────────────────────
 
     private MethodSpec emitInsert(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method());
+        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
         TypeMapping<?> entity = ctx.entity();
         String entityVar = "entity";
         String idTypeFqn = entity.id().typeFqn();
@@ -482,14 +487,14 @@ public final class WriteEmitter {
             if (returnsEntity) body.add("\nreturn $L;", entityVar);
         }
 
-        builder.addStatement(body.build());
+        builder.addCode(body.build());
         return builder.build();
     }
 
     // ── UPDATE ───────────────────────────────────────────────────────────
 
     private MethodSpec emitUpdate(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method());
+        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
         TypeMapping<?> entity = ctx.entity();
         String entityVar = "entity";
 
@@ -507,14 +512,14 @@ public final class WriteEmitter {
         body.add(".param($S, $L.getId()).update();", "id", entityVar);
         if (returnsEntity) body.add("\nreturn $L;", entityVar);
 
-        builder.addStatement(body.build());
+        builder.addCode(body.build());
         return builder.build();
     }
 
     // ── DELETE BY ID ─────────────────────────────────────────────────────
 
     private MethodSpec emitDeleteById(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodSpec.overriding(method.method());
+        MethodSpec.Builder builder = MethodSpec.overriding(method.method(), repositoryType, types);
         TypeMapping<?> entity = ctx.entity();
 
         SqlBuilder sb = new SqlBuilder(entity);
@@ -528,7 +533,7 @@ public final class WriteEmitter {
         CodeBlock.Builder body = CodeBlock.builder();
         body.add("jdbcClient.sql($L).param($S, $L).update();", constName, "id", idParam);
 
-        builder.addStatement(body.build());
+        builder.addCode(body.build());
         return builder.build();
     }
 

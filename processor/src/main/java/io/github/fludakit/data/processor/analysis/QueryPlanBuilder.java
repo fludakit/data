@@ -155,8 +155,8 @@ public final class QueryPlanBuilder {
     public Object tryParse(String name) {
         // A qbn-free prefix test: fluda-data-qbn is an OPTIONAL dependency, so the name is classified
         // before any qbn class is touched. RepositoryMethodValidator reports the diagnostics.
-        return RepositoryMethodValidator.QbnSupport.isQueryMethodName(name)
-                ? RepositoryMethodValidator.QbnSupport.parseOrNull(name) : null;
+        return QbnSupport.isQueryMethodName(name)
+                ? QbnSupport.parseOrNull(name) : null;
     }
 
     public List<Integer> nonSpecialIndices(List<? extends TypeMirror> parameterTypes) {

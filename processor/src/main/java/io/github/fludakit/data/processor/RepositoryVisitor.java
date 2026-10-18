@@ -11,6 +11,7 @@ import io.github.fludakit.data.processor.context.RepositoryContext;
 import io.github.fludakit.data.processor.emitter.FindEmitter;
 import io.github.fludakit.data.processor.emitter.MetamodelEmitter;
 import io.github.fludakit.data.processor.emitter.RowMapperEmitter;
+import io.github.fludakit.data.processor.emitter.WriteEmitter;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.qbn.ParsedMethodName;
 import io.github.fludakit.data.qbn.QueryByMethodNameParser;
@@ -163,6 +164,15 @@ final class RepositoryVisitor {
         FindEmitter findEmitter = new FindEmitter();
         for (MethodContext mc : methods) {
             MethodSpec emitted = findEmitter.emit(ctx, mc);
+            if (emitted != null) {
+                ctx.auxMethods().add(emitted);
+            }
+        }
+
+        // 6c. Emit write methods (save, insert, update, deleteById)
+        WriteEmitter writeEmitter = new WriteEmitter();
+        for (MethodContext mc : methods) {
+            MethodSpec emitted = writeEmitter.emit(ctx, mc);
             if (emitted != null) {
                 ctx.auxMethods().add(emitted);
             }

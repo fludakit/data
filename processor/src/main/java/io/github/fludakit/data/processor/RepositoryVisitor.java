@@ -28,13 +28,10 @@ import jakarta.data.repository.Save;
 import jakarta.data.repository.Update;
 
 import javax.annotation.processing.Filer;
-import javax.lang.model.element.AnnotationMirror;
-import javax.lang.model.element.AnnotationValue;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.Modifier;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.element.VariableElement;
-import javax.lang.model.type.ArrayType;
 import javax.lang.model.type.DeclaredType;
 import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
@@ -42,9 +39,7 @@ import javax.lang.model.util.Elements;
 import javax.lang.model.util.Types;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 
 /**
  * Visits a single {@code @Repository}-annotated interface, resolves its entity type and methods,
@@ -425,17 +420,18 @@ final class RepositoryVisitor {
             // Skip paging parameters
             if (PAGE_REQUEST.equals(paramFqn)) continue;
 
-            // Skip @By parameters that have already been handled by predicates
+            // @By parameters bind by name; advance index since the @By predicate
+            // occupies a slot in the combined predicate list
             By byAnnotation = param.getAnnotation(By.class);
             if (byAnnotation != null) {
                 String paramName = param.getSimpleName().toString();
-                // Find matching predicate
                 for (Predicate pred : predicates) {
                     if (pred.param().equals(paramName)) {
                         bindings.add(new ParamBinding(i, paramName, LikePattern.of(pred.operator())));
                         break;
                     }
                 }
+                predicateParamIndex++;
                 continue;
             }
 

@@ -9,6 +9,7 @@ import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.RepositoryContext;
 import io.github.fludakit.data.processor.emitter.FindEmitter;
+import io.github.fludakit.data.processor.emitter.LifecycleEmitter;
 import io.github.fludakit.data.processor.emitter.MetamodelEmitter;
 import io.github.fludakit.data.processor.emitter.RowMapperEmitter;
 import io.github.fludakit.data.processor.emitter.WriteEmitter;
@@ -169,7 +170,16 @@ final class RepositoryVisitor {
             }
         }
 
-        // 6c. Emit write methods (save, insert, update, deleteById)
+        // 6c. Emit batch lifecycle methods (saveAll, deleteAll, deleteByIds)
+        LifecycleEmitter lifecycleEmitter = new LifecycleEmitter();
+        for (MethodContext mc : methods) {
+            MethodSpec emitted = lifecycleEmitter.emit(ctx, mc);
+            if (emitted != null) {
+                ctx.auxMethods().add(emitted);
+            }
+        }
+
+        // 6d. Emit write methods (save, insert, update, deleteById)
         WriteEmitter writeEmitter = new WriteEmitter();
         for (MethodContext mc : methods) {
             MethodSpec emitted = writeEmitter.emit(ctx, mc);
@@ -338,7 +348,7 @@ final class RepositoryVisitor {
             case "save", "saveAll" -> Operation.SAVE;
             case "insert", "insertAll" -> Operation.INSERT;
             case "update", "updateAll" -> Operation.UPDATE;
-            case "delete", "deleteAll", "deleteById", "deleteAllById" -> Operation.DELETE;
+            case "delete", "deleteAll", "deleteById", "deleteAllById", "deleteByIds" -> Operation.DELETE;
             case "findById", "findAll", "findAllById" -> Operation.FIND;
             default -> null;
         };

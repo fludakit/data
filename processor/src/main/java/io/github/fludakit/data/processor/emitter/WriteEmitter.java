@@ -53,6 +53,12 @@ public final class WriteEmitter {
     public MethodSpec emit(RepositoryContext ctx, MethodContext method) {
         Operation op = method.operation();
 
+        // Skip batch lifecycle methods — handled by LifecycleEmitter
+        String name = method.name();
+        if ("saveAll".equals(name) || "deleteAll".equals(name) || "deleteByIds".equals(name)) {
+            return null;
+        }
+
         if (op == Operation.SAVE) {
             return emitSave(ctx, method);
         }

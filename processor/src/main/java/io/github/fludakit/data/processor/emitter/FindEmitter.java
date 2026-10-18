@@ -178,11 +178,11 @@ public final class FindEmitter {
         body.add("    .query(new $T())\n", rowMapperType);
         body.addStatement("    .list()");
 
-        // long total = jdbcClient.sql(COUNT_SQL).query(Long.class).single();
-        body.add("long $L = jdbcClient\n", "total");
+        // long total = pageRequest.requestTotal() ? jdbcClient.sql(COUNT_SQL)...single() : 0;
+        body.add("long $L = $L.requestTotal() ? jdbcClient\n", "total", pageRequestParam);
         body.add("    .sql($L)\n", countConstName);
         appendParamBindings(body, bindings, method);
-        body.addStatement("    .query($T.class).single()", Long.class);
+        body.addStatement("    .query($T.class).single() : 0", Long.class);
 
         // return new SimplePage<>(pageRequest, content, total);
         body.addStatement("return new $T<>($L, $L, $L)", SIMPLE_PAGE, pageRequestParam, "content", "total");
@@ -207,10 +207,11 @@ public final class FindEmitter {
         ClassName rowMapperType = ctx.rowMapperType();
         List<SortSpec> sorts = method.sorts();
 
-        // Build the base SELECT SQL shell (no seek clause, no LIMIT)
+        // Build the base SELECT SQL shell (no ORDER BY, no seek clause, no LIMIT).
+        // Pass empty sorts so selectBy produces no ORDER BY — the ORDER BY below is the sole source.
         SqlBuilder sqlBuilder = new SqlBuilder(ctx.entity());
         sqlBuilder.dialect(dialect);
-        String baseSql = sqlBuilder.selectBy(method.predicates(), sorts, 0, null, method.distinct());
+        String baseSql = sqlBuilder.selectBy(method.predicates(), List.of(), 0, null, method.distinct());
         boolean shellHasWhere = !method.predicates().isEmpty();
 
         // Build sort terms and ascending flags for seek clause
@@ -228,10 +229,14 @@ public final class FindEmitter {
             orderByClause = " ORDER BY " + buildSortTerms(sorts);
         }
 
-        // Build the seek statement (base + seek clause + ORDER BY)
+        // Build the seek statement (base + conditional seek clause + ORDER BY).
+        // The conditional seek (:cursor0 IS NULL OR <predicate>) handles both the first page
+        // (no cursor — cursor keys are null) and subsequent pages without branching SQL.
         String seekStmt;
         if (!terms.isEmpty()) {
-            seekStmt = sqlBuilder.pagedSeekStatement(baseSql, shellHasWhere, terms, ascending, true, orderByClause);
+            String seekPredicate = sqlBuilder.seekClause(terms, ascending, true);
+            seekStmt = baseSql + (shellHasWhere ? " AND " : " WHERE ")
+                    + "(:cursor0 IS NULL OR " + seekPredicate + ")" + orderByClause;
         } else {
             seekStmt = baseSql + orderByClause;
         }

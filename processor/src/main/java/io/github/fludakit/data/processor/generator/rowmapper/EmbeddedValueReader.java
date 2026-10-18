@@ -7,7 +7,7 @@ import com.squareup.javapoet.TypeName;
 import io.github.fludakit.data.Names;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
-import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
+import io.github.fludakit.data.processor.analysis.TypeModelResolver;
 import io.github.fludakit.data.processor.generator.metadata.Literals;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.processor.support.Props;
@@ -31,10 +31,10 @@ public final class EmbeddedValueReader {
         CodeBlock read(TypeName type, ClassName metadataType, String property);
     }
 
-    private final TypeModelRegistry typeMappingBuilder;
+    private final TypeModelResolver typeMappingBuilder;
     private final ReadExpression readExpression;
 
-    public EmbeddedValueReader(TypeModelRegistry typeMappingBuilder, ReadExpression readExpression) {
+    public EmbeddedValueReader(TypeModelResolver typeMappingBuilder, ReadExpression readExpression) {
         this.typeMappingBuilder = typeMappingBuilder;
         this.readExpression = readExpression;
     }

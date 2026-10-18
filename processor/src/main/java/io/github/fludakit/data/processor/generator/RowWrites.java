@@ -6,7 +6,7 @@ import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
-import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
+import io.github.fludakit.data.processor.analysis.TypeModelResolver;
 import io.github.fludakit.data.processor.support.GeneratedKeyCoercion;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.sql.SqlBuilder;
@@ -37,7 +37,7 @@ public final class RowWrites {
 
     private final AttributeTypes attributeTypes;
     private final SqlDialect sqlDialect;
-    private final TypeModelRegistry typeMappingBuilder;
+    private final TypeModelResolver typeMappingBuilder;
 
     /**
      * @param attributeTypes for {@code isEnumProp} — whether a property's declared type is an
@@ -47,7 +47,7 @@ public final class RowWrites {
      *                       {@code Elements} to answer it
      */
     public RowWrites(AttributeTypes attributeTypes, SqlDialect sqlDialect,
-                     TypeModelRegistry typeMappingBuilder) {
+                     TypeModelResolver typeMappingBuilder) {
         this.attributeTypes = attributeTypes;
         this.sqlDialect = sqlDialect;
         this.typeMappingBuilder = typeMappingBuilder;

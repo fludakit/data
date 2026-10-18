@@ -5,7 +5,7 @@ import com.squareup.javapoet.MethodSpec;
 import com.squareup.javapoet.TypeName;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.analysis.MethodResults;
-import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
+import io.github.fludakit.data.processor.analysis.TypeModelResolver;
 import io.github.fludakit.data.processor.analysis.QueryPlanBuilder;
 import io.github.fludakit.data.processor.generator.QueryInvocations;
 import io.github.fludakit.data.processor.generator.RepositoryContext;
@@ -30,11 +30,11 @@ import javax.lang.model.type.TypeMirror;
 public final class NativeQueryGenerator implements MethodGenerator {
 
     private final QueryPlanBuilder queryPlanCompiler;
-    private final TypeModelRegistry typeMappingBuilder;
+    private final TypeModelResolver typeMappingBuilder;
     private final MethodResults methodResults;
     private final GeneratedArtifacts registry;
 
-    public NativeQueryGenerator(QueryPlanBuilder queryPlanCompiler, TypeModelRegistry typeMappingBuilder,
+    public NativeQueryGenerator(QueryPlanBuilder queryPlanCompiler, TypeModelResolver typeMappingBuilder,
                          MethodResults methodResults, GeneratedArtifacts registry) {
         this.queryPlanCompiler = queryPlanCompiler;
         this.typeMappingBuilder = typeMappingBuilder;

@@ -31,32 +31,32 @@ import java.util.Set;
  *
  * <p>This is the only pass that makes a mapping decision. The memoization of its results — one
  * descriptor per type, one element collection per placement, one member type per member — lives in
- * {@link TypeModelRegistry}, which this class owns and drives through {@code buildDescriptor}.
+ * {@link TypeModelResolver}, which this class owns and drives through {@code buildDescriptor}.
  */
 public final class TypeModelBuilder {
 
     private final Types types;
     private final Elements elements;
     private final Diagnostics diagnostics;
-    private final TypeModelRegistry registry;
+    private final TypeModelResolver typeModelResolver;
 
     public TypeModelBuilder(Types types, Elements elements, Diagnostics diagnostics) {
         this.types = types;
         this.elements = elements;
         this.diagnostics = diagnostics;
-        this.registry = new TypeModelRegistry(types, elements, this::buildDescriptor);
+        this.typeModelResolver = new TypeModelResolver(types, elements, this::buildDescriptor);
     }
 
     /** The mapping of one declared type, built and memoized on first use. */
     public TypeMapping<?> buildEntity(TypeElement element) {
-        return registry.descriptorFor(element);
+        return typeModelResolver.descriptorFor(element);
     }
 
     // ------------------------------------------------------------ memoized lookups
 
     /** The resolved models this builder scans into: the memoized cache the generators consume. */
-    public TypeModelRegistry registry() {
-        return registry;
+    public TypeModelResolver registry() {
+        return typeModelResolver;
     }
 
     // ------------------------------------------------------------------------- the field scan
@@ -67,8 +67,8 @@ public final class TypeModelBuilder {
      * annotations, so the registry's memoization can drive this as a plain {@code TypeElement} function.
      */
     private TypeMapping<?> buildDescriptor(TypeElement element) {
-        boolean valueObject = registry.isValueObjectType(element);
-        boolean ownerOwns = registry.ownsAggregateLifecycle(element);
+        boolean valueObject = typeModelResolver.isValueObjectType(element);
+        boolean ownerOwns = typeModelResolver.ownsAggregateLifecycle(element);
         String table = valueObject ? null : Names.tableName(element.getSimpleName().toString());
         String typeNameString = element.getQualifiedName().toString();
         Prop.Id idProp = null;
@@ -101,18 +101,18 @@ public final class TypeModelBuilder {
             }
             if (!valueObject && (identityAnnotated || name.equals(MemberNames.ID_PROPERTY))) {
                 idProp = new Prop.Id(name, Names.columnBase(name), fieldType);
-                registry.recordMemberType(typeNameString, name, fieldTypeName);
+                typeModelResolver.recordMemberType(typeNameString, name, fieldTypeName);
 
             } else if (field.getAnnotation(Association.class) != null) {
                 TypeElement target = declaredElement(field);
                 props.add(referenceProp(name, Names.fkColumn(name),
                         target != null ? target.getQualifiedName().toString() : null, false, false, target));
-                registry.recordMemberType(typeNameString, name, fieldTypeName);
+                typeModelResolver.recordMemberType(typeNameString, name, fieldTypeName);
 
             } else if (embeddedTarget(field) != null) {
                 TypeElement vo = embeddedTarget(field);
-                props.add(new Prop.Embedded(name, embeddedOf(registry.descriptorFor(vo))));
-                registry.recordMemberType(typeNameString, name, fieldTypeName);
+                props.add(new Prop.Embedded(name, embeddedOf(typeModelResolver.descriptorFor(vo))));
+                typeModelResolver.recordMemberType(typeNameString, name, fieldTypeName);
 
             } else if (isEntityType(declaredElement(field))) {
                 TypeElement target = declaredElement(field);
@@ -121,7 +121,7 @@ public final class TypeModelBuilder {
                 boolean composition = ownerOwns;
                 props.add(referenceProp(name, Names.fkColumn(name),
                         target.getQualifiedName().toString(), composition, !composition, target));
-                registry.recordMemberType(typeNameString, name, fieldTypeName);
+                typeModelResolver.recordMemberType(typeNameString, name, fieldTypeName);
 
             } else if (valueObjectElementType(field) != null) {
                 TypeElement vo = valueObjectElementType(field);
@@ -135,15 +135,15 @@ public final class TypeModelBuilder {
                                     + " child table to live in", field);
                     continue;
                 }
-                props.add(registry.buildCollection(table, name, vo));
+                props.add(typeModelResolver.buildCollection(table, name, vo));
 
             } else if (entityTypeElement(field) != null) {
                 TypeElement child = entityTypeElement(field);
-                props.add(new Prop.EntityCollection(name, registry.descriptorFor(child), null, null));
+                props.add(new Prop.EntityCollection(name, typeModelResolver.descriptorFor(child), null, null));
 
             } else {
                 props.add(new Prop.Scalar(name, Names.columnBase(name), fieldType));
-                registry.recordMemberType(typeNameString, name, fieldTypeName);
+                typeModelResolver.recordMemberType(typeNameString, name, fieldTypeName);
             }
         }
         if (!valueObject && idProp == null) {
@@ -151,7 +151,7 @@ public final class TypeModelBuilder {
                     "entity '" + element.getSimpleName() + "' declares no identifier; annotate one field with"
                             + " @Identity (or name it 'id')", element);
             idProp = new Prop.Id(MemberNames.ID_PROPERTY, Names.columnBase(MemberNames.ID_PROPERTY), "java.lang.Long");
-            registry.recordMemberType(typeNameString, MemberNames.ID_PROPERTY, ClassName.get(Long.class));
+            typeModelResolver.recordMemberType(typeNameString, MemberNames.ID_PROPERTY, ClassName.get(Long.class));
         }
 
         // Resolve one-to-many inverse references after collecting all parent properties.
@@ -160,7 +160,7 @@ public final class TypeModelBuilder {
             if (prop instanceof Prop.EntityCollection entityCollection && entityCollection.targetTypeName() != null) {
                 TypeElement childElement = elements.getTypeElement(entityCollection.targetTypeName());
                 TypeMapping<?> child = childElement != null
-                        ? registry.descriptorFor(childElement) : null;
+                        ? typeModelResolver.descriptorFor(childElement) : null;
                 String inverse = child != null ? findInverseName(typeNameString, child) : null;
                 resolved.add(new Prop.EntityCollection(entityCollection.name(), entityCollection.target(),
                         inverse, inverse == null ? null : Names.fkColumn(inverse)));
@@ -168,12 +168,12 @@ public final class TypeModelBuilder {
                 resolved.add(prop);
             }
         }
-        return TypeModelRegistry.entityMapping(valueObject, ownerOwns, typeNameString, table, idProp, resolved);
+        return TypeModelResolver.entityMapping(valueObject, ownerOwns, typeNameString, table, idProp, resolved);
     }
 
     private Prop.Reference referenceProp(String name, String fkColumn, String targetTypeName,
                                          boolean composition, boolean backReference, TypeElement target) {
-        TypeMapping<?> targetModel = target == null ? null : registry.descriptorFor(target);
+        TypeMapping<?> targetModel = target == null ? null : typeModelResolver.descriptorFor(target);
         return new Prop.Reference(name, fkColumn, targetTypeName, targetModel, composition, backReference);
     }
 
@@ -202,7 +202,7 @@ public final class TypeModelBuilder {
                 || !(declared.asElement() instanceof TypeElement element)) {
             return null;
         }
-        return registry.isValueObjectType(element) ? element : null;
+        return typeModelResolver.isValueObjectType(element) ? element : null;
     }
 
     private TypeElement listElementType(VariableElement field,
@@ -226,7 +226,7 @@ public final class TypeModelBuilder {
     }
 
     private TypeElement valueObjectElementType(VariableElement field) {
-        return listElementType(field, registry::isValueObjectType);
+        return listElementType(field, typeModelResolver::isValueObjectType);
     }
 
     private static TypeElement declaredElement(VariableElement field) {

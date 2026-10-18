@@ -3,7 +3,7 @@ package io.github.fludakit.data.processor.generator;
 import com.squareup.javapoet.ClassName;
 
 import io.github.fludakit.data.metadata.TypeMapping;
-import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
+import io.github.fludakit.data.processor.analysis.TypeModelResolver;
 import io.github.fludakit.data.processor.generator.metadata.TypeMappingGenerator;
 import io.github.fludakit.data.processor.generator.metadata.MetamodelGenerator;
 import io.github.fludakit.data.processor.generator.rowmapper.RowMapperGenerator;
@@ -22,7 +22,7 @@ import java.util.Set;
  * generation. It lives in {@code generate} so that {@code analysis} (and its model output) no longer
  * imports anything from {@code generate}, which is what keeps the analysis → plan → generate layers
  * pointing one way. The analysis-side half — building the compile-time {@link TypeMapping} model — is
- * {@link TypeModelRegistry}, which this coordinator reads.
+ * {@link TypeModelResolver}, which this coordinator reads.
  *
  * <p>Idempotent at the artifact level: the name-claiming and cache checks in
  * {@link GeneratedArtifacts} mean two repositories over the same entity (or a repository and a
@@ -30,15 +30,15 @@ import java.util.Set;
  */
 public final class ArtifactCoordinator {
 
-    private final TypeModelRegistry typeMappingBuilder;
+    private final TypeModelResolver typeMappingBuilder;
     private final TypeMappingGenerator metadataGenerator;
     private final MetamodelGenerator metamodelGenerator;
     private final RowMapperGenerator rowMapperGenerator;
     private final GeneratedArtifacts registry;
 
-    public ArtifactCoordinator(TypeModelRegistry typeMappingBuilder,
-                        TypeMappingGenerator metadataGenerator, MetamodelGenerator metamodelGenerator,
-                        RowMapperGenerator rowMapperGenerator, GeneratedArtifacts registry) {
+    public ArtifactCoordinator(TypeModelResolver typeMappingBuilder,
+                               TypeMappingGenerator metadataGenerator, MetamodelGenerator metamodelGenerator,
+                               RowMapperGenerator rowMapperGenerator, GeneratedArtifacts registry) {
         this.typeMappingBuilder = typeMappingBuilder;
         this.metadataGenerator = metadataGenerator;
         this.metamodelGenerator = metamodelGenerator;

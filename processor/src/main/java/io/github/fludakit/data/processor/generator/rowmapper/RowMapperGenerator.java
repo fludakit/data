@@ -10,7 +10,7 @@ import com.squareup.javapoet.TypeSpec;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
-import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
+import io.github.fludakit.data.processor.analysis.TypeModelResolver;
 import io.github.fludakit.data.processor.generator.RepositorySourceWriter;
 import io.github.fludakit.data.processor.generator.metadata.Literals;
 import io.github.fludakit.data.processor.generator.metadata.TypeMappingGenerator;
@@ -22,7 +22,6 @@ import javax.lang.model.element.Element;
 import javax.lang.model.element.Modifier;
 import javax.lang.model.element.TypeElement;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 
 /**
@@ -41,9 +40,9 @@ import java.util.Map;
  *
  * <p>Writes go out through {@link RepositorySourceWriter}, so this emitter never sees {@code Filer},
  * and it holds no {@code Elements}: a target that is only ever named (a descriptor carries an FQN
- * {@code String}) resolves through {@link TypeModelRegistry#elementFor(String)}, and the one question
+ * {@code String}) resolves through {@link TypeModelResolver#elementFor(String)}, and the one question
  * that needs a member SCAN — whether the target has an id setter, which is what makes an id-only
- * partial constructible — is {@link TypeModelRegistry#hasMethod}, which owns {@code Elements} and
+ * partial constructible — is {@link TypeModelResolver#hasMethod}, which owns {@code Elements} and
  * memoizes by name. Both belong to the class that already had to own the environment for building the
  * models; neither decides whether this emitter can be constructed. The no-arg-constructor test needs
  * no environment at all — it reads {@code getEnclosedElements} off an element it already holds. A
@@ -53,7 +52,7 @@ public final class RowMapperGenerator {
 
     private final RowMapperEligibility eligibility;
     private final Diagnostics diagnostics;
-    private final TypeModelRegistry typeMappingBuilder;
+    private final TypeModelResolver typeMappingBuilder;
     private final TypeMappingGenerator metadataGenerator;
     private final RepositorySourceWriter sourceWriter;
 
@@ -70,7 +69,7 @@ public final class RowMapperGenerator {
     private final EmbeddedValueReader embeddedReader;
 
     public RowMapperGenerator(AttributeTypes attributeTypes, Diagnostics diagnostics,
-                       TypeModelRegistry typeMappingBuilder,
+                       TypeModelResolver typeMappingBuilder,
                        TypeMappingGenerator metadataGenerator,
                        RepositorySourceWriter sourceWriter, Map<String, ClassName> metadataTypes) {
         this.eligibility = new RowMapperEligibility(attributeTypes, typeMappingBuilder);

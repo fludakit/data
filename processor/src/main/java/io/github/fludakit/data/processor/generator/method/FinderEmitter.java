@@ -8,7 +8,7 @@ import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.analysis.MethodResults;
-import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
+import io.github.fludakit.data.processor.analysis.TypeModelResolver;
 import io.github.fludakit.data.processor.analysis.PathResolver;
 import io.github.fludakit.data.processor.model.PagedRead;
 import io.github.fludakit.data.processor.model.QueryPlan;
@@ -21,7 +21,6 @@ import io.github.fludakit.data.processor.generator.RepositoryContext;
 import io.github.fludakit.data.processor.generator.JoinedProjectionEmitter;
 import io.github.fludakit.data.processor.generator.PagingEmitter;
 import io.github.fludakit.data.processor.generator.QueryInvocations;
-import io.github.fludakit.data.processor.generator.RepositoryContext;
 import io.github.fludakit.data.processor.generator.SqlConstants;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.GeneratedArtifacts;
@@ -36,7 +35,7 @@ import io.github.fludakit.data.query.SeekTerm;
 import io.github.fludakit.data.query.SortSpec;
 import io.github.fludakit.data.sql.SqlBuilder;
 import io.github.fludakit.data.sql.SqlDialect;
-import jakarta.data.repository.OrderBy;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -54,7 +53,7 @@ import javax.lang.model.type.ExecutableType;
  */
 public final class FinderEmitter {
 
-    private final TypeModelRegistry typeMappingBuilder;
+    private final TypeModelResolver typeMappingBuilder;
     private final Diagnostics diagnostics;
     private final SqlDialect sqlDialect;
     private final QueryPlanBuilder queryPlanCompiler;
@@ -64,10 +63,10 @@ public final class FinderEmitter {
     private final MethodResults methodResults;
     private final RepositoryMethodResolver resolver;
 
-    public FinderEmitter(TypeModelRegistry typeMappingBuilder, Diagnostics diagnostics, SqlDialect sqlDialect,
-                  QueryPlanBuilder queryPlanCompiler,
-                  JoinedProjectionEmitter joinedProjections, PagingEmitter pagingEmitter,
-                  GeneratedArtifacts registry, MethodResults methodResults, RepositoryMethodResolver resolver) {
+    public FinderEmitter(TypeModelResolver typeMappingBuilder, Diagnostics diagnostics, SqlDialect sqlDialect,
+                         QueryPlanBuilder queryPlanCompiler,
+                         JoinedProjectionEmitter joinedProjections, PagingEmitter pagingEmitter,
+                         GeneratedArtifacts registry, MethodResults methodResults, RepositoryMethodResolver resolver) {
         this.typeMappingBuilder = typeMappingBuilder;
         this.diagnostics = diagnostics;
         this.sqlDialect = sqlDialect;

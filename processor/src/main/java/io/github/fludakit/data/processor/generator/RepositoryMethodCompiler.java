@@ -4,7 +4,7 @@ import com.squareup.javapoet.MethodSpec;
 import com.squareup.javapoet.TypeName;
 import com.squareup.javapoet.TypeVariableName;
 import io.github.fludakit.data.processor.analysis.MethodResults;
-import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
+import io.github.fludakit.data.processor.analysis.TypeModelResolver;
 import io.github.fludakit.data.processor.analysis.PathResolver;
 import io.github.fludakit.data.processor.analysis.QueryPlanBuilder;
 import io.github.fludakit.data.processor.analysis.RepositoryMethodResolver;
@@ -39,10 +39,10 @@ import javax.lang.model.util.Types;
 public final class RepositoryMethodCompiler {
 
     private final Types types;
-    private final TypeModelRegistry typeMappingBuilder;
+    private final TypeModelResolver typeMappingBuilder;
     private final MethodGeneratorDispatcher dispatcher;
 
-    public RepositoryMethodCompiler(Types types, TypeModelRegistry typeMappingBuilder,
+    public RepositoryMethodCompiler(Types types, TypeModelResolver typeMappingBuilder,
                              Diagnostics diagnostics, SqlDialect sqlDialect, PathResolver pathResolver,
                              QueryPlanBuilder queryPlanCompiler, TypeMappingGenerator metadataGenerator,
                              WriteMethodEmitter writeMethodEmitter,

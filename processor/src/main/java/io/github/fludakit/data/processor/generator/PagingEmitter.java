@@ -8,10 +8,9 @@ import io.github.fludakit.data.metadata.NonLocalAttributePathException;
 import io.github.fludakit.data.metadata.UnknownAttributePathException;
 import io.github.fludakit.data.page.SimpleCursoredPage;
 import io.github.fludakit.data.page.SimplePage;
-import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
+import io.github.fludakit.data.processor.analysis.TypeModelResolver;
 import io.github.fludakit.data.processor.analysis.PathResolver;
 import io.github.fludakit.data.processor.generator.metadata.TypeMappingGenerator;
-import io.github.fludakit.data.processor.generator.RepositoryContext;
 import io.github.fludakit.data.processor.model.PagedRead;
 import io.github.fludakit.data.processor.model.PathResolution;
 import io.github.fludakit.data.processor.support.Diagnostics;
@@ -48,12 +47,12 @@ import java.util.List;
 public final class PagingEmitter {
 
     private final SqlDialect sqlDialect;
-    private final TypeModelRegistry typeMappingBuilder;
+    private final TypeModelResolver typeMappingBuilder;
     private final PathResolver pathResolver;
     private final TypeMappingGenerator metadataGenerator;
     private final Diagnostics diagnostics;
 
-    public PagingEmitter(SqlDialect sqlDialect, TypeModelRegistry typeMappingBuilder,
+    public PagingEmitter(SqlDialect sqlDialect, TypeModelResolver typeMappingBuilder,
                          PathResolver pathResolver, TypeMappingGenerator metadataGenerator,
                          Diagnostics diagnostics) {
         this.sqlDialect = sqlDialect;

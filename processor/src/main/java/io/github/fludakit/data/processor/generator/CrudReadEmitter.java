@@ -7,11 +7,9 @@ import io.github.fludakit.data.metadata.JoinEdge;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.page.SimplePage;
-import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
+import io.github.fludakit.data.processor.analysis.TypeModelResolver;
 import io.github.fludakit.data.processor.analysis.PathResolver;
-import io.github.fludakit.data.processor.generator.metadata.Literals;
 import io.github.fludakit.data.processor.generator.metadata.TypeMappingGenerator;
-import io.github.fludakit.data.processor.generator.RepositoryContext;
 import io.github.fludakit.data.processor.support.JoinEdges;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.query.LimitSpec;
@@ -59,11 +57,11 @@ public final class CrudReadEmitter {
             ClassName.get("io.github.fludakit.data.metadata", "ColumnPlacement");
 
     private final SqlDialect sqlDialect;
-    private final TypeModelRegistry typeMappingBuilder;
+    private final TypeModelResolver typeMappingBuilder;
     private final TypeMappingGenerator metadataGenerator;
     private final JoinedProjectionEmitter joinedProjections;
 
-    public CrudReadEmitter(SqlDialect sqlDialect, TypeModelRegistry typeMappingBuilder,
+    public CrudReadEmitter(SqlDialect sqlDialect, TypeModelResolver typeMappingBuilder,
                            TypeMappingGenerator metadataGenerator,
                            JoinedProjectionEmitter joinedProjections) {
         this.sqlDialect = sqlDialect;

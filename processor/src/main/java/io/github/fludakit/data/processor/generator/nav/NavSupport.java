@@ -16,7 +16,7 @@ import io.github.fludakit.data.metadata.ValueObjectMapping;
 import io.github.fludakit.data.processor.RepositoryProcessor;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
 import io.github.fludakit.data.processor.analysis.PathResolver;
-import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
+import io.github.fludakit.data.processor.analysis.TypeModelResolver;
 import io.github.fludakit.data.processor.generator.rowmapper.RowMapperGenerator;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.support.Props;
@@ -42,13 +42,13 @@ public final class NavSupport {
 
     private final AttributeTypes attributeTypes;
     private final Diagnostics diagnostics;
-    private final TypeModelRegistry typeMappingBuilder;
+    private final TypeModelResolver typeMappingBuilder;
     private final RowMapperGenerator rowMapperGenerator;
     private final Set<String> managedEntities;
 
     public NavSupport(AttributeTypes attributeTypes, Diagnostics diagnostics,
-               TypeModelRegistry typeMappingBuilder, RowMapperGenerator rowMapperGenerator,
-               Set<String> managedEntities) {
+                      TypeModelResolver typeMappingBuilder, RowMapperGenerator rowMapperGenerator,
+                      Set<String> managedEntities) {
         this.attributeTypes = attributeTypes;
         this.diagnostics = diagnostics;
         this.typeMappingBuilder = typeMappingBuilder;

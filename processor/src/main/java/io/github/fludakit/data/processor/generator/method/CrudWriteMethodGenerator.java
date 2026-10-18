@@ -2,7 +2,7 @@ package io.github.fludakit.data.processor.generator.method;
 
 import com.squareup.javapoet.MethodSpec;
 import io.github.fludakit.data.processor.analysis.MethodResults;
-import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
+import io.github.fludakit.data.processor.analysis.TypeModelResolver;
 import io.github.fludakit.data.processor.generator.CrudReadEmitter;
 import io.github.fludakit.data.processor.generator.RepositoryContext;
 import io.github.fludakit.data.processor.generator.WriteMethodEmitter;
@@ -36,11 +36,11 @@ public final class CrudWriteMethodGenerator implements MethodGenerator {
     private final WriteMethodEmitter writeMethodEmitter;
     private final CrudReadEmitter crudReads;
     private final MethodResults methodResults;
-    private final TypeModelRegistry typeMappingBuilder;
+    private final TypeModelResolver typeMappingBuilder;
     private final GeneratedArtifacts registry;
 
     public CrudWriteMethodGenerator(WriteMethodEmitter writeMethodEmitter, CrudReadEmitter crudReads,
-                             MethodResults methodResults, TypeModelRegistry typeMappingBuilder,
+                             MethodResults methodResults, TypeModelResolver typeMappingBuilder,
                              GeneratedArtifacts registry) {
         this.writeMethodEmitter = writeMethodEmitter;
         this.crudReads = crudReads;

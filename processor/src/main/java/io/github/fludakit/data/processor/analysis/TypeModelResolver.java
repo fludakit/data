@@ -34,7 +34,7 @@ import java.util.function.Function;
  * drives the scan through the {@code descriptorScan} callback, and the scan records each member's
  * JavaPoet type through {@link #recordMemberType} — both are the memoization's job, not the scan's.
  */
-public final class TypeModelRegistry {
+public final class TypeModelResolver {
 
     private final Types types;
     private final Elements elements;
@@ -53,7 +53,7 @@ public final class TypeModelRegistry {
     /** The JavaPoet type of one MEMBER, keyed by declaring type plus member name (see {@link #recordMemberType}). */
     private final Map<String, TypeName> memberTypes = new HashMap<>();
 
-    public TypeModelRegistry(Types types, Elements elements, Function<TypeElement, TypeMapping<?>> descriptorScan) {
+    public TypeModelResolver(Types types, Elements elements, Function<TypeElement, TypeMapping<?>> descriptorScan) {
         this.types = types;
         this.elements = elements;
         this.descriptorScan = descriptorScan;

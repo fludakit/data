@@ -10,7 +10,7 @@ import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
 import io.github.fludakit.data.metadata.TypeMapping;
-import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
+import io.github.fludakit.data.processor.analysis.TypeModelResolver;
 import io.github.fludakit.data.processor.model.EntityRelationship;
 import io.github.fludakit.data.processor.support.MemberNames;
 import io.github.fludakit.data.sql.SqlDialect;
@@ -41,7 +41,7 @@ public final class HydrationEmitter {
 
     private final SqlDialect sqlDialect;
     private final AttributeTypes attributeTypes;
-    private final TypeModelRegistry typeMappingBuilder;
+    private final TypeModelResolver typeMappingBuilder;
 
     /**
      * @param attributeTypes the one lookup this emitter needs: the element type of a collection, which
@@ -49,7 +49,7 @@ public final class HydrationEmitter {
      *                       therefore not a JavaPoet name
      */
     public HydrationEmitter(SqlDialect sqlDialect, AttributeTypes attributeTypes,
-                            TypeModelRegistry typeMappingBuilder) {
+                            TypeModelResolver typeMappingBuilder) {
         this.sqlDialect = sqlDialect;
         this.attributeTypes = attributeTypes;
         this.typeMappingBuilder = typeMappingBuilder;

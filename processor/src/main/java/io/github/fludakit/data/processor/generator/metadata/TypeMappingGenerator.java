@@ -17,7 +17,7 @@ import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.metadata.UnknownAttributePathException;
 
 import io.github.fludakit.data.processor.analysis.PathResolver;
-import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
+import io.github.fludakit.data.processor.analysis.TypeModelResolver;
 import io.github.fludakit.data.processor.generator.RepositorySourceWriter;
 import io.github.fludakit.data.processor.generator.nav.NavCase;
 import io.github.fludakit.data.processor.support.JoinEdges;
@@ -45,7 +45,7 @@ import java.util.Set;
  *
  * <p>Nothing here touches {@code Filer}: the source goes out through {@link RepositorySourceWriter},
  * which is also what registers the generated name. It holds no {@code Elements} either — resolving a
- * value-object element by name is {@link TypeModelRegistry#elementFor(String)}, the one place a name
+ * value-object element by name is {@link TypeModelResolver#elementFor(String)}, the one place a name
  * becomes a type, so a compile-time query no longer decides whether this emitter can be constructed.
  * A degraded path is reported through {@link Diagnostics}, which is swappable. The emitter never
  * reaches for {@code ProcessingEnvironment} itself.</p>
@@ -60,7 +60,7 @@ public final class TypeMappingGenerator {
             ClassName.get("io.github.fludakit.data.metadata", "ColumnPlacement");
 
     private final Diagnostics diagnostics;
-    private final TypeModelRegistry typeMappingBuilder;
+    private final TypeModelResolver typeMappingBuilder;
     private final PathResolver pathResolver;
     private final RepositorySourceWriter sourceWriter;
 
@@ -73,7 +73,7 @@ public final class TypeMappingGenerator {
     private final ValueAccessGenerator valueAccessGenerator;
     private final NavigationAnalysis navigationAnalysis;
 
-    public TypeMappingGenerator(Diagnostics diagnostics, TypeModelRegistry typeMappingBuilder,
+    public TypeMappingGenerator(Diagnostics diagnostics, TypeModelResolver typeMappingBuilder,
                       PathResolver pathResolver, RepositorySourceWriter sourceWriter,
                       Map<String, ClassName> metadataTypes) {
         this.diagnostics = diagnostics;

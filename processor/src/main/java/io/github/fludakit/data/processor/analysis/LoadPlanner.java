@@ -41,13 +41,13 @@ import java.util.Set;
 public final class LoadPlanner {
 
     private final Diagnostics diagnostics;
-    private final TypeModelRegistry typeMappingBuilder;
+    private final TypeModelResolver typeMappingBuilder;
     private final GeneratedArtifacts registry;
     /** Entity FQNs managed in the CURRENT round — see the pre-scan in {@link RepositoryProcessor#process}. */
     private final Set<String> managedEntities;
 
     public LoadPlanner(Diagnostics diagnostics,
-                            TypeModelRegistry typeMappingBuilder,
+                            TypeModelResolver typeMappingBuilder,
                             GeneratedArtifacts registry,
                             Set<String> managedEntities) {
         this.diagnostics = diagnostics;

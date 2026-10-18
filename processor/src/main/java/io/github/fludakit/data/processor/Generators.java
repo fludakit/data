@@ -8,7 +8,7 @@ import io.github.fludakit.data.processor.analysis.QueryPlanBuilder;
 import io.github.fludakit.data.processor.analysis.MethodResults;
 import io.github.fludakit.data.processor.analysis.RepositoryMethodResolver;
 import io.github.fludakit.data.processor.analysis.SavePlanner;
-import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
+import io.github.fludakit.data.processor.analysis.TypeModelResolver;
 import io.github.fludakit.data.processor.generator.ArtifactCoordinator;
 import io.github.fludakit.data.processor.generator.HydrationEmitter;
 import io.github.fludakit.data.processor.generator.JoinedProjectionEmitter;
@@ -46,7 +46,7 @@ public final class Generators {
 
     public Generators(Session session, Analysis analysis) {
         SqlDialect sqlDialect = session.sqlDialect();
-        TypeModelRegistry registry = session.typeMappingBuilder().registry();
+        TypeModelResolver registry = session.typeMappingBuilder().registry();
         AttributeTypes attributeTypes = analysis.attributeTypes();
         PathResolver pathResolver = analysis.pathResolver();
         QueryPlanBuilder queryPlanBuilder = analysis.queryPlanBuilder();

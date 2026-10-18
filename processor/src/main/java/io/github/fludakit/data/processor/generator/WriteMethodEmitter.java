@@ -6,7 +6,7 @@ import com.squareup.javapoet.TypeName;
 import com.squareup.javapoet.TypeVariableName;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
-import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
+import io.github.fludakit.data.processor.analysis.TypeModelResolver;
 import io.github.fludakit.data.processor.analysis.TypeMirrors;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.processor.model.EntityRelationship;
@@ -58,7 +58,7 @@ public final class WriteMethodEmitter {
      * it writes comes from the {@link TypeMapping} it is handed.
      */
     private final AttributeTypes attributeTypes;
-    private final TypeModelRegistry typeMappingBuilder;
+    private final TypeModelResolver typeMappingBuilder;
     private final Types types;
     private final Elements elements;
     private final Diagnostics diagnostics;
@@ -68,7 +68,7 @@ public final class WriteMethodEmitter {
     /** The child-cascade statements: element collections, owned entity collections, compositions. */
     private final ChildCascadeEmitter childCascade;
 
-    public WriteMethodEmitter(AttributeTypes attributeTypes, TypeModelRegistry typeMappingBuilder,
+    public WriteMethodEmitter(AttributeTypes attributeTypes, TypeModelResolver typeMappingBuilder,
                        Types types, Elements elements, Diagnostics diagnostics, SqlDialect sqlDialect) {
         this.attributeTypes = attributeTypes;
         this.typeMappingBuilder = typeMappingBuilder;

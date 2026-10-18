@@ -8,7 +8,7 @@ import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.metadata.UnknownAttributePathException;
-import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
+import io.github.fludakit.data.processor.analysis.TypeModelResolver;
 import io.github.fludakit.data.processor.analysis.PathResolver;
 import io.github.fludakit.data.processor.generator.nav.NavCase;
 import io.github.fludakit.data.processor.support.Diagnostics;
@@ -33,9 +33,9 @@ import javax.lang.model.element.TypeElement;
 public final class ValueAccessGenerator {
 
     private final Diagnostics diagnostics;
-    private final TypeModelRegistry typeMappingBuilder;
+    private final TypeModelResolver typeMappingBuilder;
 
-    public ValueAccessGenerator(Diagnostics diagnostics, TypeModelRegistry typeMappingBuilder) {
+    public ValueAccessGenerator(Diagnostics diagnostics, TypeModelResolver typeMappingBuilder) {
         this.diagnostics = diagnostics;
         this.typeMappingBuilder = typeMappingBuilder;
     }

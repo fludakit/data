@@ -4,7 +4,7 @@ import com.squareup.javapoet.TypeName;
 import io.github.fludakit.data.metadata.TypeMapping;
 import io.github.fludakit.data.metadata.TypeMapping.Prop;
 import io.github.fludakit.data.processor.analysis.AttributeTypes;
-import io.github.fludakit.data.processor.analysis.TypeModelRegistry;
+import io.github.fludakit.data.processor.analysis.TypeModelResolver;
 import io.github.fludakit.data.processor.support.MemberNames;
 import javax.lang.model.element.Element;
 import javax.lang.model.element.ElementKind;
@@ -24,9 +24,9 @@ import javax.lang.model.element.TypeElement;
 public final class RowMapperEligibility {
 
     private final AttributeTypes attributeTypes;
-    private final TypeModelRegistry typeMappingBuilder;
+    private final TypeModelResolver typeMappingBuilder;
 
-    public RowMapperEligibility(AttributeTypes attributeTypes, TypeModelRegistry typeMappingBuilder) {
+    public RowMapperEligibility(AttributeTypes attributeTypes, TypeModelResolver typeMappingBuilder) {
         this.attributeTypes = attributeTypes;
         this.typeMappingBuilder = typeMappingBuilder;
     }

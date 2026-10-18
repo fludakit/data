@@ -56,14 +56,10 @@ processor/src/main/java/io/github/fludakit/data/processor/
     TypeModelEmitter.java           -- XXXTypeModel runtime TypeMapping impl
     QueryModelEmitter.java          -- RepositoryQueryModel static query definitions
   support/
-    Diagnostics.java                -- error reporting
-    MemberNames.java                -- naming conventions
-    Props.java                      -- property utilities
-    MethodResults.java              -- result kind resolution
-    GeneratedKeyCoercion.java       -- generated key handling
-    JoinEdges.java                  -- join edge utilities
-    QueryInvocations.java           -- query invocation helpers
+    Diagnostics.java                -- error/warning/note reporting wrapper
 ```
+
+**Minimal support/.** Only `Diagnostics` — everything else is inline in visitors/emitters or already exists in the core module (`JoinEdge`, `ColumnRef`, `SqlBuilder`, etc.). No carry-over utilities from the old processor: no `MethodResults` (result kind resolution is inline in the visitor), no `JoinEdges` (core module owns join edges), no `QueryInvocations` (emitter concern), no `GeneratedKeyCoercion` (inline check), no `Props` (TypeMapping owns property access).
 
 ## Components
 
@@ -283,6 +279,15 @@ Paths are always rooted at the `TypeMapping` being queried. The same physical co
 - **No EntityRelationship carrier** — relationships accessed through entity.props() filtered by Prop variant
 - **RepositoryContext is lean** — no pre-computed relationship lists; derives from entity model on demand
 - **MethodContext is lean** — no Object parsed field; QBN results decomposed into predicates/sorts during resolution
+
+## Clean Break from Old Code
+
+The new branch starts fresh from `main`. The previous branch (`refactor/processor-monolithic-redesign`) is reference only. No code is copied or imported from it. The new processor:
+
+- Does not import any class from the old processor package structure
+- Does not reuse old support utilities (MethodResults, JoinEdges, QueryInvocations, GeneratedKeyCoercion, Props, MemberNames)
+- Builds all logic inline in visitors/emitters or uses core module types directly
+- Treats the old branch as architectural reference, not code source
 
 ## Reference
 

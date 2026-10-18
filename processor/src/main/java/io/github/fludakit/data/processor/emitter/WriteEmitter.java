@@ -48,7 +48,7 @@ public final class WriteEmitter {
     }
 
     private static final ClassName GENERATED_KEY_HOLDER =
-            ClassName.get("org.springframework.jdbc.support", "GeneratedKeyHolder");
+            ClassName.get("io.github.fludakit.jdbc.support", "GeneratedKeyHolder");
 
     /**
      * Generates a method override for a write method.

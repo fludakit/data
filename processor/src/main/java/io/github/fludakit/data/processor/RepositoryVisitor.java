@@ -186,7 +186,8 @@ final class RepositoryVisitor {
         }
 
         // 6b. Emit plain finder methods
-        FindEmitter findEmitter = new FindEmitter(types, (DeclaredType) repository.asType());
+        DeclaredType repositoryDeclaredType = resolveRepositoryDeclaredType();
+        FindEmitter findEmitter = new FindEmitter(types, repositoryDeclaredType);
         for (MethodContext mc : methods) {
             MethodSpec emitted = findEmitter.emit(ctx, mc);
             if (emitted != null) {
@@ -195,7 +196,7 @@ final class RepositoryVisitor {
         }
 
         // 6c. Emit batch lifecycle methods (saveAll, deleteAll, deleteByIds)
-        LifecycleEmitter lifecycleEmitter = new LifecycleEmitter(types, (DeclaredType) repository.asType());
+        LifecycleEmitter lifecycleEmitter = new LifecycleEmitter(types, repositoryDeclaredType);
         for (MethodContext mc : methods) {
             MethodSpec emitted = lifecycleEmitter.emit(ctx, mc);
             if (emitted != null) {
@@ -204,7 +205,7 @@ final class RepositoryVisitor {
         }
 
         // 6d. Emit write methods (save, insert, update, deleteById)
-        WriteEmitter writeEmitter = new WriteEmitter(types, (DeclaredType) repository.asType());
+        WriteEmitter writeEmitter = new WriteEmitter(types, repositoryDeclaredType);
         for (MethodContext mc : methods) {
             MethodSpec emitted = writeEmitter.emit(ctx, mc);
             if (emitted != null) {
@@ -684,6 +685,29 @@ final class RepositoryVisitor {
         } catch (IOException e) {
             diagnostics.error("Failed to write " + generatedName + ": " + e.getMessage(), repository);
         }
+    }
+
+    /**
+     * Resolves the parameterized CrudRepository/BasicRepository/DataRepository type
+     * from the repository's type hierarchy. This is needed for proper type variable
+     * resolution when overriding methods like save(T entity) — we need the concrete
+     * type arguments (e.g., CrudRepository<Customer, Long>) not just the repository
+     * interface itself.
+     */
+    private DeclaredType resolveRepositoryDeclaredType() {
+        // Walk the type hierarchy to find CrudRepository/BasicRepository/DataRepository
+        for (TypeMirror iface : getAllInterfaces(repository)) {
+            if (iface.getKind() == TypeKind.DECLARED) {
+                DeclaredType dt = (DeclaredType) iface;
+                TypeElement te = (TypeElement) dt.asElement();
+                String fqn = te.getQualifiedName().toString();
+                if (fqn.equals(CRUD_REPOSITORY) || fqn.equals(BASIC_REPOSITORY) || fqn.equals(DATA_REPOSITORY)) {
+                    return dt;
+                }
+            }
+        }
+        // Fallback to the repository's own type if no base repository found
+        return (DeclaredType) repository.asType();
     }
 
     // ── Utility methods ──────────────────────────────────────────────────

@@ -1,8 +1,8 @@
 package io.github.fludakit.data.sql;
 
 import io.github.fludakit.data.metadata.ColumnRef;
-import io.github.fludakit.data.metadata.TypeMapping;
-import io.github.fludakit.data.metadata.TypeMapping.Prop;
+import io.github.fludakit.data.metadata.ColumnMapping;
+import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.query.Operation;
 import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
@@ -103,10 +103,10 @@ class UpsertTest {
         assertThat(pg).contains("(\"id\", \"title\") VALUES (:id, :title)");
     }
 
-    static TypeMapping<Note> note() {
+    static TypeDefinition note() {
         return TestMappings.aggregateRoot("Note", "note",
-                new Prop.Id("id", "id", "java.lang.Long"),
-                List.of(new Prop.Scalar("title", "title", "java.lang.String")),
-                List.of(new ColumnRef.Simple("id", "note"), new ColumnRef.Simple("title", "note")));
+                new ColumnMapping("id", "id", "java.lang.Long", true, false),
+                List.of(new ColumnMapping("title", "title", "java.lang.String", false, false)),
+                List.of());
     }
 }

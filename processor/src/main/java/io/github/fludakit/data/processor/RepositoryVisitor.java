@@ -5,14 +5,16 @@ import com.squareup.javapoet.FieldSpec;
 import com.squareup.javapoet.JavaFile;
 import com.squareup.javapoet.MethodSpec;
 import com.squareup.javapoet.TypeSpec;
-import io.github.fludakit.data.metadata.TypeMapping;
+import io.github.fludakit.data.metadata.ColumnMapping;
+import io.github.fludakit.data.metadata.RelationKind;
+import io.github.fludakit.data.metadata.RelationMapping;
+import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.RepositoryContext;
 import io.github.fludakit.data.processor.emitter.FindEmitter;
 import io.github.fludakit.data.processor.emitter.HydrationEmitter;
 import io.github.fludakit.data.processor.emitter.LifecycleEmitter;
 import io.github.fludakit.data.processor.emitter.MetamodelEmitter;
-import io.github.fludakit.data.processor.emitter.QueryModelEmitter;
 import io.github.fludakit.data.processor.emitter.RowMapperEmitter;
 import io.github.fludakit.data.processor.emitter.TypeModelEmitter;
 import io.github.fludakit.data.processor.emitter.WriteEmitter;
@@ -23,6 +25,7 @@ import io.github.fludakit.data.query.Operation;
 import io.github.fludakit.data.query.LikePattern;
 import io.github.fludakit.data.query.ParamBinding;
 import io.github.fludakit.data.query.PagingMode;
+import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.ResultKind;
 import io.github.fludakit.data.query.SortSpec;
@@ -122,8 +125,8 @@ final class RepositoryVisitor {
             return;
         }
 
-        // 2. Fetch TypeMapping from TypeMappingVisitor
-        TypeMapping<?> entityMapping = typeMappingVisitor.get(entityFqn);
+        // 2. Fetch TypeDefinition from TypeMappingVisitor
+        TypeDefinition entityMapping = typeMappingVisitor.get(entityFqn);
         if (entityMapping == null) {
             diagnostics.error("No @Entity/@AggregateRoot/@ValueObject mapping found for " + entityFqn,
                     repository);
@@ -142,9 +145,9 @@ final class RepositoryVisitor {
         }
 
         // 4a. Generate row mappers for VO types used in element collections
-        for (TypeMapping.Prop prop : entityMapping.props()) {
-            if (prop instanceof TypeMapping.Prop.ElementCollection ec && ec.target() != null) {
-                rowMapperEmitter.emit(ec.target());
+        for (RelationMapping rel : entityMapping.relationMappings()) {
+            if (rel.kind() == RelationKind.ELEMENT_COLLECTION && rel.target() != null) {
+                rowMapperEmitter.emit(rel.target());
             }
         }
 
@@ -153,7 +156,7 @@ final class RepositoryVisitor {
 
         // Pre-claim all entity metamodel FQNs so collision detection works across entities
         for (String managedEntityFqn : typeMappingVisitor.managedEntities()) {
-            TypeMapping<?> managedMapping = typeMappingVisitor.get(managedEntityFqn);
+            TypeDefinition managedMapping = typeMappingVisitor.get(managedEntityFqn);
             if (managedMapping != null) {
                 metamodelEmitter.preclaimEntityMetamodel(managedMapping);
             }
@@ -161,7 +164,7 @@ final class RepositoryVisitor {
 
         metamodelEmitter.emit(entityMapping);
 
-        // 4c. Generate TypeModel (runtime TypeMapping implementation)
+        // 4c. Generate TypeModel (runtime TypeDefinition implementation)
         new TypeModelEmitter(filer).emit(entityMapping);
 
         // 5. Create RepositoryContext
@@ -259,7 +262,6 @@ final class RepositoryVisitor {
         }
 
         // 6f. Emit QueryModel (static QueryDefinition fields)
-        new QueryModelEmitter(filer).emit(repository, ctx, methods);
 
         // 7. Generate skeleton Repository_ class
         emitSkeleton(ctx);
@@ -350,7 +352,7 @@ final class RepositoryVisitor {
 
     // ── Method resolution ────────────────────────────────────────────────
 
-    private MethodContext resolveMethod(ExecutableElement method, TypeMapping<?> entityMapping) {
+    private MethodContext resolveMethod(ExecutableElement method, TypeDefinition entityMapping) {
         String methodName = method.getSimpleName().toString();
 
         // Priority 1: Lifecycle annotations (@Save, @Insert, @Update, @Delete, @Find)
@@ -421,7 +423,7 @@ final class RepositoryVisitor {
     }
 
     private MethodContext resolveAnnotatedMethod(ExecutableElement method, String methodName,
-                                                  Operation operation, TypeMapping<?> entityMapping) {
+                                                  Operation operation, TypeDefinition entityMapping) {
         ResultKind resultKind = resolveResultKind(method, operation);
         PagingMode pagingMode = resolvePagingMode(method, resultKind);
         List<Predicate> predicates = resolveByAnnotations(method, entityMapping);
@@ -459,7 +461,7 @@ final class RepositoryVisitor {
     }
 
     private MethodContext resolveBuiltInCrudMethod(ExecutableElement method, String methodName,
-                                                    Operation operation, TypeMapping<?> entityMapping) {
+                                                    Operation operation, TypeDefinition entityMapping) {
         ResultKind resultKind = resolveResultKind(method, operation);
         PagingMode pagingMode = resolvePagingMode(method, resultKind);
         boolean distinct = false;
@@ -467,10 +469,10 @@ final class RepositoryVisitor {
         // Create predicates based on method name
         List<Predicate> predicates = switch (methodName) {
             case "findById", "deleteById" -> {
-                if (entityMapping.id() == null) {
+                if (entityMapping.idColumn() == null) {
                     yield List.of();
                 }
-                String idProp = entityMapping.id().name();
+                String idProp = idPropertyName(entityMapping);
                 yield List.of(Predicate.of(idProp, io.github.fludakit.data.query.Operator.EQ, "id"));
             }
             default -> List.of();
@@ -484,7 +486,7 @@ final class RepositoryVisitor {
     }
 
     private MethodContext resolveQbnMethod(ExecutableElement method, String methodName,
-                                            ParsedMethodName parsed, TypeMapping<?> entityMapping) {
+                                            ParsedMethodName parsed, TypeDefinition entityMapping) {
         Operation operation = parsed.operation();
         ResultKind resultKind = resolveResultKind(method, operation);
         PagingMode pagingMode = resolvePagingMode(method, resultKind);
@@ -511,7 +513,7 @@ final class RepositoryVisitor {
      * Attempts to resolve camelCase property paths by splitting them at entity property boundaries.
      * For example, "workHistoryCompany" becomes "workHistory.company" if "workHistory" is a property.
      */
-    private List<Predicate> resolveCamelCasePaths(List<Predicate> predicates, TypeMapping<?> entityMapping) {
+    private List<Predicate> resolveCamelCasePaths(List<Predicate> predicates, TypeDefinition entityMapping) {
         List<Predicate> resolved = new ArrayList<>(predicates.size());
         for (Predicate p : predicates) {
             String path = p.property();
@@ -534,19 +536,20 @@ final class RepositoryVisitor {
      * Tries to split a camelCase path at entity property boundaries.
      * Returns the dot-separated path if successful, or the original path if no split is found.
      */
-    private String trySplitCamelCasePath(String path, TypeMapping<?> mapping) {
+    private String trySplitCamelCasePath(String path, TypeDefinition mapping) {
         // Try splitting at each uppercase letter
         for (int i = 1; i < path.length(); i++) {
             if (Character.isUpperCase(path.charAt(i))) {
                 String head = path.substring(0, i);
                 String tail = Character.toLowerCase(path.charAt(i)) + path.substring(i + 1);
-                // Check if head is a property
-                try {
-                    mapping.prop(head);
+                // Check if head is a known property (column or relation)
+                boolean isProperty = mapping.columnMapping(head) != null
+                        || mapping.relationMapping(head) != null;
+                if (isProperty) {
                     // head is a property, check if tail resolves in the target
                     String fullPath = head + "." + tail;
                     try {
-                        mapping.resolve(fullPath);
+                        mapping.resolvePath(fullPath);
                         return fullPath;
                     } catch (Exception e) {
                         // tail doesn't resolve, try deeper splits
@@ -555,8 +558,6 @@ final class RepositoryVisitor {
                             return head + "." + resolvedTail;
                         }
                     }
-                } catch (Exception e) {
-                    // head is not a property, continue
                 }
             }
         }
@@ -564,18 +565,11 @@ final class RepositoryVisitor {
     }
 
     /**
-     * Gets the target TypeMapping for a property name, or null if not resolvable.
+     * Gets the target TypeDefinition for a property name, or null if not resolvable.
      */
-    private TypeMapping<?> getTargetMapping(TypeMapping<?> mapping, String propName) {
-        try {
-            var prop = mapping.prop(propName);
-            if (prop instanceof TypeMapping.Prop.Reference ref) return ref.target();
-            if (prop instanceof TypeMapping.Prop.EntityCollection ec) return ec.target();
-            if (prop instanceof TypeMapping.Prop.ElementCollection ec) return ec.target();
-            if (prop instanceof TypeMapping.Prop.Embedded emb) return emb.target();
-        } catch (Exception e) {
-            // ignore
-        }
+    private TypeDefinition getTargetMapping(TypeDefinition mapping, String propName) {
+        RelationMapping rel = mapping.relationMapping(propName);
+        if (rel != null) return rel.target();
         return null;
     }
 
@@ -657,7 +651,7 @@ final class RepositoryVisitor {
     /**
      * Resolves predicates from {@code @By} annotations on method parameters.
      */
-    private List<Predicate> resolveByAnnotations(ExecutableElement method, TypeMapping<?> entityMapping) {
+    private List<Predicate> resolveByAnnotations(ExecutableElement method, TypeDefinition entityMapping) {
         List<Predicate> predicates = new ArrayList<>();
         for (VariableElement param : method.getParameters()) {
             By byAnnotation = param.getAnnotation(By.class);
@@ -674,11 +668,11 @@ final class RepositoryVisitor {
      * Replaces Jakarta Data's {@code "id(this)"} JDQL convention with the entity's actual ID property name.
      * This processor does not implement JDQL, so {@code "id(this)"} is replaced with the real column.
      */
-    private List<Predicate> replaceIdThis(List<Predicate> predicates, TypeMapping<?> entityMapping) {
-        if (predicates.isEmpty() || entityMapping.id() == null) {
+    private List<Predicate> replaceIdThis(List<Predicate> predicates, TypeDefinition entityMapping) {
+        if (predicates.isEmpty() || entityMapping.idColumn() == null) {
             return predicates;
         }
-        String idPropName = entityMapping.id().name();
+        String idPropName = idPropertyName(entityMapping);
         List<Predicate> result = new ArrayList<>(predicates.size());
         for (Predicate p : predicates) {
             if ("id(this)".equals(p.property())) {
@@ -718,37 +712,40 @@ final class RepositoryVisitor {
         List<ParamBinding> bindings = new ArrayList<>();
         List<? extends VariableElement> params = method.getParameters();
 
-        // Track which parameters are paging params (skip them)
-        int predicateParamIndex = 0;
+        // Count non-paging parameters
+        List<Integer> nonPagingParamIndices = new ArrayList<>();
         for (int i = 0; i < params.size(); i++) {
             VariableElement param = params.get(i);
             String paramFqn = erasureFqn(param.asType());
-
-            // Skip paging parameters
-            if (PAGE_REQUEST.equals(paramFqn)) continue;
-
-            // @By parameters bind by name; advance index since the @By predicate
-            // occupies a slot in the combined predicate list
-            By byAnnotation = param.getAnnotation(By.class);
-            if (byAnnotation != null) {
-                String paramName = param.getSimpleName().toString();
-                for (Predicate pred : predicates) {
-                    if (pred.param().equals(paramName)) {
-                        bindings.add(new ParamBinding(i, paramName, LikePattern.of(pred.operator())));
-                        break;
-                    }
-                }
-                predicateParamIndex++;
-                continue;
-            }
-
-            // Match positional parameters to predicates
-            if (predicateParamIndex < predicates.size()) {
-                Predicate pred = predicates.get(predicateParamIndex);
-                bindings.add(new ParamBinding(i, pred.param(), LikePattern.of(pred.operator())));
-                predicateParamIndex++;
+            if (!PAGE_REQUEST.equals(paramFqn)) {
+                nonPagingParamIndices.add(i);
             }
         }
+
+        // Map each predicate to its binding slot(s)
+        int slotIndex = 0;
+        for (Predicate pred : predicates) {
+            Operator op = pred.operator();
+            
+            if (op == Operator.BETWEEN || op == Operator.NOT_BETWEEN) {
+                // BETWEEN needs TWO consecutive parameter slots -> _from and _to
+                if (slotIndex + 1 < nonPagingParamIndices.size()) {
+                    int fromParamIdx = nonPagingParamIndices.get(slotIndex);
+                    int toParamIdx = nonPagingParamIndices.get(slotIndex + 1);
+                    bindings.add(new ParamBinding(fromParamIdx, pred.param() + "_from", LikePattern.NONE));
+                    bindings.add(new ParamBinding(toParamIdx, pred.param() + "_to", LikePattern.NONE));
+                    slotIndex += 2; // Consumed two parameter slots
+                }
+            } else {
+                // Regular operator: one parameter slot
+                if (slotIndex < nonPagingParamIndices.size()) {
+                    int paramIdx = nonPagingParamIndices.get(slotIndex);
+                    bindings.add(new ParamBinding(paramIdx, pred.param(), LikePattern.of(op)));
+                    slotIndex++;
+                }
+            }
+        }
+        
         return bindings;
     }
 
@@ -961,5 +958,15 @@ final class RepositoryVisitor {
         if ("hashCode".equals(name) && params.isEmpty()) return true;
         if ("toString".equals(name) && params.isEmpty()) return true;
         return false;
+    }
+
+    /**
+     * Returns the Java property name of the primary key column from a TypeDefinition.
+     */
+    private static String idPropertyName(TypeDefinition type) {
+        for (ColumnMapping col : type.columnMappings()) {
+            if (col.isId()) return col.propertyName();
+        }
+        return null;
     }
 }

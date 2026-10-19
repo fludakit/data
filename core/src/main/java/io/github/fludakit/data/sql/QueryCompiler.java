@@ -6,7 +6,7 @@ import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.ColumnResolver;
 import io.github.fludakit.data.metadata.JoinEdge;
 import io.github.fludakit.data.metadata.TableSchema;
-import io.github.fludakit.data.metadata.TypeMapping;
+import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.metadata.UnknownAttributePathException;
 import io.github.fludakit.data.query.Connector;
 import io.github.fludakit.data.query.Operation;
@@ -554,8 +554,8 @@ public final class QueryCompiler {
 
     /** The logical attribute path that owns {@code column}, taken from the WRITE view when available. */
     public static String attributePath(ColumnResolver attributes, ColumnRef column) {
-        Map<String, ColumnRef> refs = attributes instanceof TypeMapping<?> tm
-                ? tm.writeColumnRefs() : attributes.columnRefs();
+        Map<String, ColumnRef> refs = attributes instanceof TypeDefinition td
+                ? td.columnRefs() : attributes.columnRefs();
         return refs.entrySet().stream()
                 .filter(entry -> entry.getValue().column().equals(column.column()))
                 .map(Map.Entry::getKey)

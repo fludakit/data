@@ -6,7 +6,7 @@ import io.github.fludakit.data.metadata.ColumnResolver;
 import io.github.fludakit.data.metadata.JoinEdge;
 import io.github.fludakit.data.metadata.NonLocalAttributePathException;
 import io.github.fludakit.data.metadata.TableSchema;
-import io.github.fludakit.data.metadata.TypeMapping;
+import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.QueryDefinition;
@@ -60,8 +60,8 @@ public final class SqlBuilder {
         this(schema, null, null);
     }
 
-    /** A convenience for generated code: a {@link TypeMapping} is both schema and resolver. */
-    public SqlBuilder(TypeMapping<?> metadata) {
+    /** A convenience for generated code: a {@link TypeDefinition} is both schema and resolver. */
+    public SqlBuilder(TypeDefinition metadata) {
         this(metadata, metadata, null);
     }
 
@@ -103,6 +103,11 @@ public final class SqlBuilder {
     /** As {@link #render(QueryDefinition)}, carrying a joined full-materialisation projection. */
     public String render(QueryDefinition definition, String extraProjection) {
         return QueryCompiler.render(schema, resolver, dialect, definition, extraProjection);
+    }
+
+    /** As {@link #render(QueryDefinition, String)}, additionally seeding the join chain with {@code extraEdges}. */
+    public String render(QueryDefinition definition, List<JoinEdge> extraEdges, String extraProjection) {
+        return QueryCompiler.render(schema, resolver, dialect, definition, extraEdges, extraProjection);
     }
 
     // --------------------------------------------------------------- structured terminals

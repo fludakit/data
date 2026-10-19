@@ -2,7 +2,7 @@ package io.github.fludakit.data.sql;
 
 import io.github.fludakit.data.metadata.ColumnResolver;
 import io.github.fludakit.data.metadata.TableSchema;
-import io.github.fludakit.data.metadata.TypeMapping;
+import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.query.Operation;
 import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.Predicate;
@@ -31,7 +31,7 @@ import java.util.List;
  *
  * <ul>
  * <li><b>Queries</b> ({@link #select}, {@link #count}, {@link #delete}) need a {@link TableSchema}
- *     plus an {@link ColumnResolver}; a {@link TypeMapping} is both.</li>
+ *     plus an {@link ColumnResolver}; a {@link TypeDefinition} is both.</li>
  * <li><b>Lifecycle statements</b> ({@link #insert}, {@link #update}, {@link #deleteById}) need only
  *     the table shape.</li>
  * </ul>
@@ -67,7 +67,7 @@ public final class Sql {
     // ------------------------------------------------------------------- queries
 
     /** Starts a SELECT chain rooted at {@code metadata}. */
-    public static QueryDraft select(TypeMapping<?> metadata) {
+    public static QueryDraft select(TypeDefinition metadata) {
         return SqlQuery.query(metadata, metadata, Operation.FIND);
     }
 
@@ -77,7 +77,7 @@ public final class Sql {
     }
 
     /** Starts a COUNT chain. A count has no projection and no ordering, so neither is offered. */
-    public static Filtered count(TypeMapping<?> metadata) {
+    public static Filtered count(TypeDefinition metadata) {
         return SqlQuery.query(metadata, metadata, Operation.COUNT);
     }
 
@@ -87,7 +87,7 @@ public final class Sql {
     }
 
     /** Starts a DELETE-by-predicate chain. Like count: predicates only. */
-    public static Filtered delete(TypeMapping<?> metadata) {
+    public static Filtered delete(TypeDefinition metadata) {
         return SqlQuery.query(metadata, metadata, Operation.DELETE);
     }
 
@@ -99,7 +99,7 @@ public final class Sql {
     // ------------------------------------------------------------------- lifecycle
 
     /** Starts an INSERT chain over {@code metadata}. */
-    public static Insert insert(TypeMapping<?> metadata) {
+    public static Insert insert(TypeDefinition metadata) {
         return SqlLifecycle.insert(metadata, metadata);
     }
 
@@ -109,7 +109,7 @@ public final class Sql {
     }
 
     /** Starts an UPDATE-by-identifier chain over {@code metadata}. */
-    public static Lifecycle update(TypeMapping<?> metadata) {
+    public static Lifecycle update(TypeDefinition metadata) {
         return SqlLifecycle.update(metadata, metadata);
     }
 

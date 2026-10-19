@@ -7,13 +7,14 @@ import com.squareup.javapoet.JavaFile;
 import com.squareup.javapoet.MethodSpec;
 import com.squareup.javapoet.ParameterizedTypeName;
 import com.squareup.javapoet.TypeSpec;
+import io.github.fludakit.data.metadata.ColumnMapping;
 import io.github.fludakit.data.metadata.ColumnPlacement;
 import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.JoinEdge;
-import io.github.fludakit.data.metadata.TypeMapping;
-import io.github.fludakit.data.metadata.TypeMapping.Prop;
+import io.github.fludakit.data.metadata.RelationKind;
+import io.github.fludakit.data.metadata.RelationMapping;
+import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.metadata.UnknownAttributePathException;
-import io.github.fludakit.data.metadata.ValueObjectMapping;
 
 import javax.annotation.processing.Filer;
 import javax.lang.model.element.Modifier;
@@ -24,12 +25,13 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Generates {@code XXXTypeModel} classes that implement {@link TypeMapping} and
+ * Generates {@code XXXTypeModel} classes that implement {@link io.github.fludakit.data.metadata.TableSchema} and
+ * {@link io.github.fludakit.data.metadata.ColumnResolver} and
  * {@link io.github.fludakit.data.metadata.ValueAccess} for each entity type.
  *
  * <p>The generated class is the runtime descriptor {@code SqlBuilder} uses for
  * path-to-column resolution. It exposes the entity's table name, column map,
- * {@link Prop} descriptors, and a {@code resolve(path)} switch that returns
+ * and a {@code resolve(path)} switch that returns
  * {@link ColumnPlacement} instances directly — no runtime walk needed.</p>
  *
  * <p>Naming: entity {@code Customer} produces {@code CustomerTypeModel} in the same package.</p>
@@ -38,18 +40,20 @@ public final class TypeModelEmitter {
 
     private static final String METADATA_PACKAGE = "io.github.fludakit.data.metadata";
 
-    private static final ClassName TYPE_MAPPING =
-            ClassName.get(METADATA_PACKAGE, "TypeMapping");
+    private static final ClassName TABLE_SCHEMA =
+            ClassName.get(METADATA_PACKAGE, "TableSchema");
+    private static final ClassName COLUMN_RESOLVER =
+            ClassName.get(METADATA_PACKAGE, "ColumnResolver");
+    private static final ClassName TYPE_DEFINITION =
+            ClassName.get(METADATA_PACKAGE, "TypeDefinition");
     private static final ClassName VALUE_ACCESS =
             ClassName.get(METADATA_PACKAGE, "ValueAccess");
-    private static final ClassName PROP =
-            ClassName.get(METADATA_PACKAGE, "TypeMapping", "Prop");
-    private static final ClassName PROP_ID = PROP.nestedClass("Id");
-    private static final ClassName PROP_SCALAR = PROP.nestedClass("Scalar");
-    private static final ClassName PROP_EMBEDDED = PROP.nestedClass("Embedded");
-    private static final ClassName PROP_REFERENCE = PROP.nestedClass("Reference");
-    private static final ClassName PROP_ENTITY_COLLECTION = PROP.nestedClass("EntityCollection");
-    private static final ClassName PROP_ELEMENT_COLLECTION = PROP.nestedClass("ElementCollection");
+    private static final ClassName COLUMN_MAPPING =
+            ClassName.get(METADATA_PACKAGE, "ColumnMapping");
+    private static final ClassName RELATION_MAPPING =
+            ClassName.get(METADATA_PACKAGE, "RelationMapping");
+    private static final ClassName RELATION_KIND =
+            ClassName.get(METADATA_PACKAGE, "RelationKind");
     private static final ClassName COLUMN_REF =
             ClassName.get(METADATA_PACKAGE, "ColumnRef");
     private static final ClassName COLUMN_REF_SIMPLE = COLUMN_REF.nestedClass("Simple");
@@ -76,7 +80,7 @@ public final class TypeModelEmitter {
      *
      * @param entity the entity type mapping
      */
-    public void emit(TypeMapping<?> entity) {
+    public void emit(TypeDefinition entity) {
         String typeFqn = entity.typeName();
         String packageName = packageNameOf(typeFqn);
         String simpleName = simpleNameOf(typeFqn);
@@ -85,12 +89,12 @@ public final class TypeModelEmitter {
         ClassName entityType = ClassName.bestGuess(typeFqn);
         ClassName typeModelType = ClassName.get(packageName, typeModelName);
 
-        ParameterizedTypeName typeMappingParam = ParameterizedTypeName.get(TYPE_MAPPING, entityType);
         ParameterizedTypeName valueAccessParam = ParameterizedTypeName.get(VALUE_ACCESS, entityType);
 
         TypeSpec.Builder classBuilder = TypeSpec.classBuilder(typeModelName)
                 .addModifiers(Modifier.PUBLIC, Modifier.FINAL)
-                .addSuperinterface(typeMappingParam)
+                .addSuperinterface(TABLE_SCHEMA)
+                .addSuperinterface(COLUMN_RESOLVER)
                 .addSuperinterface(valueAccessParam);
 
         // Singleton INSTANCE
@@ -101,7 +105,6 @@ public final class TypeModelEmitter {
 
         // typeName()
         classBuilder.addMethod(MethodSpec.methodBuilder("typeName")
-                .addAnnotation(Override.class)
                 .addModifiers(Modifier.PUBLIC)
                 .returns(String.class)
                 .addStatement("return $S", typeFqn)
@@ -115,11 +118,16 @@ public final class TypeModelEmitter {
                 .addStatement("return $S", entity.tableName())
                 .build());
 
-        // id()
-        classBuilder.addMethod(buildIdMethod(entity));
+        // idColumn()
+        classBuilder.addMethod(MethodSpec.methodBuilder("idColumn")
+                .addAnnotation(Override.class)
+                .addModifiers(Modifier.PUBLIC)
+                .returns(String.class)
+                .addStatement("return $S", entity.idColumn())
+                .build());
 
-        // props()
-        classBuilder.addMethod(buildPropsMethod(entity));
+        // definition() — returns a TypeDefinition
+        classBuilder.addMethod(buildDefinitionMethod(entity));
 
         // columns()
         classBuilder.addMethod(buildColumnsMethod(entity));
@@ -146,89 +154,90 @@ public final class TypeModelEmitter {
         }
     }
 
-    // ── id() ──────────────────────────────────────────────────────────────
+    // ── definition() ──────────────────────────────────────────────────────
 
-    private MethodSpec buildIdMethod(TypeMapping<?> entity) {
-        MethodSpec.Builder method = MethodSpec.methodBuilder("id")
-                .addAnnotation(Override.class)
-                .addModifiers(Modifier.PUBLIC)
-                .returns(PROP_ID);
+    private MethodSpec buildDefinitionMethod(TypeDefinition entity) {
+        MethodSpec.Builder method = MethodSpec.methodBuilder("definition")
+                .addModifiers(Modifier.PUBLIC, Modifier.STATIC)
+                .returns(TYPE_DEFINITION);
 
-        if (entity.id() != null) {
-            Prop.Id id = entity.id();
-            method.addStatement("return new $T($S, $S, $S)",
-                    PROP_ID, id.name(), id.column(), id.typeFqn());
+        // Build columnMappings list
+        if (entity.columnMappings().isEmpty()) {
+            method.addStatement("$T<$T> columns = $T.of()", LIST, COLUMN_MAPPING, LIST);
         } else {
-            method.addStatement("return null");
+            CodeBlock.Builder columnsBuilder = CodeBlock.builder();
+            columnsBuilder.add("$T<$T> columns = $T.of(\n", LIST, COLUMN_MAPPING, LIST);
+            for (ColumnMapping col : entity.columnMappings()) {
+                columnsBuilder.add("    new $T($S, $S, $S, $L, $L)",
+                        COLUMN_MAPPING, col.propertyName(), col.columnName(),
+                        col.typeFqn(), col.isId(), col.isVersion());
+                if (entity.columnMappings().indexOf(col) < entity.columnMappings().size() - 1) {
+                    columnsBuilder.add(",");
+                }
+                columnsBuilder.add("\n");
+            }
+            columnsBuilder.add(")");
+            method.addCode(columnsBuilder.build());
+            method.addCode(";\n");
         }
+
+        // Build relationMappings list
+        if (entity.relationMappings().isEmpty()) {
+            method.addStatement("$T<$T> relations = $T.of()", LIST, RELATION_MAPPING, LIST);
+        } else {
+            CodeBlock.Builder relationsBuilder = CodeBlock.builder();
+            relationsBuilder.add("$T<$T> relations = $T.of(\n", LIST, RELATION_MAPPING, LIST);
+            List<RelationMapping> rels = entity.relationMappings();
+            for (int i = 0; i < rels.size(); i++) {
+                RelationMapping rel = rels.get(i);
+                String fkCol = rel.fkColumn();
+                String childTbl = rel.childTable();
+                // Always use null for target in generated code since nested VOs don't have TypeModels
+                relationsBuilder.add("    new $T($S, $T.$L, $S, ",
+                        RELATION_MAPPING,
+                        rel.propertyName(),
+                        RELATION_KIND, rel.kind(),
+                        rel.targetTypeName());
+                if (fkCol != null) {
+                    relationsBuilder.add("$S, ", fkCol);
+                } else {
+                    relationsBuilder.add("null, ");
+                }
+                if (childTbl != null) {
+                    relationsBuilder.add("$S, ", childTbl);
+                } else {
+                    relationsBuilder.add("null, ");
+                }
+                relationsBuilder.add("$L, $L, null)",
+                        rel.isComposition(),
+                        rel.isEmbedded());
+                if (i < rels.size() - 1) {
+                    relationsBuilder.add(",");
+                }
+                relationsBuilder.add("\n");
+            }
+            relationsBuilder.add(")");
+            method.addCode(relationsBuilder.build());
+            method.addCode(";\n");
+        }
+
+        String idCol = entity.idColumn();
+        method.addStatement("return new $T($S, $S, $S, $L, columns, relations)",
+                TYPE_DEFINITION, entity.typeName(), entity.tableName(),
+                idCol, entity.isAggregate());
         return method.build();
-    }
-
-    // ── props() ───────────────────────────────────────────────────────────
-
-    private MethodSpec buildPropsMethod(TypeMapping<?> entity) {
-        MethodSpec.Builder method = MethodSpec.methodBuilder("props")
-                .addAnnotation(Override.class)
-                .addModifiers(Modifier.PUBLIC)
-                .returns(ParameterizedTypeName.get(LIST, PROP));
-
-        List<Prop> props = entity.props();
-        if (props.isEmpty()) {
-            method.addStatement("return $T.of()", LIST);
-            return method.build();
-        }
-
-        method.addCode("return $T.of(\n", LIST);
-        for (int i = 0; i < props.size(); i++) {
-            Prop prop = props.get(i);
-            String trailing = (i < props.size() - 1) ? "," : "";
-            method.addCode("    $L$L\n", propConstructorCode(prop), trailing);
-        }
-        method.addCode(");\n");
-        return method.build();
-    }
-
-    private CodeBlock propConstructorCode(Prop prop) {
-        if (prop instanceof Prop.Id id) {
-            return CodeBlock.of("new $T($S, $S, $S)",
-                    PROP_ID, id.name(), id.column(), id.typeFqn());
-        } else if (prop instanceof Prop.Scalar scalar) {
-            return CodeBlock.of("new $T($S, $S, $S)",
-                    PROP_SCALAR, scalar.name(), scalar.column(), scalar.typeFqn());
-        } else if (prop instanceof Prop.Embedded embedded) {
-            // Target is null in generated descriptors
-            return CodeBlock.of("new $T($S, null)",
-                    PROP_EMBEDDED, embedded.name());
-        } else if (prop instanceof Prop.Reference ref) {
-            // Target is null in generated descriptors
-            return CodeBlock.of("new $T($S, $S, $S, null, $L, $L)",
-                    PROP_REFERENCE, ref.name(), ref.fkColumn(),
-                    ref.targetTypeName(), ref.composition(), ref.backReference());
-        } else if (prop instanceof Prop.EntityCollection ec) {
-            // Target is null in generated descriptors, but targetTypeName is preserved
-            return CodeBlock.of("new $T($S, $S, null, $S, $S)",
-                    PROP_ENTITY_COLLECTION, ec.name(),
-                    ec.targetTypeName() == null ? "" : ec.targetTypeName(),
-                    ec.inverseName() == null ? "" : ec.inverseName(),
-                    ec.inverseFkColumn() == null ? "" : ec.inverseFkColumn());
-        } else if (prop instanceof Prop.ElementCollection ec) {
-            // Target is null in generated descriptors
-            return CodeBlock.of("new $T($S, null)",
-                    PROP_ELEMENT_COLLECTION, ec.name());
-        }
-        throw new IllegalStateException("Unknown Prop type: " + prop.getClass());
     }
 
     // ── columns() ─────────────────────────────────────────────────────────
 
-    private MethodSpec buildColumnsMethod(TypeMapping<?> entity) {
+    private MethodSpec buildColumnsMethod(TypeDefinition entity) {
         MethodSpec.Builder method = MethodSpec.methodBuilder("columns")
                 .addAnnotation(Override.class)
                 .addModifiers(Modifier.PUBLIC)
                 .returns(ParameterizedTypeName.get(LIST, COLUMN_REF));
 
         String tableName = entity.tableName();
-        List<ColumnRef> cols = flattenColumns(entity.id(), entity.props(), tableName);
+        List<ColumnRef> cols = flattenColumns(entity, tableName);
 
         if (cols.isEmpty()) {
             method.addStatement("return $T.of()", LIST);
@@ -246,35 +255,34 @@ public final class TypeModelEmitter {
     }
 
     /**
-     * Flattens physical columns in declaration order, matching {@link TypeMapping#flattenColumns}.
+     * Flattens physical columns: scalar columns, TO_ONE FK columns, and recursively
+     * embedded VO columns with prefix.
      */
-    private List<ColumnRef> flattenColumns(Prop.Id id, List<Prop> props, String tableName) {
+    private List<ColumnRef> flattenColumns(TypeDefinition def, String tableName) {
         List<ColumnRef> out = new ArrayList<>();
-        if (id != null) {
-            out.add(new ColumnRef.Simple(id.column(), tableName));
+        for (ColumnMapping col : def.columnMappings()) {
+            out.add(new ColumnRef.Simple(col.columnName(), tableName));
         }
-        for (Prop p : props) {
-            if (p instanceof Prop.Scalar scalar) {
-                out.add(new ColumnRef.Simple(scalar.column(), tableName));
-            } else if (p instanceof Prop.Reference reference) {
-                out.add(new ColumnRef.Simple(reference.fkColumn(), tableName));
-            } else if (p instanceof Prop.Embedded embedded && embedded.target() != null) {
-                String prefix = io.github.fludakit.data.Names.columnBase(embedded.name()) + "_";
-                flattenEmbeddedColumns(embedded.target(), prefix, tableName, out);
+        for (RelationMapping rel : def.relationMappings()) {
+            if (rel.kind() == RelationKind.TO_ONE && rel.fkColumn() != null) {
+                out.add(new ColumnRef.Simple(rel.fkColumn(), tableName));
+            } else if (rel.kind() == RelationKind.EMBEDDED && rel.target() != null) {
+                String prefix = rel.propertyName() + "_";
+                flattenEmbeddedColumns(rel.target(), prefix, tableName, out);
             }
-            // EntityCollection / ElementCollection carry no column on this table
         }
         return out;
     }
 
-    private void flattenEmbeddedColumns(ValueObjectMapping<?> vo, String columnPrefix,
+    private void flattenEmbeddedColumns(TypeDefinition embedded, String columnPrefix,
                                          String tableName, List<ColumnRef> out) {
-        for (Prop p : vo.props()) {
-            if (p instanceof Prop.Scalar scalar) {
-                out.add(new ColumnRef.Simple(columnPrefix + scalar.column(), tableName));
-            } else if (p instanceof Prop.Embedded embedded && embedded.target() != null) {
-                String nestedPrefix = columnPrefix + io.github.fludakit.data.Names.columnBase(embedded.name()) + "_";
-                flattenEmbeddedColumns(embedded.target(), nestedPrefix, tableName, out);
+        for (ColumnMapping col : embedded.columnMappings()) {
+            out.add(new ColumnRef.Simple(columnPrefix + col.columnName(), tableName));
+        }
+        for (RelationMapping rel : embedded.relationMappings()) {
+            if (rel.kind() == RelationKind.EMBEDDED && rel.target() != null) {
+                String nestedPrefix = columnPrefix + rel.propertyName() + "_";
+                flattenEmbeddedColumns(rel.target(), nestedPrefix, tableName, out);
             }
         }
     }
@@ -288,7 +296,7 @@ public final class TypeModelEmitter {
 
     // ── columnRefs() ──────────────────────────────────────────────────────
 
-    private MethodSpec buildColumnRefsMethod(TypeMapping<?> entity) {
+    private MethodSpec buildColumnRefsMethod(TypeDefinition entity) {
         MethodSpec.Builder method = MethodSpec.methodBuilder("columnRefs")
                 .addAnnotation(Override.class)
                 .addModifiers(Modifier.PUBLIC)
@@ -328,38 +336,43 @@ public final class TypeModelEmitter {
     }
 
     /**
-     * Computes the local column refs map: id, scalars, forward FK references, and flattened
-     * embedded leaves. Back-references are excluded (they are write-only).
+     * Computes the local column refs map: scalars, forward FK references, and flattened
+     * embedded leaves.
      */
-    private Map<String, ColumnRef> computeLocalColumnRefs(TypeMapping<?> entity) {
+    private Map<String, ColumnRef> computeLocalColumnRefs(TypeDefinition entity) {
         Map<String, ColumnRef> refs = new LinkedHashMap<>();
         String tableName = entity.tableName();
-        addLocalRefs(refs, tableName, entity.id(), entity.props(), "", "");
+        addLocalRefs(refs, tableName, entity, "", "");
         return refs;
     }
 
     private void addLocalRefs(Map<String, ColumnRef> refs, String tableName,
-                               Prop.Id id, List<Prop> props,
+                               TypeDefinition def,
                                String pathPrefix, String columnPrefix) {
-        if (id != null) {
-            refs.put(pathPrefix + id.name(),
-                    new ColumnRef.Simple(columnPrefix + id.column(), tableName));
+        for (ColumnMapping col : def.columnMappings()) {
+            refs.put(pathPrefix + col.propertyName(),
+                    new ColumnRef.Simple(columnPrefix + col.columnName(), tableName));
         }
-        for (Prop prop : props) {
-            if (prop instanceof Prop.Scalar scalar) {
-                refs.put(pathPrefix + scalar.name(),
-                        new ColumnRef.Simple(columnPrefix + scalar.column(), tableName));
-            } else if (prop instanceof Prop.Reference reference) {
-                if (!reference.backReference()) {
-                    refs.put(pathPrefix + reference.name(),
-                            new ColumnRef.ForeignKey(columnPrefix + reference.fkColumn(), tableName));
-                }
-            } else if (prop instanceof Prop.Embedded embedded && embedded.target() != null) {
-                addLocalRefs(refs, tableName, null, embedded.target().props(),
-                        pathPrefix + embedded.name() + ".",
-                        columnPrefix + io.github.fludakit.data.Names.columnBase(embedded.name()) + "_");
+        for (RelationMapping rel : def.relationMappings()) {
+            if (rel.kind() == RelationKind.TO_ONE && rel.fkColumn() != null) {
+                refs.put(pathPrefix + rel.propertyName(),
+                        new ColumnRef.ForeignKey(columnPrefix + rel.fkColumn(), tableName));
+            } else if (rel.kind() == RelationKind.EMBEDDED && rel.target() != null) {
+                addLocalRefs(refs, tableName, rel.target(),
+                        pathPrefix + rel.propertyName() + ".",
+                        columnPrefix + rel.propertyName() + "_");
             }
         }
+    }
+
+    /**
+     * Computes local column refs for a target definition using an explicit table name.
+     * Used for element collection targets where the target's own tableName may be null.
+     */
+    private Map<String, ColumnRef> computeLocalColumnRefsWithTable(TypeDefinition def, String tableName) {
+        Map<String, ColumnRef> refs = new LinkedHashMap<>();
+        addLocalRefs(refs, tableName, def, "", "");
+        return refs;
     }
 
     /**
@@ -376,7 +389,7 @@ public final class TypeModelEmitter {
 
     // ── resolve(path) ─────────────────────────────────────────────────────
 
-    private MethodSpec buildResolveMethod(TypeMapping<?> entity, String typeFqn) {
+    private MethodSpec buildResolveMethod(TypeDefinition entity, String typeFqn) {
         MethodSpec.Builder method = MethodSpec.methodBuilder("resolve")
                 .addAnnotation(Override.class)
                 .addModifiers(Modifier.PUBLIC)
@@ -404,12 +417,12 @@ public final class TypeModelEmitter {
 
     /**
      * Collects all resolvable paths and their placements:
-     * 1. Local paths (id, scalars, FK refs, embedded leaves) — no edges
+     * 1. Local paths (scalars, FK refs, embedded leaves) — no edges
      * 2. Reference traversals (one level) — JoinEdge.ToOne
      * 3. EntityCollection traversals (one level) — JoinEdge.ToMany
      * 4. ElementCollection traversals (one level) — JoinEdge.ToMany
      */
-    private Map<String, ColumnPlacement> collectResolvablePaths(TypeMapping<?> entity) {
+    private Map<String, ColumnPlacement> collectResolvablePaths(TypeDefinition entity) {
         Map<String, ColumnPlacement> paths = new LinkedHashMap<>();
         String tableName = entity.tableName();
 
@@ -419,45 +432,35 @@ public final class TypeModelEmitter {
             paths.put(entry.getKey(), new ColumnPlacement(entry.getValue()));
         }
 
-        // 2. Reference traversals (one level into target)
-        for (Prop prop : entity.props()) {
-            if (prop instanceof Prop.Reference ref && !ref.backReference() && ref.target() != null) {
-                JoinEdge.ToOne edge = buildToOneEdge(entity, ref);
+        // 2-4. Relation traversals (one level into target)
+        for (RelationMapping rel : entity.relationMappings()) {
+            if (rel.kind() == RelationKind.TO_ONE && rel.target() != null) {
+                JoinEdge.ToOne edge = buildToOneEdge(entity, rel);
                 if (edge == null) continue;
-                TypeMapping<?> target = ref.target();
+                TypeDefinition target = rel.target();
                 Map<String, ColumnRef> targetRefs = computeLocalColumnRefs(target);
                 for (Map.Entry<String, ColumnRef> targetEntry : targetRefs.entrySet()) {
-                    String fullPath = ref.name() + "." + targetEntry.getKey();
+                    String fullPath = rel.propertyName() + "." + targetEntry.getKey();
                     paths.put(fullPath, new ColumnPlacement(
                             targetEntry.getValue(), List.of(edge)));
                 }
-            }
-        }
-
-        // 3. EntityCollection traversals (one level into target)
-        for (Prop prop : entity.props()) {
-            if (prop instanceof Prop.EntityCollection ec && ec.target() != null) {
-                JoinEdge.ToMany edge = buildToManyEdgeForCollection(entity, ec);
+            } else if (rel.kind() == RelationKind.TO_MANY && rel.target() != null) {
+                JoinEdge.ToMany edge = buildToManyEdgeForCollection(entity, rel);
                 if (edge == null) continue;
-                TypeMapping<?> target = ec.target();
+                TypeDefinition target = rel.target();
                 Map<String, ColumnRef> targetRefs = computeLocalColumnRefs(target);
                 for (Map.Entry<String, ColumnRef> targetEntry : targetRefs.entrySet()) {
-                    String fullPath = ec.name() + "." + targetEntry.getKey();
+                    String fullPath = rel.propertyName() + "." + targetEntry.getKey();
                     paths.put(fullPath, new ColumnPlacement(
                             targetEntry.getValue(), List.of(edge)));
                 }
-            }
-        }
-
-        // 4. ElementCollection traversals (one level into target VO)
-        for (Prop prop : entity.props()) {
-            if (prop instanceof Prop.ElementCollection ec && ec.target() != null) {
-                JoinEdge.ToMany edge = buildToManyEdgeForElementCollection(entity, ec);
+            } else if (rel.kind() == RelationKind.ELEMENT_COLLECTION && rel.target() != null) {
+                JoinEdge.ToMany edge = buildToManyEdgeForElementCollection(entity, rel);
                 if (edge == null) continue;
-                Map<String, ColumnRef> targetRefs = computeVoLocalRefs(
-                        ec.target(), ec.target().tableName());
+                String childTable = rel.childTable() != null ? rel.childTable() : rel.target().tableName();
+                Map<String, ColumnRef> targetRefs = computeLocalColumnRefsWithTable(rel.target(), childTable);
                 for (Map.Entry<String, ColumnRef> targetEntry : targetRefs.entrySet()) {
-                    String fullPath = ec.name() + "." + targetEntry.getKey();
+                    String fullPath = rel.propertyName() + "." + targetEntry.getKey();
                     paths.put(fullPath, new ColumnPlacement(
                             targetEntry.getValue(), List.of(edge)));
                 }
@@ -467,40 +470,33 @@ public final class TypeModelEmitter {
         return paths;
     }
 
-    private JoinEdge.ToOne buildToOneEdge(TypeMapping<?> owner, Prop.Reference ref) {
-        if (ref.targetTable() == null || ref.targetIdColumn() == null) return null;
+    private JoinEdge.ToOne buildToOneEdge(TypeDefinition owner, RelationMapping ref) {
+        if (ref.target() == null || ref.target().tableName() == null
+                || ref.target().idColumn() == null || ref.fkColumn() == null) return null;
         return new JoinEdge.ToOne(
                 new ColumnRef.ForeignKey(ref.fkColumn(), owner.tableName()),
-                new ColumnRef.Simple(ref.targetIdColumn(), ref.targetTable()));
+                new ColumnRef.Simple(ref.target().idColumn(), ref.target().tableName()));
     }
 
-    private JoinEdge.ToMany buildToManyEdgeForCollection(TypeMapping<?> owner, Prop.EntityCollection ec) {
-        if (ec.targetTable() == null || ec.inverseFkColumn() == null || owner.idColumn() == null) {
+    private JoinEdge.ToMany buildToManyEdgeForCollection(TypeDefinition owner, RelationMapping ec) {
+        if (ec.target() == null || ec.target().tableName() == null
+                || ec.fkColumn() == null || owner.idColumn() == null) {
             return null;
         }
         return new JoinEdge.ToMany(
                 new ColumnRef.Simple(owner.idColumn(), owner.tableName()),
-                new ColumnRef.ForeignKey(ec.inverseFkColumn(), ec.targetTable()));
+                new ColumnRef.ForeignKey(ec.fkColumn(), ec.target().tableName()));
     }
 
-    private JoinEdge.ToMany buildToManyEdgeForElementCollection(TypeMapping<?> owner, Prop.ElementCollection ec) {
-        if (ec.childTable() == null || ec.parentFkColumn() == null || owner.idColumn() == null) {
+    private JoinEdge.ToMany buildToManyEdgeForElementCollection(TypeDefinition owner, RelationMapping ec) {
+        String childTable = ec.childTable() != null ? ec.childTable()
+                : (ec.target() != null ? ec.target().tableName() : null);
+        if (childTable == null || ec.fkColumn() == null || owner.idColumn() == null) {
             return null;
         }
         return new JoinEdge.ToMany(
                 new ColumnRef.Simple(owner.idColumn(), owner.tableName()),
-                new ColumnRef.ForeignKey(ec.parentFkColumn(), ec.childTable()));
-    }
-
-    /**
-     * Computes local column refs for a value object mapping (no id).
-     */
-    private Map<String, ColumnRef> computeVoLocalRefs(ValueObjectMapping<?> vo, String tableName) {
-        Map<String, ColumnRef> refs = new LinkedHashMap<>();
-        if (tableName != null) {
-            addLocalRefs(refs, tableName, null, vo.props(), "", "");
-        }
-        return refs;
+                new ColumnRef.ForeignKey(ec.fkColumn(), childTable));
     }
 
     private CodeBlock placementCode(ColumnPlacement placement) {
@@ -537,18 +533,18 @@ public final class TypeModelEmitter {
 
     // ── isToManyPath(path) ────────────────────────────────────────────────
 
-    private MethodSpec buildIsToManyPathMethod(TypeMapping<?> entity) {
+    private MethodSpec buildIsToManyPathMethod(TypeDefinition entity) {
         MethodSpec.Builder method = MethodSpec.methodBuilder("isToManyPath")
                 .addAnnotation(Override.class)
                 .addModifiers(Modifier.PUBLIC)
                 .returns(boolean.class)
                 .addParameter(String.class, "path");
 
-        // Collect to-many prop names
+        // Collect to-many relation names
         List<String> toManyNames = new ArrayList<>();
-        for (Prop prop : entity.props()) {
-            if (prop instanceof Prop.EntityCollection || prop instanceof Prop.ElementCollection) {
-                toManyNames.add(prop.name());
+        for (RelationMapping rel : entity.relationMappings()) {
+            if (rel.kind() == RelationKind.TO_MANY || rel.kind() == RelationKind.ELEMENT_COLLECTION) {
+                toManyNames.add(rel.propertyName());
             }
         }
 
@@ -575,7 +571,7 @@ public final class TypeModelEmitter {
 
     // ── value(path, root) ─────────────────────────────────────────────────
 
-    private MethodSpec buildValueMethod(TypeMapping<?> entity, ClassName entityType, String typeFqn) {
+    private MethodSpec buildValueMethod(TypeDefinition entity, ClassName entityType, String typeFqn) {
         MethodSpec.Builder method = MethodSpec.methodBuilder("value")
                 .addAnnotation(Override.class)
                 .addModifiers(Modifier.PUBLIC)
@@ -604,29 +600,45 @@ public final class TypeModelEmitter {
 
     /**
      * Collects paths and their getter chains for the value() method.
-     * Covers local paths (id, scalar, embedded leaves) and one-level reference traversals.
+     * Covers local paths (scalars, embedded leaves) and one-level reference traversals.
      */
-    private Map<String, List<String>> collectValuePaths(TypeMapping<?> entity, String rootVar) {
+    private Map<String, List<String>> collectValuePaths(TypeDefinition entity, String rootVar) {
         Map<String, List<String>> paths = new LinkedHashMap<>();
 
-        // Local paths
-        if (entity.id() != null) {
-            paths.put(entity.id().name(), List.of(rootVar + "." + getter(entity.id().name()) + "()"));
+        // Local paths (scalars and embedded leaves)
+        for (ColumnMapping col : entity.columnMappings()) {
+            paths.put(col.propertyName(),
+                    List.of(rootVar + "." + getter(col.propertyName()) + "()"));
         }
-        for (Prop prop : entity.props()) {
-            collectLocalValuePaths(paths, prop, rootVar, "");
+        for (RelationMapping rel : entity.relationMappings()) {
+            if (rel.kind() == RelationKind.EMBEDDED && rel.target() != null) {
+                collectEmbeddedValuePaths(paths, rel.target(), rel.target().columnMappings(),
+                        rel.target().relationMappings(),
+                        rootVar + "." + getter(rel.propertyName()) + "()",
+                        rel.propertyName() + ".");
+            }
         }
 
         // Reference traversals (one level)
-        for (Prop prop : entity.props()) {
-            if (prop instanceof Prop.Reference ref && !ref.backReference() && ref.target() != null) {
-                String refGetter = rootVar + "." + getter(ref.name()) + "()";
-                if (ref.target().id() != null) {
-                    String fullPath = ref.name() + "." + ref.target().id().name();
-                    paths.put(fullPath, List.of(refGetter + "." + getter(ref.target().id().name()) + "()"));
+        for (RelationMapping rel : entity.relationMappings()) {
+            if (rel.kind() == RelationKind.TO_ONE && rel.target() != null) {
+                String refGetter = rootVar + "." + getter(rel.propertyName()) + "()";
+                TypeDefinition target = rel.target();
+                // Target's own columns
+                for (ColumnMapping col : target.columnMappings()) {
+                    String fullPath = rel.propertyName() + "." + col.propertyName();
+                    paths.put(fullPath,
+                            List.of(refGetter + "." + getter(col.propertyName()) + "()"));
                 }
-                for (Prop targetProp : ref.target().props()) {
-                    collectLocalValuePaths(paths, targetProp, refGetter, ref.name() + ".");
+                // Target's embedded leaves
+                for (RelationMapping targetRel : target.relationMappings()) {
+                    if (targetRel.kind() == RelationKind.EMBEDDED && targetRel.target() != null) {
+                        collectEmbeddedValuePaths(paths, targetRel.target(),
+                                targetRel.target().columnMappings(),
+                                targetRel.target().relationMappings(),
+                                refGetter + "." + getter(targetRel.propertyName()) + "()",
+                                rel.propertyName() + "." + targetRel.propertyName() + ".");
+                    }
                 }
             }
         }
@@ -634,16 +646,23 @@ public final class TypeModelEmitter {
         return paths;
     }
 
-    private void collectLocalValuePaths(Map<String, List<String>> paths, Prop prop,
-                                         String accessor, String pathPrefix) {
-        if (prop instanceof Prop.Scalar scalar) {
-            paths.put(pathPrefix + scalar.name(),
-                    List.of(accessor + "." + getter(scalar.name()) + "()"));
-        } else if (prop instanceof Prop.Embedded embedded && embedded.target() != null) {
-            String nestedAccessor = accessor + "." + getter(embedded.name()) + "()";
-            String nestedPrefix = pathPrefix + embedded.name() + ".";
-            for (Prop voProp : embedded.target().props()) {
-                collectLocalValuePaths(paths, voProp, nestedAccessor, nestedPrefix);
+    private void collectEmbeddedValuePaths(Map<String, List<String>> paths,
+                                            TypeDefinition embeddedDef,
+                                            List<ColumnMapping> columns,
+                                            List<RelationMapping> relations,
+                                            String accessor, String pathPrefix) {
+        for (ColumnMapping col : columns) {
+            paths.put(pathPrefix + col.propertyName(),
+                    List.of(accessor + "." + getter(col.propertyName()) + "()"));
+        }
+        for (RelationMapping rel : relations) {
+            if (rel.kind() == RelationKind.EMBEDDED && rel.target() != null) {
+                String nestedAccessor = accessor + "." + getter(rel.propertyName()) + "()";
+                String nestedPrefix = pathPrefix + rel.propertyName() + ".";
+                collectEmbeddedValuePaths(paths, rel.target(),
+                        rel.target().columnMappings(),
+                        rel.target().relationMappings(),
+                        nestedAccessor, nestedPrefix);
             }
         }
     }

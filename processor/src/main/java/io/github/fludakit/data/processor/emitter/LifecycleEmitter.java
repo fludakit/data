@@ -5,6 +5,8 @@ import com.squareup.javapoet.CodeBlock;
 import com.squareup.javapoet.MethodSpec;
 import com.squareup.javapoet.ParameterizedTypeName;
 import com.squareup.javapoet.TypeName;
+import io.github.fludakit.data.metadata.ColumnMapping;
+import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.RepositoryContext;
 import io.github.fludakit.data.processor.support.MethodOverrides;
@@ -159,7 +161,7 @@ public final class LifecycleEmitter {
 
     private MethodSpec emitDeleteByIds(RepositoryContext ctx, MethodContext method) {
         MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
-        String idTypeFqn = ctx.entity().id().typeFqn();
+        String idTypeFqn = idColumnMapping(ctx.entity()).typeFqn();
         ClassName idClass = ClassName.bestGuess(idTypeFqn);
 
         CodeBlock.Builder body = CodeBlock.builder();
@@ -172,6 +174,14 @@ public final class LifecycleEmitter {
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────
+
+    /** Returns the id ColumnMapping from a TypeDefinition, or null if none. */
+    private static ColumnMapping idColumnMapping(TypeDefinition def) {
+        for (ColumnMapping col : def.columnMappings()) {
+            if (col.isId()) return col;
+        }
+        return null;
+    }
 
     /**
      * Resolves the type argument for the ArrayList in saveAll.

@@ -9,11 +9,10 @@ import com.squareup.javapoet.MethodSpec;
 import com.squareup.javapoet.ParameterizedTypeName;
 import com.squareup.javapoet.TypeName;
 import com.squareup.javapoet.TypeSpec;
-import io.github.fludakit.data.metadata.EmbeddedValueObjectMapping;
-import io.github.fludakit.data.metadata.ElementCollectionValueObjectMapping;
-import io.github.fludakit.data.metadata.TypeMapping;
-import io.github.fludakit.data.metadata.TypeMapping.Prop;
-import io.github.fludakit.data.metadata.ValueObjectMapping;
+import io.github.fludakit.data.metadata.ColumnMapping;
+import io.github.fludakit.data.metadata.RelationKind;
+import io.github.fludakit.data.metadata.RelationMapping;
+import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.support.Diagnostics;
 
 import javax.annotation.processing.Filer;
@@ -107,7 +106,7 @@ public final class MetamodelEmitter {
      * Pre-registers entity metamodel FQNs so that nav-class collision detection works
      * across entities in the same processing round.
      */
-    public void preclaimEntityMetamodel(TypeMapping<?> entity) {
+    public void preclaimEntityMetamodel(TypeDefinition entity) {
         String packageName = packageNameOf(entity.typeName());
         String simpleName = simpleNameOf(entity.typeName());
         claimedMetamodelFqns.add(packageName + "._" + simpleName);
@@ -118,7 +117,7 @@ public final class MetamodelEmitter {
      *
      * @param entity the entity type mapping
      */
-    public void emit(TypeMapping<?> entity) {
+    public void emit(TypeDefinition entity) {
         String typeFqn = entity.typeName();
         String packageName = packageNameOf(typeFqn);
         String simpleName = simpleNameOf(typeFqn);
@@ -138,22 +137,29 @@ public final class MetamodelEmitter {
                         .build());
 
         // Add ID constant + field
-        if (entity.id() != null) {
-            Prop.Id id = entity.id();
-            String constName = toScreamingSnakeCase(id.name());
-            addStringConstant(interfaceBuilder, constName, id.name());
+        ColumnMapping idCol = idColumnMapping(entity);
+        if (idCol != null) {
+            String constName = toScreamingSnakeCase(idCol.propertyName());
+            addStringConstant(interfaceBuilder, constName, idCol.propertyName());
 
             TypeName fieldType = ParameterizedTypeName.get(ID_ATTRIBUTE, entityType);
             TypeName recordType = ParameterizedTypeName.get(ID_ATTRIBUTE_RECORD, entityType);
-            interfaceBuilder.addField(FieldSpec.builder(fieldType, id.name(),
+            interfaceBuilder.addField(FieldSpec.builder(fieldType, idCol.propertyName(),
                             Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
-                    .initializer("new $T($S, $L)", recordType, id.name(), constName)
+                    .initializer("new $T($S, $L)", recordType, idCol.propertyName(), constName)
                     .build());
         }
 
-        // Add props
-        for (Prop prop : entity.props()) {
-            addPropToInterface(interfaceBuilder, prop, entityType, metamodelType,
+        // Add columns
+        for (ColumnMapping col : entity.columnMappings()) {
+            if (!col.isId()) {
+                addColumnToInterface(interfaceBuilder, col, entityType, "");
+            }
+        }
+
+        // Add relations
+        for (RelationMapping rel : entity.relationMappings()) {
+            addRelationToInterface(interfaceBuilder, rel, entityType, metamodelType,
                     packageName, simpleName, "");
         }
 
@@ -161,58 +167,56 @@ public final class MetamodelEmitter {
         writeJavaFile(packageName, interfaceBuilder.build(), metamodelType);
     }
 
-    // ── Interface prop handling ──────────────────────────────────────────
+    // ── Interface column/relation handling ────────────────────────────────
 
-    private void addPropToInterface(TypeSpec.Builder interfaceBuilder, Prop prop,
-                                     ClassName entityType, ClassName metamodelType,
-                                     String packageName, String entitySimpleName,
-                                     String pathPrefix) {
-        if (prop instanceof Prop.Scalar scalar) {
-            addScalarToInterface(interfaceBuilder, scalar, entityType, pathPrefix);
-        } else if (prop instanceof Prop.Embedded embedded) {
-            addEmbeddedToInterface(interfaceBuilder, embedded, entityType, metamodelType,
-                    packageName, entitySimpleName, pathPrefix);
-        } else if (prop instanceof Prop.Reference ref) {
-            addReferenceToInterface(interfaceBuilder, ref, entityType, metamodelType,
-                    packageName, entitySimpleName, pathPrefix);
-        } else if (prop instanceof Prop.EntityCollection ec) {
-            addEntityCollectionToInterface(interfaceBuilder, ec, entityType, metamodelType,
-                    packageName, entitySimpleName, pathPrefix);
-        } else if (prop instanceof Prop.ElementCollection ec) {
-            addElementCollectionToInterface(interfaceBuilder, ec, entityType, metamodelType,
-                    packageName, entitySimpleName, pathPrefix);
-        }
-    }
-
-    private void addScalarToInterface(TypeSpec.Builder builder, Prop.Scalar scalar,
+    private void addColumnToInterface(TypeSpec.Builder builder, ColumnMapping col,
                                        ClassName entityType, String pathPrefix) {
-        String constName = toScreamingSnakeCase(scalar.name());
-        addStringConstant(builder, constName, scalar.name());
+        String constName = toScreamingSnakeCase(col.propertyName());
+        addStringConstant(builder, constName, col.propertyName());
 
-        String typeFqn = scalar.typeFqn();
+        String typeFqn = col.typeFqn();
         ClassName attributeInterface = scalarAttributeInterface(typeFqn);
         ClassName attributeRecord = scalarAttributeRecord(typeFqn);
 
         TypeName fieldType = ParameterizedTypeName.get(attributeInterface, entityType);
         TypeName recordType = ParameterizedTypeName.get(attributeRecord, entityType);
 
-        String path = pathPrefix.isEmpty() ? scalar.name() : pathPrefix + "." + scalar.name();
+        String path = pathPrefix.isEmpty() ? col.propertyName() : pathPrefix + "." + col.propertyName();
         String pathArg = pathPrefix.isEmpty() ? constName : "\"" + path + "\"";
 
-        builder.addField(FieldSpec.builder(fieldType, scalar.name(),
+        builder.addField(FieldSpec.builder(fieldType, col.propertyName(),
                         Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
-                .initializer("new $T($S, $L)", recordType, scalar.name(), pathArg)
+                .initializer("new $T($S, $L)", recordType, col.propertyName(), pathArg)
                 .build());
     }
 
-    private void addEmbeddedToInterface(TypeSpec.Builder builder, Prop.Embedded embedded,
+    private void addRelationToInterface(TypeSpec.Builder interfaceBuilder, RelationMapping rel,
                                          ClassName entityType, ClassName metamodelType,
                                          String packageName, String entitySimpleName,
                                          String pathPrefix) {
-        String constName = toScreamingSnakeCase(embedded.name());
-        addStringConstant(builder, constName, embedded.name());
+        if (rel.kind() == RelationKind.EMBEDDED) {
+            addEmbeddedToInterface(interfaceBuilder, rel, entityType, metamodelType,
+                    packageName, entitySimpleName, pathPrefix);
+        } else if (rel.kind() == RelationKind.TO_ONE) {
+            addReferenceToInterface(interfaceBuilder, rel, entityType, metamodelType,
+                    packageName, entitySimpleName, pathPrefix);
+        } else if (rel.kind() == RelationKind.TO_MANY) {
+            addEntityCollectionToInterface(interfaceBuilder, rel, entityType, metamodelType,
+                    packageName, entitySimpleName, pathPrefix);
+        } else if (rel.kind() == RelationKind.ELEMENT_COLLECTION) {
+            addElementCollectionToInterface(interfaceBuilder, rel, entityType, metamodelType,
+                    packageName, entitySimpleName, pathPrefix);
+        }
+    }
 
-        String navClassName = "_" + entitySimpleName + capitalize(embedded.name());
+    private void addEmbeddedToInterface(TypeSpec.Builder builder, RelationMapping embedded,
+                                         ClassName entityType, ClassName metamodelType,
+                                         String packageName, String entitySimpleName,
+                                         String pathPrefix) {
+        String constName = toScreamingSnakeCase(embedded.propertyName());
+        addStringConstant(builder, constName, embedded.propertyName());
+
+        String navClassName = "_" + entitySimpleName + capitalize(embedded.propertyName());
         String navFqn = packageName + "." + navClassName;
 
         if (claimedMetamodelFqns.contains(navFqn)) {
@@ -222,36 +226,36 @@ public final class MetamodelEmitter {
                     : ClassName.get("java.lang", "Object");
             TypeName fieldType = ParameterizedTypeName.get(EMBEDDABLE_ATTRIBUTE, entityType, voType);
             TypeName recordType = ParameterizedTypeName.get(EMBEDDABLE_ATTRIBUTE_RECORD, entityType, voType);
-            builder.addField(FieldSpec.builder(fieldType, embedded.name(),
+            builder.addField(FieldSpec.builder(fieldType, embedded.propertyName(),
                             Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
-                    .initializer("new $T($S, $L)", recordType, embedded.name(), constName)
+                    .initializer("new $T($S, $L)", recordType, embedded.propertyName(), constName)
                     .build());
-            diagnostics.note("static metamodel collision on navigable member '" + embedded.name()
+            diagnostics.note("static metamodel collision on navigable member '" + embedded.propertyName()
                     + "': type '" + navFqn + "' already claimed", null);
             return;
         }
 
         // Add the nav field to the interface
         ClassName navType = ClassName.get(packageName, navClassName);
-        builder.addField(FieldSpec.builder(navType, embedded.name(),
+        builder.addField(FieldSpec.builder(navType, embedded.propertyName(),
                         Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
                 .initializer("new $T()", navType)
                 .build());
 
         // Generate the nav class
-        String fullPath = pathPrefix.isEmpty() ? embedded.name() : pathPrefix + "." + embedded.name();
+        String fullPath = pathPrefix.isEmpty() ? embedded.propertyName() : pathPrefix + "." + embedded.propertyName();
         emitEmbeddedNavClass(embedded, entityType, packageName, entitySimpleName,
-                embedded.name(), navClassName, fullPath);
+                embedded.propertyName(), navClassName, fullPath);
     }
 
-    private void addReferenceToInterface(TypeSpec.Builder builder, Prop.Reference ref,
+    private void addReferenceToInterface(TypeSpec.Builder builder, RelationMapping ref,
                                           ClassName entityType, ClassName metamodelType,
                                           String packageName, String entitySimpleName,
                                           String pathPrefix) {
-        String constName = toScreamingSnakeCase(ref.name());
-        addStringConstant(builder, constName, ref.name());
+        String constName = toScreamingSnakeCase(ref.propertyName());
+        addStringConstant(builder, constName, ref.propertyName());
 
-        String navClassName = "_" + entitySimpleName + capitalize(ref.name());
+        String navClassName = "_" + entitySimpleName + capitalize(ref.propertyName());
         String navFqn = packageName + "." + navClassName;
 
         if (claimedMetamodelFqns.contains(navFqn)) {
@@ -260,93 +264,93 @@ public final class MetamodelEmitter {
                     ClassName.bestGuess(ref.targetTypeName()));
             TypeName recordType = ParameterizedTypeName.get(ENTITY_ATTRIBUTE_RECORD, entityType,
                     ClassName.bestGuess(ref.targetTypeName()));
-            builder.addField(FieldSpec.builder(fieldType, ref.name(),
+            builder.addField(FieldSpec.builder(fieldType, ref.propertyName(),
                             Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
-                    .initializer("new $T($S, $L)", recordType, ref.name(), constName)
+                    .initializer("new $T($S, $L)", recordType, ref.propertyName(), constName)
                     .build());
-            diagnostics.note("static metamodel collision on navigable member '" + ref.name()
+            diagnostics.note("static metamodel collision on navigable member '" + ref.propertyName()
                     + "': type '" + navFqn + "' already claimed", null);
             return;
         }
 
         // Add the nav field to the interface
         ClassName navType = ClassName.get(packageName, navClassName);
-        builder.addField(FieldSpec.builder(navType, ref.name(),
+        builder.addField(FieldSpec.builder(navType, ref.propertyName(),
                         Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
                 .initializer("new $T()", navType)
                 .build());
 
         // Generate the nav class
-        String fullPath = pathPrefix.isEmpty() ? ref.name() : pathPrefix + "." + ref.name();
+        String fullPath = pathPrefix.isEmpty() ? ref.propertyName() : pathPrefix + "." + ref.propertyName();
         emitReferenceNavClass(ref, entityType, packageName, entitySimpleName,
-                ref.name(), navClassName, fullPath);
+                ref.propertyName(), navClassName, fullPath);
     }
 
-    private void addEntityCollectionToInterface(TypeSpec.Builder builder, Prop.EntityCollection ec,
+    private void addEntityCollectionToInterface(TypeSpec.Builder builder, RelationMapping ec,
                                                  ClassName entityType, ClassName metamodelType,
                                                  String packageName, String entitySimpleName,
                                                  String pathPrefix) {
-        String constName = toScreamingSnakeCase(ec.name());
-        addStringConstant(builder, constName, ec.name());
+        String constName = toScreamingSnakeCase(ec.propertyName());
+        addStringConstant(builder, constName, ec.propertyName());
 
-        String navClassName = "_" + entitySimpleName + capitalize(ec.name());
+        String navClassName = "_" + entitySimpleName + capitalize(ec.propertyName());
         String navFqn = packageName + "." + navClassName;
 
         if (claimedMetamodelFqns.contains(navFqn)) {
-            diagnostics.note("static metamodel collision on navigable member '" + ec.name()
+            diagnostics.note("static metamodel collision on navigable member '" + ec.propertyName()
                     + "': type '" + navFqn + "' already claimed", null);
             return;
         }
 
         // Add the nav field to the interface
         ClassName navType = ClassName.get(packageName, navClassName);
-        builder.addField(FieldSpec.builder(navType, ec.name(),
+        builder.addField(FieldSpec.builder(navType, ec.propertyName(),
                         Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
                 .initializer("new $T()", navType)
                 .build());
 
         // Generate the nav class
-        String fullPath = pathPrefix.isEmpty() ? ec.name() : pathPrefix + "." + ec.name();
+        String fullPath = pathPrefix.isEmpty() ? ec.propertyName() : pathPrefix + "." + ec.propertyName();
         if (ec.target() != null) {
             emitEntityCollectionNavClass(ec, entityType, packageName, entitySimpleName,
-                    ec.name(), navClassName, fullPath);
+                    ec.propertyName(), navClassName, fullPath);
         }
     }
 
-    private void addElementCollectionToInterface(TypeSpec.Builder builder, Prop.ElementCollection ec,
+    private void addElementCollectionToInterface(TypeSpec.Builder builder, RelationMapping ec,
                                                   ClassName entityType, ClassName metamodelType,
                                                   String packageName, String entitySimpleName,
                                                   String pathPrefix) {
-        String constName = toScreamingSnakeCase(ec.name());
-        addStringConstant(builder, constName, ec.name());
+        String constName = toScreamingSnakeCase(ec.propertyName());
+        addStringConstant(builder, constName, ec.propertyName());
 
-        String navClassName = "_" + entitySimpleName + capitalize(ec.name());
+        String navClassName = "_" + entitySimpleName + capitalize(ec.propertyName());
         String navFqn = packageName + "." + navClassName;
 
         if (claimedMetamodelFqns.contains(navFqn)) {
-            diagnostics.note("static metamodel collision on navigable member '" + ec.name()
+            diagnostics.note("static metamodel collision on navigable member '" + ec.propertyName()
                     + "': type '" + navFqn + "' already claimed", null);
             return;
         }
 
         // Add the nav field to the interface
         ClassName navType = ClassName.get(packageName, navClassName);
-        builder.addField(FieldSpec.builder(navType, ec.name(),
+        builder.addField(FieldSpec.builder(navType, ec.propertyName(),
                         Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
                 .initializer("new $T()", navType)
                 .build());
 
         // Generate the nav class
-        String fullPath = pathPrefix.isEmpty() ? ec.name() : pathPrefix + "." + ec.name();
+        String fullPath = pathPrefix.isEmpty() ? ec.propertyName() : pathPrefix + "." + ec.propertyName();
         if (ec.target() != null) {
             emitElementCollectionNavClass(ec, entityType, packageName, entitySimpleName,
-                    ec.name(), navClassName, fullPath);
+                    ec.propertyName(), navClassName, fullPath);
         }
     }
 
     // ── Nav class generation ─────────────────────────────────────────────
 
-    private void emitEmbeddedNavClass(Prop.Embedded embedded, ClassName entityType,
+    private void emitEmbeddedNavClass(RelationMapping embedded, ClassName entityType,
                                        String packageName, String entitySimpleName,
                                        String fieldName, String navClassName,
                                        String fullPath) {
@@ -373,7 +377,7 @@ public final class MetamodelEmitter {
                 ClassName.get(packageName, navClassName));
     }
 
-    private void emitReferenceNavClass(Prop.Reference ref, ClassName entityType,
+    private void emitReferenceNavClass(RelationMapping ref, ClassName entityType,
                                         String packageName, String entitySimpleName,
                                         String fieldName, String navClassName,
                                         String fullPath) {
@@ -398,7 +402,7 @@ public final class MetamodelEmitter {
                 ClassName.get(packageName, navClassName));
     }
 
-    private void emitEntityCollectionNavClass(Prop.EntityCollection ec, ClassName entityType,
+    private void emitEntityCollectionNavClass(RelationMapping ec, ClassName entityType,
                                                String packageName, String entitySimpleName,
                                                String fieldName, String navClassName,
                                                String fullPath) {
@@ -423,7 +427,7 @@ public final class MetamodelEmitter {
                 ClassName.get(packageName, navClassName));
     }
 
-    private void emitElementCollectionNavClass(Prop.ElementCollection ec, ClassName entityType,
+    private void emitElementCollectionNavClass(RelationMapping ec, ClassName entityType,
                                                 String packageName, String entitySimpleName,
                                                 String fieldName, String navClassName,
                                                 String fullPath) {
@@ -456,15 +460,16 @@ public final class MetamodelEmitter {
      * Adds leaf fields from a value object mapping to a nav class. Handles embedded VOs
      * recursively with cycle detection.
      */
-    private void addVoPropsToNav(TypeSpec.Builder navBuilder, ValueObjectMapping<?> voMapping,
+    private void addVoPropsToNav(TypeSpec.Builder navBuilder, TypeDefinition voMapping,
                                   ClassName entityType, String packageName,
                                   String entitySimpleName, String ownerNavClassName,
                                   String fullPath, Set<String> visitedVOs) {
-        for (Prop prop : voMapping.props()) {
-            if (prop instanceof Prop.Scalar scalar) {
-                addScalarToNav(navBuilder, scalar, entityType, fullPath);
-            } else if (prop instanceof Prop.Embedded embedded) {
-                addEmbeddedToNav(navBuilder, embedded, entityType, packageName,
+        for (ColumnMapping col : voMapping.columnMappings()) {
+            addColumnToNav(navBuilder, col, entityType, fullPath);
+        }
+        for (RelationMapping rel : voMapping.relationMappings()) {
+            if (rel.kind() == RelationKind.EMBEDDED) {
+                addEmbeddedToNav(navBuilder, rel, entityType, packageName,
                         entitySimpleName, ownerNavClassName, fullPath, visitedVOs);
             }
         }
@@ -474,79 +479,82 @@ public final class MetamodelEmitter {
      * Adds leaf fields from an entity mapping to a nav class (for Reference/EntityCollection targets).
      * Only adds scalars and the entity's own id; does not recurse into further navigable members.
      */
-    private void addEntityLeavesToNav(TypeSpec.Builder navBuilder, TypeMapping<?> target,
+    private void addEntityLeavesToNav(TypeSpec.Builder navBuilder, TypeDefinition target,
                                        ClassName entityType, String packageName,
                                        String entitySimpleName, String ownerNavClassName,
                                        String fullPath) {
         // Add target's id
-        if (target.id() != null) {
-            Prop.Id id = target.id();
-            String leafPath = fullPath + "." + id.name();
+        ColumnMapping targetIdCol = idColumnMapping(target);
+        if (targetIdCol != null) {
+            String leafPath = fullPath + "." + targetIdCol.propertyName();
             TypeName fieldType = ParameterizedTypeName.get(ID_ATTRIBUTE, entityType);
             TypeName recordType = ParameterizedTypeName.get(ID_ATTRIBUTE_RECORD, entityType);
-            navBuilder.addField(FieldSpec.builder(fieldType, id.name(),
+            navBuilder.addField(FieldSpec.builder(fieldType, targetIdCol.propertyName(),
                             Modifier.PUBLIC, Modifier.FINAL)
-                    .initializer("new $T($S, $S)", recordType, id.name(), leafPath)
+                    .initializer("new $T($S, $S)", recordType, targetIdCol.propertyName(), leafPath)
                     .build());
         }
 
-        // Add target's scalar props and embedded VOs
-        for (Prop prop : target.props()) {
-            if (prop instanceof Prop.Scalar scalar) {
-                addScalarToNav(navBuilder, scalar, entityType, fullPath);
-            } else if (prop instanceof Prop.Embedded embedded) {
+        // Add target's scalar columns and embedded VOs
+        for (ColumnMapping col : target.columnMappings()) {
+            if (!col.isId()) {
+                addColumnToNav(navBuilder, col, entityType, fullPath);
+            }
+        }
+        for (RelationMapping rel : target.relationMappings()) {
+            if (rel.kind() == RelationKind.EMBEDDED) {
                 // Flatten embedded VOs from the target into this nav
                 Set<String> visitedVOs = new HashSet<>();
-                if (embedded.target() != null) {
-                    visitedVOs.add(embedded.target().typeName());
+                if (rel.target() != null) {
+                    visitedVOs.add(rel.target().typeName());
                 }
-                addEmbeddedToNav(navBuilder, embedded, entityType, packageName,
+                addEmbeddedToNav(navBuilder, rel, entityType, packageName,
                         entitySimpleName, ownerNavClassName, fullPath, visitedVOs);
-            } else if (prop instanceof Prop.Reference ref) {
+            } else if (rel.kind() == RelationKind.TO_ONE) {
                 // Reference on the target: add as a plain ScalarAttribute (non-navigable leaf)
-                String leafPath = fullPath + "." + ref.name();
+                String leafPath = fullPath + "." + rel.propertyName();
                 TypeName fieldType = ParameterizedTypeName.get(SCALAR_ATTRIBUTE, entityType);
                 TypeName recordType = ParameterizedTypeName.get(SCALAR_ATTRIBUTE_RECORD, entityType);
-                navBuilder.addField(FieldSpec.builder(fieldType, ref.name(),
+                navBuilder.addField(FieldSpec.builder(fieldType, rel.propertyName(),
                                 Modifier.PUBLIC, Modifier.FINAL)
-                        .initializer("new $T($S, $S)", recordType, ref.name(), leafPath)
+                        .initializer("new $T($S, $S)", recordType, rel.propertyName(), leafPath)
                         .build());
             }
         }
     }
 
-    private void addScalarToNav(TypeSpec.Builder navBuilder, Prop.Scalar scalar,
+    private void addColumnToNav(TypeSpec.Builder navBuilder, ColumnMapping col,
                                  ClassName entityType, String ownerPath) {
-        String leafPath = ownerPath + "." + scalar.name();
-        String typeFqn = scalar.typeFqn();
+        String leafPath = ownerPath + "." + col.propertyName();
+        String typeFqn = col.typeFqn();
         ClassName attributeInterface = scalarAttributeInterface(typeFqn);
         ClassName attributeRecord = scalarAttributeRecord(typeFqn);
 
         TypeName fieldType = ParameterizedTypeName.get(attributeInterface, entityType);
         TypeName recordType = ParameterizedTypeName.get(attributeRecord, entityType);
 
-        navBuilder.addField(FieldSpec.builder(fieldType, scalar.name(),
+        navBuilder.addField(FieldSpec.builder(fieldType, col.propertyName(),
                         Modifier.PUBLIC, Modifier.FINAL)
-                .initializer("new $T($S, $S)", recordType, scalar.name(), leafPath)
+                .initializer("new $T($S, $S)", recordType, col.propertyName(), leafPath)
                 .build());
     }
 
-    private void addEmbeddedToNav(TypeSpec.Builder navBuilder, Prop.Embedded embedded,
+    private void addEmbeddedToNav(TypeSpec.Builder navBuilder, RelationMapping embedded,
                                    ClassName entityType, String packageName,
                                    String entitySimpleName, String ownerNavClassName,
                                    String ownerPath, Set<String> visitedVOs) {
         if (embedded.target() == null) return;
 
         // Build the nested nav class name: _OwnerNavClassName + Capitalized(fieldName)
-        String nestedNavName = ownerNavClassName + capitalize(embedded.name());
-        String nestedFullPath = ownerPath + "." + embedded.name();
+        String nestedNavName = ownerNavClassName + capitalize(embedded.propertyName());
+        String nestedFullPath = ownerPath + "." + embedded.propertyName();
 
         // Cycle detection: if this VO is already in the visited set, emit a container-only nav
         boolean isCycle = visitedVOs.contains(embedded.target().typeName());
 
         // Add the nested nav field
         ClassName nestedNavType = ClassName.get(packageName, nestedNavName);
-        navBuilder.addField(FieldSpec.builder(nestedNavType, embedded.name(),
+        navBuilder.addField(FieldSpec.builder(nestedNavType, embedded.propertyName(),
                         Modifier.PUBLIC, Modifier.FINAL)
                 .initializer("new $T()", nestedNavType)
                 .build());
@@ -560,7 +568,7 @@ public final class MetamodelEmitter {
                 .addModifiers(Modifier.PUBLIC, Modifier.FINAL)
                 .addSuperinterface(superInterface);
 
-        addNameAndPathMethods(nestedNavBuilder, embedded.name(), nestedFullPath);
+        addNameAndPathMethods(nestedNavBuilder, embedded.propertyName(), nestedFullPath);
 
         if (!isCycle) {
             // Recurse into the VO's props
@@ -653,6 +661,14 @@ public final class MetamodelEmitter {
     private static String capitalize(String name) {
         if (name.isEmpty()) return name;
         return Character.toUpperCase(name.charAt(0)) + name.substring(1);
+    }
+
+    /** Returns the id ColumnMapping from a TypeDefinition, or null if none. */
+    private static ColumnMapping idColumnMapping(TypeDefinition def) {
+        for (ColumnMapping col : def.columnMappings()) {
+            if (col.isId()) return col;
+        }
+        return null;
     }
 
     private static String packageNameOf(String fqn) {

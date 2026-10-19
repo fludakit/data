@@ -2,7 +2,7 @@ package io.github.fludakit.data.processor.context;
 
 import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.MethodSpec;
-import io.github.fludakit.data.metadata.TypeMapping;
+import io.github.fludakit.data.metadata.TypeDefinition;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -10,7 +10,7 @@ import java.util.List;
 import java.util.Map;
 
 public final class RepositoryContext {
-    private final TypeMapping<?> entity;
+    private final TypeDefinition entity;
     private final boolean crud;
     private final boolean spec;
     private final ClassName rowMapperType;
@@ -21,7 +21,7 @@ public final class RepositoryContext {
     private final List<MethodSpec> auxMethods = new ArrayList<>();
     private final Map<String, Integer> queryDefinitionNames = new LinkedHashMap<>();
 
-    public RepositoryContext(TypeMapping<?> entity, boolean crud, boolean spec,
+    public RepositoryContext(TypeDefinition entity, boolean crud, boolean spec,
                              ClassName rowMapperType, String repositoryFqn) {
         this.entity = entity;
         this.crud = crud;
@@ -30,7 +30,7 @@ public final class RepositoryContext {
         this.repositoryFqn = repositoryFqn;
     }
 
-    public TypeMapping<?> entity() { return entity; }
+    public TypeDefinition entity() { return entity; }
     public boolean crud() { return crud; }
     public boolean spec() { return spec; }
     public ClassName rowMapperType() { return rowMapperType; }

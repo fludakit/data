@@ -3,7 +3,10 @@ package io.github.fludakit.data.processor.emitter;
 import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.CodeBlock;
 import com.squareup.javapoet.MethodSpec;
-import io.github.fludakit.data.metadata.TypeMapping;
+import io.github.fludakit.data.metadata.ColumnMapping;
+import io.github.fludakit.data.metadata.RelationKind;
+import io.github.fludakit.data.metadata.RelationMapping;
+import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.RepositoryContext;
 import io.github.fludakit.data.processor.support.MethodOverrides;
@@ -100,27 +103,28 @@ public final class WriteEmitter {
 
     private MethodSpec emitSave(RepositoryContext ctx, MethodContext method) {
         MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
-        TypeMapping<?> entity = ctx.entity();
+        TypeDefinition entity = ctx.entity();
         String entityVar = "entity";
-        String idTypeFqn = entity.id().typeFqn();
+        ColumnMapping idCol = idColumnMapping(entity);
+        String idTypeFqn = idCol != null ? idCol.typeFqn() : "java.lang.Long";
         IdStrategy strategy = idStrategy(idTypeFqn);
         boolean hasUpsert = dialect.upsertForm() != UpsertForm.NONE;
 
         // Register SQL constants
         String upsertSql;
         if (hasUpsert) {
-            SqlBuilder sb = new SqlBuilder(entity);
+            SqlBuilder sb = new SqlBuilder(entity, entity);
             sb.dialect(dialect);
             upsertSql = sb.upsert();
         } else {
-            SqlBuilder sb = new SqlBuilder(entity);
+            SqlBuilder sb = new SqlBuilder(entity, entity);
             sb.dialect(dialect);
             upsertSql = sb.update();
         }
         String upsertConstName = ctx.registerConstant(
                 hasUpsert ? "UPSERT" : "UPDATE_FOR_SAVE", upsertSql);
 
-        SqlBuilder insertSb = new SqlBuilder(entity);
+        SqlBuilder insertSb = new SqlBuilder(entity, entity);
         insertSb.dialect(dialect);
         String insertSql = strategy == IdStrategy.APP_ASSIGNED
                 ? insertSb.insert(true)
@@ -130,6 +134,16 @@ public final class WriteEmitter {
         // Build method body
         CodeBlock.Builder body = CodeBlock.builder();
         boolean returnsEntity = method.resultKind() == ResultKind.SINGLE;
+        
+        // For aggregate roots with composing TO_ONE relations, emit pre-insert cascade
+        // to ensure child IDs are generated before binding them as FKs
+        boolean hasComposingToOne = ctx.entity().ownsAggregateLifecycle() && 
+                ctx.entity().relationMappings().stream()
+                    .anyMatch(rel -> rel.kind() == RelationKind.TO_ONE && rel.isComposition() && rel.target() != null);
+        
+        if (hasComposingToOne) {
+            emitPreInsertCascade(body, ctx, entityVar);
+        }
 
         if (strategy == IdStrategy.APP_ASSIGNED) {
             if (hasUpsert) {
@@ -182,9 +196,10 @@ public final class WriteEmitter {
 
         builder.addCode(body.build());
 
-        // Cascade writes: aggregate roots get full cascade; plain entities save element collections only
+        // Post-insert cascade: element collections and entity collections
+        // (composing TO_ONE was already handled pre-insert)
         if (ctx.entity().ownsAggregateLifecycle()) {
-            emitCascadeWrites(builder, ctx, entityVar);
+            emitPostInsertCascade(builder, ctx, entityVar);
         } else {
             emitElementCollectionWrites(builder, ctx, entityVar);
         }
@@ -199,23 +214,102 @@ public final class WriteEmitter {
 
     /**
      * Emits cascade write logic for aggregate root entities.
-     * - Prop.Reference with composition=true: save the composed child (backfill FK)
-     * - Prop.EntityCollection: save each child with parent FK set
-     * - Prop.ElementCollection: delete all + re-insert (replace-all)
+     * - RelationMapping with kind=TO_ONE and isComposition=true: save the composed child (backfill FK)
+     * - RelationMapping with kind=TO_MANY: save each child with parent FK set
+     * - RelationMapping with kind=ELEMENT_COLLECTION: delete all + re-insert (replace-all)
      */
     private void emitCascadeWrites(MethodSpec.Builder builder, RepositoryContext ctx, String entityVar) {
-        TypeMapping<?> entity = ctx.entity();
+        TypeDefinition entity = ctx.entity();
 
-        for (TypeMapping.Prop prop : entity.props()) {
-            if (prop instanceof TypeMapping.Prop.Reference ref && ref.composition() && ref.target() != null) {
+        for (RelationMapping rel : entity.relationMappings()) {
+            if (rel.kind() == RelationKind.TO_ONE && rel.isComposition() && rel.target() != null) {
                 // Composition to-one: cascade save to the composed child
-                emitCompositionSave(builder, ctx, entityVar, ref);
-            } else if (prop instanceof TypeMapping.Prop.EntityCollection ec && ec.target() != null) {
+                emitCompositionSave(builder, ctx, entityVar, rel);
+            } else if (rel.kind() == RelationKind.TO_MANY && rel.target() != null) {
                 // Entity collection: save each child with parent FK
-                emitEntityCollectionSave(builder, ctx, entityVar, ec);
-            } else if (prop instanceof TypeMapping.Prop.ElementCollection ec && ec.target() != null) {
+                emitEntityCollectionSave(builder, ctx, entityVar, rel);
+            } else if (rel.kind() == RelationKind.ELEMENT_COLLECTION && rel.target() != null) {
                 // Element collection: replace-all (delete + re-insert)
-                emitElementCollectionReplace(builder, ctx, entityVar, ec);
+                emitElementCollectionReplace(builder, ctx, entityVar, rel);
+            }
+        }
+    }
+
+    /**
+     * Pre-insert cascade for aggregate roots: saves composing TO_ONE children BEFORE
+     * the root insert so their generated IDs can be bound as FK columns.
+     */
+    private void emitPreInsertCascade(CodeBlock.Builder body, RepositoryContext ctx, String entityVar) {
+        TypeDefinition entity = ctx.entity();
+        
+        for (RelationMapping rel : entity.relationMappings()) {
+            if (rel.kind() == RelationKind.TO_ONE && rel.isComposition() && rel.target() != null) {
+                // Generate cascade save code inline in the body
+                String childVar = entityVar + "." + rel.propertyName();
+                TypeDefinition childMapping = rel.target();
+                
+                SqlBuilder childSb = new SqlBuilder(childMapping, childMapping);
+                childSb.dialect(dialect);
+                ColumnMapping childIdCol = idColumnMapping(childMapping);
+                String childIdTypeFqn = childIdCol != null ? childIdCol.typeFqn() : "java.lang.Long";
+                IdStrategy childStrategy = idStrategy(childIdTypeFqn);
+                String childInsertSql = childStrategy == IdStrategy.APP_ASSIGNED
+                        ? childSb.insert(true)
+                        : childSb.insert(false);
+                String childInsertConst = ctx.registerConstant(
+                        "CASCADE_INSERT_" + rel.propertyName().toUpperCase(), childInsertSql);
+                String childUpdateSql = childSb.update();
+                String childUpdateConst = ctx.registerConstant(
+                        "CASCADE_UPDATE_" + rel.propertyName().toUpperCase(), childUpdateSql);
+                
+                body.add("if ($L != null) {\n", childVar);
+                
+                if (childStrategy == IdStrategy.APP_ASSIGNED) {
+                    body.add("    jdbcClient.sql($L)", childUpdateConst);
+                    appendAllBindings(body, childMapping, childVar);
+                    body.add(".update();\n");
+                } else {
+                    body.add("    if ($L.getId() == null) {\n", childVar);
+                    body.add("        $T $L = new $T();\n", GENERATED_KEY_HOLDER,
+                            "childKeys_" + rel.propertyName(), GENERATED_KEY_HOLDER);
+                    body.add("        jdbcClient.sql($L)", childInsertConst);
+                    appendNonIdBindings(body, childMapping, childVar);
+                    body.add(".update($L);\n", "childKeys_" + rel.propertyName());
+                    if (childStrategy == IdStrategy.NUMERIC) {
+                        body.add("        if ($L.getKey() != null) {\n", "childKeys_" + rel.propertyName());
+                        body.add("            $L.setId((($T) $L.getKey()).$L());\n",
+                                childVar, Number.class, "childKeys_" + rel.propertyName(), numericAccessor(childIdTypeFqn));
+                        body.add("        }\n");
+                    } else {
+                        body.add("        if ($L.getKey() != null) {\n", "childKeys_" + rel.propertyName());
+                        body.add("            $L.setId(($T) $L.getKey());\n",
+                                childVar, ClassName.bestGuess(childIdTypeFqn), "childKeys_" + rel.propertyName());
+                        body.add("        }\n");
+                    }
+                    body.add("    } else {\n");
+                    body.add("        jdbcClient.sql($L)", childUpdateConst);
+                    appendAllBindings(body, childMapping, childVar);
+                    body.add(".update();\n");
+                    body.add("    }\n");
+                }
+                
+                body.add("}\n");
+            }
+        }
+    }
+    
+    /**
+     * Post-insert cascade for aggregate roots: handles element collections and entity collections
+     * AFTER the root has been inserted.
+     */
+    private void emitPostInsertCascade(MethodSpec.Builder builder, RepositoryContext ctx, String entityVar) {
+        TypeDefinition entity = ctx.entity();
+        
+        for (RelationMapping rel : entity.relationMappings()) {
+            if (rel.kind() == RelationKind.TO_MANY && rel.target() != null) {
+                emitEntityCollectionSave(builder, ctx, entityVar, rel);
+            } else if (rel.kind() == RelationKind.ELEMENT_COLLECTION && rel.target() != null) {
+                emitElementCollectionReplace(builder, ctx, entityVar, rel);
             }
         }
     }
@@ -226,11 +320,11 @@ public final class WriteEmitter {
      * entity collections and composition references.
      */
     private void emitElementCollectionWrites(MethodSpec.Builder builder, RepositoryContext ctx, String entityVar) {
-        TypeMapping<?> entity = ctx.entity();
+        TypeDefinition entity = ctx.entity();
 
-        for (TypeMapping.Prop prop : entity.props()) {
-            if (prop instanceof TypeMapping.Prop.ElementCollection ec && ec.target() != null) {
-                emitElementCollectionReplace(builder, ctx, entityVar, ec);
+        for (RelationMapping rel : entity.relationMappings()) {
+            if (rel.kind() == RelationKind.ELEMENT_COLLECTION && rel.target() != null) {
+                emitElementCollectionReplace(builder, ctx, entityVar, rel);
             }
         }
     }
@@ -240,26 +334,27 @@ public final class WriteEmitter {
      * on the parent if needed.
      */
     private void emitCompositionSave(MethodSpec.Builder builder, RepositoryContext ctx,
-                                      String entityVar, TypeMapping.Prop.Reference ref) {
-        TypeMapping<?> childMapping = ref.target();
-        String childVar = entityVar + "." + getter(ref.name()) + "()";
+                                      String entityVar, RelationMapping ref) {
+        TypeDefinition childMapping = ref.target();
+        String childVar = entityVar + "." + getter(ref.propertyName()) + "()";
         String childTypeFqn = childMapping.typeName();
 
         // Build insert SQL for the child
-        SqlBuilder childSb = new SqlBuilder(childMapping);
+        SqlBuilder childSb = new SqlBuilder(childMapping, childMapping);
         childSb.dialect(dialect);
-        String childIdTypeFqn = childMapping.id().typeFqn();
+        ColumnMapping childIdCol = idColumnMapping(childMapping);
+        String childIdTypeFqn = childIdCol != null ? childIdCol.typeFqn() : "java.lang.Long";
         IdStrategy childStrategy = idStrategy(childIdTypeFqn);
         String childInsertSql = childStrategy == IdStrategy.APP_ASSIGNED
                 ? childSb.insert(true)
                 : childSb.insert(false);
         String childInsertConst = ctx.registerConstant(
-                "CASCADE_INSERT_" + ref.name().toUpperCase(), childInsertSql);
+                "CASCADE_INSERT_" + ref.propertyName().toUpperCase(), childInsertSql);
 
         // Build update SQL for the child
         String childUpdateSql = childSb.update();
         String childUpdateConst = ctx.registerConstant(
-                "CASCADE_UPDATE_" + ref.name().toUpperCase(), childUpdateSql);
+                "CASCADE_UPDATE_" + ref.propertyName().toUpperCase(), childUpdateSql);
 
         CodeBlock.Builder cascade = CodeBlock.builder();
         cascade.add("if ($L != null) {\n", childVar);
@@ -273,20 +368,20 @@ public final class WriteEmitter {
             // Generated key: check if child has ID
             cascade.add("    if ($L.getId() == null) {\n", childVar);
             cascade.add("        $T $L = new $T();\n", GENERATED_KEY_HOLDER,
-                    "childKeys_" + ref.name(), GENERATED_KEY_HOLDER);
+                    "childKeys_" + ref.propertyName(), GENERATED_KEY_HOLDER);
             cascade.add("        jdbcClient.sql($L)", childInsertConst);
             appendNonIdBindings(cascade, childMapping, childVar);
-            cascade.add(".update($L);\n", "childKeys_" + ref.name());
+            cascade.add(".update($L);\n", "childKeys_" + ref.propertyName());
             if (childStrategy == IdStrategy.NUMERIC) {
-                cascade.add("        if ($L.getKey() != null) {\n", "childKeys_" + ref.name());
+                cascade.add("        if ($L.getKey() != null) {\n", "childKeys_" + ref.propertyName());
                 cascade.add("            $L.setId((($T) $L.getKey()).$L());\n",
-                        childVar, Number.class, "childKeys_" + ref.name(), numericAccessor(childIdTypeFqn));
+                        childVar, Number.class, "childKeys_" + ref.propertyName(), numericAccessor(childIdTypeFqn));
                 cascade.add("        }\n");
             } else {
                 // UUID
-                cascade.add("        if ($L.getKey() != null) {\n", "childKeys_" + ref.name());
+                cascade.add("        if ($L.getKey() != null) {\n", "childKeys_" + ref.propertyName());
                 cascade.add("            $L.setId(($T) $L.getKey());\n",
-                        childVar, ClassName.bestGuess(childIdTypeFqn), "childKeys_" + ref.name());
+                        childVar, ClassName.bestGuess(childIdTypeFqn), "childKeys_" + ref.propertyName());
                 cascade.add("        }\n");
             }
             cascade.add("    } else {\n");
@@ -307,44 +402,48 @@ public final class WriteEmitter {
      * 3. Delete children whose IDs are no longer in the collection
      */
     private void emitEntityCollectionSave(MethodSpec.Builder builder, RepositoryContext ctx,
-                                           String entityVar, TypeMapping.Prop.EntityCollection ec) {
-        TypeMapping<?> childMapping = ec.target();
-        String collectionGetter = entityVar + "." + getter(ec.name()) + "()";
-        String childVar = "child_" + ec.name();
+                                           String entityVar, RelationMapping ec) {
+        TypeDefinition childMapping = ec.target();
+        String collectionGetter = entityVar + "." + getter(ec.propertyName()) + "()";
+        String childVar = "child_" + ec.propertyName();
         String parentIdExpr = entityVar + ".getId()";
 
+        // Find the inverse relation name on the child (TO_ONE targeting parent type)
+        String inverseName = findInverseRelationName(childMapping, ctx.entity().typeName());
+
         // Build insert SQL for the child
-        SqlBuilder childSb = new SqlBuilder(childMapping);
+        SqlBuilder childSb = new SqlBuilder(childMapping, childMapping);
         childSb.dialect(dialect);
-        String childIdTypeFqn = childMapping.id().typeFqn();
+        ColumnMapping childIdCol = idColumnMapping(childMapping);
+        String childIdTypeFqn = childIdCol != null ? childIdCol.typeFqn() : "java.lang.Long";
         IdStrategy childStrategy = idStrategy(childIdTypeFqn);
         String childInsertSql = childStrategy == IdStrategy.APP_ASSIGNED
                 ? childSb.insert(true)
                 : childSb.insert(false);
         String childInsertConst = ctx.registerConstant(
-                "EC_INSERT_" + ec.name().toUpperCase(), childInsertSql);
+                "EC_INSERT_" + ec.propertyName().toUpperCase(), childInsertSql);
 
         // Build update SQL for the child
         String childUpdateSql = childSb.update();
         String childUpdateConst = ctx.registerConstant(
-                "EC_UPDATE_" + ec.name().toUpperCase(), childUpdateSql);
+                "EC_UPDATE_" + ec.propertyName().toUpperCase(), childUpdateSql);
 
         // Build delete SQL: DELETE FROM child_table WHERE id = :id AND fk_column = :parentId
         String childTable = dialect.quoteIdentifier(childMapping.tableName());
-        String fkColumn = dialect.quoteIdentifier(ec.inverseFkColumn());
-        String idColumn = dialect.quoteIdentifier(childMapping.id().column());
+        String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
+        String idColumn = dialect.quoteIdentifier(childMapping.idColumn());
         String deleteSql = "DELETE FROM " + childTable + " WHERE " + idColumn + " = :childId AND " + fkColumn + " = :parentId";
-        String deleteConst = ctx.registerConstant("EC_DELETE_" + ec.name().toUpperCase(), deleteSql);
+        String deleteConst = ctx.registerConstant("EC_DELETE_" + ec.propertyName().toUpperCase(), deleteSql);
 
         // Build select-existing-IDs SQL: SELECT id FROM child_table WHERE fk_column = :parentId
         String selectIdsSql = "SELECT " + idColumn + " FROM " + childTable + " WHERE " + fkColumn + " = :parentId";
-        String selectIdsConst = ctx.registerConstant("EC_IDS_" + ec.name().toUpperCase(), selectIdsSql);
+        String selectIdsConst = ctx.registerConstant("EC_IDS_" + ec.propertyName().toUpperCase(), selectIdsSql);
 
         CodeBlock.Builder cascade = CodeBlock.builder();
 
         // Load existing child IDs into a set
         cascade.add("$T<$T> $L = new $T<>(jdbcClient\n",
-                java.util.Set.class, Long.class, "existingIds_" + ec.name(), java.util.HashSet.class);
+                java.util.Set.class, Long.class, "existingIds_" + ec.propertyName(), java.util.HashSet.class);
         cascade.add("    .sql($L)\n", selectIdsConst);
         cascade.add("    .param($S, $L)\n", "parentId", parentIdExpr);
         cascade.add("    .query($T.class)\n", Long.class);
@@ -352,7 +451,7 @@ public final class WriteEmitter {
 
         // Track which IDs are still in the collection
         cascade.add("$T<$T> $L = new $T<>();\n",
-                java.util.Set.class, Long.class, "currentIds_" + ec.name(), java.util.HashSet.class);
+                java.util.Set.class, Long.class, "currentIds_" + ec.propertyName(), java.util.HashSet.class);
 
         // Upsert each in-memory child
         cascade.add("if ($L != null) {\n", collectionGetter);
@@ -360,41 +459,41 @@ public final class WriteEmitter {
 
         if (childStrategy == IdStrategy.APP_ASSIGNED) {
             cascade.add("        jdbcClient.sql($L)", childUpdateConst);
-            appendChildPropBindings(cascade, childMapping, childVar, parentIdExpr, ec.inverseName());
+            appendChildPropBindings(cascade, childMapping, childVar, parentIdExpr, inverseName);
             cascade.add(".update();\n");
-            cascade.add("        $L.add($L.getId());\n", "currentIds_" + ec.name(), childVar);
+            cascade.add("        $L.add($L.getId());\n", "currentIds_" + ec.propertyName(), childVar);
         } else {
             cascade.add("        if ($L.getId() == null) {\n", childVar);
             cascade.add("            $T $L = new $T();\n", GENERATED_KEY_HOLDER,
-                    "ecKeys_" + ec.name(), GENERATED_KEY_HOLDER);
+                    "ecKeys_" + ec.propertyName(), GENERATED_KEY_HOLDER);
             cascade.add("            jdbcClient.sql($L)", childInsertConst);
-            appendChildNonIdBindings(cascade, childMapping, childVar, parentIdExpr, ec.inverseName());
-            cascade.add(".update($L);\n", "ecKeys_" + ec.name());
+            appendChildNonIdBindings(cascade, childMapping, childVar, parentIdExpr, inverseName);
+            cascade.add(".update($L);\n", "ecKeys_" + ec.propertyName());
             if (childStrategy == IdStrategy.NUMERIC) {
-                cascade.add("            if ($L.getKey() != null) {\n", "ecKeys_" + ec.name());
+                cascade.add("            if ($L.getKey() != null) {\n", "ecKeys_" + ec.propertyName());
                 cascade.add("                $L.setId((($T) $L.getKey()).$L());\n",
-                        childVar, Number.class, "ecKeys_" + ec.name(), numericAccessor(childIdTypeFqn));
+                        childVar, Number.class, "ecKeys_" + ec.propertyName(), numericAccessor(childIdTypeFqn));
                 cascade.add("            }\n");
             } else {
-                cascade.add("            if ($L.getKey() != null) {\n", "ecKeys_" + ec.name());
+                cascade.add("            if ($L.getKey() != null) {\n", "ecKeys_" + ec.propertyName());
                 cascade.add("                $L.setId(($T) $L.getKey());\n",
-                        childVar, ClassName.bestGuess(childIdTypeFqn), "ecKeys_" + ec.name());
+                        childVar, ClassName.bestGuess(childIdTypeFqn), "ecKeys_" + ec.propertyName());
                 cascade.add("            }\n");
             }
             cascade.add("        } else {\n");
             cascade.add("            jdbcClient.sql($L)", childUpdateConst);
-            appendChildPropBindings(cascade, childMapping, childVar, parentIdExpr, ec.inverseName());
+            appendChildPropBindings(cascade, childMapping, childVar, parentIdExpr, inverseName);
             cascade.add(".update();\n");
             cascade.add("        }\n");
-            cascade.add("        $L.add($L.getId());\n", "currentIds_" + ec.name(), childVar);
+            cascade.add("        $L.add($L.getId());\n", "currentIds_" + ec.propertyName(), childVar);
         }
 
         cascade.add("    }\n");
         cascade.add("}\n");
 
         // Delete orphans: existing IDs that are not in the current collection
-        cascade.add("$L.removeAll($L);\n", "existingIds_" + ec.name(), "currentIds_" + ec.name());
-        cascade.add("for ($T $L : $L) {\n", Long.class, "orphanId", "existingIds_" + ec.name());
+        cascade.add("$L.removeAll($L);\n", "existingIds_" + ec.propertyName(), "currentIds_" + ec.propertyName());
+        cascade.add("for ($T $L : $L) {\n", Long.class, "orphanId", "existingIds_" + ec.propertyName());
         cascade.add("    jdbcClient.sql($L).param($S, $L).param($S, $L).update();\n",
                 deleteConst, "childId", "orphanId", "parentId", parentIdExpr);
         cascade.add("}");
@@ -406,71 +505,60 @@ public final class WriteEmitter {
      * Replace-all for an ElementCollection: delete all existing rows, then insert new ones.
      */
     private void emitElementCollectionReplace(MethodSpec.Builder builder, RepositoryContext ctx,
-                                               String entityVar, TypeMapping.Prop.ElementCollection ec) {
+                                               String entityVar, RelationMapping ec) {
         String childTable = dialect.quoteIdentifier(ec.childTable());
-        String fkColumn = dialect.quoteIdentifier(ec.parentFkColumn());
+        String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
 
         // DELETE SQL: DELETE FROM child_table WHERE fk_column = :parentId
         String deleteSql = "DELETE FROM " + childTable + " WHERE " + fkColumn + " = :parentId";
-        String deleteConst = ctx.registerConstant("EC_DELETE_" + ec.name().toUpperCase(), deleteSql);
+        String deleteConst = ctx.registerConstant("EC_DELETE_" + ec.propertyName().toUpperCase(), deleteSql);
 
         // INSERT SQL for element collection items
-        TypeMapping<?> voMapping = ec.target();
-        List<TypeMapping.Prop> voProps = voMapping.props(); // value object props (no id)
+        TypeDefinition voMapping = ec.target();
         String voTable = dialect.quoteIdentifier(voMapping.tableName());
 
         // Build column list: fk_column + vo columns
         StringBuilder insertCols = new StringBuilder();
         insertCols.append(fkColumn);
-        for (TypeMapping.Prop vp : voProps) {
+        for (ColumnMapping col : voMapping.columnMappings()) {
             insertCols.append(", ");
-            if (vp instanceof TypeMapping.Prop.Scalar s) {
-                insertCols.append(dialect.quoteIdentifier(s.column()));
-            } else if (vp instanceof TypeMapping.Prop.Reference r) {
-                insertCols.append(dialect.quoteIdentifier(r.fkColumn()));
-            } else if (vp instanceof TypeMapping.Prop.Embedded emb) {
-                // Flatten embedded columns
-                if (emb.target() != null) {
-                    for (TypeMapping.Prop ep : emb.target().props()) {
-                        if (ep instanceof TypeMapping.Prop.Scalar es) {
-                            insertCols.append(", ");
-                            insertCols.append(dialect.quoteIdentifier(
-                                    io.github.fludakit.data.Names.columnBase(emb.name()) + "_" + es.column()));
-                        }
-                    }
+            insertCols.append(dialect.quoteIdentifier(col.columnName()));
+        }
+        for (RelationMapping rel : voMapping.relationMappings()) {
+            if (rel.kind() == RelationKind.TO_ONE && rel.fkColumn() != null) {
+                insertCols.append(", ");
+                insertCols.append(dialect.quoteIdentifier(rel.fkColumn()));
+            } else if (rel.kind() == RelationKind.EMBEDDED && rel.target() != null) {
+                for (ColumnMapping ec2 : rel.target().columnMappings()) {
+                    insertCols.append(", ");
+                    insertCols.append(dialect.quoteIdentifier(
+                            io.github.fludakit.data.Names.columnBase(rel.propertyName()) + "_" + ec2.columnName()));
                 }
-                // Remove the last comma since we handle it in the loop
-                continue;
             }
         }
 
         // Build param list
         StringBuilder insertParams = new StringBuilder();
         insertParams.append(":parentId");
-        for (TypeMapping.Prop vp : voProps) {
-            insertParams.append(", ");
-            if (vp instanceof TypeMapping.Prop.Scalar s) {
-                insertParams.append(":").append(s.name());
-            } else if (vp instanceof TypeMapping.Prop.Reference r) {
-                insertParams.append(":").append(r.name());
-            } else if (vp instanceof TypeMapping.Prop.Embedded emb) {
-                if (emb.target() != null) {
-                    for (TypeMapping.Prop ep : emb.target().props()) {
-                        if (ep instanceof TypeMapping.Prop.Scalar es) {
-                            insertParams.append(", :");
-                            insertParams.append(io.github.fludakit.data.Names.columnBase(emb.name()) + "_" + es.name());
-                        }
-                    }
+        for (ColumnMapping col : voMapping.columnMappings()) {
+            insertParams.append(", :").append(col.propertyName());
+        }
+        for (RelationMapping rel : voMapping.relationMappings()) {
+            if (rel.kind() == RelationKind.TO_ONE && rel.fkColumn() != null) {
+                insertParams.append(", :").append(rel.propertyName());
+            } else if (rel.kind() == RelationKind.EMBEDDED && rel.target() != null) {
+                for (ColumnMapping ec2 : rel.target().columnMappings()) {
+                    insertParams.append(", :");
+                    insertParams.append(io.github.fludakit.data.Names.columnBase(rel.propertyName()) + "_" + ec2.propertyName());
                 }
-                continue;
             }
         }
 
         String insertSql = "INSERT INTO " + voTable + " (" + insertCols + ") VALUES (" + insertParams + ")";
-        String insertConst = ctx.registerConstant("EC_INSERT_" + ec.name().toUpperCase(), insertSql);
+        String insertConst = ctx.registerConstant("EC_INSERT_" + ec.propertyName().toUpperCase(), insertSql);
 
-        String collectionGetter = entityVar + "." + getter(ec.name()) + "()";
-        String itemVar = "item_" + ec.name();
+        String collectionGetter = entityVar + "." + getter(ec.propertyName()) + "()";
+        String itemVar = "item_" + ec.propertyName();
 
         CodeBlock.Builder cascade = CodeBlock.builder();
         // Delete all existing
@@ -482,7 +570,7 @@ public final class WriteEmitter {
         cascade.add("        jdbcClient.sql($L)", insertConst);
         cascade.add(".param($S, $L.getId())", "parentId", entityVar);
         // Bind value object properties
-        appendElementBindings(cascade, voProps, itemVar, "");
+        appendElementBindings(cascade, voMapping, itemVar, "");
         cascade.add(".update();\n");
         cascade.add("    }\n");
         cascade.add("}");
@@ -490,28 +578,25 @@ public final class WriteEmitter {
     }
 
     /** Appends .param() calls for element collection value object properties. */
-    private void appendElementBindings(CodeBlock.Builder body, List<TypeMapping.Prop> voProps,
+    private void appendElementBindings(CodeBlock.Builder body, TypeDefinition voMapping,
                                         String itemVar, String prefix) {
-        for (TypeMapping.Prop prop : voProps) {
-            if (prop instanceof TypeMapping.Prop.Scalar scalar) {
-                String paramName = prefix.isEmpty() ? scalar.name() : prefix + scalar.name();
-                body.add(".param($S, $L.$L())", paramName, itemVar, getter(scalar.name()));
-            } else if (prop instanceof TypeMapping.Prop.Reference ref) {
-                String paramName = prefix.isEmpty() ? ref.name() : prefix + ref.name();
+        for (ColumnMapping col : voMapping.columnMappings()) {
+            String paramName = prefix.isEmpty() ? col.propertyName() : prefix + col.propertyName();
+            body.add(".param($S, $L.$L())", paramName, itemVar, getter(col.propertyName()));
+        }
+        for (RelationMapping rel : voMapping.relationMappings()) {
+            if (rel.kind() == RelationKind.TO_ONE && rel.fkColumn() != null) {
+                String paramName = prefix.isEmpty() ? rel.propertyName() : prefix + rel.propertyName();
                 body.add(".param($S, $L.$L() == null ? null : $L.$L().getId())",
-                        paramName, itemVar, getter(ref.name()), itemVar, getter(ref.name()));
-            } else if (prop instanceof TypeMapping.Prop.Embedded embedded) {
-                if (embedded.target() != null) {
-                    String newPrefix = prefix.isEmpty()
-                            ? io.github.fludakit.data.Names.columnBase(embedded.name()) + "_"
-                            : prefix + io.github.fludakit.data.Names.columnBase(embedded.name()) + "_";
-                    for (TypeMapping.Prop ep : embedded.target().props()) {
-                        if (ep instanceof TypeMapping.Prop.Scalar scalar) {
-                            String paramName = newPrefix + scalar.name();
-                            body.add(".param($S, $L.$L().$L())",
-                                    paramName, itemVar, getter(embedded.name()), getter(scalar.name()));
-                        }
-                    }
+                        paramName, itemVar, getter(rel.propertyName()), itemVar, getter(rel.propertyName()));
+            } else if (rel.kind() == RelationKind.EMBEDDED && rel.target() != null) {
+                String newPrefix = prefix.isEmpty()
+                        ? io.github.fludakit.data.Names.columnBase(rel.propertyName()) + "_"
+                        : prefix + io.github.fludakit.data.Names.columnBase(rel.propertyName()) + "_";
+                for (ColumnMapping ec : rel.target().columnMappings()) {
+                    String paramName = newPrefix + ec.propertyName();
+                    body.add(".param($S, $L.$L().$L())",
+                            paramName, itemVar, getter(rel.propertyName()), getter(ec.propertyName()));
                 }
             }
         }
@@ -521,12 +606,13 @@ public final class WriteEmitter {
 
     private MethodSpec emitInsert(RepositoryContext ctx, MethodContext method) {
         MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
-        TypeMapping<?> entity = ctx.entity();
+        TypeDefinition entity = ctx.entity();
         String entityVar = "entity";
-        String idTypeFqn = entity.id().typeFqn();
+        ColumnMapping idCol = idColumnMapping(entity);
+        String idTypeFqn = idCol != null ? idCol.typeFqn() : "java.lang.Long";
         IdStrategy strategy = idStrategy(idTypeFqn);
 
-        SqlBuilder sb = new SqlBuilder(entity);
+        SqlBuilder sb = new SqlBuilder(entity, entity);
         sb.dialect(dialect);
         String insertSql = strategy == IdStrategy.APP_ASSIGNED
                 ? sb.insert(true)
@@ -570,10 +656,10 @@ public final class WriteEmitter {
 
     private MethodSpec emitUpdate(RepositoryContext ctx, MethodContext method) {
         MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
-        TypeMapping<?> entity = ctx.entity();
+        TypeDefinition entity = ctx.entity();
         String entityVar = "entity";
 
-        SqlBuilder sb = new SqlBuilder(entity);
+        SqlBuilder sb = new SqlBuilder(entity, entity);
         sb.dialect(dialect);
         String updateSql = sb.update();
         String constName = ctx.registerConstant("UPDATE", updateSql);
@@ -603,9 +689,9 @@ public final class WriteEmitter {
 
     private MethodSpec emitDeleteById(RepositoryContext ctx, MethodContext method) {
         MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
-        TypeMapping<?> entity = ctx.entity();
+        TypeDefinition entity = ctx.entity();
 
-        SqlBuilder sb = new SqlBuilder(entity);
+        SqlBuilder sb = new SqlBuilder(entity, entity);
         sb.dialect(dialect);
         String deleteSql = sb.deleteById();
         String constName = ctx.registerConstant("DELETE", deleteSql);
@@ -623,16 +709,18 @@ public final class WriteEmitter {
     // ── Binding helpers ──────────────────────────────────────────────────
 
     /** Appends .param() calls for ALL columns (id + non-id props). */
-    private void appendAllBindings(CodeBlock.Builder body, TypeMapping<?> entity, String varName) {
+    private void appendAllBindings(CodeBlock.Builder body, TypeDefinition entity, String varName) {
         // Id binding
-        String idParamName = entity.id().name();
-        body.add(".param($S, $L.getId())", idParamName, varName);
+        ColumnMapping idCol = idColumnMapping(entity);
+        if (idCol != null) {
+            body.add(".param($S, $L.getId())", idCol.propertyName(), varName);
+        }
         // Non-id props
         appendPropBindings(body, entity, varName);
     }
 
     /** Appends .param() calls for non-id columns only. */
-    private void appendNonIdBindings(CodeBlock.Builder body, TypeMapping<?> entity, String varName) {
+    private void appendNonIdBindings(CodeBlock.Builder body, TypeDefinition entity, String varName) {
         appendPropBindings(body, entity, varName);
     }
 
@@ -640,13 +728,18 @@ public final class WriteEmitter {
      * Appends .param() calls for all props of a child entity in an entity collection.
      * The inverse FK (back-reference to parent) is bound to the parent's ID.
      */
-    private void appendChildPropBindings(CodeBlock.Builder body, TypeMapping<?> childMapping,
+    private void appendChildPropBindings(CodeBlock.Builder body, TypeDefinition childMapping,
                                           String childVar, String parentIdExpr,
                                           String inverseName) {
-        String idParamName = childMapping.id().name();
-        body.add(".param($S, $L.getId())", idParamName, childVar);
-        for (TypeMapping.Prop prop : childMapping.props()) {
-            appendChildPropBinding(body, prop, childVar, "", parentIdExpr, inverseName);
+        ColumnMapping idCol = idColumnMapping(childMapping);
+        if (idCol != null) {
+            body.add(".param($S, $L.getId())", idCol.propertyName(), childVar);
+        }
+        for (ColumnMapping col : childMapping.columnMappings()) {
+            appendChildPropBinding(body, col, childVar, "", parentIdExpr, inverseName);
+        }
+        for (RelationMapping rel : childMapping.relationMappings()) {
+            appendChildRelationBinding(body, rel, childVar, "", parentIdExpr, inverseName);
         }
     }
 
@@ -654,93 +747,101 @@ public final class WriteEmitter {
      * Appends .param() calls for non-id props of a child entity in an entity collection.
      * The inverse FK (back-reference to parent) is bound to the parent's ID.
      */
-    private void appendChildNonIdBindings(CodeBlock.Builder body, TypeMapping<?> childMapping,
+    private void appendChildNonIdBindings(CodeBlock.Builder body, TypeDefinition childMapping,
                                            String childVar, String parentIdExpr,
                                            String inverseName) {
-        for (TypeMapping.Prop prop : childMapping.props()) {
-            appendChildPropBinding(body, prop, childVar, "", parentIdExpr, inverseName);
+        for (ColumnMapping col : childMapping.columnMappings()) {
+            appendChildPropBinding(body, col, childVar, "", parentIdExpr, inverseName);
+        }
+        for (RelationMapping rel : childMapping.relationMappings()) {
+            appendChildRelationBinding(body, rel, childVar, "", parentIdExpr, inverseName);
         }
     }
 
     /**
-     * Appends one .param() call for a child property. The inverse FK uses the parent ID expression.
+     * Appends one .param() call for a child column mapping. The inverse FK uses the parent ID expression.
      */
-    private void appendChildPropBinding(CodeBlock.Builder body, TypeMapping.Prop prop,
+    private void appendChildPropBinding(CodeBlock.Builder body, ColumnMapping col,
                                          String varName, String prefix, String parentIdExpr,
                                          String inverseName) {
-        if (prop instanceof TypeMapping.Prop.Reference ref && ref.name().equals(inverseName)) {
-            String paramName = prefix.isEmpty() ? ref.name() : prefix + ref.name();
+        // Column mappings are scalars — just bind normally
+        appendColumnBinding(body, col, varName, prefix);
+    }
+
+    /**
+     * Appends .param() calls for a child relation mapping. If the relation is the inverse
+     * (back-reference to parent), binds the parent ID. Otherwise binds normally.
+     */
+    private void appendChildRelationBinding(CodeBlock.Builder body, RelationMapping rel,
+                                             String varName, String prefix, String parentIdExpr,
+                                             String inverseName) {
+        if (rel.kind() == RelationKind.TO_ONE && rel.propertyName().equals(inverseName)) {
+            // This is the inverse FK — bind parent ID
+            String paramName = prefix.isEmpty() ? rel.propertyName() : prefix + rel.propertyName();
             body.add(".param($S, $L)", paramName, parentIdExpr);
         } else {
-            appendPropBinding(body, prop, varName, prefix);
+            appendRelationBinding(body, rel, varName, prefix);
         }
     }
 
-    /** Appends .param() calls for each property (non-id). */
-    private void appendPropBindings(CodeBlock.Builder body, TypeMapping<?> entity, String varName) {
-        for (TypeMapping.Prop prop : entity.props()) {
-            appendPropBinding(body, prop, varName, "");
+    /** Appends .param() calls for each column and relation. */
+    private void appendPropBindings(CodeBlock.Builder body, TypeDefinition entity, String varName) {
+        for (ColumnMapping col : entity.columnMappings()) {
+            appendColumnBinding(body, col, varName, "");
         }
-    }
-
-    /** Appends .param() calls for element-collection child item properties. */
-    private void appendItemBindings(CodeBlock.Builder body, List<TypeMapping.Prop> childProps,
-                                     String itemVar) {
-        for (TypeMapping.Prop prop : childProps) {
-            appendPropBinding(body, prop, itemVar, "");
+        for (RelationMapping rel : entity.relationMappings()) {
+            appendRelationBinding(body, rel, varName, "");
         }
     }
 
     /**
-     * Appends one or more .param() calls for a single property.
-     * Handles Scalar, Reference, and Embedded recursively.
+     * Appends .param() call for a scalar column mapping.
      */
-    private void appendPropBinding(CodeBlock.Builder body, TypeMapping.Prop prop,
-                                    String varName, String prefix) {
-        if (prop instanceof TypeMapping.Prop.Scalar scalar) {
-            String paramName = prefix.isEmpty() ? scalar.name() : prefix + scalar.name();
-            if (prefix.isEmpty()) {
-                // Top-level scalar: direct getter, with enum conversion
-                if (isEnum(scalar.typeFqn())) {
-                    body.add(".param($S, $L.$L() == null ? null : $L.$L().name())",
-                            paramName, varName, getter(scalar.name()), varName, getter(scalar.name()));
-                } else {
-                    body.add(".param($S, $L.$L())", paramName, varName, getter(scalar.name()));
-                }
+    private void appendColumnBinding(CodeBlock.Builder body, ColumnMapping col,
+                                      String varName, String prefix) {
+        String paramName = prefix.isEmpty() ? col.propertyName() : prefix + col.propertyName();
+        if (prefix.isEmpty()) {
+            // Top-level scalar: direct getter, with enum conversion
+            if (isEnum(col.typeFqn())) {
+                body.add(".param($S, $L.$L() == null ? null : $L.$L().name())",
+                        paramName, varName, getter(col.propertyName()), varName, getter(col.propertyName()));
             } else {
-                // Nested scalar (inside embedded): null-guard the embedded chain
-                if (isEnum(scalar.typeFqn())) {
-                    String nullGuarded = buildNullGuardedGetter(varName, prefix, scalar.name());
-                    body.add(".param($S, $L == null ? null : $L.name())", paramName, nullGuarded, nullGuarded);
-                } else {
-                    String nullGuarded = buildNullGuardedGetter(varName, prefix, scalar.name());
-                    body.add(".param($S, $L)", paramName, nullGuarded);
-                }
+                body.add(".param($S, $L.$L())", paramName, varName, getter(col.propertyName()));
             }
-        } else if (prop instanceof TypeMapping.Prop.Reference ref) {
-            if (ref.backReference()) {
-                // Back-reference: bind fk column from the target's id
-                String paramName = prefix.isEmpty() ? ref.name() : prefix + ref.name();
-                String getter = buildGetterChain(varName, prefix, ref.name());
-                body.add(".param($S, $L == null ? null : $L.getId())",
-                        paramName, getter, getter);
+        } else {
+            // Nested scalar (inside embedded): null-guard the embedded chain
+            if (isEnum(col.typeFqn())) {
+                String nullGuarded = buildNullGuardedGetter(varName, prefix, col.propertyName());
+                body.add(".param($S, $L == null ? null : $L.name())", paramName, nullGuarded, nullGuarded);
             } else {
-                String paramName = prefix.isEmpty() ? ref.name() : prefix + ref.name();
-                String getter = buildGetterChain(varName, prefix, ref.name());
-                body.add(".param($S, $L == null ? null : $L.getId())",
-                        paramName, getter, getter);
-            }
-        } else if (prop instanceof TypeMapping.Prop.Embedded embedded) {
-            if (embedded.target() != null) {
-                String newPrefix = prefix.isEmpty()
-                        ? embedded.name() + "_"
-                        : prefix + embedded.name() + "_";
-                for (TypeMapping.Prop childProp : embedded.target().props()) {
-                    appendPropBinding(body, childProp, varName, newPrefix);
-                }
+                String nullGuarded = buildNullGuardedGetter(varName, prefix, col.propertyName());
+                body.add(".param($S, $L)", paramName, nullGuarded);
             }
         }
-        // EntityCollection and ElementCollection are not bound on the parent row
+    }
+
+    /**
+     * Appends .param() calls for a relation mapping (TO_ONE FK or EMBEDDED flattened columns).
+     */
+    private void appendRelationBinding(CodeBlock.Builder body, RelationMapping rel,
+                                        String varName, String prefix) {
+        if (rel.kind() == RelationKind.TO_ONE && rel.fkColumn() != null) {
+            String paramName = prefix.isEmpty() ? rel.propertyName() : prefix + rel.propertyName();
+            String getterChain = buildGetterChain(varName, prefix, rel.propertyName());
+            body.add(".param($S, $L == null ? null : $L.getId())",
+                    paramName, getterChain, getterChain);
+        } else if (rel.kind() == RelationKind.EMBEDDED && rel.target() != null) {
+            String newPrefix = prefix.isEmpty()
+                    ? rel.propertyName() + "_"
+                    : prefix + rel.propertyName() + "_";
+            for (ColumnMapping childCol : rel.target().columnMappings()) {
+                appendColumnBinding(body, childCol, varName, newPrefix);
+            }
+            for (RelationMapping childRel : rel.target().relationMappings()) {
+                appendRelationBinding(body, childRel, varName, newPrefix);
+            }
+        }
+        // TO_MANY and ELEMENT_COLLECTION are not bound on the parent row
     }
 
     /**
@@ -788,6 +889,27 @@ public final class WriteEmitter {
     }
 
     // ── ID strategy ──────────────────────────────────────────────────────
+
+    /** Returns the id ColumnMapping from a TypeDefinition, or null if none. */
+    private static ColumnMapping idColumnMapping(TypeDefinition def) {
+        for (ColumnMapping col : def.columnMappings()) {
+            if (col.isId()) return col;
+        }
+        return null;
+    }
+
+    /**
+     * Finds the name of the TO_ONE relation on the child that targets the parent type.
+     * Used to identify the inverse FK when binding child entity parameters.
+     */
+    private static String findInverseRelationName(TypeDefinition childDef, String parentTypeName) {
+        for (RelationMapping rel : childDef.relationMappings()) {
+            if (rel.kind() == RelationKind.TO_ONE && parentTypeName.equals(rel.targetTypeName())) {
+                return rel.propertyName();
+            }
+        }
+        return null;
+    }
 
     private enum IdStrategy { NUMERIC, UUID, APP_ASSIGNED }
 

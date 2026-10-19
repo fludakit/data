@@ -96,7 +96,7 @@ class ValidationDiagnosticsTest {
 
         compile(sourceDir, classesDir, generatedDir, "Note.java", "Notes.java");
 
-        String impl = sqlFlat(generatedDir.resolve("lifecyclefreename/NotesImpl.java"));
+        String impl = sqlFlat(generatedDir.resolve("lifecyclefreename/Notes_.java"));
         assertTrue(impl.contains("public void store(Note note)"),
                 "a lifecycle method named freely must be generated:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("public Note persist(Note note)"),
@@ -137,7 +137,7 @@ class ValidationDiagnosticsTest {
 
         compile(sourceDir, classesDir, generatedDir, "Note.java", "Notes.java");
 
-        String impl = sqlFlat(generatedDir.resolve("builtinfindall/NotesImpl.java"));
+        String impl = sqlFlat(generatedDir.resolve("builtinfindall/Notes_.java"));
         assertTrue(impl.contains("public Stream<Note> findAll()"),
                 "a built-in findAll must be generated:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("public boolean existsById(Long id)"),
@@ -334,7 +334,7 @@ class ValidationDiagnosticsTest {
         assertTrue(result.diagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR
                         && d.getMessage(Locale.ROOT).contains("is a nested collection of")),
                 "expected the nested-collection diagnostic:" + System.lineSeparator() + result.diagnostics());
-        assertTrue(Files.exists(generatedDir.resolve("nestedec/NotesImpl.java")),
+        assertTrue(Files.exists(generatedDir.resolve("nestedec/Notes_.java")),
                 "the round must survive one unsupported repository:"
                         + System.lineSeparator() + result.diagnostics());
     }

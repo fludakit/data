@@ -261,22 +261,25 @@ public final class FindEmitter {
 
         // Detect TO_MANY sorts first (needed for both SQL generation and cursor extraction)
         boolean hasToManySort = false;
-        io.github.fludakit.data.metadata.RelationMapping toManyRelForHydration = null;
+        TypeDefinition.Prop.ToMany toManyRelForHydration = null;
         String toManyPropForHydration = null;
         
         for (SortSpec sort : sorts) {
             String prop = sort.property();
             if (prop.contains(".")) {
                 String firstSegment = prop.substring(0, prop.indexOf('.'));
-                for (var rel : ctx.entity().relationMappings()) {
-                    if (rel.propertyName().equals(firstSegment)
-                            && (rel.kind() == io.github.fludakit.data.metadata.RelationKind.TO_MANY
-                                || rel.kind() == io.github.fludakit.data.metadata.RelationKind.ELEMENT_COLLECTION)
-                            && rel.target() != null) {
+                for (TypeDefinition.Prop p : ctx.entity().properties()) {
+                    if (p instanceof TypeDefinition.Prop.ToMany toMany && p.name().equals(firstSegment)) {
                         hasToManySort = true;
                         if (toManyRelForHydration == null) {
-                            toManyRelForHydration = rel;
+                            toManyRelForHydration = toMany;
                             toManyPropForHydration = firstSegment;
+                        }
+                        break;
+                    } else if (p instanceof TypeDefinition.Prop.ElementCollection ec && p.name().equals(firstSegment)) {
+                        hasToManySort = true;
+                        if (toManyRelForHydration == null) {
+                            // ElementCollection doesn't have a target Entity, skip hydration
                         }
                         break;
                     }
@@ -302,10 +305,24 @@ public final class FindEmitter {
             // Build SELECT with root columns AND aggregate expressions for TO_MANY sort terms
             List<String> selectColumns = new ArrayList<>();
             List<String> groupByColumns = new ArrayList<>();
-            for (var col : ctx.entity().columnMappings()) {
-                String qualifiedCol = rootTable + "." + dialect.quoteIdentifier(col.columnName());
-                selectColumns.add(qualifiedCol);
-                groupByColumns.add(qualifiedCol);
+            for (TypeDefinition.Prop prop : ctx.entity().properties()) {
+                if (prop instanceof TypeDefinition.Prop.Scalar s) {
+                    String qualifiedCol = rootTable + "." + dialect.quoteIdentifier(s.columnName());
+                    selectColumns.add(qualifiedCol);
+                    groupByColumns.add(qualifiedCol);
+                } else if (prop instanceof TypeDefinition.Prop.Id id) {
+                    String qualifiedCol = rootTable + "." + dialect.quoteIdentifier(id.columnName());
+                    selectColumns.add(qualifiedCol);
+                    groupByColumns.add(qualifiedCol);
+                } else if (prop instanceof TypeDefinition.Prop.Version v) {
+                    String qualifiedCol = rootTable + "." + dialect.quoteIdentifier(v.columnName());
+                    selectColumns.add(qualifiedCol);
+                    groupByColumns.add(qualifiedCol);
+                } else if (prop instanceof TypeDefinition.Prop.ToOne toOne && toOne.fkColumn() != null) {
+                    String qualifiedCol = rootTable + "." + dialect.quoteIdentifier(toOne.fkColumn());
+                    selectColumns.add(qualifiedCol);
+                    groupByColumns.add(qualifiedCol);
+                }
             }
             
             // Add aggregate expressions for each TO_MANY sort term
@@ -355,11 +372,9 @@ public final class FindEmitter {
             // Check if this is a TO_MANY path
             if (prop.contains(".")) {
                 String firstSegment = prop.substring(0, prop.indexOf('.'));
-                for (var rel : ctx.entity().relationMappings()) {
-                    if (rel.propertyName().equals(firstSegment)
-                            && (rel.kind() == io.github.fludakit.data.metadata.RelationKind.TO_MANY
-                                || rel.kind() == io.github.fludakit.data.metadata.RelationKind.ELEMENT_COLLECTION)
-                            && rel.target() != null) {
+                for (TypeDefinition.Prop p : ctx.entity().properties()) {
+                    if ((p instanceof TypeDefinition.Prop.ToMany || p instanceof TypeDefinition.Prop.ElementCollection)
+                            && p.name().equals(firstSegment)) {
                         hasToManySort = true;
                         break;
                     }
@@ -371,11 +386,10 @@ public final class FindEmitter {
         if (hasToManySort && !sorts.isEmpty()) {
             SortSpec lastSort = sorts.get(sorts.size() - 1);
             String idPropName = null;
-            for (var col : ctx.entity().columnMappings()) {
-                if (col.isId()) {
-                    idPropName = col.propertyName();
-                    break;
-                }
+            if (ctx.entity() instanceof TypeDefinition.Entity e) {
+                idPropName = e.id().name();
+            } else if (ctx.entity() instanceof TypeDefinition.Aggregate a) {
+                idPropName = a.id().name();
             }
             if (idPropName != null && !(lastSort.property().equals(idPropName) && lastSort.ascending())) {
                 // Add id as the last sort key
@@ -395,23 +409,29 @@ public final class FindEmitter {
             if (prop.contains(".")) {
                 String firstSegment = prop.substring(0, prop.indexOf('.'));
                 boolean isToManyPath = false;
-                io.github.fludakit.data.metadata.RelationMapping toManyRel = null;
+                TypeDefinition.Prop.ToMany toManyRel = null;
+                TypeDefinition.Prop.ElementCollection ecRel = null;
                 
-                for (var rel : ctx.entity().relationMappings()) {
-                    if (rel.propertyName().equals(firstSegment)
-                            && (rel.kind() == io.github.fludakit.data.metadata.RelationKind.TO_MANY
-                                || rel.kind() == io.github.fludakit.data.metadata.RelationKind.ELEMENT_COLLECTION)
-                            && rel.target() != null) {
+                for (TypeDefinition.Prop p : ctx.entity().properties()) {
+                    if (p instanceof TypeDefinition.Prop.ToMany toMany && p.name().equals(firstSegment)) {
                         isToManyPath = true;
-                        toManyRel = rel;
+                        toManyRel = toMany;
+                        break;
+                    } else if (p instanceof TypeDefinition.Prop.ElementCollection ec && p.name().equals(firstSegment)) {
+                        isToManyPath = true;
+                        ecRel = ec;
                         break;
                     }
                 }
                 
-                if (isToManyPath && toManyRel != null) {
+                if (isToManyPath && (toManyRel != null || ecRel != null)) {
                     String colPart = prop.substring(prop.indexOf('.') + 1).replace('.', '_');
-                    String childTable = dialect.quoteIdentifier(toManyRel.target().tableName());
-                    String fkColumn = dialect.quoteIdentifier(toManyRel.fkColumn());
+                    String childTable = toManyRel != null 
+                        ? dialect.quoteIdentifier(toManyRel.target().tableName())
+                        : dialect.quoteIdentifier(ecRel.childTable());
+                    String fkColumn = toManyRel != null 
+                        ? dialect.quoteIdentifier(toManyRel.fkColumn())
+                        : dialect.quoteIdentifier(ecRel.fkColumn());
                     String rootTable = dialect.quoteIdentifier(ctx.entity().tableName());
                     String ownerIdColumn = dialect.quoteIdentifier(ctx.entity().idColumn());
                     String aggFunc = sort.ascending() ? "MIN" : "MAX";
@@ -621,11 +641,9 @@ public final class FindEmitter {
                     
                     // Check if this is a TO_MANY path that needs aggregate extraction
                     boolean isToManyPath = false;
-                    for (var rel : ctx.entity().relationMappings()) {
-                        if (rel.propertyName().equals(parts[0])
-                                && (rel.kind() == io.github.fludakit.data.metadata.RelationKind.TO_MANY
-                                    || rel.kind() == io.github.fludakit.data.metadata.RelationKind.ELEMENT_COLLECTION)
-                                && rel.target() != null) {
+                    for (TypeDefinition.Prop p : ctx.entity().properties()) {
+                        if ((p instanceof TypeDefinition.Prop.ToMany || p instanceof TypeDefinition.Prop.ElementCollection)
+                                && p.name().equals(parts[0])) {
                             isToManyPath = true;
                             break;
                         }
@@ -719,10 +737,10 @@ public final class FindEmitter {
     }
 
     private boolean isToManyPath(RepositoryContext ctx, String firstSegment) {
-        for (io.github.fludakit.data.metadata.RelationMapping rel : ctx.entity().relationMappings()) {
-            if (rel.propertyName().equals(firstSegment)
-                    && (rel.kind() == io.github.fludakit.data.metadata.RelationKind.TO_MANY
-                        || rel.kind() == io.github.fludakit.data.metadata.RelationKind.ELEMENT_COLLECTION)) {
+        for (TypeDefinition.Prop prop : ctx.entity().properties()) {
+            if ((prop instanceof TypeDefinition.Prop.ToMany
+                    || prop instanceof TypeDefinition.Prop.ElementCollection)
+                    && prop.name().equals(firstSegment)) {
                 return true;
             }
         }
@@ -730,11 +748,13 @@ public final class FindEmitter {
     }
 
     private String resolveCollectionElementType(RepositoryContext ctx, String firstSegment) {
-        for (io.github.fludakit.data.metadata.RelationMapping rel : ctx.entity().relationMappings()) {
-            if (rel.propertyName().equals(firstSegment)
-                    && (rel.kind() == io.github.fludakit.data.metadata.RelationKind.TO_MANY
-                        || rel.kind() == io.github.fludakit.data.metadata.RelationKind.ELEMENT_COLLECTION)) {
-                return rel.targetTypeName();
+        for (TypeDefinition.Prop prop : ctx.entity().properties()) {
+            if (prop instanceof TypeDefinition.Prop.ToMany toMany
+                    && prop.name().equals(firstSegment)) {
+                return toMany.target().typeName();
+            } else if (prop instanceof TypeDefinition.Prop.ElementCollection ec
+                    && prop.name().equals(firstSegment)) {
+                return ec.elementType();
             }
         }
         return null;
@@ -950,9 +970,9 @@ public final class FindEmitter {
      * Returns whether the entity has to-many collections that need hydration.
      */
     private boolean hasToManyCollections(io.github.fludakit.data.metadata.TypeDefinition entity) {
-        for (io.github.fludakit.data.metadata.RelationMapping rel : entity.relationMappings()) {
-            if (rel.kind() == io.github.fludakit.data.metadata.RelationKind.TO_MANY
-                    || rel.kind() == io.github.fludakit.data.metadata.RelationKind.ELEMENT_COLLECTION) {
+        for (TypeDefinition.Prop prop : entity.properties()) {
+            if (prop instanceof TypeDefinition.Prop.ToMany
+                    || prop instanceof TypeDefinition.Prop.ElementCollection) {
                 return true;
             }
         }

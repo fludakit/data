@@ -5,9 +5,6 @@ import com.squareup.javapoet.FieldSpec;
 import com.squareup.javapoet.JavaFile;
 import com.squareup.javapoet.MethodSpec;
 import com.squareup.javapoet.TypeSpec;
-import io.github.fludakit.data.metadata.ColumnMapping;
-import io.github.fludakit.data.metadata.RelationKind;
-import io.github.fludakit.data.metadata.RelationMapping;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.RepositoryContext;
@@ -145,9 +142,9 @@ final class RepositoryVisitor {
         }
 
         // 4a. Generate row mappers for VO types used in element collections
-        for (RelationMapping rel : entityMapping.relationMappings()) {
-            if (rel.kind() == RelationKind.ELEMENT_COLLECTION && rel.target() != null) {
-                rowMapperEmitter.emit(rel.target());
+        for (TypeDefinition.Prop prop : entityMapping.properties()) {
+            if (prop instanceof TypeDefinition.Prop.ElementCollection ec && ec.definition() != null) {
+                rowMapperEmitter.emit(ec.definition());
             }
         }
 
@@ -542,9 +539,8 @@ final class RepositoryVisitor {
             if (Character.isUpperCase(path.charAt(i))) {
                 String head = path.substring(0, i);
                 String tail = Character.toLowerCase(path.charAt(i)) + path.substring(i + 1);
-                // Check if head is a known property (column or relation)
-                boolean isProperty = mapping.columnMapping(head) != null
-                        || mapping.relationMapping(head) != null;
+                // Check if head is a known property
+                boolean isProperty = mapping.findProperty(head) != null;
                 if (isProperty) {
                     // head is a property, check if tail resolves in the target
                     String fullPath = head + "." + tail;
@@ -568,8 +564,10 @@ final class RepositoryVisitor {
      * Gets the target TypeDefinition for a property name, or null if not resolvable.
      */
     private TypeDefinition getTargetMapping(TypeDefinition mapping, String propName) {
-        RelationMapping rel = mapping.relationMapping(propName);
-        if (rel != null) return rel.target();
+        TypeDefinition.Prop prop = mapping.findProperty(propName);
+        if (prop instanceof TypeDefinition.Prop.ToOne toOne) return toOne.target();
+        if (prop instanceof TypeDefinition.Prop.ToMany toMany) return toMany.target();
+        if (prop instanceof TypeDefinition.Prop.Embedded emb) return emb.definition();
         return null;
     }
 
@@ -964,9 +962,8 @@ final class RepositoryVisitor {
      * Returns the Java property name of the primary key column from a TypeDefinition.
      */
     private static String idPropertyName(TypeDefinition type) {
-        for (ColumnMapping col : type.columnMappings()) {
-            if (col.isId()) return col.propertyName();
-        }
+        if (type instanceof TypeDefinition.Entity e) return e.id().name();
+        if (type instanceof TypeDefinition.Aggregate a) return a.id().name();
         return null;
     }
 }

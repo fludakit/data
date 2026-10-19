@@ -89,9 +89,15 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
             } else if (prop instanceof Prop.Version v) {
                 String columnName = prefix.isEmpty() ? v.columnName() : prefix + "_" + v.columnName();
                 refs.add(new ColumnRef.Simple(columnName, table.isEmpty() ? tableName() : table));
-            } else if (prop instanceof Prop.ToOne toOne && toOne.fkColumn() != null) {
-                String columnName = prefix.isEmpty() ? toOne.fkColumn() : prefix + "_" + toOne.fkColumn();
+            } else if (prop instanceof Prop.Association assoc && assoc.fkColumn() != null) {
+                String columnName = prefix.isEmpty() ? assoc.fkColumn() : prefix + "_" + assoc.fkColumn();
                 refs.add(new ColumnRef.Simple(columnName, table.isEmpty() ? tableName() : table));
+            } else if (prop instanceof Prop.EntityCollection ec) {
+                // EntityCollections in VOs are stored in child tables - skip for column listing
+                // They will be loaded separately via hydration
+            } else if (prop instanceof Prop.ElementCollection ec) {
+                // ElementCollections in VOs are stored in child tables - skip for column listing
+                // They will be loaded separately via hydration
             } else if (prop instanceof Prop.Embedded emb && emb.definition() != null) {
                 String newPrefix = prefix.isEmpty() ? emb.name() : prefix + "_" + emb.name();
                 TypeDefinition target = emb.definition();
@@ -132,11 +138,15 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
                 String columnPrefix = prefix.replace('.', '_');
                 String columnName = prefix.isEmpty() ? s.columnName() : columnPrefix + "_" + s.columnName();
                 refs.put(propName, new ColumnRef.Simple(columnName, tableName()));
-            } else if (prop instanceof Prop.ToOne toOne && toOne.fkColumn() != null) {
-                String propName = prefix.isEmpty() ? toOne.name() : prefix + "." + toOne.name();
+            } else if (prop instanceof Prop.Association assoc && assoc.fkColumn() != null) {
+                String propName = prefix.isEmpty() ? assoc.name() : prefix + "." + assoc.name();
                 String columnPrefix = prefix.replace('.', '_');
-                String columnName = prefix.isEmpty() ? toOne.fkColumn() : columnPrefix + "_" + toOne.fkColumn();
+                String columnName = prefix.isEmpty() ? assoc.fkColumn() : columnPrefix + "_" + assoc.fkColumn();
                 refs.put(propName, new ColumnRef.ForeignKey(columnName, tableName()));
+            } else if (prop instanceof Prop.EntityCollection ec) {
+                // EntityCollections in VOs don't contribute to column refs - they're separate tables
+            } else if (prop instanceof Prop.ElementCollection ec) {
+                // ElementCollections in VOs don't contribute to column refs - they're separate tables
             } else if (prop instanceof Prop.Embedded emb && emb.definition() != null) {
                 String newPrefix = prefix.isEmpty() ? emb.name() : prefix + "." + emb.name();
                 TypeDefinition target = emb.definition();
@@ -164,22 +174,22 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
                         "Cannot navigate through non-relation property: " + segment);
             }
 
-            if (prop instanceof Prop.ToOne toOne) {
+            if (prop instanceof Prop.Association assoc) {
                 // To-one: owner table has FK pointing to child table's ID
                 ColumnRef.ForeignKey ownerFk = new ColumnRef.ForeignKey(
-                        toOne.fkColumn(), current.tableName());
+                        assoc.fkColumn(), current.tableName());
                 ColumnRef.Simple childId = new ColumnRef.Simple(
-                        toOne.target().id().columnName(), toOne.target().tableName());
+                        assoc.target().id().columnName(), assoc.target().tableName());
                 edges.add(new JoinEdge.ToOne(ownerFk, childId));
-                current = toOne.target();
-            } else if (prop instanceof Prop.ToMany toMany) {
+                current = assoc.target();
+            } else if (prop instanceof Prop.EntityCollection ec) {
                 // To-many: child table has FK pointing back to owner table's ID
                 ColumnRef.Simple ownerId = new ColumnRef.Simple(
                         current.idColumn(), current.tableName());
                 ColumnRef.ForeignKey childFk = new ColumnRef.ForeignKey(
-                        toMany.fkColumn(), toMany.target().tableName());
+                        ec.fkColumn(), ec.target().tableName());
                 edges.add(new JoinEdge.ToMany(ownerId, childFk));
-                current = toMany.target();
+                current = ec.target();
             } else if (prop instanceof Prop.ElementCollection ec) {
                 // Element collection: child table has FK pointing back to owner table's ID
                 ColumnRef.Simple ownerId = new ColumnRef.Simple(
@@ -187,9 +197,12 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
                 ColumnRef.ForeignKey childFk = new ColumnRef.ForeignKey(
                         ec.fkColumn(), ec.childTable());
                 edges.add(new JoinEdge.ToMany(ownerId, childFk));
-                // Element collections don't have a TypeDefinition target, so we can't navigate further
+                // For element collections of VOs, we need to continue navigation into the VO
+                // But we don't have a TypeDefinition for the element type here
+                // The element type FQN is stored in ec.elementType()
+                // We'll need to look it up from the cache or throw for now
                 throw new UnknownAttributePathException(path,
-                        "Cannot navigate through element collection: " + segment);
+                        "Cannot navigate through element collection without runtime type resolution: " + segment);
             } else if (prop instanceof Prop.Embedded emb) {
                 // Embedded relations don't create join edges - they're flattened into the same table
                 if (columnPrefix.length() > 0) {
@@ -197,14 +210,22 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
                 }
                 columnPrefix.append(segment);
                 current = emb.definition();
-            } else if (prop instanceof Prop.Composition comp) {
-                // Composition is like ToMany but owned
+            } else if (prop instanceof Prop.Association assoc) {
+                // Association within a VO - this creates a join edge
+                ColumnRef.ForeignKey ownerFk = new ColumnRef.ForeignKey(
+                        assoc.fkColumn(), current.tableName());
+                ColumnRef.Simple childId = new ColumnRef.Simple(
+                        assoc.target().id().columnName(), assoc.target().tableName());
+                edges.add(new JoinEdge.ToOne(ownerFk, childId));
+                current = assoc.target();
+            } else if (prop instanceof Prop.EntityCollection ec) {
+                // EntityCollection within a VO - this creates a join edge
                 ColumnRef.Simple ownerId = new ColumnRef.Simple(
                         current.idColumn(), current.tableName());
                 ColumnRef.ForeignKey childFk = new ColumnRef.ForeignKey(
-                        comp.target().idColumn(), comp.target().tableName());
+                        ec.fkColumn(), ec.target().tableName());
                 edges.add(new JoinEdge.ToMany(ownerId, childFk));
-                current = comp.target();
+                current = ec.target();
             } else {
                 // Scalar, Id, Version cannot be navigated through
                 throw new UnknownAttributePathException(path,
@@ -241,10 +262,10 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
                     : v.columnName();
             String tableName = current.tableName() != null ? current.tableName() : this.tableName();
             leaf = new ColumnRef.Simple(columnName, tableName);
-        } else if (lastProp instanceof Prop.ToOne toOne) {
+        } else if (lastProp instanceof Prop.Association assoc) {
             String columnName = columnPrefix.length() > 0
-                    ? columnPrefix.toString() + "_" + toOne.fkColumn()
-                    : toOne.fkColumn();
+                    ? columnPrefix.toString() + "_" + assoc.fkColumn()
+                    : assoc.fkColumn();
             String tableName = current.tableName() != null ? current.tableName() : this.tableName();
             leaf = new ColumnRef.ForeignKey(columnName, tableName);
         } else {
@@ -262,7 +283,7 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
         int dot = path.indexOf('.');
         String pathHead = dot < 0 ? path : path.substring(0, dot);
         Prop prop = findProperty(pathHead);
-        return prop instanceof Prop.ToMany
+        return prop instanceof Prop.EntityCollection
                 || prop instanceof Prop.ElementCollection;
     }
 
@@ -278,16 +299,16 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
             Prop.Version version, // optional
             List<Prop.Scalar> scalars,
             List<Prop.Embedded> embedded,
-            List<Prop.ToOne> toOneEntities,
-            List<Prop.ToMany> toManyEntities,
+            List<Prop.Association> associations,
+            List<Prop.EntityCollection> entityCollections,
             List<Prop.ElementCollection> elementCollections
     ) implements TypeDefinition {
 
         public Entity {
             scalars = List.copyOf(scalars);
             embedded = List.copyOf(embedded);
-            toOneEntities = List.copyOf(toOneEntities);
-            toManyEntities = List.copyOf(toManyEntities);
+            associations = List.copyOf(associations);
+            entityCollections = List.copyOf(entityCollections);
             elementCollections = List.copyOf(elementCollections);
         }
 
@@ -298,8 +319,8 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
             if (version != null) all.add(version);
             all.addAll(scalars);
             all.addAll(embedded);
-            all.addAll(toOneEntities);
-            all.addAll(toManyEntities);
+            all.addAll(associations);
+            all.addAll(entityCollections);
             all.addAll(elementCollections);
             return all;
         }
@@ -317,19 +338,17 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
             Prop.Version version,
             List<Prop.Scalar> scalars,
             List<Prop.Embedded> embedded,
-            List<Prop.ToOne> toOneEntities,
-            List<Prop.ToMany> toManyEntities,
-            List<Prop.ElementCollection> elementCollections,
-            List<Prop.Composition> compositions // owned child aggregates
+            List<Prop.Association> associations,
+            List<Prop.EntityCollection> entityCollections,
+            List<Prop.ElementCollection> elementCollections
     ) implements TypeDefinition {
 
         public Aggregate {
             scalars = List.copyOf(scalars);
             embedded = List.copyOf(embedded);
-            toOneEntities = List.copyOf(toOneEntities);
-            toManyEntities = List.copyOf(toManyEntities);
+            associations = List.copyOf(associations);
+            entityCollections = List.copyOf(entityCollections);
             elementCollections = List.copyOf(elementCollections);
-            compositions = List.copyOf(compositions);
         }
 
         @Override
@@ -339,10 +358,9 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
             if (version != null) all.add(version);
             all.addAll(scalars);
             all.addAll(embedded);
-            all.addAll(toOneEntities);
-            all.addAll(toManyEntities);
+            all.addAll(associations);
+            all.addAll(entityCollections);
             all.addAll(elementCollections);
-            all.addAll(compositions);
             return all;
         }
     }
@@ -351,17 +369,22 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
 
     /**
      * A value object without its own table or ID, used for embedding.
+     * Value objects can contain scalars, embedded VOs, element collections, AND associations to entities.
      */
     record ValueObject(
             String typeName,
             List<Prop.Scalar> scalars,
             List<Prop.Embedded> embedded,
+            List<Prop.Association> associations,
+            List<Prop.EntityCollection> entityCollections,
             List<Prop.ElementCollection> elementCollections
     ) implements TypeDefinition {
 
         public ValueObject {
             scalars = List.copyOf(scalars);
             embedded = List.copyOf(embedded);
+            associations = List.copyOf(associations);
+            entityCollections = List.copyOf(entityCollections);
             elementCollections = List.copyOf(elementCollections);
         }
 
@@ -375,6 +398,8 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
             List<Prop> all = new ArrayList<>();
             all.addAll(scalars);
             all.addAll(embedded);
+            all.addAll(associations);
+            all.addAll(entityCollections);
             all.addAll(elementCollections);
             return all;
         }
@@ -385,9 +410,9 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
     /**
      * Sealed interface for all property kinds.
      */
-    sealed interface Prop permits Prop.Scalar, Prop.Embedded, Prop.ToOne,
-                                      Prop.ToMany, Prop.ElementCollection,
-                                      Prop.Composition, Prop.Id, Prop.Version {
+    sealed interface Prop permits Prop.Scalar, Prop.Embedded, Prop.Association,
+                                      Prop.EntityCollection, Prop.ElementCollection,
+                                      Prop.Id, Prop.Version {
 
         /** The Java property name. */
         String name();
@@ -411,20 +436,25 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
         record Embedded(String name, String javaType, ValueObject definition, String prefix) implements Prop {
         }
 
-        // ── ToOne property ───────────────────────────────────────────────
+        // ── Association property ─────────────────────────────────────────
 
         /**
-         * A to-one foreign key reference (ManyToOne or OneToOne owning side).
+         * A to-one association (ManyToOne, OneToOne, or Composition when composition=true).
          */
-        record ToOne(String name, String javaType, Entity target, String fkColumn, boolean backReference) implements Prop {
+        record Association(String name, String javaType, Entity target, String fkColumn,
+                           boolean backReference, boolean composition, Cascade cascade) implements Prop {
+
+            public enum Cascade {
+                ALL, PERSIST, MERGE, REMOVE
+            }
         }
 
-        // ── ToMany property ──────────────────────────────────────────────
+        // ── EntityCollection property ────────────────────────────────────
 
         /**
-         * A to-many entity collection stored in the target table (OneToMany or ManyToMany).
+         * A to-many entity collection stored in the child table (OneToMany or ManyToMany).
          */
-        record ToMany(String name, String javaType, Entity target, String fkColumn, String mappedBy) implements Prop {
+        record EntityCollection(String name, String javaType, Entity target, String fkColumn, String mappedBy) implements Prop {
         }
 
         // ── ElementCollection property ───────────────────────────────────
@@ -436,18 +466,6 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
             @Override
             public String javaType() {
                 return elementType;
-            }
-        }
-
-        // ── Composition property ─────────────────────────────────────────
-
-        /**
-         * An owned child aggregate (cascade lifecycle).
-         */
-        record Composition(String name, String javaType, Aggregate target, Cascade cascade) implements Prop {
-
-            public enum Cascade {
-                ALL, PERSIST, MERGE, REMOVE
             }
         }
 

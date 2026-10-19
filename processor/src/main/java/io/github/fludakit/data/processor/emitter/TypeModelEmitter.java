@@ -7,12 +7,9 @@ import com.squareup.javapoet.JavaFile;
 import com.squareup.javapoet.MethodSpec;
 import com.squareup.javapoet.ParameterizedTypeName;
 import com.squareup.javapoet.TypeSpec;
-import io.github.fludakit.data.metadata.ColumnMapping;
 import io.github.fludakit.data.metadata.ColumnPlacement;
 import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.JoinEdge;
-import io.github.fludakit.data.metadata.RelationKind;
-import io.github.fludakit.data.metadata.RelationMapping;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.metadata.UnknownAttributePathException;
 
@@ -48,12 +45,6 @@ public final class TypeModelEmitter {
             ClassName.get(METADATA_PACKAGE, "TypeDefinition");
     private static final ClassName VALUE_ACCESS =
             ClassName.get(METADATA_PACKAGE, "ValueAccess");
-    private static final ClassName COLUMN_MAPPING =
-            ClassName.get(METADATA_PACKAGE, "ColumnMapping");
-    private static final ClassName RELATION_MAPPING =
-            ClassName.get(METADATA_PACKAGE, "RelationMapping");
-    private static final ClassName RELATION_KIND =
-            ClassName.get(METADATA_PACKAGE, "RelationKind");
     private static final ClassName COLUMN_REF =
             ClassName.get(METADATA_PACKAGE, "ColumnRef");
     private static final ClassName COLUMN_REF_SIMPLE = COLUMN_REF.nestedClass("Simple");

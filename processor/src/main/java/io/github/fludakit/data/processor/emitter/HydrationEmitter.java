@@ -4,9 +4,6 @@ import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.CodeBlock;
 import com.squareup.javapoet.MethodSpec;
 import com.squareup.javapoet.ParameterizedTypeName;
-import io.github.fludakit.data.metadata.ColumnMapping;
-import io.github.fludakit.data.metadata.RelationKind;
-import io.github.fludakit.data.metadata.RelationMapping;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.context.RepositoryContext;
 import io.github.fludakit.data.sql.SqlDialect;
@@ -47,12 +44,12 @@ public final class HydrationEmitter {
      * Returns whether the entity has any to-many collections or composing references that need hydration.
      */
     public boolean hasCollectionsToHydrate(TypeDefinition entity) {
-        for (RelationMapping rel : entity.relationMappings()) {
-            if (rel.kind() == RelationKind.TO_MANY
-                    || rel.kind() == RelationKind.ELEMENT_COLLECTION) {
+        for (TypeDefinition.Prop prop : entity.properties()) {
+            if (prop instanceof TypeDefinition.Prop.ToMany
+                    || prop instanceof TypeDefinition.Prop.ElementCollection) {
                 return true;
             }
-            if (rel.kind() == RelationKind.TO_ONE && rel.isComposition()) {
+            if (prop instanceof TypeDefinition.Prop.ToOne toOne && toOne.isComposition()) {
                 return true;
             }
         }
@@ -78,13 +75,13 @@ public final class HydrationEmitter {
         CodeBlock.Builder body = CodeBlock.builder();
         body.add("if (entity == null) return;\n");
 
-        for (RelationMapping rel : entity.relationMappings()) {
-            if (rel.kind() == RelationKind.TO_MANY) {
-                body.add("load$L(entity);\n", capitalize(rel.propertyName()));
-            } else if (rel.kind() == RelationKind.ELEMENT_COLLECTION) {
-                body.add("load$L(entity);\n", capitalize(rel.propertyName()));
-            } else if (rel.kind() == RelationKind.TO_ONE && rel.isComposition()) {
-                body.add("load$L(entity);\n", capitalize(rel.propertyName()));
+        for (TypeDefinition.Prop prop : entity.properties()) {
+            if (prop instanceof TypeDefinition.Prop.ToMany toMany) {
+                body.add("load$L(entity);\n", capitalize(toMany.propertyName()));
+            } else if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
+                body.add("load$L(entity);\n", capitalize(ec.propertyName()));
+            } else if (prop instanceof TypeDefinition.Prop.ToOne toOne && toOne.isComposition()) {
+                body.add("load$L(entity);\n", capitalize(toOne.propertyName()));
             }
         }
 
@@ -126,19 +123,19 @@ public final class HydrationEmitter {
         List<MethodSpec> methods = new ArrayList<>();
         TypeDefinition entity = ctx.entity();
 
-        for (RelationMapping rel : entity.relationMappings()) {
-            if (rel.kind() == RelationKind.TO_MANY) {
-                MethodSpec loader = emitEntityCollectionLoader(ctx, rel);
+        for (TypeDefinition.Prop prop : entity.properties()) {
+            if (prop instanceof TypeDefinition.Prop.ToMany toMany) {
+                MethodSpec loader = emitEntityCollectionLoader(ctx, toMany);
                 if (loader != null) {
                     methods.add(loader);
                 }
-            } else if (rel.kind() == RelationKind.ELEMENT_COLLECTION) {
-                MethodSpec loader = emitElementCollectionLoader(ctx, rel);
+            } else if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
+                MethodSpec loader = emitElementCollectionLoader(ctx, ec);
                 if (loader != null) {
                     methods.add(loader);
                 }
-            } else if (rel.kind() == RelationKind.TO_ONE && rel.isComposition()) {
-                MethodSpec loader = emitCompositionReferenceLoader(ctx, rel);
+            } else if (prop instanceof TypeDefinition.Prop.ToOne toOne && toOne.isComposition()) {
+                MethodSpec loader = emitCompositionReferenceLoader(ctx, toOne);
                 if (loader != null) {
                     methods.add(loader);
                 }
@@ -153,45 +150,45 @@ public final class HydrationEmitter {
      * maps results, and sets them on the parent entity.
      */
     private MethodSpec emitEntityCollectionLoader(RepositoryContext ctx,
-                                                   RelationMapping ec) {
-        TypeDefinition childMapping = ec.target();
+                                                   TypeDefinition.Prop.ToMany toMany) {
+        TypeDefinition.Entity childMapping = toMany.target();
         if (childMapping == null) return null;
 
         ClassName entityClass = ClassName.bestGuess(ctx.entity().typeName());
         ClassName childClass = ClassName.bestGuess(childMapping.typeName());
-        String methodName = "load" + capitalize(ec.propertyName());
+        String methodName = "load" + capitalize(toMany.propertyName());
 
         // Build SELECT SQL for children by parent FK
         String childTable = dialect.quoteIdentifier(childMapping.tableName());
-        String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
+        String fkColumn = dialect.quoteIdentifier(toMany.fkColumn());
 
         // Build column list from child mapping - include scalar columns AND TO_ONE FK columns
         // TO_ONE relations on entity collection elements are materialized as id-only partials
         List<String> columns = new ArrayList<>();
-        ColumnMapping childIdCol = idColumnMapping(childMapping);
-        if (childIdCol != null) {
-            columns.add(dialect.quoteIdentifier(childIdCol.columnName()) + " AS "
-                    + dialect.quoteIdentifier(childIdCol.propertyName()));
+        TypeDefinition.Prop.Id childIdProp = idProp(childMapping);
+        if (childIdProp != null) {
+            columns.add(dialect.quoteIdentifier(childIdProp.columnName()) + " AS "
+                    + dialect.quoteIdentifier(childIdProp.propertyName()));
         }
-        for (ColumnMapping col : childMapping.columnMappings()) {
-            if (!col.isId()) {
-                columns.add(dialect.quoteIdentifier(col.columnName()) + " AS "
-                        + dialect.quoteIdentifier(col.propertyName()));
+        for (TypeDefinition.Prop prop : childMapping.properties()) {
+            if (prop instanceof TypeDefinition.Prop.Scalar s && !s.isId()) {
+                columns.add(dialect.quoteIdentifier(s.columnName()) + " AS "
+                        + dialect.quoteIdentifier(s.propertyName()));
             }
         }
         // Include TO_ONE FK columns so row mapper can create id-only partials for back-references
-        for (RelationMapping rel : childMapping.relationMappings()) {
-            if (rel.kind() == RelationKind.TO_ONE && rel.fkColumn() != null) {
+        for (TypeDefinition.Prop prop : childMapping.properties()) {
+            if (prop instanceof TypeDefinition.Prop.ToOne toOneRel && toOneRel.fkColumn() != null) {
                 // Use column name as alias (not property name) so RowMapper can find it
-                columns.add(dialect.quoteIdentifier(rel.fkColumn()) + " AS "
-                        + dialect.quoteIdentifier(rel.fkColumn()));
+                columns.add(dialect.quoteIdentifier(toOneRel.fkColumn()) + " AS "
+                        + dialect.quoteIdentifier(toOneRel.fkColumn()));
             }
         }
 
         String selectSql = "SELECT " + String.join(", ", columns)
                 + " FROM " + childTable
                 + " WHERE " + fkColumn + " = :parentId";
-        String constName = ctx.registerConstant("HYDRATE_" + ec.propertyName().toUpperCase(), selectSql);
+        String constName = ctx.registerConstant("HYDRATE_" + toMany.propertyName().toUpperCase(), selectSql);
 
         MethodSpec.Builder builder = MethodSpec.methodBuilder(methodName)
                 .addModifiers(Modifier.PRIVATE)
@@ -199,7 +196,7 @@ public final class HydrationEmitter {
                 .returns(void.class);
 
         // Determine the collection type (List<X>)
-        String setterName = "set" + Character.toUpperCase(ec.propertyName().charAt(0)) + ec.propertyName().substring(1);
+        String setterName = "set" + Character.toUpperCase(toMany.propertyName().charAt(0)) + toMany.propertyName().substring(1);
 
         // Derive child row mapper class name
         ClassName childRowMapper = deriveRowMapperType(childMapping.typeName());
@@ -221,8 +218,8 @@ public final class HydrationEmitter {
      * maps results to value objects, and sets them on the parent entity.
      */
     private MethodSpec emitElementCollectionLoader(RepositoryContext ctx,
-                                                    RelationMapping ec) {
-        TypeDefinition voMapping = ec.target();
+                                                    TypeDefinition.Prop.ElementCollection ec) {
+        TypeDefinition.ValueObject voMapping = ec.target();
         if (voMapping == null) return null;
 
         ClassName entityClass = ClassName.bestGuess(ctx.entity().typeName());
@@ -235,9 +232,11 @@ public final class HydrationEmitter {
         // Build column list from value object mapping - only scalar columns, NOT TO_ONE relations
         // TO_ONE relations on collection elements should remain null (not materialized during hydration)
         List<String> columns = new ArrayList<>();
-        for (ColumnMapping col : voMapping.columnMappings()) {
-            columns.add(dialect.quoteIdentifier(col.columnName()) + " AS "
-                    + dialect.quoteIdentifier(col.propertyName()));
+        for (TypeDefinition.Prop prop : voMapping.properties()) {
+            if (prop instanceof TypeDefinition.Prop.Scalar s) {
+                columns.add(dialect.quoteIdentifier(s.columnName()) + " AS "
+                        + dialect.quoteIdentifier(s.propertyName()));
+            }
         }
         // NOTE: Do NOT include TO_ONE relation FK columns or EMBEDDED expansions - they should stay null during collection hydration
 
@@ -277,8 +276,8 @@ public final class HydrationEmitter {
      * from the child table, replacing the id-only partial set by the row mapper.
      */
     private MethodSpec emitCompositionReferenceLoader(RepositoryContext ctx,
-                                                       RelationMapping ref) {
-        TypeDefinition childMapping = ref.target();
+                                                       TypeDefinition.Prop.ToOne ref) {
+        TypeDefinition.Entity childMapping = ref.target();
         if (childMapping == null) return null;
 
         ClassName entityClass = ClassName.bestGuess(ctx.entity().typeName());
@@ -292,21 +291,21 @@ public final class HydrationEmitter {
 
         // Build column list from child mapping
         java.util.List<String> columns = new java.util.ArrayList<>();
-        ColumnMapping childIdCol = idColumnMapping(childMapping);
-        if (childIdCol != null) {
-            columns.add(dialect.quoteIdentifier(childIdCol.columnName()) + " AS "
-                    + dialect.quoteIdentifier(childIdCol.propertyName()));
+        TypeDefinition.Prop.Id childIdProp = idProp(childMapping);
+        if (childIdProp != null) {
+            columns.add(dialect.quoteIdentifier(childIdProp.columnName()) + " AS "
+                    + dialect.quoteIdentifier(childIdProp.propertyName()));
         }
-        for (ColumnMapping col : childMapping.columnMappings()) {
-            if (!col.isId()) {
-                columns.add(dialect.quoteIdentifier(col.columnName()) + " AS "
-                        + dialect.quoteIdentifier(col.propertyName()));
+        for (TypeDefinition.Prop prop : childMapping.properties()) {
+            if (prop instanceof TypeDefinition.Prop.Scalar s && !s.isId()) {
+                columns.add(dialect.quoteIdentifier(s.columnName()) + " AS "
+                        + dialect.quoteIdentifier(s.propertyName()));
             }
         }
-        for (RelationMapping rel : childMapping.relationMappings()) {
-            if (rel.kind() == RelationKind.TO_ONE && rel.fkColumn() != null) {
-                columns.add(dialect.quoteIdentifier(rel.fkColumn()) + " AS "
-                        + dialect.quoteIdentifier(rel.propertyName()));
+        for (TypeDefinition.Prop prop : childMapping.properties()) {
+            if (prop instanceof TypeDefinition.Prop.ToOne toOneRel && toOneRel.fkColumn() != null) {
+                columns.add(dialect.quoteIdentifier(toOneRel.fkColumn()) + " AS "
+                        + dialect.quoteIdentifier(toOneRel.propertyName()));
             }
         }
 
@@ -345,12 +344,13 @@ public final class HydrationEmitter {
         return Character.toUpperCase(s.charAt(0)) + s.substring(1);
     }
 
-    /** Returns the id ColumnMapping from a TypeDefinition, or null if none. */
-    private static ColumnMapping idColumnMapping(TypeDefinition def) {
-        for (ColumnMapping col : def.columnMappings()) {
-            if (col.isId()) return col;
-        }
-        return null;
+    /** Returns the id Prop from a TypeDefinition, or null if none. */
+    private static TypeDefinition.Prop.Id idProp(TypeDefinition def) {
+        return switch (def) {
+            case TypeDefinition.Entity e -> e.id();
+            case TypeDefinition.Aggregate a -> a.id();
+            default -> null;
+        };
     }
 
     /**

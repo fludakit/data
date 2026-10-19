@@ -9,9 +9,6 @@ import com.squareup.javapoet.MethodSpec;
 import com.squareup.javapoet.ParameterizedTypeName;
 import com.squareup.javapoet.TypeName;
 import com.squareup.javapoet.TypeSpec;
-import io.github.fludakit.data.metadata.ColumnMapping;
-import io.github.fludakit.data.metadata.RelationKind;
-import io.github.fludakit.data.metadata.RelationMapping;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.support.Diagnostics;
 
@@ -137,30 +134,41 @@ public final class MetamodelEmitter {
                         .build());
 
         // Add ID constant + field
-        ColumnMapping idCol = idColumnMapping(entity);
-        if (idCol != null) {
-            String constName = toScreamingSnakeCase(idCol.propertyName());
-            addStringConstant(interfaceBuilder, constName, idCol.propertyName());
+        TypeDefinition.Prop.Id idProp = idProp(entity);
+        if (idProp != null) {
+            String constName = toScreamingSnakeCase(idProp.propertyName());
+            addStringConstant(interfaceBuilder, constName, idProp.propertyName());
 
             TypeName fieldType = ParameterizedTypeName.get(ID_ATTRIBUTE, entityType);
             TypeName recordType = ParameterizedTypeName.get(ID_ATTRIBUTE_RECORD, entityType);
-            interfaceBuilder.addField(FieldSpec.builder(fieldType, idCol.propertyName(),
+            interfaceBuilder.addField(FieldSpec.builder(fieldType, idProp.propertyName(),
                             Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
-                    .initializer("new $T($S, $L)", recordType, idCol.propertyName(), constName)
+                    .initializer("new $T($S, $L)", recordType, idProp.propertyName(), constName)
                     .build());
         }
 
         // Add columns
-        for (ColumnMapping col : entity.columnMappings()) {
-            if (!col.isId()) {
-                addColumnToInterface(interfaceBuilder, col, entityType, "");
+        for (TypeDefinition.Prop prop : entity.properties()) {
+            if (prop instanceof TypeDefinition.Prop.Scalar s && !s.isId()) {
+                addColumnToInterface(interfaceBuilder, s, entityType, "");
             }
         }
 
         // Add relations
-        for (RelationMapping rel : entity.relationMappings()) {
-            addRelationToInterface(interfaceBuilder, rel, entityType, metamodelType,
-                    packageName, simpleName, "");
+        for (TypeDefinition.Prop prop : entity.properties()) {
+            if (prop instanceof TypeDefinition.Prop.ToOne toOne) {
+                addRelationToInterface(interfaceBuilder, toOne, entityType, metamodelType,
+                        packageName, simpleName, "");
+            } else if (prop instanceof TypeDefinition.Prop.Embedded embedded) {
+                addRelationToInterface(interfaceBuilder, embedded, entityType, metamodelType,
+                        packageName, simpleName, "");
+            } else if (prop instanceof TypeDefinition.Prop.ToMany toMany) {
+                addRelationToInterface(interfaceBuilder, toMany, entityType, metamodelType,
+                        packageName, simpleName, "");
+            } else if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
+                addRelationToInterface(interfaceBuilder, ec, entityType, metamodelType,
+                        packageName, simpleName, "");
+            }
         }
 
         // Write the interface
@@ -169,12 +177,12 @@ public final class MetamodelEmitter {
 
     // ── Interface column/relation handling ────────────────────────────────
 
-    private void addColumnToInterface(TypeSpec.Builder builder, ColumnMapping col,
+    private void addColumnToInterface(TypeSpec.Builder builder, TypeDefinition.Prop.Scalar col,
                                        ClassName entityType, String pathPrefix) {
         String constName = toScreamingSnakeCase(col.propertyName());
         addStringConstant(builder, constName, col.propertyName());
 
-        String typeFqn = col.typeFqn();
+        String typeFqn = col.javaType();
         ClassName attributeInterface = scalarAttributeInterface(typeFqn);
         ClassName attributeRecord = scalarAttributeRecord(typeFqn);
 
@@ -190,26 +198,26 @@ public final class MetamodelEmitter {
                 .build());
     }
 
-    private void addRelationToInterface(TypeSpec.Builder interfaceBuilder, RelationMapping rel,
+    private void addRelationToInterface(TypeSpec.Builder interfaceBuilder, TypeDefinition.Prop rel,
                                          ClassName entityType, ClassName metamodelType,
                                          String packageName, String entitySimpleName,
                                          String pathPrefix) {
-        if (rel.kind() == RelationKind.EMBEDDED) {
-            addEmbeddedToInterface(interfaceBuilder, rel, entityType, metamodelType,
+        if (rel instanceof TypeDefinition.Prop.Embedded embedded) {
+            addEmbeddedToInterface(interfaceBuilder, embedded, entityType, metamodelType,
                     packageName, entitySimpleName, pathPrefix);
-        } else if (rel.kind() == RelationKind.TO_ONE) {
-            addReferenceToInterface(interfaceBuilder, rel, entityType, metamodelType,
+        } else if (rel instanceof TypeDefinition.Prop.ToOne toOne) {
+            addReferenceToInterface(interfaceBuilder, toOne, entityType, metamodelType,
                     packageName, entitySimpleName, pathPrefix);
-        } else if (rel.kind() == RelationKind.TO_MANY) {
-            addEntityCollectionToInterface(interfaceBuilder, rel, entityType, metamodelType,
+        } else if (rel instanceof TypeDefinition.Prop.ToMany toMany) {
+            addEntityCollectionToInterface(interfaceBuilder, toMany, entityType, metamodelType,
                     packageName, entitySimpleName, pathPrefix);
-        } else if (rel.kind() == RelationKind.ELEMENT_COLLECTION) {
-            addElementCollectionToInterface(interfaceBuilder, rel, entityType, metamodelType,
+        } else if (rel instanceof TypeDefinition.Prop.ElementCollection ec) {
+            addElementCollectionToInterface(interfaceBuilder, ec, entityType, metamodelType,
                     packageName, entitySimpleName, pathPrefix);
         }
     }
 
-    private void addEmbeddedToInterface(TypeSpec.Builder builder, RelationMapping embedded,
+    private void addEmbeddedToInterface(TypeSpec.Builder builder, TypeDefinition.Prop.Embedded embedded,
                                          ClassName entityType, ClassName metamodelType,
                                          String packageName, String entitySimpleName,
                                          String pathPrefix) {
@@ -248,7 +256,7 @@ public final class MetamodelEmitter {
                 embedded.propertyName(), navClassName, fullPath);
     }
 
-    private void addReferenceToInterface(TypeSpec.Builder builder, RelationMapping ref,
+    private void addReferenceToInterface(TypeSpec.Builder builder, TypeDefinition.Prop.ToOne ref,
                                           ClassName entityType, ClassName metamodelType,
                                           String packageName, String entitySimpleName,
                                           String pathPrefix) {
@@ -286,7 +294,7 @@ public final class MetamodelEmitter {
                 ref.propertyName(), navClassName, fullPath);
     }
 
-    private void addEntityCollectionToInterface(TypeSpec.Builder builder, RelationMapping ec,
+    private void addEntityCollectionToInterface(TypeSpec.Builder builder, TypeDefinition.Prop.ToMany ec,
                                                  ClassName entityType, ClassName metamodelType,
                                                  String packageName, String entitySimpleName,
                                                  String pathPrefix) {
@@ -317,7 +325,7 @@ public final class MetamodelEmitter {
         }
     }
 
-    private void addElementCollectionToInterface(TypeSpec.Builder builder, RelationMapping ec,
+    private void addElementCollectionToInterface(TypeSpec.Builder builder, TypeDefinition.Prop.ElementCollection ec,
                                                   ClassName entityType, ClassName metamodelType,
                                                   String packageName, String entitySimpleName,
                                                   String pathPrefix) {
@@ -350,7 +358,7 @@ public final class MetamodelEmitter {
 
     // ── Nav class generation ─────────────────────────────────────────────
 
-    private void emitEmbeddedNavClass(RelationMapping embedded, ClassName entityType,
+    private void emitEmbeddedNavClass(TypeDefinition.Prop.Embedded embedded, ClassName entityType,
                                        String packageName, String entitySimpleName,
                                        String fieldName, String navClassName,
                                        String fullPath) {
@@ -377,7 +385,7 @@ public final class MetamodelEmitter {
                 ClassName.get(packageName, navClassName));
     }
 
-    private void emitReferenceNavClass(RelationMapping ref, ClassName entityType,
+    private void emitReferenceNavClass(TypeDefinition.Prop.ToOne ref, ClassName entityType,
                                         String packageName, String entitySimpleName,
                                         String fieldName, String navClassName,
                                         String fullPath) {
@@ -402,7 +410,7 @@ public final class MetamodelEmitter {
                 ClassName.get(packageName, navClassName));
     }
 
-    private void emitEntityCollectionNavClass(RelationMapping ec, ClassName entityType,
+    private void emitEntityCollectionNavClass(TypeDefinition.Prop.ToMany ec, ClassName entityType,
                                                String packageName, String entitySimpleName,
                                                String fieldName, String navClassName,
                                                String fullPath) {
@@ -427,7 +435,7 @@ public final class MetamodelEmitter {
                 ClassName.get(packageName, navClassName));
     }
 
-    private void emitElementCollectionNavClass(RelationMapping ec, ClassName entityType,
+    private void emitElementCollectionNavClass(TypeDefinition.Prop.ElementCollection ec, ClassName entityType,
                                                 String packageName, String entitySimpleName,
                                                 String fieldName, String navClassName,
                                                 String fullPath) {
@@ -460,16 +468,18 @@ public final class MetamodelEmitter {
      * Adds leaf fields from a value object mapping to a nav class. Handles embedded VOs
      * recursively with cycle detection.
      */
-    private void addVoPropsToNav(TypeSpec.Builder navBuilder, TypeDefinition voMapping,
+    private void addVoPropsToNav(TypeSpec.Builder navBuilder, TypeDefinition.ValueObject voMapping,
                                   ClassName entityType, String packageName,
                                   String entitySimpleName, String ownerNavClassName,
                                   String fullPath, Set<String> visitedVOs) {
-        for (ColumnMapping col : voMapping.columnMappings()) {
-            addColumnToNav(navBuilder, col, entityType, fullPath);
+        for (TypeDefinition.Prop prop : voMapping.properties()) {
+            if (prop instanceof TypeDefinition.Prop.Scalar s) {
+                addColumnToNav(navBuilder, s, entityType, fullPath);
+            }
         }
-        for (RelationMapping rel : voMapping.relationMappings()) {
-            if (rel.kind() == RelationKind.EMBEDDED) {
-                addEmbeddedToNav(navBuilder, rel, entityType, packageName,
+        for (TypeDefinition.Prop prop : voMapping.properties()) {
+            if (prop instanceof TypeDefinition.Prop.Embedded embedded) {
+                addEmbeddedToNav(navBuilder, embedded, entityType, packageName,
                         entitySimpleName, ownerNavClassName, fullPath, visitedVOs);
             }
         }
@@ -479,54 +489,54 @@ public final class MetamodelEmitter {
      * Adds leaf fields from an entity mapping to a nav class (for Reference/EntityCollection targets).
      * Only adds scalars and the entity's own id; does not recurse into further navigable members.
      */
-    private void addEntityLeavesToNav(TypeSpec.Builder navBuilder, TypeDefinition target,
+    private void addEntityLeavesToNav(TypeSpec.Builder navBuilder, TypeDefinition.Entity target,
                                        ClassName entityType, String packageName,
                                        String entitySimpleName, String ownerNavClassName,
                                        String fullPath) {
         // Add target's id
-        ColumnMapping targetIdCol = idColumnMapping(target);
-        if (targetIdCol != null) {
-            String leafPath = fullPath + "." + targetIdCol.propertyName();
+        TypeDefinition.Prop.Id targetIdProp = idProp(target);
+        if (targetIdProp != null) {
+            String leafPath = fullPath + "." + targetIdProp.propertyName();
             TypeName fieldType = ParameterizedTypeName.get(ID_ATTRIBUTE, entityType);
             TypeName recordType = ParameterizedTypeName.get(ID_ATTRIBUTE_RECORD, entityType);
-            navBuilder.addField(FieldSpec.builder(fieldType, targetIdCol.propertyName(),
+            navBuilder.addField(FieldSpec.builder(fieldType, targetIdProp.propertyName(),
                             Modifier.PUBLIC, Modifier.FINAL)
-                    .initializer("new $T($S, $S)", recordType, targetIdCol.propertyName(), leafPath)
+                    .initializer("new $T($S, $S)", recordType, targetIdProp.propertyName(), leafPath)
                     .build());
         }
 
         // Add target's scalar columns and embedded VOs
-        for (ColumnMapping col : target.columnMappings()) {
-            if (!col.isId()) {
-                addColumnToNav(navBuilder, col, entityType, fullPath);
+        for (TypeDefinition.Prop prop : target.properties()) {
+            if (prop instanceof TypeDefinition.Prop.Scalar s && !s.isId()) {
+                addColumnToNav(navBuilder, s, entityType, fullPath);
             }
         }
-        for (RelationMapping rel : target.relationMappings()) {
-            if (rel.kind() == RelationKind.EMBEDDED) {
+        for (TypeDefinition.Prop prop : target.properties()) {
+            if (prop instanceof TypeDefinition.Prop.Embedded embedded) {
                 // Flatten embedded VOs from the target into this nav
                 Set<String> visitedVOs = new HashSet<>();
-                if (rel.target() != null) {
-                    visitedVOs.add(rel.target().typeName());
+                if (embedded.target() != null) {
+                    visitedVOs.add(embedded.target().typeName());
                 }
-                addEmbeddedToNav(navBuilder, rel, entityType, packageName,
+                addEmbeddedToNav(navBuilder, embedded, entityType, packageName,
                         entitySimpleName, ownerNavClassName, fullPath, visitedVOs);
-            } else if (rel.kind() == RelationKind.TO_ONE) {
+            } else if (prop instanceof TypeDefinition.Prop.ToOne toOne) {
                 // Reference on the target: add as a plain ScalarAttribute (non-navigable leaf)
-                String leafPath = fullPath + "." + rel.propertyName();
+                String leafPath = fullPath + "." + toOne.propertyName();
                 TypeName fieldType = ParameterizedTypeName.get(SCALAR_ATTRIBUTE, entityType);
                 TypeName recordType = ParameterizedTypeName.get(SCALAR_ATTRIBUTE_RECORD, entityType);
-                navBuilder.addField(FieldSpec.builder(fieldType, rel.propertyName(),
+                navBuilder.addField(FieldSpec.builder(fieldType, toOne.propertyName(),
                                 Modifier.PUBLIC, Modifier.FINAL)
-                        .initializer("new $T($S, $S)", recordType, rel.propertyName(), leafPath)
+                        .initializer("new $T($S, $S)", recordType, toOne.propertyName(), leafPath)
                         .build());
             }
         }
     }
 
-    private void addColumnToNav(TypeSpec.Builder navBuilder, ColumnMapping col,
+    private void addColumnToNav(TypeSpec.Builder navBuilder, TypeDefinition.Prop.Scalar col,
                                  ClassName entityType, String ownerPath) {
         String leafPath = ownerPath + "." + col.propertyName();
-        String typeFqn = col.typeFqn();
+        String typeFqn = col.javaType();
         ClassName attributeInterface = scalarAttributeInterface(typeFqn);
         ClassName attributeRecord = scalarAttributeRecord(typeFqn);
 
@@ -539,7 +549,7 @@ public final class MetamodelEmitter {
                 .build());
     }
 
-    private void addEmbeddedToNav(TypeSpec.Builder navBuilder, RelationMapping embedded,
+    private void addEmbeddedToNav(TypeSpec.Builder navBuilder, TypeDefinition.Prop.Embedded embedded,
                                    ClassName entityType, String packageName,
                                    String entitySimpleName, String ownerNavClassName,
                                    String ownerPath, Set<String> visitedVOs) {
@@ -663,12 +673,13 @@ public final class MetamodelEmitter {
         return Character.toUpperCase(name.charAt(0)) + name.substring(1);
     }
 
-    /** Returns the id ColumnMapping from a TypeDefinition, or null if none. */
-    private static ColumnMapping idColumnMapping(TypeDefinition def) {
-        for (ColumnMapping col : def.columnMappings()) {
-            if (col.isId()) return col;
-        }
-        return null;
+    /** Returns the id Prop from a TypeDefinition, or null if none. */
+    private static TypeDefinition.Prop.Id idProp(TypeDefinition def) {
+        return switch (def) {
+            case TypeDefinition.Entity e -> e.id();
+            case TypeDefinition.Aggregate a -> a.id();
+            default -> null;
+        };
     }
 
     private static String packageNameOf(String fqn) {

@@ -1,7 +1,6 @@
 package io.github.fludakit.data.sql;
 
 import io.github.fludakit.data.metadata.ColumnRef;
-import io.github.fludakit.data.metadata.ColumnMapping;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.query.Operation;
 import io.github.fludakit.data.query.QueryDefinition;
@@ -104,9 +103,13 @@ class UpsertTest {
     }
 
     static TypeDefinition note() {
+        TypeDefinition.Prop.Id idProp = new TypeDefinition.Prop.Id(
+                "id", "java.lang.Long", "id", TypeDefinition.Prop.Id.GeneratedType.IDENTITY);
+        TypeDefinition.Prop.Scalar titleProp = new TypeDefinition.Prop.Scalar(
+                "title", "java.lang.String", "title", false);
         return TestMappings.aggregateRoot("Note", "note",
-                new ColumnMapping("id", "id", "java.lang.Long", true, false),
-                List.of(new ColumnMapping("title", "title", "java.lang.String", false, false)),
+                idProp,
+                List.of(titleProp),
                 List.of());
     }
 }

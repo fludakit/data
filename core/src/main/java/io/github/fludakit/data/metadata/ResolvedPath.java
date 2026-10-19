@@ -4,29 +4,27 @@ package io.github.fludakit.data.metadata;
  * Result of resolving a dot-separated property path through the relation graph.
  *
  * @param ownerType the TypeDefinition that owns the terminal column or relation
- * @param column non-null if the terminal is a scalar column
- * @param relation non-null if the terminal is a relation
+ * @param prop non-null if the terminal is a scalar column, ID, version, or relation
  */
 public record ResolvedPath(
         TypeDefinition ownerType,
-        ColumnMapping column,
-        RelationMapping relation
+        TypeDefinition.Prop prop
 ) {
 
     /**
      * Returns true if the terminal is a to-many relation or element collection.
      */
     public boolean isToMany() {
-        return relation != null
-                && (relation.kind() == RelationKind.TO_MANY
-                || relation.kind() == RelationKind.ELEMENT_COLLECTION);
+        return prop != null
+                && (prop.kind() == TypeDefinition.Prop.PropKind.TO_MANY
+                || prop.kind() == TypeDefinition.Prop.PropKind.ELEMENT_COLLECTION);
     }
 
     /**
      * Returns true if the terminal is an embedded relation.
      */
     public boolean isEmbedded() {
-        return relation != null && relation.kind() == RelationKind.EMBEDDED;
+        return prop != null && prop.kind() == TypeDefinition.Prop.PropKind.EMBEDDED;
     }
 
     /**
@@ -35,13 +33,18 @@ public record ResolvedPath(
      * For relations, returns the FK column or embedded column.
      */
     public String columnName() {
-        if (column != null) {
-            return column.columnName();
+        if (prop == null) {
+            throw new IllegalStateException("ResolvedPath has no prop");
         }
-        if (relation != null) {
-            return relation.fkColumn();
-        }
-        throw new IllegalStateException("ResolvedPath has neither column nor relation");
+        return switch (prop.kind()) {
+            case SCALAR -> ((TypeDefinition.Prop.Scalar) prop).columnName();
+            case ID -> ((TypeDefinition.Prop.Id) prop).columnName();
+            case VERSION -> ((TypeDefinition.Prop.Version) prop).columnName();
+            case TO_ONE -> ((TypeDefinition.Prop.ToOne) prop).fkColumn();
+            case TO_MANY -> ((TypeDefinition.Prop.ToMany) prop).fkColumn();
+            case ELEMENT_COLLECTION -> ((TypeDefinition.Prop.ElementCollection) prop).fkColumn();
+            default -> throw new IllegalStateException("Prop kind " + prop.kind() + " has no column name");
+        };
     }
 
     /**

@@ -15,16 +15,15 @@ public record ResolvedPath(
      * Returns true if the terminal is a to-many relation or element collection.
      */
     public boolean isToMany() {
-        return prop != null
-                && (prop.kind() == TypeDefinition.Prop.PropKind.TO_MANY
-                || prop.kind() == TypeDefinition.Prop.PropKind.ELEMENT_COLLECTION);
+        return prop instanceof TypeDefinition.Prop.ToMany
+                || prop instanceof TypeDefinition.Prop.ElementCollection;
     }
 
     /**
      * Returns true if the terminal is an embedded relation.
      */
     public boolean isEmbedded() {
-        return prop != null && prop.kind() == TypeDefinition.Prop.PropKind.EMBEDDED;
+        return prop instanceof TypeDefinition.Prop.Embedded;
     }
 
     /**
@@ -36,14 +35,14 @@ public record ResolvedPath(
         if (prop == null) {
             throw new IllegalStateException("ResolvedPath has no prop");
         }
-        return switch (prop.kind()) {
-            case SCALAR -> ((TypeDefinition.Prop.Scalar) prop).columnName();
-            case ID -> ((TypeDefinition.Prop.Id) prop).columnName();
-            case VERSION -> ((TypeDefinition.Prop.Version) prop).columnName();
-            case TO_ONE -> ((TypeDefinition.Prop.ToOne) prop).fkColumn();
-            case TO_MANY -> ((TypeDefinition.Prop.ToMany) prop).fkColumn();
-            case ELEMENT_COLLECTION -> ((TypeDefinition.Prop.ElementCollection) prop).fkColumn();
-            default -> throw new IllegalStateException("Prop kind " + prop.kind() + " has no column name");
+        return switch (prop) {
+            case TypeDefinition.Prop.Scalar s -> s.columnName();
+            case TypeDefinition.Prop.Id id -> id.columnName();
+            case TypeDefinition.Prop.Version v -> v.columnName();
+            case TypeDefinition.Prop.ToOne toOne -> toOne.fkColumn();
+            case TypeDefinition.Prop.ToMany toMany -> toMany.fkColumn();
+            case TypeDefinition.Prop.ElementCollection ec -> ec.fkColumn();
+            default -> throw new IllegalStateException("Prop type " + prop.getClass().getSimpleName() + " has no column name");
         };
     }
 

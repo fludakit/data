@@ -32,15 +32,15 @@ public interface TypeVisitor<T> {
     // ── Prop kinds ───────────────────────────────────────────────────────
 
     default T visit(TypeDefinition.Prop prop) {
-        return switch (prop.kind()) {
-            case SCALAR -> visitScalar((TypeDefinition.Prop.Scalar) prop);
-            case EMBEDDED -> visitEmbedded((TypeDefinition.Prop.Embedded) prop);
-            case TO_ONE -> visitToOne((TypeDefinition.Prop.ToOne) prop);
-            case TO_MANY -> visitToMany((TypeDefinition.Prop.ToMany) prop);
-            case ELEMENT_COLLECTION -> visitElementCollection((TypeDefinition.Prop.ElementCollection) prop);
-            case COMPOSITION -> visitComposition((TypeDefinition.Prop.Composition) prop);
-            case ID -> visitId((TypeDefinition.Prop.Id) prop);
-            case VERSION -> visitVersion((TypeDefinition.Prop.Version) prop);
+        return switch (prop) {
+            case TypeDefinition.Prop.Scalar s -> visitScalar(s);
+            case TypeDefinition.Prop.Embedded e -> visitEmbedded(e);
+            case TypeDefinition.Prop.ToOne t -> visitToOne(t);
+            case TypeDefinition.Prop.ToMany t -> visitToMany(t);
+            case TypeDefinition.Prop.ElementCollection ec -> visitElementCollection(ec);
+            case TypeDefinition.Prop.Composition c -> visitComposition(c);
+            case TypeDefinition.Prop.Id id -> visitId(id);
+            case TypeDefinition.Prop.Version v -> visitVersion(v);
         };
     }
 

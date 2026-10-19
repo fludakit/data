@@ -395,23 +395,12 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
         /** The fully-qualified Java type name. */
         String javaType();
 
-        /** The kind of this property. */
-        PropKind kind();
-
-        enum PropKind {
-            SCALAR, EMBEDDED, TO_ONE, TO_MANY, ELEMENT_COLLECTION, COMPOSITION, ID, VERSION
-        }
-
         // ── Scalar property ──────────────────────────────────────────────
 
         /**
          * A simple scalar property mapped to a column.
          */
         record Scalar(String name, String javaType, String columnName, boolean nullable) implements Prop {
-            @Override
-            public PropKind kind() {
-                return PropKind.SCALAR;
-            }
         }
 
         // ── Embedded property ────────────────────────────────────────────
@@ -420,10 +409,6 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
          * An embedded value object flattened into the parent table.
          */
         record Embedded(String name, String javaType, ValueObject definition, String prefix) implements Prop {
-            @Override
-            public PropKind kind() {
-                return PropKind.EMBEDDED;
-            }
         }
 
         // ── ToOne property ───────────────────────────────────────────────
@@ -432,10 +417,6 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
          * A to-one foreign key reference (ManyToOne or OneToOne owning side).
          */
         record ToOne(String name, String javaType, Entity target, String fkColumn, boolean backReference) implements Prop {
-            @Override
-            public PropKind kind() {
-                return PropKind.TO_ONE;
-            }
         }
 
         // ── ToMany property ──────────────────────────────────────────────
@@ -444,10 +425,6 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
          * A to-many entity collection stored in the target table (OneToMany or ManyToMany).
          */
         record ToMany(String name, String javaType, Entity target, String fkColumn, String mappedBy) implements Prop {
-            @Override
-            public PropKind kind() {
-                return PropKind.TO_MANY;
-            }
         }
 
         // ── ElementCollection property ───────────────────────────────────
@@ -460,11 +437,6 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
             public String javaType() {
                 return elementType;
             }
-
-            @Override
-            public PropKind kind() {
-                return PropKind.ELEMENT_COLLECTION;
-            }
         }
 
         // ── Composition property ─────────────────────────────────────────
@@ -473,10 +445,6 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
          * An owned child aggregate (cascade lifecycle).
          */
         record Composition(String name, String javaType, Aggregate target, Cascade cascade) implements Prop {
-            @Override
-            public PropKind kind() {
-                return PropKind.COMPOSITION;
-            }
 
             public enum Cascade {
                 ALL, PERSIST, MERGE, REMOVE
@@ -489,10 +457,6 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
          * The primary key property.
          */
         record Id(String name, String javaType, String columnName, GeneratedType generated) implements Prop {
-            @Override
-            public PropKind kind() {
-                return PropKind.ID;
-            }
 
             public enum GeneratedType {
                 NONE, AUTO, IDENTITY, SEQUENCE, UUID
@@ -505,10 +469,6 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
          * The optimistic locking version property.
          */
         record Version(String name, String javaType, String columnName) implements Prop {
-            @Override
-            public PropKind kind() {
-                return PropKind.VERSION;
-            }
         }
     }
 }

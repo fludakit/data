@@ -65,7 +65,7 @@ class UpsertTest {
     @Test
     void postgreSqlSpellsItInsertOnConflictDoUpdate() {
         // EXCLUDED is the row the INSERT tried to write, so the update half rebinds nothing and both
-        // halves share the same named parameters. The identifier is the conflict target and is never
+        // halves share the same named parameters. The identifier is the conflict definition and is never
         // re-assigned, so it is absent from the SET list.
         assertThat(new SqlBuilder(note()).dialect(PostgreSqlDialect.INSTANCE).upsert())
                 .isEqualTo("INSERT INTO \"note\" (\"id\", \"title\") VALUES (:id, :title)"

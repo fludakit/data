@@ -24,8 +24,8 @@ final class TestMappings {
                 null, // no version
                 scalars,
                 List.of(), // no embedded
-                filterType(relations, TypeDefinition.Prop.ToOne.class),
-                filterType(relations, TypeDefinition.Prop.ToMany.class),
+                filterType(relations, TypeDefinition.Prop.Association.class),
+                filterType(relations, TypeDefinition.Prop.EntityCollection.class),
                 filterType(relations, TypeDefinition.Prop.ElementCollection.class)
         );
     }
@@ -40,10 +40,9 @@ final class TestMappings {
                 null, // no version
                 scalars,
                 List.of(), // no embedded
-                filterType(relations, TypeDefinition.Prop.ToOne.class),
-                filterType(relations, TypeDefinition.Prop.ToMany.class),
-                filterType(relations, TypeDefinition.Prop.ElementCollection.class),
-                filterType(relations, TypeDefinition.Prop.Composition.class)
+                filterType(relations, TypeDefinition.Prop.Association.class),
+                filterType(relations, TypeDefinition.Prop.EntityCollection.class),
+                filterType(relations, TypeDefinition.Prop.ElementCollection.class)
         );
     }
 

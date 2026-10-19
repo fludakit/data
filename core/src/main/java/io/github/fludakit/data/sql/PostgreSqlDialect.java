@@ -25,7 +25,7 @@ public final class PostgreSqlDialect extends AnsiSqlDialect {
     public String upsertStatement(String tableName, String idColumn, List<String> columns,
                                   List<String> params) {
         // EXCLUDED is the row the INSERT tried to write, so the update half rebinds nothing and both
-        // halves share the same named parameters. The identifier is the conflict target and is never
+        // halves share the same named parameters. The identifier is the conflict definition and is never
         // re-assigned, so it is dropped from the SET list. An entity whose only column is its
         // identifier has nothing to update, so it degrades to DO NOTHING.
         String names = columns.stream().map(this::quoteIdentifier).collect(Collectors.joining(", "));

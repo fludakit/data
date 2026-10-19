@@ -20,7 +20,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * one; update replaces the whole child set (delete + re-insert); delete cascades the children.
  *
  * <p>Contract lock: hydration covers element collections only — the {@code @Association} header
- * target ({@code Order.getCustomer()}) and the {@code @Association} child target
+ * definition ({@code Order.getCustomer()}) and the {@code @Association} child definition
  * ({@code OrderItem.getProduct()}) are never fully populated by the collection loader; an
  * {@code @Association} reference reached that way stays {@code null} rather than being hydrated. The
  * relationship kinds are exercised by the {@code it/team} corpus instead.</p>
@@ -51,7 +51,7 @@ class OrderCollectionHydrationTest {
         Order found = orders.findById(saved.getId()).orElseThrow();
         assertThat(found.getOrderItems()).hasSize(2);
         assertThat(found.getOrderItems()).extracting(OrderItem::getQuantity).containsExactlyInAnyOrder(2, 5);
-        // Partial materialisation covers entity row-mapper reads only: there an @Association target
+        // Partial materialisation covers entity row-mapper reads only: there an @Association definition
         // is rebuilt as an id-only partial, whereas children rebuilt by the element-collection
         // loader leave their association field untouched, i.e. null.
         assertThat(found.getOrderItems()).allSatisfy(i -> assertThat(i.getProduct()).isNull());
@@ -82,7 +82,7 @@ class OrderCollectionHydrationTest {
     @Test
     void findByAmountHydratesOrderItems() {
         // A hydrated LIST @Find must run the umbrella loader, so the returned orders carry hydrated
-        // orderItems — while the @Association child target still stays null through this read too.
+        // orderItems — while the @Association child definition still stays null through this read too.
         Customer ana = customers.save(customer("Ana", "ana@example.com"));
         Product widget = products.save(product("Widget", new BigDecimal("1.00")));
         Order order = new Order(ana);

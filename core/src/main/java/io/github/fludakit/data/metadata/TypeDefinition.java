@@ -198,9 +198,9 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
                         ec.fkColumn(), ec.childTable());
                 edges.add(new JoinEdge.ToMany(ownerId, childFk));
                 // For element collections of VOs, we need to continue navigation into the VO
-                // But we don't have a TypeDefinition for the element type here
-                // The element type FQN is stored in ec.elementType()
-                // We'll need to look it up from the cache or throw for now
+                // But we don't have a TypeDefinition for the element type here - it needs to be
+                // resolved by the caller (processor) which has access to the type cache
+                // For now, create a placeholder and let the caller handle nested resolution
                 throw new UnknownAttributePathException(path,
                         "Cannot navigate through element collection without runtime type resolution: " + segment);
             } else if (prop instanceof Prop.Embedded emb) {

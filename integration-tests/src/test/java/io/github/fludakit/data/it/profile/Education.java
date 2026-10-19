@@ -4,7 +4,7 @@ import io.github.fludakit.data.annotation.Entity;
 import io.github.fludakit.data.annotation.Identity;
 
 /**
- * Second composition entity-collection target of the CV aggregate ({@code Profile.education}).
+ * Second composition entity-collection definition of the CV aggregate ({@code Profile.education}).
  * Same inverse-field contract as {@link WorkExperience}: bare {@code Profile profile} →
  * non-composing Reference on {@code profile_id}.
  */

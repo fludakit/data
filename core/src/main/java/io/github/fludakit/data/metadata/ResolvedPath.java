@@ -15,7 +15,7 @@ public record ResolvedPath(
      * Returns true if the terminal is a to-many relation or element collection.
      */
     public boolean isToMany() {
-        return prop instanceof TypeDefinition.Prop.ToMany
+        return prop instanceof TypeDefinition.Prop.EntityCollection
                 || prop instanceof TypeDefinition.Prop.ElementCollection;
     }
 
@@ -39,9 +39,9 @@ public record ResolvedPath(
             case TypeDefinition.Prop.Scalar s -> s.columnName();
             case TypeDefinition.Prop.Id id -> id.columnName();
             case TypeDefinition.Prop.Version v -> v.columnName();
-            case TypeDefinition.Prop.ToOne toOne -> toOne.fkColumn();
-            case TypeDefinition.Prop.ToMany toMany -> toMany.fkColumn();
-            case TypeDefinition.Prop.ElementCollection ec -> ec.fkColumn();
+            case TypeDefinition.Prop.Association assoc -> assoc.fkColumn();
+            case TypeDefinition.Prop.EntityCollection ec -> ec.fkColumn();
+            case TypeDefinition.Prop.ElementCollection ec -> ec.elementType();
             default -> throw new IllegalStateException("Prop type " + prop.getClass().getSimpleName() + " has no column name");
         };
     }

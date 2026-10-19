@@ -142,11 +142,8 @@ final class RepositoryVisitor {
         }
 
         // 4a. Generate row mappers for VO types used in element collections
-        for (TypeDefinition.Prop prop : entityMapping.properties()) {
-            if (prop instanceof TypeDefinition.Prop.ElementCollection ec && ec.definition() != null) {
-                rowMapperEmitter.emit(ec.definition());
-            }
-        }
+        // Note: ElementCollection stores element type FQN, not a TypeDefinition
+        // Row mappers for element types are generated when scanning the VO itself
 
         // 4b. Generate static metamodel (_Entity interface + navigable member classes)
         MetamodelEmitter metamodelEmitter = new MetamodelEmitter(filer, diagnostics);
@@ -206,7 +203,7 @@ final class RepositoryVisitor {
                 String methodName = method.getSimpleName().toString();
                 String repoName = repository.getQualifiedName().toString();
                 throw new IllegalStateException(
-                    "Cannot resolve method '" + methodName + "' in repository " + 
+                    "Cannot resolve method '" + methodName + "' in repository " +
                     repoName + ". Either add a lifecycle annotation " +
                     "(@Find, @Save, @Insert, @Update, @Delete), use a recognized CRUD method name " +
                     "(findById, save, etc.), use Query By Name (findByXxx), or add a custom @Query annotation."
@@ -387,17 +384,17 @@ final class RepositoryVisitor {
     private boolean extendsJakartaDataInterface() {
         // Check superclass
         if (isJakartaDataInterface(repository.getSuperclass())) return true;
-        
+
         // Check direct interfaces
         for (TypeMirror iface : repository.getInterfaces()) {
             if (isJakartaDataInterface(iface)) return true;
         }
-        
+
         // Check transitive interfaces
         for (TypeMirror iface : getAllInterfaces(repository)) {
             if (isJakartaDataInterface(iface)) return true;
         }
-        
+
         return false;
     }
 
@@ -405,7 +402,7 @@ final class RepositoryVisitor {
         if (type == null || type.getKind() != TypeKind.DECLARED) return false;
         TypeElement te = (TypeElement) ((DeclaredType) type).asElement();
         String fqn = te.getQualifiedName().toString();
-        return fqn.equals(CRUD_REPOSITORY) || 
+        return fqn.equals(CRUD_REPOSITORY) ||
                fqn.equals("jakarta.data.repository.BasicRepository") ||
                fqn.equals(DATA_REPOSITORY);
     }
@@ -424,10 +421,10 @@ final class RepositoryVisitor {
         ResultKind resultKind = resolveResultKind(method, operation);
         PagingMode pagingMode = resolvePagingMode(method, resultKind);
         List<Predicate> predicates = resolveByAnnotations(method, entityMapping);
-        
+
         // Replace Jakarta Data's "id(this)" JDQL convention with the actual ID property name
         predicates = replaceIdThis(predicates, entityMapping);
-        
+
         List<SortSpec> sorts = resolveOrderByAnnotations(method);
         List<ParamBinding> paramBindings = buildParamBindings(method, predicates);
         boolean distinct = false;
@@ -540,18 +537,33 @@ final class RepositoryVisitor {
                 String head = path.substring(0, i);
                 String tail = Character.toLowerCase(path.charAt(i)) + path.substring(i + 1);
                 // Check if head is a known property
-                boolean isProperty = mapping.findProperty(head) != null;
-                if (isProperty) {
-                    // head is a property, check if tail resolves in the target
+                TypeDefinition.Prop prop = mapping.findProperty(head);
+                if (prop != null) {
+                    // head is a property, check if tail resolves in the definition
                     String fullPath = head + "." + tail;
-                    try {
-                        mapping.resolvePath(fullPath);
+                    
+                    // Special handling for ElementCollection - can't use resolve() directly
+                    if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
+                        TypeDefinition elementType = typeMappingVisitor.get(ec.elementType());
+                        if (elementType != null && elementType.findProperty(tail) != null) {
+                            return fullPath;
+                        }
+                        // If element type not found in cache yet, assume path is valid
+                        // and let SQL generation handle it with EXISTS subquery
                         return fullPath;
-                    } catch (Exception e) {
-                        // tail doesn't resolve, try deeper splits
-                        String resolvedTail = trySplitCamelCasePath(tail, getTargetMapping(mapping, head));
-                        if (resolvedTail != null && !resolvedTail.equals(tail)) {
-                            return head + "." + resolvedTail;
+                    } else {
+                        try {
+                            mapping.resolve(fullPath);
+                            return fullPath;
+                        } catch (Exception e) {
+                            // tail doesn't resolve, try deeper splits
+                            TypeDefinition targetMapping = getTargetMapping(mapping, head);
+                            if (targetMapping != null) {
+                                String resolvedTail = trySplitCamelCasePath(tail, targetMapping);
+                                if (resolvedTail != null && !resolvedTail.equals(tail)) {
+                                    return head + "." + resolvedTail;
+                                }
+                            }
                         }
                     }
                 }
@@ -561,13 +573,17 @@ final class RepositoryVisitor {
     }
 
     /**
-     * Gets the target TypeDefinition for a property name, or null if not resolvable.
+     * Gets the definition TypeDefinition for a property name, or null if not resolvable.
      */
     private TypeDefinition getTargetMapping(TypeDefinition mapping, String propName) {
         TypeDefinition.Prop prop = mapping.findProperty(propName);
-        if (prop instanceof TypeDefinition.Prop.ToOne toOne) return toOne.target();
-        if (prop instanceof TypeDefinition.Prop.ToMany toMany) return toMany.target();
+        if (prop instanceof TypeDefinition.Prop.Association assoc) return assoc.target();
+        if (prop instanceof TypeDefinition.Prop.EntityCollection ec) return ec.target();
         if (prop instanceof TypeDefinition.Prop.Embedded emb) return emb.definition();
+        if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
+            // For element collections, look up the element type definition from cache
+            return typeMappingVisitor.get(ec.elementType());
+        }
         return null;
     }
 
@@ -724,7 +740,7 @@ final class RepositoryVisitor {
         int slotIndex = 0;
         for (Predicate pred : predicates) {
             Operator op = pred.operator();
-            
+
             if (op == Operator.BETWEEN || op == Operator.NOT_BETWEEN) {
                 // BETWEEN needs TWO consecutive parameter slots -> _from and _to
                 if (slotIndex + 1 < nonPagingParamIndices.size()) {
@@ -743,7 +759,7 @@ final class RepositoryVisitor {
                 }
             }
         }
-        
+
         return bindings;
     }
 

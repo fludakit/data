@@ -11,7 +11,6 @@ import io.github.fludakit.data.metadata.ColumnPlacement;
 import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.JoinEdge;
 import io.github.fludakit.data.metadata.TypeDefinition;
-import io.github.fludakit.data.metadata.UnknownAttributePathException;
 
 import javax.annotation.processing.Filer;
 import javax.lang.model.element.Modifier;
@@ -152,71 +151,154 @@ public final class TypeModelEmitter {
                 .addModifiers(Modifier.PUBLIC, Modifier.STATIC)
                 .returns(TYPE_DEFINITION);
 
-        // Build columnMappings list
-        if (entity.columnMappings().isEmpty()) {
-            method.addStatement("$T<$T> columns = $T.of()", LIST, COLUMN_MAPPING, LIST);
-        } else {
-            CodeBlock.Builder columnsBuilder = CodeBlock.builder();
-            columnsBuilder.add("$T<$T> columns = $T.of(\n", LIST, COLUMN_MAPPING, LIST);
-            for (ColumnMapping col : entity.columnMappings()) {
-                columnsBuilder.add("    new $T($S, $S, $S, $L, $L)",
-                        COLUMN_MAPPING, col.propertyName(), col.columnName(),
-                        col.typeFqn(), col.isId(), col.isVersion());
-                if (entity.columnMappings().indexOf(col) < entity.columnMappings().size() - 1) {
-                    columnsBuilder.add(",");
-                }
-                columnsBuilder.add("\n");
+        // Collect Props by type
+        List<TypeDefinition.Prop.Scalar> scalars = new ArrayList<>();
+        TypeDefinition.Prop.Id idProp = null;
+        TypeDefinition.Prop.Version versionProp = null;
+        List<TypeDefinition.Prop.Embedded> embedded = new ArrayList<>();
+        List<TypeDefinition.Prop.Association> associations = new ArrayList<>();
+        List<TypeDefinition.Prop.EntityCollection> entityCollections = new ArrayList<>();
+        List<TypeDefinition.Prop.ElementCollection> elementCollections = new ArrayList<>();
+
+        for (TypeDefinition.Prop prop : entity.properties()) {
+            switch (prop) {
+                case TypeDefinition.Prop.Scalar s -> scalars.add(s);
+                case TypeDefinition.Prop.Id id -> idProp = id;
+                case TypeDefinition.Prop.Version v -> versionProp = v;
+                case TypeDefinition.Prop.Embedded e -> embedded.add(e);
+                case TypeDefinition.Prop.Association a -> associations.add(a);
+                case TypeDefinition.Prop.EntityCollection ec -> entityCollections.add(ec);
+                case TypeDefinition.Prop.ElementCollection ec -> elementCollections.add(ec);
+                default -> {}
             }
-            columnsBuilder.add(")");
-            method.addCode(columnsBuilder.build());
+        }
+
+        // Build properties list for generated code
+        if (entity.properties().isEmpty()) {
+            method.addStatement("$T<$T> props = $T.of()", LIST, ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop"), LIST);
+        } else {
+            CodeBlock.Builder propsBuilder = CodeBlock.builder();
+            propsBuilder.add("$T<$T> props = $T.of(\n", LIST, ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop"), LIST);
+            List<TypeDefinition.Prop> allProps = new ArrayList<>();
+            if (idProp != null) allProps.add(idProp);
+            if (versionProp != null) allProps.add(versionProp);
+            allProps.addAll(scalars);
+            allProps.addAll(embedded);
+            allProps.addAll(associations);
+            allProps.addAll(entityCollections);
+            allProps.addAll(elementCollections);
+
+            for (int i = 0; i < allProps.size(); i++) {
+                TypeDefinition.Prop prop = allProps.get(i);
+                propsBuilder.add(propLiteral(prop));
+                if (i < allProps.size() - 1) {
+                    propsBuilder.add(",");
+                }
+                propsBuilder.add("\n");
+            }
+            propsBuilder.add(")");
+            method.addCode(propsBuilder.build());
             method.addCode(";\n");
         }
 
-        // Build relationMappings list
-        if (entity.relationMappings().isEmpty()) {
-            method.addStatement("$T<$T> relations = $T.of()", LIST, RELATION_MAPPING, LIST);
-        } else {
-            CodeBlock.Builder relationsBuilder = CodeBlock.builder();
-            relationsBuilder.add("$T<$T> relations = $T.of(\n", LIST, RELATION_MAPPING, LIST);
-            List<RelationMapping> rels = entity.relationMappings();
-            for (int i = 0; i < rels.size(); i++) {
-                RelationMapping rel = rels.get(i);
-                String fkCol = rel.fkColumn();
-                String childTbl = rel.childTable();
-                // Always use null for target in generated code since nested VOs don't have TypeModels
-                relationsBuilder.add("    new $T($S, $T.$L, $S, ",
-                        RELATION_MAPPING,
-                        rel.propertyName(),
-                        RELATION_KIND, rel.kind(),
-                        rel.targetTypeName());
-                if (fkCol != null) {
-                    relationsBuilder.add("$S, ", fkCol);
-                } else {
-                    relationsBuilder.add("null, ");
-                }
-                if (childTbl != null) {
-                    relationsBuilder.add("$S, ", childTbl);
-                } else {
-                    relationsBuilder.add("null, ");
-                }
-                relationsBuilder.add("$L, $L, null)",
-                        rel.isComposition(),
-                        rel.isEmbedded());
-                if (i < rels.size() - 1) {
-                    relationsBuilder.add(",");
-                }
-                relationsBuilder.add("\n");
-            }
-            relationsBuilder.add(")");
-            method.addCode(relationsBuilder.build());
-            method.addCode(";\n");
-        }
+        String tableName = entity.tableName();
+        String idCol = idProp != null ? idProp.columnName() : null;
+        boolean isAggregate = entity instanceof TypeDefinition.Aggregate;
 
-        String idCol = entity.idColumn();
-        method.addStatement("return new $T($S, $S, $S, $L, columns, relations)",
-                TYPE_DEFINITION, entity.typeName(), entity.tableName(),
-                idCol, entity.isAggregate());
+        if (entity instanceof TypeDefinition.Entity) {
+            method.addCode("return new $T.Entity($S, $S, ", TYPE_DEFINITION, entity.typeName(), tableName);
+            addIdOrVersion(method, idProp, "Id");
+            method.addCode(", ");
+            addIdOrVersion(method, versionProp, "Version");
+            method.addCode(", ");
+            addPropList(method, scalars, "Scalar");
+            method.addCode(", ");
+            addPropList(method, embedded, "Embedded");
+            method.addCode(", ");
+            addPropList(method, associations, "Association");
+            method.addCode(", ");
+            addPropList(method, entityCollections, "EntityCollection");
+            method.addCode(", ");
+            addPropList(method, elementCollections, "ElementCollection");
+            method.addStatement(")");
+        } else if (entity instanceof TypeDefinition.Aggregate agg) {
+            method.addCode("return new $T.Aggregate($S, $S, ", TYPE_DEFINITION, entity.typeName(), tableName);
+            addIdOrVersion(method, idProp, "Id");
+            method.addCode(", ");
+            addIdOrVersion(method, versionProp, "Version");
+            method.addCode(", ");
+            addPropList(method, scalars, "Scalar");
+            method.addCode(", ");
+            addPropList(method, embedded, "Embedded");
+            method.addCode(", ");
+            addPropList(method, associations, "Association");
+            method.addCode(", ");
+            addPropList(method, entityCollections, "EntityCollection");
+            method.addCode(", ");
+            addPropList(method, elementCollections, "ElementCollection");
+            method.addStatement(")");
+        } else {
+            method.addCode("return new $T.ValueObject($S, ", TYPE_DEFINITION, entity.typeName());
+            addPropList(method, scalars, "Scalar");
+            method.addCode(", ");
+            addPropList(method, embedded, "Embedded");
+            method.addCode(", ");
+            addPropList(method, elementCollections, "ElementCollection");
+            method.addStatement(")");
+        }
         return method.build();
+    }
+
+    private void addIdOrVersion(MethodSpec.Builder method, TypeDefinition.Prop prop, String typeName) {
+        if (prop == null) {
+            method.addCode("null");
+        } else {
+            method.addCode("$L", propLiteral(prop));
+        }
+    }
+
+    private void addPropList(MethodSpec.Builder method, List<? extends TypeDefinition.Prop> props, String typeName) {
+        if (props.isEmpty()) {
+            method.addCode("$T.of()", LIST);
+        } else {
+            method.addCode("$T.of(\n", LIST);
+            for (int i = 0; i < props.size(); i++) {
+                method.addCode("    $L", propLiteral(props.get(i)));
+                if (i < props.size() - 1) {
+                    method.addCode(",");
+                }
+                method.addCode("\n");
+            }
+            method.addCode("  )");
+        }
+    }
+
+    private CodeBlock propLiteral(TypeDefinition.Prop prop) {
+        return switch (prop) {
+            case TypeDefinition.Prop.Scalar s -> CodeBlock.of("new $T($S, $S, $S, $L)",
+                    ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "Scalar"),
+                    s.name(), s.javaType(), s.columnName(), s.nullable());
+            case TypeDefinition.Prop.Id id -> CodeBlock.of("new $T($S, $S, $S, $T.IDENTITY)",
+                    ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "Id"),
+                    id.name(), id.javaType(), id.columnName(), ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "Id", "GeneratedType"));
+            case TypeDefinition.Prop.Version v -> CodeBlock.of("new $T($S, $S, $S)",
+                    ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "Version"),
+                    v.name(), v.javaType(), v.columnName());
+            case TypeDefinition.Prop.Embedded e -> CodeBlock.of("new $T($S, $S, null, $S)",
+                    ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "Embedded"),
+                    e.name(), e.javaType(), e.prefix());
+            case TypeDefinition.Prop.Association a -> CodeBlock.of("new $T($S, $S, null, $S, $L, $L, $L)",
+                    ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "Association"),
+                    a.name(), a.javaType(), a.fkColumn(), a.backReference(), a.composition(),
+                    a.cascade() != null ? CodeBlock.of("$T.$L", ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "Association", "Cascade"), a.cascade()) : CodeBlock.of("null"));
+            case TypeDefinition.Prop.EntityCollection ec -> CodeBlock.of("new $T($S, $S, null, $S, null)",
+                    ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "EntityCollection"),
+                    ec.name(), ec.javaType(), ec.fkColumn());
+            case TypeDefinition.Prop.ElementCollection ec -> CodeBlock.of("new $T($S, $S, $S, $S)",
+                    ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "ElementCollection"),
+                    ec.name(), ec.elementType(), ec.childTable(), ec.fkColumn());
+            default -> throw new IllegalStateException("Unexpected prop: " + prop);
+        };
     }
 
     // ── columns() ─────────────────────────────────────────────────────────
@@ -251,15 +333,21 @@ public final class TypeModelEmitter {
      */
     private List<ColumnRef> flattenColumns(TypeDefinition def, String tableName) {
         List<ColumnRef> out = new ArrayList<>();
-        for (ColumnMapping col : def.columnMappings()) {
-            out.add(new ColumnRef.Simple(col.columnName(), tableName));
-        }
-        for (RelationMapping rel : def.relationMappings()) {
-            if (rel.kind() == RelationKind.TO_ONE && rel.fkColumn() != null) {
-                out.add(new ColumnRef.Simple(rel.fkColumn(), tableName));
-            } else if (rel.kind() == RelationKind.EMBEDDED && rel.target() != null) {
-                String prefix = rel.propertyName() + "_";
-                flattenEmbeddedColumns(rel.target(), prefix, tableName, out);
+        for (TypeDefinition.Prop prop : def.properties()) {
+            switch (prop) {
+                case TypeDefinition.Prop.Scalar s -> out.add(new ColumnRef.Simple(s.columnName(), tableName));
+                case TypeDefinition.Prop.Id id -> out.add(new ColumnRef.Simple(id.columnName(), tableName));
+                case TypeDefinition.Prop.Version v -> out.add(new ColumnRef.Simple(v.columnName(), tableName));
+                case TypeDefinition.Prop.Association a -> {
+                    if (a.fkColumn() != null) {
+                        out.add(new ColumnRef.Simple(a.fkColumn(), tableName));
+                    }
+                }
+                case TypeDefinition.Prop.Embedded e -> {
+                    String prefix = e.name() + "_";
+                    flattenEmbeddedColumns(e.definition(), prefix, tableName, out);
+                }
+                default -> {}
             }
         }
         return out;
@@ -267,13 +355,16 @@ public final class TypeModelEmitter {
 
     private void flattenEmbeddedColumns(TypeDefinition embedded, String columnPrefix,
                                          String tableName, List<ColumnRef> out) {
-        for (ColumnMapping col : embedded.columnMappings()) {
-            out.add(new ColumnRef.Simple(columnPrefix + col.columnName(), tableName));
-        }
-        for (RelationMapping rel : embedded.relationMappings()) {
-            if (rel.kind() == RelationKind.EMBEDDED && rel.target() != null) {
-                String nestedPrefix = columnPrefix + rel.propertyName() + "_";
-                flattenEmbeddedColumns(rel.target(), nestedPrefix, tableName, out);
+        for (TypeDefinition.Prop prop : embedded.properties()) {
+            switch (prop) {
+                case TypeDefinition.Prop.Scalar s -> out.add(new ColumnRef.Simple(columnPrefix + s.columnName(), tableName));
+                case TypeDefinition.Prop.Id id -> out.add(new ColumnRef.Simple(columnPrefix + id.columnName(), tableName));
+                case TypeDefinition.Prop.Version v -> out.add(new ColumnRef.Simple(columnPrefix + v.columnName(), tableName));
+                case TypeDefinition.Prop.Embedded e -> {
+                    String nestedPrefix = columnPrefix + e.name() + "_";
+                    flattenEmbeddedColumns(e.definition(), nestedPrefix, tableName, out);
+                }
+                default -> {}
             }
         }
     }
@@ -340,25 +431,31 @@ public final class TypeModelEmitter {
     private void addLocalRefs(Map<String, ColumnRef> refs, String tableName,
                                TypeDefinition def,
                                String pathPrefix, String columnPrefix) {
-        for (ColumnMapping col : def.columnMappings()) {
-            refs.put(pathPrefix + col.propertyName(),
-                    new ColumnRef.Simple(columnPrefix + col.columnName(), tableName));
-        }
-        for (RelationMapping rel : def.relationMappings()) {
-            if (rel.kind() == RelationKind.TO_ONE && rel.fkColumn() != null) {
-                refs.put(pathPrefix + rel.propertyName(),
-                        new ColumnRef.ForeignKey(columnPrefix + rel.fkColumn(), tableName));
-            } else if (rel.kind() == RelationKind.EMBEDDED && rel.target() != null) {
-                addLocalRefs(refs, tableName, rel.target(),
-                        pathPrefix + rel.propertyName() + ".",
-                        columnPrefix + rel.propertyName() + "_");
+        for (TypeDefinition.Prop prop : def.properties()) {
+            switch (prop) {
+                case TypeDefinition.Prop.Scalar s -> refs.put(pathPrefix + s.name(),
+                        new ColumnRef.Simple(columnPrefix + s.columnName(), tableName));
+                case TypeDefinition.Prop.Id id -> refs.put(pathPrefix + id.name(),
+                        new ColumnRef.Simple(columnPrefix + id.columnName(), tableName));
+                case TypeDefinition.Prop.Version v -> refs.put(pathPrefix + v.name(),
+                        new ColumnRef.Simple(columnPrefix + v.columnName(), tableName));
+                case TypeDefinition.Prop.Association a -> {
+                    if (a.fkColumn() != null) {
+                        refs.put(pathPrefix + a.name(),
+                                new ColumnRef.ForeignKey(columnPrefix + a.fkColumn(), tableName));
+                    }
+                }
+                case TypeDefinition.Prop.Embedded e -> addLocalRefs(refs, tableName, e.definition(),
+                        pathPrefix + e.name() + ".",
+                        columnPrefix + e.name() + "_");
+                default -> {}
             }
         }
     }
 
     /**
-     * Computes local column refs for a target definition using an explicit table name.
-     * Used for element collection targets where the target's own tableName may be null.
+     * Computes local column refs for a definition definition using an explicit table name.
+     * Used for element collection targets where the definition's own tableName may be null.
      */
     private Map<String, ColumnRef> computeLocalColumnRefsWithTable(TypeDefinition def, String tableName) {
         Map<String, ColumnRef> refs = new LinkedHashMap<>();
@@ -423,53 +520,55 @@ public final class TypeModelEmitter {
             paths.put(entry.getKey(), new ColumnPlacement(entry.getValue()));
         }
 
-        // 2-4. Relation traversals (one level into target)
-        for (RelationMapping rel : entity.relationMappings()) {
-            if (rel.kind() == RelationKind.TO_ONE && rel.target() != null) {
-                JoinEdge.ToOne edge = buildToOneEdge(entity, rel);
-                if (edge == null) continue;
-                TypeDefinition target = rel.target();
-                Map<String, ColumnRef> targetRefs = computeLocalColumnRefs(target);
-                for (Map.Entry<String, ColumnRef> targetEntry : targetRefs.entrySet()) {
-                    String fullPath = rel.propertyName() + "." + targetEntry.getKey();
-                    paths.put(fullPath, new ColumnPlacement(
-                            targetEntry.getValue(), List.of(edge)));
+        // 2-4. Relation traversals (one level into definition)
+        for (TypeDefinition.Prop prop : entity.properties()) {
+            switch (prop) {
+                case TypeDefinition.Prop.Association assoc -> {
+                    if (assoc.target() != null) {
+                        JoinEdge.ToOne edge = buildAssociationEdge(entity, assoc);
+                        if (edge == null) continue;
+                        TypeDefinition target = assoc.target();
+                        Map<String, ColumnRef> targetRefs = computeLocalColumnRefs(target);
+                        for (Map.Entry<String, ColumnRef> targetEntry : targetRefs.entrySet()) {
+                            String fullPath = assoc.name() + "." + targetEntry.getKey();
+                            paths.put(fullPath, new ColumnPlacement(
+                                    targetEntry.getValue(), List.of(edge)));
+                        }
+                    }
                 }
-            } else if (rel.kind() == RelationKind.TO_MANY && rel.target() != null) {
-                JoinEdge.ToMany edge = buildToManyEdgeForCollection(entity, rel);
-                if (edge == null) continue;
-                TypeDefinition target = rel.target();
-                Map<String, ColumnRef> targetRefs = computeLocalColumnRefs(target);
-                for (Map.Entry<String, ColumnRef> targetEntry : targetRefs.entrySet()) {
-                    String fullPath = rel.propertyName() + "." + targetEntry.getKey();
-                    paths.put(fullPath, new ColumnPlacement(
-                            targetEntry.getValue(), List.of(edge)));
+                case TypeDefinition.Prop.EntityCollection ec -> {
+                    if (ec.target() != null) {
+                        JoinEdge.ToMany edge = buildEntityCollectionEdge(entity, ec);
+                        if (edge == null) continue;
+                        TypeDefinition target = ec.target();
+                        Map<String, ColumnRef> targetRefs = computeLocalColumnRefs(target);
+                        for (Map.Entry<String, ColumnRef> targetEntry : targetRefs.entrySet()) {
+                            String fullPath = ec.name() + "." + targetEntry.getKey();
+                            paths.put(fullPath, new ColumnPlacement(
+                                    targetEntry.getValue(), List.of(edge)));
+                        }
+                    }
                 }
-            } else if (rel.kind() == RelationKind.ELEMENT_COLLECTION && rel.target() != null) {
-                JoinEdge.ToMany edge = buildToManyEdgeForElementCollection(entity, rel);
-                if (edge == null) continue;
-                String childTable = rel.childTable() != null ? rel.childTable() : rel.target().tableName();
-                Map<String, ColumnRef> targetRefs = computeLocalColumnRefsWithTable(rel.target(), childTable);
-                for (Map.Entry<String, ColumnRef> targetEntry : targetRefs.entrySet()) {
-                    String fullPath = rel.propertyName() + "." + targetEntry.getKey();
-                    paths.put(fullPath, new ColumnPlacement(
-                            targetEntry.getValue(), List.of(edge)));
+                case TypeDefinition.Prop.ElementCollection ec -> {
+                    // ElementCollection stores primitives - no nested path resolution
+                    // The collection itself is resolvable via the FK column
                 }
+                default -> {}
             }
         }
 
         return paths;
     }
 
-    private JoinEdge.ToOne buildToOneEdge(TypeDefinition owner, RelationMapping ref) {
-        if (ref.target() == null || ref.target().tableName() == null
-                || ref.target().idColumn() == null || ref.fkColumn() == null) return null;
+    private JoinEdge.ToOne buildAssociationEdge(TypeDefinition owner, TypeDefinition.Prop.Association assoc) {
+        if (assoc.target() == null || assoc.target().tableName() == null
+                || assoc.target().idColumn() == null || assoc.fkColumn() == null) return null;
         return new JoinEdge.ToOne(
-                new ColumnRef.ForeignKey(ref.fkColumn(), owner.tableName()),
-                new ColumnRef.Simple(ref.target().idColumn(), ref.target().tableName()));
+                new ColumnRef.ForeignKey(assoc.fkColumn(), owner.tableName()),
+                new ColumnRef.Simple(assoc.target().idColumn(), assoc.target().tableName()));
     }
 
-    private JoinEdge.ToMany buildToManyEdgeForCollection(TypeDefinition owner, RelationMapping ec) {
+    private JoinEdge.ToMany buildEntityCollectionEdge(TypeDefinition owner, TypeDefinition.Prop.EntityCollection ec) {
         if (ec.target() == null || ec.target().tableName() == null
                 || ec.fkColumn() == null || owner.idColumn() == null) {
             return null;
@@ -479,9 +578,8 @@ public final class TypeModelEmitter {
                 new ColumnRef.ForeignKey(ec.fkColumn(), ec.target().tableName()));
     }
 
-    private JoinEdge.ToMany buildToManyEdgeForElementCollection(TypeDefinition owner, RelationMapping ec) {
-        String childTable = ec.childTable() != null ? ec.childTable()
-                : (ec.target() != null ? ec.target().tableName() : null);
+    private JoinEdge.ToMany buildToManyEdgeForElementCollection(TypeDefinition owner, TypeDefinition.Prop.ElementCollection ec) {
+        String childTable = ec.childTable();
         if (childTable == null || ec.fkColumn() == null || owner.idColumn() == null) {
             return null;
         }
@@ -533,9 +631,9 @@ public final class TypeModelEmitter {
 
         // Collect to-many relation names
         List<String> toManyNames = new ArrayList<>();
-        for (RelationMapping rel : entity.relationMappings()) {
-            if (rel.kind() == RelationKind.TO_MANY || rel.kind() == RelationKind.ELEMENT_COLLECTION) {
-                toManyNames.add(rel.propertyName());
+        for (TypeDefinition.Prop prop : entity.properties()) {
+            if (prop instanceof TypeDefinition.Prop.EntityCollection || prop instanceof TypeDefinition.Prop.ElementCollection) {
+                toManyNames.add(prop.name());
             }
         }
 
@@ -597,38 +695,56 @@ public final class TypeModelEmitter {
         Map<String, List<String>> paths = new LinkedHashMap<>();
 
         // Local paths (scalars and embedded leaves)
-        for (ColumnMapping col : entity.columnMappings()) {
-            paths.put(col.propertyName(),
-                    List.of(rootVar + "." + getter(col.propertyName()) + "()"));
-        }
-        for (RelationMapping rel : entity.relationMappings()) {
-            if (rel.kind() == RelationKind.EMBEDDED && rel.target() != null) {
-                collectEmbeddedValuePaths(paths, rel.target(), rel.target().columnMappings(),
-                        rel.target().relationMappings(),
-                        rootVar + "." + getter(rel.propertyName()) + "()",
-                        rel.propertyName() + ".");
+        for (TypeDefinition.Prop prop : entity.properties()) {
+            switch (prop) {
+                case TypeDefinition.Prop.Scalar s -> paths.put(s.name(),
+                        List.of(rootVar + "." + getter(s.name()) + "()"));
+                case TypeDefinition.Prop.Id id -> paths.put(id.name(),
+                        List.of(rootVar + "." + getter(id.name()) + "()"));
+                case TypeDefinition.Prop.Version v -> paths.put(v.name(),
+                        List.of(rootVar + "." + getter(v.name()) + "()"));
+                case TypeDefinition.Prop.Embedded e -> {
+                    if (e.definition() != null) {
+                        collectEmbeddedValuePaths(paths, e.definition(),
+                                rootVar + "." + getter(e.name()) + "()",
+                                e.name() + ".");
+                    }
+                }
+                default -> {}
             }
         }
 
         // Reference traversals (one level)
-        for (RelationMapping rel : entity.relationMappings()) {
-            if (rel.kind() == RelationKind.TO_ONE && rel.target() != null) {
-                String refGetter = rootVar + "." + getter(rel.propertyName()) + "()";
-                TypeDefinition target = rel.target();
+        for (TypeDefinition.Prop prop : entity.properties()) {
+            if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.target() != null) {
+                String refGetter = rootVar + "." + getter(assoc.name()) + "()";
+                TypeDefinition target = assoc.target();
                 // Target's own columns
-                for (ColumnMapping col : target.columnMappings()) {
-                    String fullPath = rel.propertyName() + "." + col.propertyName();
-                    paths.put(fullPath,
-                            List.of(refGetter + "." + getter(col.propertyName()) + "()"));
-                }
-                // Target's embedded leaves
-                for (RelationMapping targetRel : target.relationMappings()) {
-                    if (targetRel.kind() == RelationKind.EMBEDDED && targetRel.target() != null) {
-                        collectEmbeddedValuePaths(paths, targetRel.target(),
-                                targetRel.target().columnMappings(),
-                                targetRel.target().relationMappings(),
-                                refGetter + "." + getter(targetRel.propertyName()) + "()",
-                                rel.propertyName() + "." + targetRel.propertyName() + ".");
+                for (TypeDefinition.Prop targetProp : target.properties()) {
+                    switch (targetProp) {
+                        case TypeDefinition.Prop.Scalar s -> {
+                            String fullPath = assoc.name() + "." + s.name();
+                            paths.put(fullPath,
+                                    List.of(refGetter + "." + getter(s.name()) + "()"));
+                        }
+                        case TypeDefinition.Prop.Id id -> {
+                            String fullPath = assoc.name() + "." + id.name();
+                            paths.put(fullPath,
+                                    List.of(refGetter + "." + getter(id.name()) + "()"));
+                        }
+                        case TypeDefinition.Prop.Version v -> {
+                            String fullPath = assoc.name() + "." + v.name();
+                            paths.put(fullPath,
+                                    List.of(refGetter + "." + getter(v.name()) + "()"));
+                        }
+                        case TypeDefinition.Prop.Embedded e -> {
+                            if (e.definition() != null) {
+                                collectEmbeddedValuePaths(paths, e.definition(),
+                                        refGetter + "." + getter(e.name()) + "()",
+                                        assoc.name() + "." + e.name() + ".");
+                            }
+                        }
+                        default -> {}
                     }
                 }
             }
@@ -639,21 +755,24 @@ public final class TypeModelEmitter {
 
     private void collectEmbeddedValuePaths(Map<String, List<String>> paths,
                                             TypeDefinition embeddedDef,
-                                            List<ColumnMapping> columns,
-                                            List<RelationMapping> relations,
                                             String accessor, String pathPrefix) {
-        for (ColumnMapping col : columns) {
-            paths.put(pathPrefix + col.propertyName(),
-                    List.of(accessor + "." + getter(col.propertyName()) + "()"));
-        }
-        for (RelationMapping rel : relations) {
-            if (rel.kind() == RelationKind.EMBEDDED && rel.target() != null) {
-                String nestedAccessor = accessor + "." + getter(rel.propertyName()) + "()";
-                String nestedPrefix = pathPrefix + rel.propertyName() + ".";
-                collectEmbeddedValuePaths(paths, rel.target(),
-                        rel.target().columnMappings(),
-                        rel.target().relationMappings(),
-                        nestedAccessor, nestedPrefix);
+        for (TypeDefinition.Prop prop : embeddedDef.properties()) {
+            switch (prop) {
+                case TypeDefinition.Prop.Scalar s -> paths.put(pathPrefix + s.name(),
+                        List.of(accessor + "." + getter(s.name()) + "()"));
+                case TypeDefinition.Prop.Id id -> paths.put(pathPrefix + id.name(),
+                        List.of(accessor + "." + getter(id.name()) + "()"));
+                case TypeDefinition.Prop.Version v -> paths.put(pathPrefix + v.name(),
+                        List.of(accessor + "." + getter(v.name()) + "()"));
+                case TypeDefinition.Prop.Embedded e -> {
+                    if (e.definition() != null) {
+                        String nestedAccessor = accessor + "." + getter(e.name()) + "()";
+                        String nestedPrefix = pathPrefix + e.name() + ".";
+                        collectEmbeddedValuePaths(paths, e.definition(),
+                                nestedAccessor, nestedPrefix);
+                    }
+                }
+                default -> {}
             }
         }
     }

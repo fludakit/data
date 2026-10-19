@@ -4,6 +4,7 @@ import io.github.fludakit.data.query.Connector;
 import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.SortSpec;
+import org.antlr.v4.runtime.tree.TerminalNode;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -127,9 +128,29 @@ public class QbnMethodNameVisitor extends QbnBaseVisitor<ParsedMethodName> {
      * The condition/order property as written, minus the leading capital: the whole rule text is
      * taken verbatim so underscore separators survive ({@code address_street} stays
      * {@code address_street}, not {@code addressstreet}).
+     *
+     * <p>Multi-segment properties separated by underscores ({@code Contacts_Value}) get
+     * dot-separated to form nested paths ({@code contacts.value}), enabling EXISTS subquery
+     * generation for ElementCollection predicates. CamelCase concatenation ({@code ContactsValue})
+     * stays as-is ({@code contactsValue}) for backward compatibility.</p>
      */
     private String propertyName(QbnParser.PropertyContext ctx) {
-        String text = ctx.getText();
-        return Character.toLowerCase(text.charAt(0)) + text.substring(1);
+        List<TerminalNode> humps = ctx.HUMP();
+        List<TerminalNode> underscores = ctx.UNDERSCORE();
+        
+        // If there are underscores between humps, convert to dot-separated path
+        if (!underscores.isEmpty() && humps.size() > 1) {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < humps.size(); i++) {
+                if (i > 0) sb.append('.');
+                String text = humps.get(i).getText();
+                sb.append(Character.toLowerCase(text.charAt(0))).append(text.substring(1));
+            }
+            return sb.toString();
+        } else {
+            // No underscores - treat as single camelCase property name
+            String text = ctx.getText();
+            return Character.toLowerCase(text.charAt(0)) + text.substring(1);
+        }
     }
 }

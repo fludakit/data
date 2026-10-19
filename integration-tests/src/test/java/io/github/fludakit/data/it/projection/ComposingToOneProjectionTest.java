@@ -19,17 +19,17 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Read-side JOIN projection of a COMPOSING to-one reference, end-to-end — see
  * {@code docs/JOIN-PROJECTION.md}.
  *
- * <p>{@link Book#author} is a bare entity field on an {@code @AggregateRoot} whose target is managed
+ * <p>{@link Book#author} is a bare entity field on an {@code @AggregateRoot} whose definition is managed
  * (it has its own {@code @Repository}), so every CRUD read JOIN-projects it: the generated constant
  * carries {@code LEFT JOIN "author" AS "author"} plus {@code "author"."name" AS "author_join_name"},
- * and a generated {@code mapRow_full_crud} materialises the target from those labels. The target
+ * and a generated {@code mapRow_full_crud} materialises the definition from those labels. The definition
  * therefore comes back FULL — not the id-only partial an {@code @Association} would produce.</p>
  *
  * <p>Contract locks:</p>
  * <ul>
  *   <li>a to-one join adds at most one row per parent, so LIMIT/COUNT still count ROOTS;</li>
- *   <li>the join is a LEFT JOIN and the projection is guarded on the target id, so a root with no
- *       target still comes back with a null reference;</li>
+ *   <li>the join is a LEFT JOIN and the projection is guarded on the definition id, so a root with no
+ *       definition still comes back with a null reference;</li>
  *   <li>the paged read keeps its runtime sort/join splice, which must not duplicate a join the base
  *       constant already carries.</li>
  * </ul>
@@ -54,7 +54,7 @@ class ComposingToOneProjectionTest {
         assertThat(back.getAuthor()).isNotNull();
         assertThat(back.getAuthor().getId()).isEqualTo(ursula.getId());
         assertThat(back.getAuthor().getName())
-                .as("a composing to-one read is JOIN-projected, so the target is fully materialised")
+                .as("a composing to-one read is JOIN-projected, so the definition is fully materialised")
                 .isEqualTo("Ursula");
     }
 
@@ -76,7 +76,7 @@ class ComposingToOneProjectionTest {
     @Test
     void rootWithoutATargetComesBackWithANullReference() {
         // LEFT JOIN + the joined mapper's null-id guard: a root whose fk is NULL must still be read,
-        // and its reference must stay null rather than materialise a zero/blank target.
+        // and its reference must stay null rather than materialise a zero/blank definition.
         Book saved = books.save(book("Anonymous", null));
 
         Book back = books.findById(saved.getId()).orElseThrow();

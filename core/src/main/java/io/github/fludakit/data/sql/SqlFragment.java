@@ -150,7 +150,7 @@ public final class SqlFragment {
     /**
      * Renders every accumulated part through {@code dialect}, in SQL's order.
      *
-     * @throws IllegalStateException when no root table was set — a statement without a FROM target
+     * @throws IllegalStateException when no root table was set — a statement without a FROM definition
      *                               is never a valid rendering, and silently emitting one would turn
      *                               a caller's missing step into a database error
      */

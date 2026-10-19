@@ -15,10 +15,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * The estore models are {@code @Entity}. Pins the read semantics of the {@code @Association} header
- * target {@code Order.customer} in that world:
+ * definition {@code Order.customer} in that world:
  *
  * <ul>
- *   <li>a plain entity read (findById) materialises the association target as an id-only partial —
+ *   <li>a plain entity read (findById) materialises the association definition as an id-only partial —
  *       an explicit {@code @Association} reference stays a partial even when the owner is an
  *       {@code @Entity} rather than an {@code @AggregateRoot};</li>
  *   <li>a method-name finder whose predicate traverses the association

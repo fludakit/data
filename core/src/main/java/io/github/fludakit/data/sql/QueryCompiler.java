@@ -166,7 +166,7 @@ public final class QueryCompiler {
             fragment.keyword("DELETE");
         } else {
             // Joined find: every root column is qualified by the root table. Unqualified bare names
-            // become ambiguous the moment a join adds a table sharing a column name (e.g. the target's
+            // become ambiguous the moment a join adds a table sharing a column name (e.g. the definition's
             // own "id"), and a full-materialisation read joins exactly such a table. Qualifying keeps
             // each label = its physical column, so the generated row mapper still reads it by name.
             fragment.keyword("SELECT")

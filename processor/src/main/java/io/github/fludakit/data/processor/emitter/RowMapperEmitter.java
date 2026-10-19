@@ -115,13 +115,13 @@ public final class RowMapperEmitter {
 
     private boolean isRelationEligible(TypeDefinition.Prop rel) {
         if (rel instanceof TypeDefinition.Prop.Embedded embedded) {
-            return isEmbeddedEligible(embedded.target());
+            return isEmbeddedEligible(embedded.definition());
         }
-        if (rel instanceof TypeDefinition.Prop.ToOne) {
-            // Non-back-reference references are eligible (read FK + id-only partial)
+        if (rel instanceof TypeDefinition.Prop.Association) {
+            // Non-back-reference associations are eligible (read FK + id-only partial)
             return true;
         }
-        // TO_MANY, ELEMENT_COLLECTION are NOT eligible
+        // ENTITY_COLLECTION, ELEMENT_COLLECTION are NOT eligible
         return false;
     }
 
@@ -154,17 +154,17 @@ public final class RowMapperEmitter {
         // Read columns (including id)
         for (TypeDefinition.Prop prop : mapping.properties()) {
             if (prop instanceof TypeDefinition.Prop.Scalar s) {
-                addScalarRead(method, entityVar, s.propertyName(), s.columnName(), s.javaType(), "rs");
+                addScalarRead(method, entityVar, s.name(), s.columnName(), s.javaType(), "rs");
             }
         }
 
-        // Read relations (TO_ONE FK and EMBEDDED)
+        // Read relations (ASSOCIATION FK and EMBEDDED)
         for (TypeDefinition.Prop prop : mapping.properties()) {
-            if (prop instanceof TypeDefinition.Prop.ToOne toOne) {
-                addReferenceRead(method, entityVar, toOne, "rs");
+            if (prop instanceof TypeDefinition.Prop.Association assoc) {
+                addAssociationRead(method, entityVar, assoc, "rs");
             } else if (prop instanceof TypeDefinition.Prop.Embedded embedded) {
-                addEmbeddedRead(method, entityVar, embedded.propertyName(),
-                        "", embedded.target(), "rs");
+                addEmbeddedRead(method, entityVar, embedded.name(),
+                        "", embedded.definition(), "rs");
             }
         }
 
@@ -178,11 +178,11 @@ public final class RowMapperEmitter {
 
     private void addRelationRead(MethodSpec.Builder method, String entityVar,
                                   TypeDefinition.Prop rel, String columnPrefix, String rsVar) {
-        if (rel instanceof TypeDefinition.Prop.ToOne toOne) {
-            addReferenceRead(method, entityVar, toOne, rsVar);
+        if (rel instanceof TypeDefinition.Prop.Association assoc) {
+            addAssociationRead(method, entityVar, assoc, rsVar);
         } else if (rel instanceof TypeDefinition.Prop.Embedded embedded) {
-            addEmbeddedRead(method, entityVar, embedded.propertyName(),
-                    columnPrefix, embedded.target(), rsVar);
+            addEmbeddedRead(method, entityVar, embedded.name(),
+                    columnPrefix, embedded.definition(), rsVar);
         }
     }
 
@@ -271,19 +271,19 @@ public final class RowMapperEmitter {
         for (TypeDefinition.Prop prop : voMapping.properties()) {
             if (prop instanceof TypeDefinition.Prop.Scalar s) {
                 String column = newPrefix + s.columnName();
-                String tempVar = voVar + "_" + s.propertyName();
+                String tempVar = voVar + "_" + s.name();
                 addScalarReadToVar(method, tempVar, column, s.javaType(), rsVar);
                 nullCheckVars.add(tempVar);
-                setters.add(() -> method.addStatement("$L.$L($L)", voVar, setterName(s.propertyName()), tempVar));
+                setters.add(() -> method.addStatement("$L.$L($L)", voVar, setterName(s.name()), tempVar));
             }
         }
         for (TypeDefinition.Prop prop : voMapping.properties()) {
-            if (prop instanceof TypeDefinition.Prop.Embedded embedded && embedded.target() != null) {
-                String nestedVar = voVar + "_" + embedded.propertyName();
-                addEmbeddedReadReturning(method, nestedVar, embedded.propertyName(),
-                        newPrefix, embedded.target(), rsVar);
+            if (prop instanceof TypeDefinition.Prop.Embedded embedded && embedded.definition() != null) {
+                String nestedVar = voVar + "_" + embedded.name();
+                addEmbeddedReadReturning(method, nestedVar, embedded.name(),
+                        newPrefix, embedded.definition(), rsVar);
                 nullCheckVars.add(nestedVar);
-                setters.add(() -> method.addStatement("$L.$L($L)", voVar, setterName(embedded.propertyName()), nestedVar));
+                setters.add(() -> method.addStatement("$L.$L($L)", voVar, setterName(embedded.name()), nestedVar));
             }
         }
 
@@ -320,19 +320,19 @@ public final class RowMapperEmitter {
         for (TypeDefinition.Prop prop : voMapping.properties()) {
             if (prop instanceof TypeDefinition.Prop.Scalar s) {
                 String column = newPrefix + s.columnName();
-                String tempVar = voVar + "_" + s.propertyName();
+                String tempVar = voVar + "_" + s.name();
                 addScalarReadToVar(method, tempVar, column, s.javaType(), rsVar);
                 nullCheckVars.add(tempVar);
-                setters.add(() -> method.addStatement("$L.$L($L)", voVar, setterName(s.propertyName()), tempVar));
+                setters.add(() -> method.addStatement("$L.$L($L)", voVar, setterName(s.name()), tempVar));
             }
         }
         for (TypeDefinition.Prop prop : voMapping.properties()) {
-            if (prop instanceof TypeDefinition.Prop.Embedded embedded && embedded.target() != null) {
-                String nestedVar = voVar + "_" + embedded.propertyName();
-                addEmbeddedReadReturning(method, nestedVar, embedded.propertyName(),
-                        newPrefix, embedded.target(), rsVar);
+            if (prop instanceof TypeDefinition.Prop.Embedded embedded && embedded.definition() != null) {
+                String nestedVar = voVar + "_" + embedded.name();
+                addEmbeddedReadReturning(method, nestedVar, embedded.name(),
+                        newPrefix, embedded.definition(), rsVar);
                 nullCheckVars.add(nestedVar);
-                setters.add(() -> method.addStatement("$L.$L($L)", voVar, setterName(embedded.propertyName()), nestedVar));
+                setters.add(() -> method.addStatement("$L.$L($L)", voVar, setterName(embedded.name()), nestedVar));
             }
         }
 
@@ -371,98 +371,92 @@ public final class RowMapperEmitter {
 
     /**
      * Generates code to read a to-one reference from the ResultSet.
-     * For composing TO_ONE relations on aggregate roots, reads the JOIN-projected columns
-     * to create a fully materialized target. Otherwise creates an id-only partial from the FK.
+     * For composing ASSOCIATION relations on aggregate roots, reads the JOIN-projected columns
+     * to create a fully materialized definition. Otherwise creates an id-only partial from the FK.
      */
-    private void addReferenceRead(MethodSpec.Builder method, String entityVar,
-                                  TypeDefinition.Prop.ToOne ref, String rsVar) {
-        String targetFqn = ref.targetTypeName();
-        if (targetFqn == null) return;
+    private void addAssociationRead(MethodSpec.Builder method, String entityVar,
+                                  TypeDefinition.Prop.Association assoc, String rsVar) {
+        if (!(assoc.target() instanceof TypeDefinition.Entity targetEntity)) return;
 
+        String targetFqn = targetEntity.typeName();
         ClassName targetType = ClassName.bestGuess(targetFqn);
-        String fkColumn = ref.fkColumn();
-        
-        // For ALL TO_ONE relations, try to read JOIN-projected columns first, fall back to FK
-        boolean hasTarget = ref.target() != null;
-        
-        if (hasTarget) {
-            // Try to read JOIN-projected columns first (for queries with predicate-driven JOINs or composing TO_ONE)
-            String joinPrefix = ref.propertyName() + "_join_";
-            
-            // Read the joined ID column to check if the join produced data
-            TypeDefinition.Prop.Id targetIdProp = idProp(ref.target());
-            String idTypeFqn = targetIdProp != null ? targetIdProp.javaType() : "java.lang.Long";
-            String joinedIdVar = ref.propertyName() + "_joined_id";
-            String joinIdColumn = joinPrefix + (targetIdProp != null ? targetIdProp.columnName() : "id");
-            
-            // Check if join-projected column exists using ResultSetMetaData
-            method.addStatement("$T $L = null", boxType(idTypeFqn), joinedIdVar);
-            method.addStatement("boolean hasJoinProjection = false");
-            method.beginControlFlow("try");
-            method.addStatement("$T metaData = $L.getMetaData()", ClassName.get("java.sql", "ResultSetMetaData"), rsVar);
-            method.addStatement("int colCount = metaData.getColumnCount()");
-            method.beginControlFlow("for (int i = 1; i <= colCount; i++)");
-            method.beginControlFlow("if ($S.equals(metaData.getColumnLabel(i)))", joinIdColumn);
-            method.addStatement("hasJoinProjection = true");
-            method.addStatement("break");
-            method.endControlFlow();
-            method.endControlFlow();
-            method.nextControlFlow("catch ($T e)", ClassName.get("java.sql", "SQLException"));
-            method.endControlFlow();
-            
-            // If join projection exists, read all joined columns to create full object
-            method.beginControlFlow("if (hasJoinProjection)");
-            CodeBlock joinedIdRead = buildReadExpression(joinIdColumn, idTypeFqn, rsVar);
-            method.addStatement("$L = $L", joinedIdVar, joinedIdRead);
-            method.beginControlFlow("if ($L != null)", joinedIdVar);
-            method.addStatement("$T $L = new $T()", targetType, ref.propertyName(), targetType);
-            method.addStatement("$L.$L($L)", ref.propertyName(), setterName("id"), joinedIdVar);
-            
-            // Read other columns from the joined target
-            for (TypeDefinition.Prop prop : ref.target().properties()) {
-                if (prop instanceof TypeDefinition.Prop.Scalar s && !s.isId()) {
-                    String joinedColAlias = joinPrefix + s.columnName();
-                    CodeBlock colRead = buildReadExpression(joinedColAlias, s.javaType(), rsVar);
-                    method.addStatement("$L.$L($L)", ref.propertyName(), setterName(s.propertyName()), colRead);
-                }
+        String fkColumn = assoc.fkColumn();
+
+        // For ALL ASSOCIATION relations, try to read JOIN-projected columns first, fall back to FK
+
+        // Try to read JOIN-projected columns first (for queries with predicate-driven JOINs or composing TO_ONE)
+        String joinPrefix = assoc.name() + "_join_";
+
+        // Read the joined ID column to check if the join produced data
+        TypeDefinition.Prop.Id targetIdProp = idProp(targetEntity);
+        String idTypeFqn = targetIdProp != null ? targetIdProp.javaType() : "java.lang.Long";
+        String joinedIdVar = assoc.name() + "_joined_id";
+        String joinIdColumn = joinPrefix + (targetIdProp != null ? targetIdProp.columnName() : "id");
+
+        // Check if join-projected column exists using ResultSetMetaData
+        method.addStatement("$T $L = null", boxType(idTypeFqn), joinedIdVar);
+        method.addStatement("boolean hasJoinProjection = false");
+        method.beginControlFlow("try");
+        method.addStatement("$T metaData = $L.getMetaData()", ClassName.get("java.sql", "ResultSetMetaData"), rsVar);
+        method.addStatement("int colCount = metaData.getColumnCount()");
+        method.beginControlFlow("for (int i = 1; i <= colCount; i++)");
+        method.beginControlFlow("if ($S.equals(metaData.getColumnLabel(i)))", joinIdColumn);
+        method.addStatement("hasJoinProjection = true");
+        method.addStatement("break");
+        method.endControlFlow();
+        method.endControlFlow();
+        method.nextControlFlow("catch ($T e)", ClassName.get("java.sql", "SQLException"));
+        method.endControlFlow();
+
+        // If join projection exists, read all joined columns to create full object
+        method.beginControlFlow("if (hasJoinProjection)");
+        CodeBlock joinedIdRead = buildReadExpression(joinIdColumn, idTypeFqn, rsVar);
+        method.addStatement("$L = $L", joinedIdVar, joinedIdRead);
+        method.beginControlFlow("if ($L != null)", joinedIdVar);
+        method.addStatement("$T $L = new $T()", targetType, assoc.name(), targetType);
+        method.addStatement("$L.$L($L)", assoc.name(), setterName("id"), joinedIdVar);
+
+        // Read other columns from the joined definition
+        for (TypeDefinition.Prop prop : targetEntity.properties()) {
+            if (prop instanceof TypeDefinition.Prop.Scalar s) {
+                String joinedColAlias = joinPrefix + s.columnName();
+                CodeBlock colRead = buildReadExpression(joinedColAlias, s.javaType(), rsVar);
+                method.addStatement("$L.$L($L)", assoc.name(), setterName(s.name()), colRead);
             }
-            method.addStatement("$L.$L($L)", entityVar, setterName(ref.propertyName()), ref.propertyName());
-            method.endControlFlow();
-            method.nextControlFlow("else");
-            
-            // Fallback: no JOIN projection available, create id-only partial from FK
-            String fkVar = ref.propertyName() + "_fk";
-            
-            // Check if FK column exists using ResultSetMetaData before reading
-            method.addStatement("$T $L = null", boxType(idTypeFqn), fkVar);
-            method.addStatement("boolean hasFkColumn = false");
-            method.beginControlFlow("try");
-            method.addStatement("$T metaData = $L.getMetaData()", ClassName.get("java.sql", "ResultSetMetaData"), rsVar);
-            method.addStatement("int colCount = metaData.getColumnCount()");
-            method.beginControlFlow("for (int i = 1; i <= colCount; i++)");
-            method.beginControlFlow("if ($S.equals(metaData.getColumnLabel(i)))", fkColumn);
-            method.addStatement("hasFkColumn = true");
-            method.addStatement("break");
-            method.endControlFlow();
-            method.endControlFlow();
-            method.nextControlFlow("catch ($T e)", ClassName.get("java.sql", "SQLException"));
-            method.endControlFlow();
-            
-            // Only read FK if column exists
-            method.beginControlFlow("if (hasFkColumn)");
-            CodeBlock fkRead = buildReadExpression(fkColumn, idTypeFqn, rsVar);
-            method.addStatement("$L = $L", fkVar, fkRead);
-            method.beginControlFlow("if ($L != null)", fkVar);
-            method.addStatement("$T $L = new $T()", targetType, ref.propertyName(), targetType);
-            method.addStatement("$L.$L($L)", ref.propertyName(), setterName("id"), fkVar);
-            method.addStatement("$L.$L($L)", entityVar, setterName(ref.propertyName()), ref.propertyName());
-            method.endControlFlow();
-            method.endControlFlow();
-            method.endControlFlow();
-        } else {
-            // No target TypeDefinition available - cannot materialize this relation
-            // This shouldn't happen in normal cases, but handle gracefully
         }
+        method.addStatement("$L.$L($L)", entityVar, setterName(assoc.name()), assoc.name());
+        method.endControlFlow();
+        method.nextControlFlow("else");
+
+        // Fallback: no JOIN projection available, create id-only partial from FK
+        String fkVar = assoc.name() + "_fk";
+
+        // Check if FK column exists using ResultSetMetaData before reading
+        method.addStatement("$T $L = null", boxType(idTypeFqn), fkVar);
+        method.addStatement("boolean hasFkColumn = false");
+        method.beginControlFlow("try");
+        method.addStatement("$T metaData = $L.getMetaData()", ClassName.get("java.sql", "ResultSetMetaData"), rsVar);
+        method.addStatement("int colCount = metaData.getColumnCount()");
+        method.beginControlFlow("for (int i = 1; i <= colCount; i++)");
+        method.beginControlFlow("if ($S.equals(metaData.getColumnLabel(i)))", fkColumn);
+        method.addStatement("hasFkColumn = true");
+        method.addStatement("break");
+        method.endControlFlow();
+        method.endControlFlow();
+        method.nextControlFlow("catch ($T e)", ClassName.get("java.sql", "SQLException"));
+        method.endControlFlow();
+
+        // Only read FK if column exists
+        method.beginControlFlow("if (hasFkColumn)");
+        CodeBlock fkRead = buildReadExpression(fkColumn, idTypeFqn, rsVar);
+        method.addStatement("$L = $L", fkVar, fkRead);
+        method.beginControlFlow("if ($L != null)", fkVar);
+        method.addStatement("$T $L = new $T()", targetType, assoc.name(), targetType);
+        method.addStatement("$L.$L($L)", assoc.name(), setterName("id"), fkVar);
+        method.addStatement("$L.$L($L)", entityVar, setterName(assoc.name()), assoc.name());
+        method.endControlFlow();
+        method.endControlFlow();
+        method.endControlFlow();
     }
 
     /** Returns the id Prop from a TypeDefinition, or null if none. */

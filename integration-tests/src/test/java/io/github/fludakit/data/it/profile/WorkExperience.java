@@ -4,8 +4,8 @@ import io.github.fludakit.data.annotation.Entity;
 import io.github.fludakit.data.annotation.Identity;
 
 /**
- * Composition entity-collection target of {@code Profile.workHistory}. The bare {@code profile}
- * inverse field classifies as a non-composing {@code Reference} (owner {@code @Entity}, target
+ * Composition entity-collection definition of {@code Profile.workHistory}. The bare {@code profile}
+ * inverse field classifies as a non-composing {@code Reference} (owner {@code @Entity}, definition
  * {@code @AggregateRoot}) mapping to the same {@code profile_id} column the aggregate's
  * {@code EntityCollection} loader walks — on direct reads it materialises as an id-only partial.
  */

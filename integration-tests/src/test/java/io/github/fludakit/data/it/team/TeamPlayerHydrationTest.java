@@ -73,7 +73,7 @@ class TeamPlayerHydrationTest {
         foundPlayer.getTeam().setName("Falcons II");                   // write via partial ref
         players.update(foundPlayer);
         assertThat(teams.findById(savedTeam.getId()).orElseThrow().getName()).isEqualTo("Falcons");
-        // ^ documents that a partial MANY_TO_ONE target is NOT cascaded on update — replace-all
+        // ^ documents that a partial MANY_TO_ONE definition is NOT cascaded on update — replace-all
         //   applies to element collections only, and composition cascades require @AggregateRoot;
         //   this assertion locks that boundary.
     }

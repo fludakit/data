@@ -1,5 +1,7 @@
 package io.github.fludakit.data.processor;
 
+import io.github.fludakit.data.metadata.TypeDefinition;
+import io.github.fludakit.data.processor.emitter.RowMapperEmitter;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.sql.H2Dialect;
 import io.github.fludakit.data.sql.SqlDialect;
@@ -55,7 +57,12 @@ public class RepositoryProcessor extends AbstractProcessor {
         if (roundEnv.processingOver()) return false;
 
         // Phase 1: Scan types
-        typeMappingVisitor.scanRound(roundEnv);
+        try {
+            typeMappingVisitor.scanRound(roundEnv);
+        } catch (RuntimeException e) {
+            String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getName();
+            diagnostics.error("fluda-data: " + msg, null);
+        }
 
         // Phase 2: Visit repositories
         for (Element element : roundEnv.getElementsAnnotatedWith(jakarta.data.repository.Repository.class)) {
@@ -70,7 +77,34 @@ public class RepositoryProcessor extends AbstractProcessor {
                     repository);
             }
         }
+        
+        // Phase 3: Generate row mappers for all entity types (including association targets)
+        generateMissingRowMappers();
+        
+        // Phase 3: Generate row mappers for all entity types (including association targets)
+        generateMissingRowMappers();
+        
         return false;
+    }
+    
+    private void generateMissingRowMappers() {
+        RowMapperEmitter emitter = new RowMapperEmitter(types, elements, filer);
+        
+        // Generate row mappers for entities and aggregates
+        for (String fqn : typeMappingVisitor.managedEntities()) {
+            TypeDefinition def = typeMappingVisitor.get(fqn);
+            if (def != null && (def instanceof TypeDefinition.Entity || def instanceof TypeDefinition.Aggregate)) {
+                emitter.emit(def);
+            }
+        }
+        
+        // Generate row mappers for value objects used in element collections
+        for (String fqn : typeMappingVisitor.elementCollectionValueObjects()) {
+            TypeDefinition def = typeMappingVisitor.get(fqn);
+            if (def != null && def instanceof TypeDefinition.ValueObject) {
+                emitter.emit(def);
+            }
+        }
     }
 
     private SqlDialect resolveDialect(String option) {

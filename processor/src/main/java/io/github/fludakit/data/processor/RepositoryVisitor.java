@@ -5,9 +5,6 @@ import com.squareup.javapoet.FieldSpec;
 import com.squareup.javapoet.JavaFile;
 import com.squareup.javapoet.MethodSpec;
 import com.squareup.javapoet.TypeSpec;
-import io.github.fludakit.data.metadata.ColumnMapping;
-import io.github.fludakit.data.metadata.RelationKind;
-import io.github.fludakit.data.metadata.RelationMapping;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.RepositoryContext;
@@ -145,11 +142,8 @@ final class RepositoryVisitor {
         }
 
         // 4a. Generate row mappers for VO types used in element collections
-        for (RelationMapping rel : entityMapping.relationMappings()) {
-            if (rel.kind() == RelationKind.ELEMENT_COLLECTION && rel.target() != null) {
-                rowMapperEmitter.emit(rel.target());
-            }
-        }
+        // Note: ElementCollection stores element type FQN, not a TypeDefinition
+        // Row mappers for element types are generated when scanning the VO itself
 
         // 4b. Generate static metamodel (_Entity interface + navigable member classes)
         MetamodelEmitter metamodelEmitter = new MetamodelEmitter(filer, diagnostics);
@@ -209,7 +203,7 @@ final class RepositoryVisitor {
                 String methodName = method.getSimpleName().toString();
                 String repoName = repository.getQualifiedName().toString();
                 throw new IllegalStateException(
-                    "Cannot resolve method '" + methodName + "' in repository " + 
+                    "Cannot resolve method '" + methodName + "' in repository " +
                     repoName + ". Either add a lifecycle annotation " +
                     "(@Find, @Save, @Insert, @Update, @Delete), use a recognized CRUD method name " +
                     "(findById, save, etc.), use Query By Name (findByXxx), or add a custom @Query annotation."
@@ -390,17 +384,17 @@ final class RepositoryVisitor {
     private boolean extendsJakartaDataInterface() {
         // Check superclass
         if (isJakartaDataInterface(repository.getSuperclass())) return true;
-        
+
         // Check direct interfaces
         for (TypeMirror iface : repository.getInterfaces()) {
             if (isJakartaDataInterface(iface)) return true;
         }
-        
+
         // Check transitive interfaces
         for (TypeMirror iface : getAllInterfaces(repository)) {
             if (isJakartaDataInterface(iface)) return true;
         }
-        
+
         return false;
     }
 
@@ -408,7 +402,7 @@ final class RepositoryVisitor {
         if (type == null || type.getKind() != TypeKind.DECLARED) return false;
         TypeElement te = (TypeElement) ((DeclaredType) type).asElement();
         String fqn = te.getQualifiedName().toString();
-        return fqn.equals(CRUD_REPOSITORY) || 
+        return fqn.equals(CRUD_REPOSITORY) ||
                fqn.equals("jakarta.data.repository.BasicRepository") ||
                fqn.equals(DATA_REPOSITORY);
     }
@@ -424,13 +418,38 @@ final class RepositoryVisitor {
 
     private MethodContext resolveAnnotatedMethod(ExecutableElement method, String methodName,
                                                   Operation operation, TypeDefinition entityMapping) {
+        // Validate that write operations accept entity or entity collection parameters
+        if (operation == Operation.SAVE || operation == Operation.INSERT || operation == Operation.UPDATE || operation == Operation.DELETE) {
+            if (!method.getParameters().isEmpty()) {
+                VariableElement firstParam = method.getParameters().get(0);
+                String paramType = firstParam.asType().toString();
+                String entityType = entityMapping.typeName();
+                
+                // Check if parameter is the entity type, a generic type variable (S extends Entity), 
+                // or a collection of entities (including generic collections like List<S>, List<? extends T>)
+                boolean isValid = paramType.equals(entityType) 
+                        || paramType.startsWith("java.util.List<" + entityType)
+                        || paramType.startsWith("java.util.Collection<" + entityType)
+                        // Allow generic type parameters (e.g., <S extends Entity> S save(S entity))
+                        || (paramType.length() == 1 && Character.isUpperCase(paramType.charAt(0)))
+                        // Allow collections of generic type parameters (e.g., List<S>, List<? extends T>)
+                        || paramType.matches("java\\.util\\.(List|Collection)<\\??\\s*(extends\\s+)?[A-Z]>");
+                
+                if (!isValid) {
+                    throw new IllegalArgumentException(
+                            "Method " + methodName + " carries a lifecycle annotation and must accept "
+                            + "the repository entity type (" + entityType + ") or a collection thereof, not " + paramType);
+                }
+            }
+        }
+        
         ResultKind resultKind = resolveResultKind(method, operation);
         PagingMode pagingMode = resolvePagingMode(method, resultKind);
         List<Predicate> predicates = resolveByAnnotations(method, entityMapping);
-        
+
         // Replace Jakarta Data's "id(this)" JDQL convention with the actual ID property name
         predicates = replaceIdThis(predicates, entityMapping);
-        
+
         List<SortSpec> sorts = resolveOrderByAnnotations(method);
         List<ParamBinding> paramBindings = buildParamBindings(method, predicates);
         boolean distinct = false;
@@ -524,7 +543,9 @@ final class RepositoryVisitor {
             // Try to split the camelCase path
             String resolvedPath = trySplitCamelCasePath(path, entityMapping);
             if (resolvedPath != null && !resolvedPath.equals(path)) {
-                resolved.add(new Predicate(resolvedPath, p.operator(), p.param(), p.connector(), p.ignoreCase()));
+                // When path is resolved, update param to match the resolved path
+                String resolvedParam = io.github.fludakit.data.sql.QueryCompiler.paramName(resolvedPath);
+                resolved.add(new Predicate(resolvedPath, p.operator(), resolvedParam, p.connector(), p.ignoreCase()));
             } else {
                 resolved.add(p);
             }
@@ -542,20 +563,34 @@ final class RepositoryVisitor {
             if (Character.isUpperCase(path.charAt(i))) {
                 String head = path.substring(0, i);
                 String tail = Character.toLowerCase(path.charAt(i)) + path.substring(i + 1);
-                // Check if head is a known property (column or relation)
-                boolean isProperty = mapping.columnMapping(head) != null
-                        || mapping.relationMapping(head) != null;
-                if (isProperty) {
-                    // head is a property, check if tail resolves in the target
+                // Check if head is a known property
+                TypeDefinition.Prop prop = mapping.findProperty(head);
+                if (prop != null) {
+                    // head is a property, check if tail resolves in the definition
                     String fullPath = head + "." + tail;
-                    try {
-                        mapping.resolvePath(fullPath);
+                    
+                    // Special handling for ElementCollection - can't use resolve() directly
+                    if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
+                        TypeDefinition elementType = typeMappingVisitor.get(ec.elementType());
+                        if (elementType != null && elementType.findProperty(tail) != null) {
+                            return fullPath;
+                        }
+                        // If element type not found in cache yet, assume path is valid
+                        // and let SQL generation handle it with EXISTS subquery
                         return fullPath;
-                    } catch (Exception e) {
-                        // tail doesn't resolve, try deeper splits
-                        String resolvedTail = trySplitCamelCasePath(tail, getTargetMapping(mapping, head));
-                        if (resolvedTail != null && !resolvedTail.equals(tail)) {
-                            return head + "." + resolvedTail;
+                    } else {
+                        try {
+                            mapping.resolve(fullPath);
+                            return fullPath;
+                        } catch (Exception e) {
+                            // tail doesn't resolve, try deeper splits
+                            TypeDefinition targetMapping = getTargetMapping(mapping, head);
+                            if (targetMapping != null) {
+                                String resolvedTail = trySplitCamelCasePath(tail, targetMapping);
+                                if (resolvedTail != null && !resolvedTail.equals(tail)) {
+                                    return head + "." + resolvedTail;
+                                }
+                            }
                         }
                     }
                 }
@@ -565,11 +600,17 @@ final class RepositoryVisitor {
     }
 
     /**
-     * Gets the target TypeDefinition for a property name, or null if not resolvable.
+     * Gets the definition TypeDefinition for a property name, or null if not resolvable.
      */
     private TypeDefinition getTargetMapping(TypeDefinition mapping, String propName) {
-        RelationMapping rel = mapping.relationMapping(propName);
-        if (rel != null) return rel.target();
+        TypeDefinition.Prop prop = mapping.findProperty(propName);
+        if (prop instanceof TypeDefinition.Prop.Association assoc) return assoc.target();
+        if (prop instanceof TypeDefinition.Prop.EntityCollection ec) return ec.target();
+        if (prop instanceof TypeDefinition.Prop.Embedded emb) return emb.definition();
+        if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
+            // For element collections, look up the element type definition from cache
+            return typeMappingVisitor.get(ec.elementType());
+        }
         return null;
     }
 
@@ -726,7 +767,7 @@ final class RepositoryVisitor {
         int slotIndex = 0;
         for (Predicate pred : predicates) {
             Operator op = pred.operator();
-            
+
             if (op == Operator.BETWEEN || op == Operator.NOT_BETWEEN) {
                 // BETWEEN needs TWO consecutive parameter slots -> _from and _to
                 if (slotIndex + 1 < nonPagingParamIndices.size()) {
@@ -745,7 +786,7 @@ final class RepositoryVisitor {
                 }
             }
         }
-        
+
         return bindings;
     }
 
@@ -964,9 +1005,8 @@ final class RepositoryVisitor {
      * Returns the Java property name of the primary key column from a TypeDefinition.
      */
     private static String idPropertyName(TypeDefinition type) {
-        for (ColumnMapping col : type.columnMappings()) {
-            if (col.isId()) return col.propertyName();
-        }
+        if (type instanceof TypeDefinition.Entity e) return e.id().name();
+        if (type instanceof TypeDefinition.Aggregate a) return a.id().name();
         return null;
     }
 }

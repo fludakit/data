@@ -276,10 +276,10 @@ final class ProcessorHarness {
     /**
      * Writes the EntityCollection fixture (package {@code exa}): {@code Order} is an
      * {@code @AggregateRoot} carrying {@code List<Line> lines}; {@code Line} is a MANAGED
-     * {@code @Entity} (its own {@code LineRepository}, which is what makes it a managed target)
+     * {@code @Entity} (its own {@code LineRepository}, which is what makes it a managed definition)
      * with {@code String product} and
      * a back-reference {@code Order order}, so the one-to-many inverse resolves to the fk column
-     * {@code "order_id"} on the target table {@code "line"}.
+     * {@code "order_id"} on the definition table {@code "line"}.
      */
 
     static void writeLinesFixture(Path sourceDir) throws Exception {
@@ -360,7 +360,7 @@ final class ProcessorHarness {
         } else {
             compileWithDialect(sourceDir, classesDir, generatedDir, dialect, "Item.java", "Items.java");
         }
-        return sqlFlat(generatedDir.resolve("ups/ItemsImpl.java"));
+        return sqlFlat(generatedDir.resolve("ups/Items_.java"));
     }
 
     static void compile(Path sourceDir, Path classesDir, Path generatedDir, String... fileNames) throws Exception {

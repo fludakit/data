@@ -1,9 +1,6 @@
 package io.github.fludakit.data.sql;
 
-import io.github.fludakit.data.metadata.ColumnMapping;
 import io.github.fludakit.data.metadata.ColumnRef;
-import io.github.fludakit.data.metadata.RelationKind;
-import io.github.fludakit.data.metadata.RelationMapping;
 import io.github.fludakit.data.metadata.TypeDefinition;
 
 import java.util.List;
@@ -18,28 +15,52 @@ final class TestMappings {
     }
 
     /** A plain entity with explicit columns and relations. */
-    static TypeDefinition entity(String typeName, String tableName, ColumnMapping idColumn,
-                                 List<ColumnMapping> columns, List<RelationMapping> relations) {
-        return new TypeDefinition(typeName, tableName, idColumn.columnName(), false, columns, relations);
+    static TypeDefinition entity(String typeName, String tableName, TypeDefinition.Prop.Id idProp,
+                                 List<TypeDefinition.Prop.Scalar> scalars, List<TypeDefinition.Prop> relations) {
+        return new TypeDefinition.Entity(
+                typeName,
+                tableName,
+                idProp,
+                null, // no version
+                scalars,
+                List.of(), // no embedded
+                filterType(relations, TypeDefinition.Prop.Association.class),
+                filterType(relations, TypeDefinition.Prop.EntityCollection.class),
+                filterType(relations, TypeDefinition.Prop.ElementCollection.class)
+        );
     }
 
     /** An aggregate root with explicit columns and relations. */
-    static TypeDefinition aggregateRoot(String typeName, String tableName, ColumnMapping idColumn,
-                                        List<ColumnMapping> columns, List<RelationMapping> relations) {
-        // Include ID column at the start of the columns list
-        List<ColumnMapping> allColumns = new java.util.ArrayList<>();
-        allColumns.add(idColumn);
-        allColumns.addAll(columns);
-        return new TypeDefinition(typeName, tableName, idColumn.columnName(), true, allColumns, relations);
+    static TypeDefinition aggregateRoot(String typeName, String tableName, TypeDefinition.Prop.Id idProp,
+                                        List<TypeDefinition.Prop.Scalar> scalars, List<TypeDefinition.Prop> relations) {
+        return new TypeDefinition.Aggregate(
+                typeName,
+                tableName,
+                idProp,
+                null, // no version
+                scalars,
+                List.of(), // no embedded
+                filterType(relations, TypeDefinition.Prop.Association.class),
+                filterType(relations, TypeDefinition.Prop.EntityCollection.class),
+                filterType(relations, TypeDefinition.Prop.ElementCollection.class)
+        );
     }
 
     /**
      * An aggregate root with an explicit columnRefs index.
      */
-    static TypeDefinition aggregateRootWithRefs(String typeName, String tableName, ColumnMapping idColumn,
-                                                List<ColumnMapping> columns, List<RelationMapping> relations,
+    static TypeDefinition aggregateRootWithRefs(String typeName, String tableName, TypeDefinition.Prop.Id idProp,
+                                                List<TypeDefinition.Prop.Scalar> scalars, List<TypeDefinition.Prop> relations,
                                                 Map<String, ColumnRef> columnRefs) {
         // For tests that need custom columnRefs, we'd need a wrapper - simplified for now
-        return new TypeDefinition(typeName, tableName, idColumn.columnName(), true, columns, relations);
+        return aggregateRoot(typeName, tableName, idProp, scalars, relations);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T extends TypeDefinition.Prop> List<T> filterType(List<TypeDefinition.Prop> props, Class<T> type) {
+        return props.stream()
+                .filter(type::isInstance)
+                .map(type::cast)
+                .toList();
     }
 }

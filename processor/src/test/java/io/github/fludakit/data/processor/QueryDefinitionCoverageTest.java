@@ -55,7 +55,7 @@ class QueryDefinitionCoverageTest {
 
         compile(sourceDir, classesDir, generatedDir, "Item.java", "Items.java");
 
-        String queries = sqlFlat(generatedDir.resolve("cover/ItemsQueries.java"));
+        String queries = sqlFlat(generatedDir.resolve("cover/Items_.java"));
         assertTrue(queries.contains("BY_NAME_QUERY = new QueryDefinition.Native("),
                 "a @Query method publishes a Native definition:" + System.lineSeparator() + queries);
         assertTrue(queries.contains("SAVE_QUERY = new QueryDefinition.Upsert("),

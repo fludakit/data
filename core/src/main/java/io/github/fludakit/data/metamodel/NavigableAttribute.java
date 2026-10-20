@@ -11,7 +11,7 @@ package io.github.fludakit.data.metamodel;
  * {@code TypeMapping.columnRefs()} index.</p>
  *
  * @param <T> the owner type
- * @param <U> the navigated target type (value object, associated entity, or element type)
+ * @param <U> the navigated definition type (value object, associated entity, or element type)
  */
 public sealed interface NavigableAttribute<T, U> extends PathAttribute<T>
         permits EntityAttribute, EmbeddableAttribute, ListAttribute {

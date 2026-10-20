@@ -98,7 +98,7 @@ class CustomerRepositoryTest {
         assertThat(saved.getId()).isNotNull();
 
         Order reloaded = orders.findById(saved.getId()).orElseThrow();
-        // An @Association reference target materializes as an id-only partial in the row mapper.
+        // An @Association reference definition materializes as an id-only partial in the row mapper.
         assertThat(reloaded.getCustomer()).isNotNull();
         assertThat(reloaded.getCustomer().getId()).isEqualTo(ana.getId());
         assertThat(reloaded.getCustomer().getName()).isNull();

@@ -5,7 +5,7 @@ import io.github.fludakit.data.annotation.Identity;
 
 /**
  * The owner of the composing to-one projection corpus: {@code author} is a bare entity field on an
- * {@code @AggregateRoot} whose target is managed, so it classifies as COMPOSING and every CRUD read
+ * {@code @AggregateRoot} whose definition is managed, so it classifies as COMPOSING and every CRUD read
  * JOIN-projects it onto the book's own row instead of re-reading it in a second phase.
  *
  * <p>The fk column is {@code author_id} on {@code book}; the join is a plain LEFT JOIN, so a book

@@ -28,7 +28,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code update}/{@code deleteById} now cascade composition entity collections (insert children with
  * the inverse fk taken from the root id; update replaces all child rows like element collections),
  * and the paged {@code findAll} join chain is spliced onto a root-table-QUALIFIED find constant so a
- * joined target sharing the {@code id} column name is no longer ambiguous. The supported child-repo +
+ * joined definition sharing the {@code id} column name is no longer ambiguous. The supported child-repo +
  * inverse-fk write path stays covered by {@link #aggregateRoundTripsAllCollections}.</p>
  */
 @EnableAutoWeld
@@ -129,7 +129,7 @@ class ProfileCvTest {
 
     @Test
     void sortThroughCollectionPathContributesJoin() {
-        // A joined sort target shares the "id" column name with the root, so the paged findAll keeps
+        // A joined sort definition shares the "id" column name with the root, so the paged findAll keeps
         // TWO find constants — the plain SQL_FIND_ALL and a root-table-QUALIFIED join variant — and
         // picks the qualified one at runtime whenever the resolved sort refs contribute a LEFT JOIN.
         // Without the qualified variant the root select list is ambiguous and the read fails.

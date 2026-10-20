@@ -3,6 +3,7 @@ package io.github.fludakit.data.processor.emitter;
 import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.CodeBlock;
 import com.squareup.javapoet.MethodSpec;
+import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.RepositoryContext;
 import io.github.fludakit.data.processor.support.MethodOverrides;
@@ -140,11 +141,250 @@ public final class FindEmitter {
     private String buildSelectSql(RepositoryContext ctx, MethodContext method) {
         SqlBuilder sqlBuilder = new SqlBuilder(ctx.entity());
         sqlBuilder.dialect(dialect);
+        
+        // Check if entity has composing associations that need JOIN projection
+        List<TypeDefinition.Prop.Association> composingAssocs = getComposingAssociations(ctx.entity());
+        
+        // Also check if predicates traverse any associations (predicate-driven JOINs)
+        List<TypeDefinition.Prop.Association> predicateDrivenAssocs = getPredicateDrivenAssociations(ctx, method);
+        
+        // Combine both sets of associations
+        List<TypeDefinition.Prop.Association> allAssocs = new ArrayList<>();
+        allAssocs.addAll(composingAssocs);
+        for (TypeDefinition.Prop.Association assoc : predicateDrivenAssocs) {
+            if (!allAssocs.contains(assoc)) {
+                allAssocs.add(assoc);
+            }
+        }
+        
+        if (!allAssocs.isEmpty()) {
+            // Build SQL with LEFT JOINs for associations
+            return buildSelectWithComposingJoins(ctx, allAssocs, method);
+        }
+        
         ResultKind rk = method.resultKind() == ResultKind.COUNT || method.resultKind() == ResultKind.EXISTS
                 ? ResultKind.LIST : method.resultKind();
         return sqlBuilder.render(new QueryDefinition.Read(
                 rk, method.predicates(), method.sorts(),
                 PagingMode.NONE, LimitSpec.none(), List.of(), List.of(), method.distinct()));
+    }
+    
+    /**
+     * Returns associations that are traversed in method predicates.
+     * These need JOIN projection to fully materialize the target.
+     */
+    private List<TypeDefinition.Prop.Association> getPredicateDrivenAssociations(RepositoryContext ctx, MethodContext method) {
+        List<TypeDefinition.Prop.Association> result = new ArrayList<>();
+        
+        for (Predicate pred : method.predicates()) {
+            String propPath = pred.property();
+            if (propPath.contains(".")) {
+                String firstSegment = propPath.substring(0, propPath.indexOf('.'));
+                
+                // Check if this segment is an association
+                for (TypeDefinition.Prop prop : getAllProperties(ctx.entity())) {
+                    if (prop instanceof TypeDefinition.Prop.Association assoc 
+                        && assoc.name().equals(firstSegment)
+                        && !result.contains(assoc)) {
+                        result.add(assoc);
+                    }
+                }
+            }
+        }
+        
+        return result;
+    }
+    
+    /**
+     * Returns all composing to-one associations for an entity.
+     */
+    private List<TypeDefinition.Prop.Association> getComposingAssociations(TypeDefinition entity) {
+        List<TypeDefinition.Prop.Association> result = new ArrayList<>();
+        
+        // Handle both Entity and Aggregate types
+        java.util.List<TypeDefinition.Prop.Association> associations;
+        if (entity instanceof TypeDefinition.Entity e) {
+            associations = e.associations();
+        } else if (entity instanceof TypeDefinition.Aggregate a) {
+            associations = a.associations();
+        } else {
+            return result; // ValueObject or other type - no associations
+        }
+        
+        for (TypeDefinition.Prop.Association assoc : associations) {
+            if (assoc.composition()) {
+                result.add(assoc);
+            }
+        }
+        return result;
+    }
+    
+    /**
+     * Returns all properties from a TypeDefinition (Entity, Aggregate, or ValueObject).
+     */
+    private java.util.List<TypeDefinition.Prop> getAllProperties(TypeDefinition entity) {
+        java.util.List<TypeDefinition.Prop> props = new ArrayList<>();
+        
+        if (entity instanceof TypeDefinition.Entity e) {
+            if (e.id() != null) props.add(e.id());
+            if (e.version() != null) props.add(e.version());
+            props.addAll(e.scalars());
+            props.addAll(e.embedded());
+            props.addAll(e.associations());
+            props.addAll(e.entityCollections());
+            props.addAll(e.elementCollections());
+        } else if (entity instanceof TypeDefinition.Aggregate a) {
+            if (a.id() != null) props.add(a.id());
+            if (a.version() != null) props.add(a.version());
+            props.addAll(a.scalars());
+            props.addAll(a.embedded());
+            props.addAll(a.associations());
+            props.addAll(a.entityCollections());
+            props.addAll(a.elementCollections());
+        } else if (entity instanceof TypeDefinition.ValueObject vo) {
+            props.addAll(vo.scalars());
+            props.addAll(vo.embedded());
+            props.addAll(vo.associations());
+            props.addAll(vo.entityCollections());
+            props.addAll(vo.elementCollections());
+        }
+        
+        return props;
+    }
+    
+    /**
+     * Builds SELECT SQL with LEFT JOINs for composing associations.
+     */
+    private String buildSelectWithComposingJoins(RepositoryContext ctx, 
+                                                  List<TypeDefinition.Prop.Association> composingAssocs,
+                                                  MethodContext method) {
+        String rootTable = dialect.quoteIdentifier(ctx.entity().tableName());
+        List<String> selectColumns = new ArrayList<>();
+        List<String> joinClauses = new ArrayList<>();
+        
+        // Add root table columns
+        for (TypeDefinition.Prop prop : getAllProperties(ctx.entity())) {
+            if (prop instanceof TypeDefinition.Prop.Scalar s) {
+                selectColumns.add(rootTable + "." + dialect.quoteIdentifier(s.columnName()));
+            } else if (prop instanceof TypeDefinition.Prop.Id id) {
+                selectColumns.add(rootTable + "." + dialect.quoteIdentifier(id.columnName()));
+            } else if (prop instanceof TypeDefinition.Prop.Version v) {
+                selectColumns.add(rootTable + "." + dialect.quoteIdentifier(v.columnName()));
+            } else if (prop instanceof TypeDefinition.Prop.Association assoc && !assoc.composition()) {
+                // Non-composing associations: just the FK column
+                if (assoc.fkColumn() != null) {
+                    selectColumns.add(rootTable + "." + dialect.quoteIdentifier(assoc.fkColumn()));
+                }
+            }
+        }
+        
+        // Add LEFT JOINs and columns for composing associations
+        for (TypeDefinition.Prop.Association assoc : composingAssocs) {
+            String childTable = dialect.quoteIdentifier(assoc.target().tableName());
+            // Use association name as the join alias to match RowMapperEmitter expectations
+            String joinAlias = assoc.name();
+            String fkColumn = dialect.quoteIdentifier(assoc.fkColumn());
+            
+            // Add LEFT JOIN - FK is on the root table, pointing to child's id
+            joinClauses.add("LEFT JOIN " + childTable + " AS " + joinAlias 
+                + " ON " + joinAlias + "." + dialect.quoteIdentifier("id") + " = " + rootTable + "." + fkColumn);
+            
+            // Add child table columns with association name prefix for row mapper compatibility
+            String columnPrefix = assoc.name() + "_join_";
+            for (TypeDefinition.Prop childProp : getAllProperties(assoc.target())) {
+                if (childProp instanceof TypeDefinition.Prop.Scalar s) {
+                    selectColumns.add(joinAlias + "." + dialect.quoteIdentifier(s.columnName()) 
+                        + " AS " + dialect.quoteIdentifier(columnPrefix + s.columnName()));
+                } else if (childProp instanceof TypeDefinition.Prop.Id id) {
+                    selectColumns.add(joinAlias + "." + dialect.quoteIdentifier(id.columnName())
+                        + " AS " + dialect.quoteIdentifier(columnPrefix + id.columnName()));
+                }
+            }
+        }
+        
+        // Build WHERE clause if needed
+        StringBuilder whereClause = new StringBuilder();
+        if (!method.predicates().isEmpty()) {
+            List<String> conjuncts = new ArrayList<>();
+            for (int i = 0; i < method.predicates().size(); i++) {
+                var pred = method.predicates().get(i);
+                String propPath = pred.property();
+                
+                // Determine the column reference for this predicate
+                String column = resolvePredicateColumn(propPath, rootTable, composingAssocs);
+                
+                String param = pred.param();
+                String conjunct = renderPredicate(pred.operator(), column, param, pred.ignoreCase());
+                
+                // Add connector (AND/OR) if not the first predicate
+                if (i > 0) {
+                    conjuncts.add((pred.connector() == io.github.fludakit.data.query.Connector.OR ? " OR " : " AND ") + conjunct);
+                } else {
+                    conjuncts.add(conjunct);
+                }
+            }
+            whereClause.append(" WHERE ").append(String.join("", conjuncts));
+        }
+        
+        return "SELECT " + String.join(", ", selectColumns) 
+            + " FROM " + rootTable 
+            + (joinClauses.isEmpty() ? "" : " " + String.join(" ", joinClauses))
+            + whereClause.toString();
+    }
+
+    /**
+     * Resolves a predicate property path to a SQL column reference.
+     * For traversed paths like "customer.name", uses the join alias.
+     * For simple properties, qualifies with root table.
+     */
+    private String resolvePredicateColumn(String propPath, String rootTable, 
+                                          List<TypeDefinition.Prop.Association> composingAssocs) {
+        if (propPath.contains(".")) {
+            String firstSegment = propPath.substring(0, propPath.indexOf('.'));
+            String restOfPath = propPath.substring(propPath.indexOf('.') + 1);
+            
+            // Check if first segment is an association we're joining
+            for (TypeDefinition.Prop.Association assoc : composingAssocs) {
+                if (assoc.name().equals(firstSegment)) {
+                    // Use the join alias (association name) and the leaf column
+                    return firstSegment + "." + dialect.quoteIdentifier(restOfPath.replace('.', '_'));
+                }
+            }
+            
+            // Fallback: treat as root table column with flattened name
+            return rootTable + "." + dialect.quoteIdentifier(propPath.replace('.', '_'));
+        } else {
+            // Simple property on root table - qualify to avoid ambiguity with joins
+            return rootTable + "." + dialect.quoteIdentifier(propPath);
+        }
+    }
+
+    /**
+     * Renders a predicate operator expression.
+     */
+    private String renderPredicate(io.github.fludakit.data.query.Operator operator, 
+                                    String column, String param, boolean ignoreCase) {
+        String col = ignoreCase ? "LOWER(" + column + ")" : column;
+        String val = ignoreCase ? "LOWER(:" + param + ")" : ":" + param;
+        
+        return switch (operator) {
+            case EQ, IGNORE_CASE_EQ -> col + " = " + val;
+            case NOT_EQ -> col + " <> " + val;
+            case GREATER_THAN -> col + " > " + val;
+            case GREATER_THAN_EQUAL -> col + " >= " + val;
+            case LESS_THAN -> col + " < " + val;
+            case LESS_THAN_EQUAL -> col + " <= " + val;
+            case LIKE, CONTAINS, STARTS_WITH, ENDS_WITH -> col + " LIKE " + val;
+            case NOT_LIKE, NOT_CONTAINS, NOT_STARTS_WITH, NOT_ENDS_WITH -> col + " NOT LIKE " + val;
+            case BETWEEN -> col + " BETWEEN :" + param + "_from AND :" + param + "_to";
+            case NOT_BETWEEN -> col + " NOT BETWEEN :" + param + "_from AND :" + param + "_to";
+            case IN -> col + " IN (:" + param + ")";
+            case NOT_IN -> col + " NOT IN (:" + param + ")";
+            case IS_NULL -> col + " IS NULL";
+            case IS_NOT_NULL -> col + " IS NOT NULL";
+            case TRUE -> col + " = TRUE";
+            case FALSE -> col + " = FALSE";
+        };
     }
 
     private void addPlainFinderBody(MethodSpec.Builder builder, RepositoryContext ctx,
@@ -164,7 +404,7 @@ public final class FindEmitter {
                 appendParamBindings(body, bindings, method);
                 body.add("    .query(new $T())\n", rowMapperType);
                 body.add("    .list();\n");
-                body.add("hydrateList($L);\n", "result");
+                emitHydrationCall(body, ResultKind.LIST, ctx);
                 body.add("return $L.stream();", "result");
             } else {
                 body.add("var $L = jdbcClient\n", "result");
@@ -173,7 +413,7 @@ public final class FindEmitter {
                 body.add("    .query(new $T())\n", rowMapperType);
                 emitTerminalSingle(body, method.resultKind(), ctx);
                 body.add(";\n");
-                emitHydrationCall(body, method.resultKind());
+                emitHydrationCall(body, method.resultKind(), ctx);
                 body.add("return $L;", "result");
             }
         } else {
@@ -196,8 +436,18 @@ public final class FindEmitter {
         ClassName entityType = ClassName.bestGuess(entityFqn);
         ClassName rowMapperType = ctx.rowMapperType();
 
-        // Build the base SELECT SQL (without LIMIT/OFFSET — those are runtime values)
-        String selectSql = buildSelectSql(ctx, method);
+        // Check if method has Order<T> parameter for dynamic sorting
+        boolean hasOrderParam = hasOrderParameter(method);
+        String orderParamName = hasOrderParam ? findOrderParamName(method) : null;
+
+        // Build the base SELECT SQL (without ORDER BY if we have dynamic Order param)
+        String selectSql;
+        if (hasOrderParam) {
+            // For dynamic Order, build SQL without ORDER BY - we'll add it at runtime
+            selectSql = buildSelectSqlWithoutOrderBy(ctx, method);
+        } else {
+            selectSql = buildSelectSql(ctx, method);
+        }
         String selectConstBase = toSqlConstantName(method.name());
         String selectConstName = ctx.registerConstant(selectConstBase, selectSql);
 
@@ -216,19 +466,87 @@ public final class FindEmitter {
         // long offset = (pageRequest.page() - 1) * pageRequest.size();
         body.addStatement("long $L = ($L.page() - 1) * $L.size()", "offset", pageRequestParam, pageRequestParam);
 
-        // List<Entity> content = jdbcClient.sql(SELECT_SQL + " LIMIT :limit OFFSET :offset")
-        //     .param("limit", pageRequest.size())
-        //     .param("offset", offset)
-        //     .param(...) for each binding
-        //     .query(new EntityRowMapper())
-        //     .list();
-        body.add("$T<$T> $L = jdbcClient\n", List.class, entityType, "content");
-        body.add("    .sql($L + $S)\n", selectConstName, dialect.limitOffsetClause(":limit", ":offset"));
+        // If we have dynamic Order parameter, build SQL with ORDER BY at runtime
+        if (hasOrderParam) {
+            // String sql = SELECT_SQL;
+            body.addStatement("$T $L = $L", String.class, "sql", selectConstName);
+            
+            // if (orderParam != null && !orderParam.isEmpty()) { ... }
+            body.add("if ($L != null) {\n", orderParamName);
+            body.addStatement("    java.util.List<String> $L = new java.util.ArrayList<>()", "orderClauses");
+            
+            // for (jakarta.data.Sort<?> sort : orderParam.sorts()) { ... }
+            body.add("    for (jakarta.data.Sort<?> $L : $L.sorts()) {\n", "sort", orderParamName);
+            
+            // String prop = sort.property();
+            body.addStatement("        String $L = $L.property()", "prop", "sort");
+            
+            // Resolve property to column using TypeModel
+            String entitySimpleName = ctx.entity().typeName().contains(".") 
+                ? ctx.entity().typeName().substring(ctx.entity().typeName().lastIndexOf('.') + 1)
+                : ctx.entity().typeName();
+            String typeModelFqn = ctx.entity().typeName().substring(0, ctx.entity().typeName().lastIndexOf('.')) + "." + entitySimpleName + "TypeModel";
+            body.add("        try {\n");
+            body.addStatement("            io.github.fludakit.data.metadata.ColumnPlacement placement = $T.INSTANCE.resolve($L)", 
+                ClassName.bestGuess(typeModelFqn),
+                "prop");
+            
+            // String direction = sort.isAscending() ? "ASC" : "DESC";
+            body.addStatement("            String $L = $L.isAscending() ? $S : $S",
+                "direction", "sort", "ASC", "DESC");
+            
+            // Build qualified column reference for ORDER BY
+            body.add("            String $L;\n", "qualifiedColumn");
+            body.add("            if ($L.local()) {\n", "placement");
+            body.addStatement("                $L = $L.leaf().column()", "qualifiedColumn", "placement");
+            body.add("            } else {\n");
+            // For non-local columns (requiring navigation), use aggregate subquery
+            // This avoids the complexity of adding JOINs at runtime
+            body.addStatement("                $L = io.github.fludakit.data.sql.QueryCompiler.aggregateSortTerm($T.INSTANCE, $T.INSTANCE, $L, $L.isAscending())",
+                "qualifiedColumn", 
+                ClassName.bestGuess("io.github.fludakit.data.sql.H2Dialect"),
+                ClassName.bestGuess(typeModelFqn),
+                "placement",
+                "sort");
+            body.add("            }\n");
+            
+            // For local columns, append direction; for aggregate subqueries, direction is already embedded
+            body.add("            if ($L.local()) {\n", "placement");
+            body.addStatement("                $L.add($L + $S + $L)", "orderClauses", "qualifiedColumn", " ", "direction");
+            body.add("            } else {\n");
+            body.addStatement("                $L.add($L)", "orderClauses", "qualifiedColumn");
+            body.add("            }\n");
+            
+            body.add("        } catch (io.github.fludakit.data.metadata.UnknownAttributePathException e) {\n");
+            body.add("            // Skip invalid sort property\n");
+            body.add("        }\n");
+            body.add("    }\n");
+            
+            // if (!orderClauses.isEmpty()) { sql += " ORDER BY " + String.join(", ", orderClauses); }
+            body.add("    if (!$L.isEmpty()) {\n", "orderClauses");
+            body.addStatement("        sql += $S + String.join($S, $L)", " ORDER BY ", ", ", "orderClauses");
+            body.add("    }\n");
+            body.add("}\n");
+            
+            // Now execute with the dynamically built SQL
+            body.add("$T<$T> $L = jdbcClient\n", List.class, entityType, "content");
+            body.add("    .sql($L + $S)\n", "sql", dialect.limitOffsetClause(":limit", ":offset"));
+        } else {
+            // Static SQL path (original behavior)
+            body.add("$T<$T> $L = jdbcClient\n", List.class, entityType, "content");
+            body.add("    .sql($L + $S)\n", selectConstName, dialect.limitOffsetClause(":limit", ":offset"));
+        }
+        
         body.add("    .param($S, $L.size())\n", "limit", pageRequestParam);
         body.add("    .param($S, $L)\n", "offset", "offset");
         appendParamBindings(body, bindings, method);
         body.add("    .query(new $T())\n", rowMapperType);
         body.addStatement("    .list()");
+        
+        // Add hydration if entity has collections
+        if (hasToManyCollections(ctx.entity())) {
+            body.addStatement("$L($L)", "hydrateList", "content");
+        }
 
         // long total = pageRequest.requestTotal() ? jdbcClient.sql(COUNT_SQL)...single() : 0;
         body.add("long $L = $L.requestTotal() ? jdbcClient\n", "total", pageRequestParam);
@@ -259,24 +577,27 @@ public final class FindEmitter {
         ClassName rowMapperType = ctx.rowMapperType();
         List<SortSpec> sorts = method.sorts();
 
-        // Detect TO_MANY sorts first (needed for both SQL generation and cursor extraction)
+        // Detect ENTITY_COLLECTION sorts first (needed for both SQL generation and cursor extraction)
         boolean hasToManySort = false;
-        io.github.fludakit.data.metadata.RelationMapping toManyRelForHydration = null;
+        TypeDefinition.Prop.EntityCollection ecRelForHydration = null;
         String toManyPropForHydration = null;
-        
+
         for (SortSpec sort : sorts) {
             String prop = sort.property();
             if (prop.contains(".")) {
                 String firstSegment = prop.substring(0, prop.indexOf('.'));
-                for (var rel : ctx.entity().relationMappings()) {
-                    if (rel.propertyName().equals(firstSegment)
-                            && (rel.kind() == io.github.fludakit.data.metadata.RelationKind.TO_MANY
-                                || rel.kind() == io.github.fludakit.data.metadata.RelationKind.ELEMENT_COLLECTION)
-                            && rel.target() != null) {
+                for (TypeDefinition.Prop p : ctx.entity().properties()) {
+                    if (p instanceof TypeDefinition.Prop.EntityCollection ec && p.name().equals(firstSegment)) {
                         hasToManySort = true;
-                        if (toManyRelForHydration == null) {
-                            toManyRelForHydration = rel;
+                        if (ecRelForHydration == null) {
+                            ecRelForHydration = ec;
                             toManyPropForHydration = firstSegment;
+                        }
+                        break;
+                    } else if (p instanceof TypeDefinition.Prop.ElementCollection elemCol && p.name().equals(firstSegment)) {
+                        hasToManySort = true;
+                        if (ecRelForHydration == null) {
+                            // ElementCollection doesn't have a definition Entity, skip hydration
                         }
                         break;
                     }
@@ -289,25 +610,39 @@ public final class FindEmitter {
         sqlBuilder.dialect(dialect);
         String baseSql;
         String joinAlias = null; // Declare here so it's available for seek term generation
-        
-        if (hasToManySort && toManyRelForHydration != null) {
-            // For TO_MANY sorts, add a LEFT JOIN to hydrate the relation for cursor extraction.
+
+        if (hasToManySort && ecRelForHydration != null && ecRelForHydration.target() != null) {
+            // For ENTITY_COLLECTION sorts, add a LEFT JOIN to hydrate the relation for cursor extraction.
             // Also add aggregate expressions to SELECT for ORDER BY compatibility with DISTINCT.
             String rootTable = dialect.quoteIdentifier(ctx.entity().tableName());
-            String childTable = dialect.quoteIdentifier(toManyRelForHydration.target().tableName());
-            String fkColumn = dialect.quoteIdentifier(toManyRelForHydration.fkColumn());
+            String childTable = dialect.quoteIdentifier(ecRelForHydration.target().tableName());
+            String fkColumn = dialect.quoteIdentifier(ecRelForHydration.fkColumn());
             String ownerIdColumn = dialect.quoteIdentifier(ctx.entity().idColumn());
             joinAlias = toManyPropForHydration + "_";
-            
+
             // Build SELECT with root columns AND aggregate expressions for TO_MANY sort terms
             List<String> selectColumns = new ArrayList<>();
             List<String> groupByColumns = new ArrayList<>();
-            for (var col : ctx.entity().columnMappings()) {
-                String qualifiedCol = rootTable + "." + dialect.quoteIdentifier(col.columnName());
-                selectColumns.add(qualifiedCol);
-                groupByColumns.add(qualifiedCol);
+            for (TypeDefinition.Prop prop : ctx.entity().properties()) {
+                if (prop instanceof TypeDefinition.Prop.Scalar s) {
+                    String qualifiedCol = rootTable + "." + dialect.quoteIdentifier(s.columnName());
+                    selectColumns.add(qualifiedCol);
+                    groupByColumns.add(qualifiedCol);
+                } else if (prop instanceof TypeDefinition.Prop.Id id) {
+                    String qualifiedCol = rootTable + "." + dialect.quoteIdentifier(id.columnName());
+                    selectColumns.add(qualifiedCol);
+                    groupByColumns.add(qualifiedCol);
+                } else if (prop instanceof TypeDefinition.Prop.Version v) {
+                    String qualifiedCol = rootTable + "." + dialect.quoteIdentifier(v.columnName());
+                    selectColumns.add(qualifiedCol);
+                    groupByColumns.add(qualifiedCol);
+                } else if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.fkColumn() != null) {
+                    String qualifiedCol = rootTable + "." + dialect.quoteIdentifier(assoc.fkColumn());
+                    selectColumns.add(qualifiedCol);
+                    groupByColumns.add(qualifiedCol);
+                }
             }
-            
+
             // Add aggregate expressions for each TO_MANY sort term
             int aggIndex = 0;
             for (SortSpec sort : sorts) {
@@ -323,13 +658,13 @@ public final class FindEmitter {
                     }
                 }
             }
-            
+
             String selectClause = "SELECT " + String.join(", ", selectColumns);
             String fromClause = "FROM " + rootTable;
-            String joinClause = "LEFT JOIN " + childTable + " AS " + joinAlias 
+            String joinClause = "LEFT JOIN " + childTable + " AS " + joinAlias
                     + " ON " + joinAlias + "." + fkColumn + " = " + rootTable + "." + ownerIdColumn;
             String groupByClause = " GROUP BY " + String.join(", ", groupByColumns);
-            
+
             baseSql = selectClause + " " + fromClause + " " + joinClause + groupByClause;
         } else {
             // No TO_MANY sort, use standard rendering
@@ -337,7 +672,7 @@ public final class FindEmitter {
                     ResultKind.LIST, method.predicates(), List.of(),
                     PagingMode.NONE, LimitSpec.none(), List.of(), List.of(), method.distinct()));
         }
-        
+
         boolean shellHasWhere = !method.predicates().isEmpty();
 
         // Build sort terms and properties lists
@@ -346,36 +681,33 @@ public final class FindEmitter {
         // Separate term lists: orderByTerms uses aliases (for ORDER BY), seekTerms uses full expressions (for WHERE)
         List<String> orderByTerms = new ArrayList<>();
         List<String> seekTerms = new ArrayList<>();
-        
+
         for (SortSpec sort : sorts) {
             String prop = sort.property();
             properties.add(prop);
             ascendingList.add(sort.ascending());
-            
-            // Check if this is a TO_MANY path
+
+            // Check if this is an ENTITY_COLLECTION path
             if (prop.contains(".")) {
                 String firstSegment = prop.substring(0, prop.indexOf('.'));
-                for (var rel : ctx.entity().relationMappings()) {
-                    if (rel.propertyName().equals(firstSegment)
-                            && (rel.kind() == io.github.fludakit.data.metadata.RelationKind.TO_MANY
-                                || rel.kind() == io.github.fludakit.data.metadata.RelationKind.ELEMENT_COLLECTION)
-                            && rel.target() != null) {
+                for (TypeDefinition.Prop p : ctx.entity().properties()) {
+                    if ((p instanceof TypeDefinition.Prop.EntityCollection || p instanceof TypeDefinition.Prop.ElementCollection)
+                            && p.name().equals(firstSegment)) {
                         hasToManySort = true;
                         break;
                     }
                 }
             }
         }
-        
+
         // If we have TO_MANY sorts, we need to ensure the id is the last sort key for uniqueness
         if (hasToManySort && !sorts.isEmpty()) {
             SortSpec lastSort = sorts.get(sorts.size() - 1);
             String idPropName = null;
-            for (var col : ctx.entity().columnMappings()) {
-                if (col.isId()) {
-                    idPropName = col.propertyName();
-                    break;
-                }
+            if (ctx.entity() instanceof TypeDefinition.Entity e) {
+                idPropName = e.id().name();
+            } else if (ctx.entity() instanceof TypeDefinition.Aggregate a) {
+                idPropName = a.id().name();
             }
             if (idPropName != null && !(lastSort.property().equals(idPropName) && lastSort.ascending())) {
                 // Add id as the last sort key
@@ -383,7 +715,7 @@ public final class FindEmitter {
                 ascendingList.add(true);
             }
         }
-        
+
         // Build ORDER BY and SEEK terms - aliases for ORDER BY, full expressions for WHERE
         int aggIndex = 0;
         for (int i = 0; i < sorts.size(); i++) {
@@ -391,31 +723,37 @@ public final class FindEmitter {
             String prop = sort.property();
             String orderByTerm;
             String seekTerm;
-            
+
             if (prop.contains(".")) {
                 String firstSegment = prop.substring(0, prop.indexOf('.'));
                 boolean isToManyPath = false;
-                io.github.fludakit.data.metadata.RelationMapping toManyRel = null;
-                
-                for (var rel : ctx.entity().relationMappings()) {
-                    if (rel.propertyName().equals(firstSegment)
-                            && (rel.kind() == io.github.fludakit.data.metadata.RelationKind.TO_MANY
-                                || rel.kind() == io.github.fludakit.data.metadata.RelationKind.ELEMENT_COLLECTION)
-                            && rel.target() != null) {
+                TypeDefinition.Prop.EntityCollection ecRel = null;
+                TypeDefinition.Prop.ElementCollection elemColRel = null;
+
+                for (TypeDefinition.Prop p : ctx.entity().properties()) {
+                    if (p instanceof TypeDefinition.Prop.EntityCollection entityCol && p.name().equals(firstSegment)) {
                         isToManyPath = true;
-                        toManyRel = rel;
+                        ecRel = entityCol;
+                        break;
+                    } else if (p instanceof TypeDefinition.Prop.ElementCollection ec && p.name().equals(firstSegment)) {
+                        isToManyPath = true;
+                        elemColRel = ec;
                         break;
                     }
                 }
-                
-                if (isToManyPath && toManyRel != null) {
+
+                if (isToManyPath && ((ecRel != null && ecRel.target() != null) || elemColRel != null)) {
                     String colPart = prop.substring(prop.indexOf('.') + 1).replace('.', '_');
-                    String childTable = dialect.quoteIdentifier(toManyRel.target().tableName());
-                    String fkColumn = dialect.quoteIdentifier(toManyRel.fkColumn());
+                    String childTable = ecRel != null && ecRel.target() != null
+                        ? dialect.quoteIdentifier(ecRel.target().tableName())
+                        : dialect.quoteIdentifier(elemColRel.childTable());
+                    String fkColumn = ecRel != null
+                        ? dialect.quoteIdentifier(ecRel.fkColumn())
+                        : dialect.quoteIdentifier(elemColRel.fkColumn());
                     String rootTable = dialect.quoteIdentifier(ctx.entity().tableName());
                     String ownerIdColumn = dialect.quoteIdentifier(ctx.entity().idColumn());
                     String aggFunc = sort.ascending() ? "MIN" : "MAX";
-                    
+
                     if (hasToManySort && toManyPropForHydration != null && firstSegment.equals(toManyPropForHydration)) {
                         // Hydrating with LEFT JOIN: use alias for ORDER BY, full expression for WHERE
                         orderByTerm = dialect.quoteIdentifier("agg_" + aggIndex);
@@ -423,8 +761,8 @@ public final class FindEmitter {
                         aggIndex++;
                     } else {
                         // No hydration: use correlated subquery for both
-                        String subquery = "(SELECT " + aggFunc + "(" + childTable + "." + dialect.quoteIdentifier(colPart) 
-                                        + ") FROM " + childTable + " WHERE " + childTable + "." + fkColumn 
+                        String subquery = "(SELECT " + aggFunc + "(" + childTable + "." + dialect.quoteIdentifier(colPart)
+                                        + ") FROM " + childTable + " WHERE " + childTable + "." + fkColumn
                                         + " = " + rootTable + "." + ownerIdColumn + ")";
                         orderByTerm = subquery;
                         seekTerm = subquery;
@@ -440,11 +778,11 @@ public final class FindEmitter {
                 orderByTerm = dialect.quoteIdentifier(prop);
                 seekTerm = orderByTerm;
             }
-            
+
             orderByTerms.add(orderByTerm);
             seekTerms.add(seekTerm);
         }
-        
+
         // Add id term if we added it for uniqueness
         if (hasToManySort && sorts.size() < properties.size()) {
             // Qualify id with root table to avoid ambiguity with JOINed tables
@@ -470,10 +808,10 @@ public final class FindEmitter {
             // Check if any seek term contains an aggregate function
             boolean hasAggregatesInSeek = seekTerms.stream()
                 .anyMatch(term -> term.contains("MIN(") || term.contains("MAX("));
-            
+
             String seekPredicate = sqlBuilder.seekClause(seekTerms, ascendingList, true);
             String whereOrAnd = shellHasWhere ? " AND " : " WHERE ";
-            
+
             if (hasAggregatesInSeek && hasToManySort && toManyPropForHydration != null) {
                 // Wrap in subquery to allow WHERE on aggregate aliases
                 // Inner query produces the aggregates with aliases
@@ -485,7 +823,7 @@ public final class FindEmitter {
                 wrappedSql.append(") AS ").append(innerAlias);
                 wrappedSql.append(whereOrAnd);
                 wrappedSql.append("(:cursor0 IS NULL OR ");
-                
+
                 // Replace aggregate expressions and qualified columns with inner alias references
                 String aliasedSeekPredicate = seekPredicate;
                 int replaceAggIndex = 0;
@@ -504,19 +842,19 @@ public final class FindEmitter {
                         }
                     }
                 }
-                
+
                 // Also replace qualified table.column references with inner alias
                 String rootTableQuoted = dialect.quoteIdentifier(ctx.entity().tableName());
                 aliasedSeekPredicate = aliasedSeekPredicate.replace(rootTableQuoted + ".", innerAlias + ".");
-                
+
                 wrappedSql.append(aliasedSeekPredicate);
                 wrappedSql.append(")");
-                
+
                 // Update ORDER BY to use inner alias for all columns
                 String aliasedOrderBy = orderByClause.replace("\"agg_", innerAlias + ".\"agg_");
                 aliasedOrderBy = aliasedOrderBy.replace(rootTableQuoted + ".", innerAlias + ".");
                 wrappedSql.append(aliasedOrderBy);
-                
+
                 seekStmt = wrappedSql.toString();
             } else {
                 seekStmt = baseSql + whereOrAnd
@@ -609,7 +947,7 @@ public final class FindEmitter {
                         break;
                     }
                 }
-                
+
                 String getter = "get" + Character.toUpperCase(prop.charAt(0)) + prop.substring(1);
                 // Handle dot paths by chaining getters
                 if (prop.contains(".")) {
@@ -618,14 +956,12 @@ public final class FindEmitter {
                     String firstGetter = "get" + Character.toUpperCase(parts[0].charAt(0)) + parts[0].substring(1);
                     // Resolve the element type for the collection (if to-many)
                     String elementTypeName = resolveCollectionElementType(ctx, parts[0]);
-                    
-                    // Check if this is a TO_MANY path that needs aggregate extraction
+
+                    // Check if this is an ENTITY_COLLECTION path that needs aggregate extraction
                     boolean isToManyPath = false;
-                    for (var rel : ctx.entity().relationMappings()) {
-                        if (rel.propertyName().equals(parts[0])
-                                && (rel.kind() == io.github.fludakit.data.metadata.RelationKind.TO_MANY
-                                    || rel.kind() == io.github.fludakit.data.metadata.RelationKind.ELEMENT_COLLECTION)
-                                && rel.target() != null) {
+                    for (TypeDefinition.Prop p : ctx.entity().properties()) {
+                        if ((p instanceof TypeDefinition.Prop.EntityCollection || p instanceof TypeDefinition.Prop.ElementCollection)
+                                && p.name().equals(parts[0])) {
                             isToManyPath = true;
                             break;
                         }
@@ -634,7 +970,7 @@ public final class FindEmitter {
                     body.add("        case $S -> {\n", prop);
                     body.add("            var $L = entity.$L();\n", "v0", firstGetter);
                     body.add("            if ($L instanceof $T) {\n", "v0", java.util.List.class);
-                    
+
                     // For cursor pagination with TO_MANY sorts, we need to extract MIN/MAX value
                     // to match the SQL aggregate function used in ORDER BY
                     if (isToManyPath && matchingSort != null) {
@@ -648,7 +984,7 @@ public final class FindEmitter {
                             body.add("                var $L = (($T<?>) $L).stream().map($L -> $L).toList();\n",
                                     "values", java.util.List.class, "v0", itemVar, chain.toString());
                             // Compute MIN/MAX to match SQL aggregate
-                            String aggCall = matchingSort.ascending() 
+                            String aggCall = matchingSort.ascending()
                                 ? "$L.stream().min(java.util.Comparator.naturalOrder()).orElse(null)"
                                 : "$L.stream().max(java.util.Comparator.naturalOrder()).orElse(null)";
                             body.add("                yield $L.isEmpty() ? null : " + aggCall + ";\n",
@@ -668,7 +1004,7 @@ public final class FindEmitter {
                             body.add("                yield (($T<?>) $L).stream().map($L -> $L).toList();\n",
                                     java.util.List.class, "v0", itemVar, chain.toString());
                         } else {
-                            // Fallback: use entity type as cast target
+                            // Fallback: use entity type as cast definition
                             body.add("                yield (($T<?>) $L).stream().map($L -> (($T) $L).$L()).toList();\n",
                                     java.util.List.class, "v0", itemVar,
                                     ClassName.bestGuess(ctx.entity().typeName()), itemVar,
@@ -719,10 +1055,10 @@ public final class FindEmitter {
     }
 
     private boolean isToManyPath(RepositoryContext ctx, String firstSegment) {
-        for (io.github.fludakit.data.metadata.RelationMapping rel : ctx.entity().relationMappings()) {
-            if (rel.propertyName().equals(firstSegment)
-                    && (rel.kind() == io.github.fludakit.data.metadata.RelationKind.TO_MANY
-                        || rel.kind() == io.github.fludakit.data.metadata.RelationKind.ELEMENT_COLLECTION)) {
+        for (TypeDefinition.Prop prop : ctx.entity().properties()) {
+            if ((prop instanceof TypeDefinition.Prop.EntityCollection
+                    || prop instanceof TypeDefinition.Prop.ElementCollection)
+                    && prop.name().equals(firstSegment)) {
                 return true;
             }
         }
@@ -730,11 +1066,13 @@ public final class FindEmitter {
     }
 
     private String resolveCollectionElementType(RepositoryContext ctx, String firstSegment) {
-        for (io.github.fludakit.data.metadata.RelationMapping rel : ctx.entity().relationMappings()) {
-            if (rel.propertyName().equals(firstSegment)
-                    && (rel.kind() == io.github.fludakit.data.metadata.RelationKind.TO_MANY
-                        || rel.kind() == io.github.fludakit.data.metadata.RelationKind.ELEMENT_COLLECTION)) {
-                return rel.targetTypeName();
+        for (TypeDefinition.Prop prop : ctx.entity().properties()) {
+            if (prop instanceof TypeDefinition.Prop.EntityCollection ec
+                    && prop.name().equals(firstSegment)) {
+                return ec.target() != null ? ec.target().typeName() : ec.javaType();
+            } else if (prop instanceof TypeDefinition.Prop.ElementCollection elemCol
+                    && prop.name().equals(firstSegment)) {
+                return elemCol.elementType();
             }
         }
         return null;
@@ -950,9 +1288,9 @@ public final class FindEmitter {
      * Returns whether the entity has to-many collections that need hydration.
      */
     private boolean hasToManyCollections(io.github.fludakit.data.metadata.TypeDefinition entity) {
-        for (io.github.fludakit.data.metadata.RelationMapping rel : entity.relationMappings()) {
-            if (rel.kind() == io.github.fludakit.data.metadata.RelationKind.TO_MANY
-                    || rel.kind() == io.github.fludakit.data.metadata.RelationKind.ELEMENT_COLLECTION) {
+        for (TypeDefinition.Prop prop : entity.properties()) {
+            if (prop instanceof TypeDefinition.Prop.EntityCollection
+                    || prop instanceof TypeDefinition.Prop.ElementCollection) {
                 return true;
             }
         }
@@ -980,9 +1318,14 @@ public final class FindEmitter {
     }
 
     /**
-     * Emits the hydration call appropriate for the result kind.
+     * Emits the hydration call appropriate for the result kind, but only if the entity has collections to hydrate.
      */
-    private void emitHydrationCall(CodeBlock.Builder body, ResultKind resultKind) {
+    private void emitHydrationCall(CodeBlock.Builder body, ResultKind resultKind, RepositoryContext ctx) {
+        HydrationEmitter hydrationEmitter = new HydrationEmitter(dialect);
+        if (!hydrationEmitter.hasCollectionsToHydrate(ctx.entity())) {
+            return; // No hydration needed
+        }
+        
         switch (resultKind) {
             case SINGLE -> body.add("hydrate(result);\n");
             case OPTIONAL -> body.add("result.ifPresent(this::hydrate);\n");
@@ -1015,12 +1358,72 @@ public final class FindEmitter {
         sb.append("_SQL");
         return sb.toString();
     }
-    
+
     /**
      * Returns the Stream API method name for aggregate extraction.
      * @param ascending true for MIN (min), false for MAX (max)
      */
     private static String aggMethodName(boolean ascending) {
         return ascending ? "min" : "max";
+    }
+
+    // ── Dynamic Order support ────────────────────────────────────────────
+
+    /**
+     * Checks if the method has an Order<T> parameter for dynamic runtime sorting.
+     */
+    private boolean hasOrderParameter(MethodContext method) {
+        for (VariableElement param : method.parameters()) {
+            String typeFqn = param.asType().toString();
+            if (typeFqn.contains("jakarta.data.Order")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Finds the parameter name of the Order<T> parameter.
+     */
+    private String findOrderParamName(MethodContext method) {
+        for (VariableElement param : method.parameters()) {
+            String simpleName = param.getSimpleName().toString();
+            String typeFqn = param.asType().toString();
+            if (typeFqn.contains("jakarta.data.Order")) {
+                return simpleName;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Builds SELECT SQL without ORDER BY clause for dynamic Order handling.
+     * This is used when the method has an Order<T> parameter that needs runtime resolution.
+     */
+    private String buildSelectSqlWithoutOrderBy(RepositoryContext ctx, MethodContext method) {
+        // Check if entity has composing associations that need JOIN projection
+        List<TypeDefinition.Prop.Association> composingAssocs = getComposingAssociations(ctx.entity());
+        
+        if (!composingAssocs.isEmpty()) {
+            // Build SQL with LEFT JOINs for composing associations (but no ORDER BY)
+            return buildSelectWithComposingJoins(ctx, composingAssocs, method);
+        }
+        
+        SqlBuilder sqlBuilder = new SqlBuilder(ctx.entity());
+        sqlBuilder.dialect(dialect);
+        
+        // Build a Read query definition with empty sorts list
+        QueryDefinition.Read queryDef = new QueryDefinition.Read(
+            method.resultKind(),
+            method.predicates(),
+            List.of(), // Empty sorts - we'll add ORDER BY at runtime
+            method.pagingMode(),
+            LimitSpec.none(),
+            List.of(),
+            List.of(),
+            method.distinct()
+        );
+        
+        return sqlBuilder.render(queryDef);
     }
 }

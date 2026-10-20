@@ -13,7 +13,7 @@ public interface OrderRepository extends CrudRepository<Order, Long> {
     @Find
     List<Order> findByAmount(@By("amount") BigDecimal amount);
 
-    // Predicate through the @Association reference {@code customer} and on to the target's name:
+    // Predicate through the @Association reference {@code customer} and on to the definition's name:
     // @By declares the traversal and the resolver descends the relation head, contributing one join
     // (the mapRow_full_ path).
     @Find

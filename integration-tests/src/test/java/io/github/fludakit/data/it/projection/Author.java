@@ -4,7 +4,7 @@ import io.github.fludakit.data.annotation.AggregateRoot;
 import io.github.fludakit.data.annotation.Identity;
 
 /**
- * The MANAGED target of the composing to-one projection corpus: its own {@code @Repository} is what
+ * The MANAGED definition of the composing to-one projection corpus: its own {@code @Repository} is what
  * makes {@link Book#author} a composing {@code Reference} rather than an unresolved field, and its
  * {@code name} leaf is what the JOIN-projected read must bring back FULL (an id-only partial would
  * leave it null).

@@ -80,14 +80,14 @@ class WriteEmissionTest {
 
         compile(sourceDir, classesDir, generatedDir, "Tag.java", "Article.java", "Articles.java");
 
-        String impl = sqlFlat(generatedDir.resolve("elementinsert/ArticlesImpl.java"));
+        String impl = sqlFlat(generatedDir.resolve("elementinsert/Articles_.java"));
         // Parent fk FIRST — the opposite of the hydration SELECT, which drops it — then the leaves.
-        assertTrue(impl.contains("SQL_INSERT_TAGS = \"INSERT INTO \"article_tags\" (\"article_id\", \"label\","
+        assertTrue(impl.contains("INSERT_TAGS = \"INSERT INTO \"article_tags\" (\"article_id\", \"label\","
                         + " \"weight\") VALUES (:article_id, :label, :weight)\""),
                 "the element-collection INSERT must list the parent fk and every leaf column:"
                         + System.lineSeparator() + impl);
         // …and bind exactly those placeholders: the fk from the ROOT id, the leaves from the item.
-        assertTrue(impl.contains("jdbcClient.sql(SQL_INSERT_TAGS).param(\"article_id\", entity.getId())"
+        assertTrue(impl.contains("jdbcClient.sql(INSERT_TAGS).param(\"article_id\", entity.getId())"
                         + ".param(\"label\", item.getLabel())"
                         + ".param(\"weight\", item.getWeight()).update()"),
                 "every listed column must be bound, in the same order:" + System.lineSeparator() + impl);
@@ -132,7 +132,7 @@ class WriteEmissionTest {
 
         compile(sourceDir, classesDir, generatedDir, "Book.java", "Shelf.java");
 
-        String impl = sqlFlat(generatedDir.resolve("collidingconstants/ShelfImpl.java"));
+        String impl = sqlFlat(generatedDir.resolve("collidingconstants/Shelf_.java"));
         assertTrue(impl.contains("SQL_SEARCH = \"SELECT id, title FROM book WHERE title = :title\""),
                 "the first statement must keep the bare base name:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("SQL_SEARCH_2 = \"SELECT id, title FROM book WHERE id = :id\""),
@@ -210,7 +210,7 @@ class WriteEmissionTest {
         compile(sourceDir, classesDir, generatedDir,
                 "Album.java", "Track.java", "Point.java", "Albums.java");
 
-        String impl = sqlFlat(generatedDir.resolve("ecnestedvo/AlbumsImpl.java"));
+        String impl = sqlFlat(generatedDir.resolve("ecnestedvo/Albums_.java"));
         assertTrue(impl.contains("INSERT INTO \"album_tracks\" (\"album_id\", \"sku\", \"point_lat\","
                         + " \"point_lon\")"),
                 "a value object nested in an element-collection value object must flatten to one column"
@@ -287,12 +287,12 @@ class WriteEmissionTest {
 
         compile(sourceDir, classesDir, generatedDir, "Product.java", "Line.java", "Basket.java", "Baskets.java");
 
-        String impl = sqlFlat(generatedDir.resolve("voca/BasketsImpl.java"));
+        String impl = sqlFlat(generatedDir.resolve("voca/Baskets_.java"));
         assertTrue(impl.contains("INSERT INTO \"basket_lines\" (\"basket_id\", \"product_id\", \"quantity\")"
                         + " VALUES (:basket_id, :product_id, :quantity)"),
                 "child-table insert must keep the fk column:" + System.lineSeparator() + impl);
         assertTrue(impl.contains(".param(\"product_id\", item.getProduct() == null ? null : item.getProduct().getId())"),
-                "@Association child column must bind the target's id, not the target object:"
+                "@Association child column must bind the definition's id, not the definition object:"
                         + System.lineSeparator() + impl);
         assertTrue(impl.contains(".param(\"quantity\", item.getQuantity())"),
                 "scalar child column must bind the getter directly:" + System.lineSeparator() + impl);
@@ -373,15 +373,15 @@ class WriteEmissionTest {
 
         compile(sourceDir, classesDir, generatedDir, "Product.java", "Line.java", "Basket.java", "Baskets.java");
 
-        String impl = sqlFlat(generatedDir.resolve("hyd/BasketsImpl.java"));
+        String impl = sqlFlat(generatedDir.resolve("hyd/Baskets_.java"));
 
         // A per-collection loader plus its SELECT constant and a delete constant for replace-all/cascade.
-        assertTrue(impl.contains("SQL_SELECT_LINES"), "missing child SELECT constant:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("SELECT_LINES"), "missing child SELECT constant:" + System.lineSeparator() + impl);
         // The emitted hydration SELECT is pinned as an exact constant string, not by shape: the
         // ASSOCIATION `product` column is excluded, so the list is parentFk + the flattened SCALAR
         // `quantity`. The loose `IN (` token alone would also match a wrong column list.
         // The file's `\"` escapes are normalised to `"` by the read above, so the expected literal uses plain quotes.
-        assertTrue(impl.contains("SQL_SELECT_LINES = \"SELECT \"basket_id\", \"quantity\" FROM "
+        assertTrue(impl.contains("SELECT_LINES = \"SELECT \"basket_id\", \"quantity\" FROM "
                         + "\"basket_lines\" WHERE \"basket_id\" IN (\";"),
                 "hydration SELECT constant value must be pinned:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("IN ("), "loader must build a runtime IN (:key0, ...) list:" + System.lineSeparator() + impl);
@@ -396,7 +396,7 @@ class WriteEmissionTest {
         assertTrue(impl.contains("new LineRowMapper().mapRow(rs, rowNum)"),
                 "loader must pair rows through the generated VO row mapper:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("parent.setLines("), "loader must group children onto each parent:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("SQL_DELETE_LINES"), "missing child DELETE constant:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("DELETE_LINES"), "missing child DELETE constant:" + System.lineSeparator() + impl);
 
         // The umbrella is emitted once and reached from every read shape.
         assertTrue(impl.contains("private void hydrateAll(Collection<Basket> parents)"),
@@ -434,14 +434,14 @@ class WriteEmissionTest {
                 "delete-cascade constant:" + System.lineSeparator() + impl);
 
         // The generated VO row mapper reads the primitive leaf with the wasNull guard and never touches
-        // the @Association target: a many-to-one/association child is left null, never hydrated.
+        // the @Association definition: a many-to-one/association child is left null, never hydrated.
         String voMapper = Files.readString(generatedDir.resolve("hyd/LineRowMapper.java"));
         assertTrue(voMapper.contains("rs.getInt(LineMetadata.QUANTITY)"),
                 "primitive leaf must use rs.getInt(...) with the VO's own metadata:" + System.lineSeparator() + voMapper);
         assertTrue(voMapper.contains("if (rs.wasNull())"),
                 "primitive read must guard wasNull:" + System.lineSeparator() + voMapper);
         assertTrue(!voMapper.contains("getProduct"),
-                "@Association child target must never be hydrated:" + System.lineSeparator() + voMapper);
+                "@Association child definition must never be hydrated:" + System.lineSeparator() + voMapper);
 
         assertTrue(!impl.contains("java.lang.reflect"), "generated code must stay reflection-free:" + System.lineSeparator() + impl);
     }
@@ -498,7 +498,7 @@ class WriteEmissionTest {
         List<Diagnostic<? extends JavaFileObject>> diagnostics = compileWithDiagnostics(
                 sourceDir, classesDir, generatedDir, "Line.java", "Basket.java", "Baskets.java");
 
-        String impl = sqlFlat(generatedDir.resolve("casc/BasketsImpl.java"));
+        String impl = sqlFlat(generatedDir.resolve("casc/Baskets_.java"));
 
         // Save still inserts child rows for the gate-failed collection (unchanged write side).
         assertTrue(impl.contains("INSERT INTO \"basket_lines\""),
@@ -506,13 +506,13 @@ class WriteEmissionTest {
 
         // The DELETE cascade (replace-all update + deleteById) is emitted even for the gate-failed
         // collection: the cascade keeps the child rows from orphaning.
-        assertTrue(impl.contains("SQL_DELETE_LINES"),
+        assertTrue(impl.contains("DELETE_LINES"),
                 "gate-failed collection must still get its child DELETE constant:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("DELETE FROM \"basket_lines\" WHERE \"basket_id\" = :basket_id"),
                 "gate-failed collection must still get the child DELETE SQL:" + System.lineSeparator() + impl);
 
         // Hydration degrades: no loader SELECT, no hydrateLines loader, no umbrella, no VO row mapper.
-        assertTrue(!impl.contains("SQL_SELECT_LINES"),
+        assertTrue(!impl.contains("SELECT_LINES"),
                 "no hydration SELECT must be emitted for a gate-failed collection:" + System.lineSeparator() + impl);
         assertTrue(!impl.contains("hydrateLines"),
                 "no loader must be emitted for a gate-failed collection:" + System.lineSeparator() + impl);
@@ -581,7 +581,7 @@ class WriteEmissionTest {
         List<Diagnostic<? extends JavaFileObject>> diagnostics = compileWithDiagnostics(
                 sourceDir, classesDir, generatedDir, "Line.java", "Basket.java", "Baskets.java");
 
-        String impl = Files.readString(generatedDir.resolve("ihd/BasketsImpl.java"))
+        String impl = Files.readString(generatedDir.resolve("ihd/Baskets_.java"))
                 .replace("\\\"", "\"")
                 .replaceAll("\\s+", " ");
 
@@ -721,12 +721,12 @@ class WriteEmissionTest {
                 "Ticket.java", "TicketRepository.java", "Badge.java", "BadgeRepository.java",
                 "Widget.java", "WidgetRepository.java", "Segment.java", "SegmentRepository.java");
 
-        String ticket = sqlFlat(generatedDir.resolve("appkey/TicketRepositoryImpl.java"));
+        String ticket = sqlFlat(generatedDir.resolve("appkey/TicketRepository_.java"));
         // No-keyholder shape: the identity column is part of the INSERT and bound from the entity.
-        assertTrue(ticket.contains("SQL_INSERT = \"INSERT INTO \"ticket\" (\"id\", \"label\") VALUES (:id, :label)\""),
+        assertTrue(ticket.contains("INSERT = \"INSERT INTO \"ticket\" (\"id\", \"label\") VALUES (:id, :label)\""),
                 "the app-assigned id must be an INSERT column:" + System.lineSeparator() + ticket);
         assertTrue(ticket.contains(
-                        "jdbcClient.sql(SQL_INSERT).param(\"id\", entity.getId()).param(\"label\", entity.getLabel()).update()"),
+                        "jdbcClient.sql(INSERT).param(\"id\", entity.getId()).param(\"label\", entity.getLabel()).update()"),
                 "the pre-assigned id parameter must be bound and the update must skip the keyholder:"
                         + System.lineSeparator() + ticket);
         assertTrue(!ticket.contains("longValue"),
@@ -734,8 +734,8 @@ class WriteEmissionTest {
         assertTrue(!ticket.contains("GeneratedKeyHolder") && !ticket.contains("keys.getKey()"),
                 "String id must not do the keyholder roundtrip:" + System.lineSeparator() + ticket);
 
-        String badge = sqlFlat(generatedDir.resolve("appkey/BadgeRepositoryImpl.java"));
-        assertTrue(badge.contains("SQL_INSERT = \"INSERT INTO \"badge\" (\"serial\") VALUES (:serial)\""),
+        String badge = sqlFlat(generatedDir.resolve("appkey/BadgeRepository_.java"));
+        assertTrue(badge.contains("INSERT = \"INSERT INTO \"badge\" (\"serial\") VALUES (:serial)\""),
                 "UUID id omits the identity column:" + System.lineSeparator() + badge);
         assertTrue(badge.contains("entity.setId((UUID) keys.getKey())"),
                 "UUID id is cast directly from the generated key:" + System.lineSeparator() + badge);
@@ -743,17 +743,17 @@ class WriteEmissionTest {
         // Long-id byte parity: the keyholder emission is textually identical to the shape it had
         // before generated-key coercion became id-aware.
         // (Integer byte parity is pinned by collectionLoaderKeyFollowsIntegerIdType above.)
-        String widget = sqlFlat(generatedDir.resolve("appkey/WidgetRepositoryImpl.java"));
-        assertTrue(widget.contains("SQL_INSERT = \"INSERT INTO \"widget\" (\"name\") VALUES (:name)\""),
+        String widget = sqlFlat(generatedDir.resolve("appkey/WidgetRepository_.java"));
+        assertTrue(widget.contains("INSERT = \"INSERT INTO \"widget\" (\"name\") VALUES (:name)\""),
                 "Long id keeps the identity column omitted:" + System.lineSeparator() + widget);
-        assertTrue(widget.contains("GeneratedKeyHolder keys = new GeneratedKeyHolder(); jdbcClient.sql(SQL_INSERT)"
+        assertTrue(widget.contains("GeneratedKeyHolder keys = new GeneratedKeyHolder(); jdbcClient.sql(INSERT)"
                         + ".param(\"name\", entity.getName()).update(keys); if (keys.getKey() != null) "
                         + "{ entity.setId(((Number) keys.getKey()).longValue()); }"),
                 "Long id keeps the keyholder roundtrip byte-identically:" + System.lineSeparator() + widget);
 
         // Short is a numeric generated key, read back through Number's accessor (like Long/Integer).
-        String segment = sqlFlat(generatedDir.resolve("appkey/SegmentRepositoryImpl.java"));
-        assertTrue(segment.contains("SQL_INSERT = \"INSERT INTO \"segment\" (\"code\") VALUES (:code)\""),
+        String segment = sqlFlat(generatedDir.resolve("appkey/SegmentRepository_.java"));
+        assertTrue(segment.contains("INSERT = \"INSERT INTO \"segment\" (\"code\") VALUES (:code)\""),
                 "Short id omits the identity column:" + System.lineSeparator() + segment);
         assertTrue(segment.contains("entity.setId(((Number) keys.getKey()).shortValue())"),
                 "Short id reads through Number.shortValue():" + System.lineSeparator() + segment);
@@ -773,8 +773,8 @@ class WriteEmissionTest {
 
     @Test
     void aggregateWritesCascadeEntityCollectionChildren() throws Exception {
-        // The composition lifecycle is bound to the aggregate root. An EntityCollection whose target
-        // clears the managed-target gate is now ALSO written: root insert runs the CHILD's own
+        // The composition lifecycle is bound to the aggregate root. An EntityCollection whose definition
+        // clears the managed-definition gate is now ALSO written: root insert runs the CHILD's own
         // generated-key insert per member with the inverse fk bound from the root id and backfills the
         // child id; root update replaces all (DELETE by inverse fk + re-insert); deleteById removes
         // children from the child's own table before the root row. This mirrors the element-collection
@@ -837,20 +837,20 @@ class WriteEmissionTest {
         compile(sourceDir, classesDir, generatedDir,
                 "Machine.java", "Part.java", "MachineRepository.java", "PartRepository.java");
 
-        String impl = sqlFlat(generatedDir.resolve("casc/MachineRepositoryImpl.java"));
+        String impl = sqlFlat(generatedDir.resolve("casc/MachineRepository_.java"));
 
         // Child INSERT constant: the child's OWN SqlBuilder insert (identity omitted, ALL child columns
         // incl. the inverse fk), byte-equal to what PartRepository would emit for the same descriptor.
-        assertTrue(impl.contains("SQL_INSERT_PARTS = \"INSERT INTO \"part\" (\"label\", \"owner_id\") VALUES (:label, :owner)\""),
+        assertTrue(impl.contains("INSERT_PARTS = \"INSERT INTO \"part\" (\"label\", \"owner_id\") VALUES (:label, :owner)\""),
                 "the cascade must reuse the child's own insert over its full column set:" + System.lineSeparator() + impl);
         // Child DELETE constant: child's own table keyed by the inverse fk (ElementCollection delete shape).
-        assertTrue(impl.contains("SQL_DELETE_PARTS = \"DELETE FROM \"part\" WHERE \"owner_id\" = :owner_id\""),
+        assertTrue(impl.contains("DELETE_PARTS = \"DELETE FROM \"part\" WHERE \"owner_id\" = :owner_id\""),
                 "the cascade needs a by-fk DELETE on the child table:" + System.lineSeparator() + impl);
         // Insert cascade: per-member child insert binding the fk from the ROOT id (the bare inverse is
         // never serialized), generated key backfilled onto the child.
         assertTrue(impl.contains("for (Part item : entity.getParts()) { if (item != null) { GeneratedKeyHolder childKeys = new GeneratedKeyHolder();"),
                 "root insert must iterate the entity collection with a per-child key holder:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("jdbcClient.sql(SQL_INSERT_PARTS).param(\"label\", item.getLabel()).param(\"owner\", entity.getId()).update(childKeys)"),
+        assertTrue(impl.contains("jdbcClient.sql(INSERT_PARTS).param(\"label\", item.getLabel()).param(\"owner\", entity.getId()).update(childKeys)"),
                 "the inverse-fk parameter must bind the ROOT id, other columns the child's own values:"
                         + System.lineSeparator() + impl);
         assertTrue(impl.contains("if (childKeys.getKey() != null) { item.setId(((Number) childKeys.getKey()).longValue()); }"),
@@ -860,23 +860,23 @@ class WriteEmissionTest {
         // keeps the key it already had; the children the collection no longer names are deleted by key.
         assertTrue(impl.contains("SQL_UPSERT_PARTS = \"MERGE INTO \"part\" (\"id\", \"label\", \"owner_id\") KEY (\"id\") VALUES (:id, :label, :owner)\""),
                 "the sync needs the child's own one-statement upsert:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("jdbcClient.sql(SQL_SELECT_IDS_PARTS).param(\"owner_id\", entity.getId()).query(Long.class).list()"),
+        assertTrue(impl.contains("jdbcClient.sql(SELECT_IDS_PARTS).param(\"owner_id\", entity.getId()).query(Long.class).list()"),
                 "the orphan pass must read the parent's existing child keys first:"
                         + System.lineSeparator() + impl);
         assertTrue(impl.contains("if (item.getId() != null) { jdbcClient.sql(SQL_UPSERT_PARTS).param(\"id\", item.getId()).param(\"label\", item.getLabel()).param(\"owner\", entity.getId()).update();"),
                 "a child that has an id must be upserted under it, not re-inserted:"
                         + System.lineSeparator() + impl);
-        assertTrue(impl.contains("for (Long orphan : keys_parts) { jdbcClient.sql(SQL_DELETE_ORPHAN_PARTS).param(\"owner_id\", entity.getId()).param(\"id\", orphan).update(); }"),
+        assertTrue(impl.contains("for (Long orphan : keys_parts) { jdbcClient.sql(DELETE_ORPHAN_PARTS).param(\"owner_id\", entity.getId()).param(\"id\", orphan).update(); }"),
                 "a child the collection no longer names must be deleted by key:"
                         + System.lineSeparator() + impl);
         // Replace-all is gone: a delete of the WHOLE child set no longer precedes the child loop, which
         // is what used to regenerate every child id on every save.
-        assertFalse(impl.contains("SQL_DELETE_PARTS).param(\"owner_id\", entity.getId()).update(); for (Part item : entity.getParts())"),
+        assertFalse(impl.contains("DELETE_PARTS).param(\"owner_id\", entity.getId()).update(); for (Part item : entity.getParts())"),
                 "the child set must no longer be deleted before it is written:" + System.lineSeparator() + impl);
         // deleteById cascade: children first (id value bound directly), then the root row.
         String deleteByIdCascade = bodyOf(impl, "public void deleteById(Long id) {");
-        assertTrue(deleteByIdCascade.contains("jdbcClient.sql(SQL_DELETE_PARTS).param(\"owner_id\", id).update();"
-                        + " jdbcClient.sql(SQL_DELETE).param(\"id\", id).update();"),
+        assertTrue(deleteByIdCascade.contains("jdbcClient.sql(DELETE_PARTS).param(\"owner_id\", id).update();"
+                        + " jdbcClient.sql(DELETE).param(\"id\", id).update();"),
                 "deleteById must remove cascaded children before the root:" + System.lineSeparator() + impl);
     }
 
@@ -945,16 +945,16 @@ class WriteEmissionTest {
         compile(sourceDir, classesDir, generatedDir,
                 "Device.java", "Module.java", "DeviceRepository.java", "ModuleRepository.java");
 
-        String impl = sqlFlat(generatedDir.resolve("cascnone/DeviceRepositoryImpl.java"));
+        String impl = sqlFlat(generatedDir.resolve("cascnone/DeviceRepository_.java"));
 
         // Read side UNCHANGED: the managed/mapped EntityCollection still gets its hydration loader.
         assertTrue(impl.contains("private void hydrateModules"),
                 "an @Entity owner keeps its read hydration loader:" + System.lineSeparator() + impl);
         // Write side: NO child INSERT constant, NO child DELETE constant, no cascade loops anywhere.
-        assertTrue(!impl.contains("SQL_INSERT_MODULES"),
+        assertTrue(!impl.contains("INSERT_MODULES"),
                 "an @Entity owner must not generate the child-insert cascade constant:"
                         + System.lineSeparator() + impl);
-        assertTrue(!impl.contains("SQL_DELETE_MODULES"),
+        assertTrue(!impl.contains("DELETE_MODULES"),
                 "an @Entity owner must not generate the child-delete cascade constant:"
                         + System.lineSeparator() + impl);
         assertTrue(!impl.contains("INSERT INTO \"module\"") && !impl.contains("DELETE FROM \"module\""),
@@ -962,15 +962,15 @@ class WriteEmissionTest {
                         + System.lineSeparator() + impl);
         // deleteById is the bare root delete (children-first cascade suppressed).
         String deleteRootOnly = bodyOf(impl, "public void deleteById(Long id) {");
-        assertTrue(deleteRootOnly.contains("jdbcClient.sql(SQL_DELETE).param(\"id\", id).update();")
-                        && !deleteRootOnly.contains("SQL_DELETE_MODULES"),
+        assertTrue(deleteRootOnly.contains("jdbcClient.sql(DELETE).param(\"id\", id).update();")
+                        && !deleteRootOnly.contains("DELETE_MODULES"),
                 "deleteById must delete ONLY the root row for an @Entity owner:" + System.lineSeparator() + impl);
     }
 
     @Test
     void writeCascadeDecoupledFromReadMapperGate() throws Exception {
         // The entity-collection write cascade is gated by WRITABILITY only (child id +
-        // table metadata), mirroring the element-collection write path. A target failing the READ
+        // table metadata), mirroring the element-collection write path. A definition failing the READ
         // managed/mapper gate keeps losing its loader (read NOTE) but still cascades on save/update/
         // deleteById; every genuine write skip (here: a non-generated-key-coercible id) records a
         // write-honest NOTE naming save/update/delete, so children are never dropped silently.
@@ -1066,41 +1066,41 @@ class WriteEmissionTest {
                 classesDir, generatedDir, "Hub.java", "Spoke.java", "Tag.java",
                 "HubRepository.java", "SpokeRepository.java");
 
-        String impl = Files.readString(generatedDir.resolve("cascgate/HubRepositoryImpl.java"))
+        String impl = Files.readString(generatedDir.resolve("cascgate/HubRepository_.java"))
                 .replace("\\\"", "\"").replaceAll("\\s+", " ");
 
         // (1) READ gate: Spoke has no row mapper → no loader + the read-worded NOTE (unchanged gate).
         assertTrue(!impl.contains("private void hydrateSpokes"),
-                "a read-gate-failed target must keep losing its hydration loader:"
+                "a read-gate-failed definition must keep losing its hydration loader:"
                         + System.lineSeparator() + impl);
         String notes = notesOf(diagnostics);
-        assertTrue(notes.contains("relationship 'spokes' on cascgate.Hub: target cascgate.Spoke has no generated row mapper"),
+        assertTrue(notes.contains("relationship 'spokes' on cascgate.Hub: definition cascgate.Spoke has no generated row mapper"),
                 "the read gate must still record its NOTE:" + System.lineSeparator() + notes);
         // (2) WRITE path DECOUPLED: despite the read skip, the plain-SQL cascade is emitted.
-        assertTrue(impl.contains("SQL_INSERT_SPOKES"),
+        assertTrue(impl.contains("INSERT_SPOKES"),
                 "the write cascade must survive the READ gate skip (child id + table suffice):"
                         + System.lineSeparator() + impl);
-        assertTrue(impl.contains("jdbcClient.sql(SQL_DELETE_SPOKES).param(\"hub_id\", id).update(); jdbcClient.sql(SQL_DELETE).param(\"id\", id).update(); }"),
+        assertTrue(impl.contains("jdbcClient.sql(DELETE_SPOKES).param(\"hub_id\", id).update(); jdbcClient.sql(DELETE).param(\"id\", id).update(); }"),
                 "deleteById must cascade the read-gate-skipped child first (children-first):"
                         + System.lineSeparator() + impl);
         // (3) A genuine WRITE skip (non-coercible id) gets the write-honest NOTE, not silence.
-        assertTrue(notes.contains("entity collection 'tags' on cascgate.Hub: target id type java.lang.String is not generated-key coercible — children will NOT be cascaded on save/update/delete"),
+        assertTrue(notes.contains("entity collection 'tags' on cascgate.Hub: definition id type java.lang.String is not generated-key coercible — children will NOT be cascaded on save/update/delete"),
                 "the write skip must carry a write-honest NOTE naming save/update/delete:"
                         + System.lineSeparator() + notes);
-        assertTrue(!impl.contains("SQL_INSERT_TAGS") && !impl.contains("SQL_DELETE_TAGS"),
+        assertTrue(!impl.contains("INSERT_TAGS") && !impl.contains("DELETE_TAGS"),
                 "the blocked collection must not emit any cascade constant:"
                         + System.lineSeparator() + impl);
-        // Read side for Tag stays gate-degraded (unmanaged target): no loader, read NOTE (unchanged).
+        // Read side for Tag stays gate-degraded (unmanaged definition): no loader, read NOTE (unchanged).
         assertTrue(!impl.contains("hydrateTags"),
-                "an unmanaged target must not get a hydration loader:" + System.lineSeparator() + impl);
-        assertTrue(notes.contains("relationship 'tags' on cascgate.Hub: target cascgate.Tag has no generated row mapper — left unmapped on read"),
+                "an unmanaged definition must not get a hydration loader:" + System.lineSeparator() + impl);
+        assertTrue(notes.contains("relationship 'tags' on cascgate.Hub: definition cascgate.Tag has no generated row mapper — left unmapped on read"),
                 "the read gate NOTE stays for the unmanaged tags collection:"
                         + System.lineSeparator() + notes);
     }
 
     @Test
     void anAggregateRootWritesItsToOneCompositionTargetBeforeItsOwnRow() throws Exception {
-        // The root's row carries the target's foreign key, read from the live object, so a target with
+        // The root's row carries the definition's foreign key, read from the live object, so a definition with
         // no id yet must be written FIRST for the root's own bind to see the generated key. An
         // @Association (composition=false) is an external entity the root does not own and must not
         // write at all.
@@ -1148,22 +1148,22 @@ class WriteEmissionTest {
                 """);
 
         compile(sourceDir, classesDir, generatedDir, "Author.java", "Book.java", "Books.java");
-        String impl = sqlFlat(generatedDir.resolve("comp/BooksImpl.java"));
+        String impl = sqlFlat(generatedDir.resolve("comp/Books_.java"));
 
         assertTrue(impl.contains("SQL_AUTHOR_UPSERT = \"MERGE INTO \"author\" (\"id\", \"name\") KEY (\"id\") VALUES (:id, :name)\""),
-                "the composition target needs the root's upsert form:" + System.lineSeparator() + impl);
+                "the composition definition needs the root's upsert form:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("Author target_author = entity.getAuthor(); if (target_author != null) {"),
-                "a null target must be skipped, not written:" + System.lineSeparator() + impl);
+                "a null definition must be skipped, not written:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("if (target_author.getId() == null) { GeneratedKeyHolder keys_author = new GeneratedKeyHolder();"),
-                "a target with no id must be inserted with a key holder:" + System.lineSeparator() + impl);
+                "a definition with no id must be inserted with a key holder:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("target_author.setId(((Number) keys_author.getKey()).longValue());"),
-                "the generated target id must be backfilled onto the object the root's fk binds:"
+                "the generated definition id must be backfilled onto the object the root's fk binds:"
                         + System.lineSeparator() + impl);
-        // The target's write precedes the root's, so the root binds an id that already exists.
+        // The definition's write precedes the root's, so the root binds an id that already exists.
         int targetWrite = impl.indexOf("target_author.getId() == null");
         int rootWrite = impl.indexOf("jdbcClient.sql(SQL_UPSERT)");
         assertTrue(targetWrite > 0 && rootWrite > targetWrite,
-                "the composition target must be written BEFORE the root row:" + System.lineSeparator() + impl);
+                "the composition definition must be written BEFORE the root row:" + System.lineSeparator() + impl);
     }
 
     @Test
@@ -1215,13 +1215,13 @@ class WriteEmissionTest {
                 """);
 
         compile(sourceDir, classesDir, generatedDir, "Vendor.java", "Invoice.java", "Invoices.java");
-        String impl = sqlFlat(generatedDir.resolve("assoc/InvoicesImpl.java"));
+        String impl = sqlFlat(generatedDir.resolve("assoc/Invoices_.java"));
 
         assertFalse(impl.contains("SQL_VENDOR_UPSERT"),
-                "an @Association target must not be written:" + System.lineSeparator() + impl);
+                "an @Association definition must not be written:" + System.lineSeparator() + impl);
         assertFalse(impl.contains("target_vendor"),
-                "an @Association target must not get a write block:" + System.lineSeparator() + impl);
-        // The positive counterpart the two negatives above need: "not written" means the target gets no
+                "an @Association definition must not get a write block:" + System.lineSeparator() + impl);
+        // The positive counterpart the two negatives above need: "not written" means the definition gets no
         // statement of its own, NOT that the root stops being written. Both negatives pass on an impl
         // that emits nothing at all, so pin the root's own upsert and the association's only footprint —
         // its fk id, bound inline on the root statement.
@@ -1236,7 +1236,7 @@ class WriteEmissionTest {
     @Test
     void batchWritesLoopTheSingleEntityBodyTheyAreNamedAfter() throws Exception {
         // The batch methods were pinned by SIGNATURE only, which a stub body satisfies: every one of
-        // them writes the same columns, so a file-wide contains("SQL_UPDATE") proves nothing about
+        // them writes the same columns, so a file-wide contains("UPDATE") proves nothing about
         // which method runs it. Scope each assertion to one method body instead — the real contract is
         // that each batch form repeats the single-entity body it is named after, and nothing else.
         Path sourceDir = Files.createDirectories(workspace.resolve("src/batchwrite"));
@@ -1265,7 +1265,7 @@ class WriteEmissionTest {
                 """);
 
         compile(sourceDir, classesDir, generatedDir, "Note.java", "Notes.java");
-        String impl = sqlFlat(generatedDir.resolve("batchwrite/NotesImpl.java"));
+        String impl = sqlFlat(generatedDir.resolve("batchwrite/Notes_.java"));
 
         // saveAll keeps save's per-entity CHOICE: a null id inserts and reads the key back, a set id
         // upserts. A saveAll that unconditionally inserted would re-insert every already-persisted row.
@@ -1280,7 +1280,7 @@ class WriteEmissionTest {
 
         // insertAll has no choice to make: every entity is new, so every one takes the keyholder path.
         String insertAll = bodyOf(impl, "public <S extends Note> List<S> insertAll(List<S> entities) {");
-        assertTrue(insertAll.contains("GeneratedKeyHolder") && insertAll.contains("SQL_INSERT"),
+        assertTrue(insertAll.contains("GeneratedKeyHolder") && insertAll.contains("INSERT"),
                 "insertAll must insert every entity and read each generated key back:"
                         + System.lineSeparator() + insertAll);
         assertFalse(insertAll.contains("SQL_UPSERT"),
@@ -1289,14 +1289,14 @@ class WriteEmissionTest {
 
         // updateAll is the mirror: every entity already has an id, so there is no keyholder at all.
         String updateAll = bodyOf(impl, "public <S extends Note> List<S> updateAll(List<S> entities) {");
-        assertTrue(updateAll.contains("SQL_UPDATE") && updateAll.contains(".param(\"id\", entity.getId())"),
+        assertTrue(updateAll.contains("UPDATE") && updateAll.contains(".param(\"id\", entity.getId())"),
                 "updateAll must update by each entity's id:" + System.lineSeparator() + updateAll);
         assertFalse(updateAll.contains("GeneratedKeyHolder"),
                 "updateAll must not ask for a generated key — the id is already set:"
                         + System.lineSeparator() + updateAll);
 
         String deleteAll = bodyOf(impl, "public void deleteAll(List<? extends Note> entities) {");
-        assertTrue(deleteAll.contains("jdbcClient.sql(SQL_DELETE).param(\"id\", entity.getId()).update();"),
+        assertTrue(deleteAll.contains("jdbcClient.sql(DELETE).param(\"id\", entity.getId()).update();"),
                 "deleteAll must delete each entity by id:" + System.lineSeparator() + deleteAll);
     }
 
@@ -1318,7 +1318,7 @@ class WriteEmissionTest {
         // A null id has nothing to match on, so it still inserts and reads the generated key back.
         assertTrue(impl.contains("if (entity.getId() == null) {"),
                 "a null id must still take the insert path:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("SQL_INSERT = \"INSERT INTO \"item\" (\"name\") VALUES (:name)\""),
+        assertTrue(impl.contains("INSERT = \"INSERT INTO \"item\" (\"name\") VALUES (:name)\""),
                 "the null-id insert must omit the identity column:" + System.lineSeparator() + impl);
     }
 
@@ -1367,15 +1367,15 @@ class WriteEmissionTest {
 
         compile(sourceDir, classesDir, generatedDir, "Stub.java", "StubRepository.java");
 
-        String impl = sqlFlat(generatedDir.resolve("appidonly/StubRepositoryImpl.java"));
-        assertTrue(impl.contains("SQL_INSERT = \"INSERT INTO \"stub\" DEFAULT VALUES\""),
+        String impl = sqlFlat(generatedDir.resolve("appidonly/StubRepository_.java"));
+        assertTrue(impl.contains("INSERT = \"INSERT INTO \"stub\" DEFAULT VALUES\""),
                 "an entity with nothing to bind must insert a row of all defaults:"
                         + System.lineSeparator() + impl);
         assertFalse(impl.contains("() VALUES ()"),
                 "the empty column list must not survive into any constant:"
                         + System.lineSeparator() + impl);
         assertTrue(impl.contains("GeneratedKeyHolder keys = new GeneratedKeyHolder(); "
-                        + "jdbcClient.sql(SQL_INSERT).update(keys);"),
+                        + "jdbcClient.sql(INSERT).update(keys);"),
                 "the keyholder roundtrip must still read the generated key back, binding nothing:"
                         + System.lineSeparator() + impl);
     }

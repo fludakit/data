@@ -11,7 +11,7 @@ import io.github.fludakit.data.annotation.Identity;
  * entity field is a NON-composing {@code Reference} (an association), so direct row-mapper reads
  * (findById and friends) fill only its identifier and leave every other column null, the same shape
  * the {@code it.profile} fixture produces for {@code WorkExperience.profile} — there is no second
- * eager fetch to complete the target.</p>
+ * eager fetch to complete the definition.</p>
  */
 @Entity
 public class Player {

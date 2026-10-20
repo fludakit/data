@@ -418,6 +418,31 @@ final class RepositoryVisitor {
 
     private MethodContext resolveAnnotatedMethod(ExecutableElement method, String methodName,
                                                   Operation operation, TypeDefinition entityMapping) {
+        // Validate that write operations accept entity or entity collection parameters
+        if (operation == Operation.SAVE || operation == Operation.INSERT || operation == Operation.UPDATE || operation == Operation.DELETE) {
+            if (!method.getParameters().isEmpty()) {
+                VariableElement firstParam = method.getParameters().get(0);
+                String paramType = firstParam.asType().toString();
+                String entityType = entityMapping.typeName();
+                
+                // Check if parameter is the entity type, a generic type variable (S extends Entity), 
+                // or a collection of entities (including generic collections like List<S>, List<? extends T>)
+                boolean isValid = paramType.equals(entityType) 
+                        || paramType.startsWith("java.util.List<" + entityType)
+                        || paramType.startsWith("java.util.Collection<" + entityType)
+                        // Allow generic type parameters (e.g., <S extends Entity> S save(S entity))
+                        || (paramType.length() == 1 && Character.isUpperCase(paramType.charAt(0)))
+                        // Allow collections of generic type parameters (e.g., List<S>, List<? extends T>)
+                        || paramType.matches("java\\.util\\.(List|Collection)<\\??\\s*(extends\\s+)?[A-Z]>");
+                
+                if (!isValid) {
+                    throw new IllegalArgumentException(
+                            "Method " + methodName + " carries a lifecycle annotation and must accept "
+                            + "the repository entity type (" + entityType + ") or a collection thereof, not " + paramType);
+                }
+            }
+        }
+        
         ResultKind resultKind = resolveResultKind(method, operation);
         PagingMode pagingMode = resolvePagingMode(method, resultKind);
         List<Predicate> predicates = resolveByAnnotations(method, entityMapping);
@@ -518,7 +543,9 @@ final class RepositoryVisitor {
             // Try to split the camelCase path
             String resolvedPath = trySplitCamelCasePath(path, entityMapping);
             if (resolvedPath != null && !resolvedPath.equals(path)) {
-                resolved.add(new Predicate(resolvedPath, p.operator(), p.param(), p.connector(), p.ignoreCase()));
+                // When path is resolved, update param to match the resolved path
+                String resolvedParam = io.github.fludakit.data.sql.QueryCompiler.paramName(resolvedPath);
+                resolved.add(new Predicate(resolvedPath, p.operator(), resolvedParam, p.connector(), p.ignoreCase()));
             } else {
                 resolved.add(p);
             }

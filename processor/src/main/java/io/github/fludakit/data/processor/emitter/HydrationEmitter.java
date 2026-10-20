@@ -40,14 +40,15 @@ public final class HydrationEmitter {
 
     /**
      * Returns whether the entity has any to-many collections or composing associations that need hydration.
-     * Note: ElementCollections are NOT hydrated separately - they're loaded inline with the parent.
      */
     public boolean hasCollectionsToHydrate(TypeDefinition entity) {
         for (TypeDefinition.Prop prop : entity.properties()) {
             if (prop instanceof TypeDefinition.Prop.EntityCollection) {
                 return true;
             }
-            // ElementCollections don't need separate hydration - they use inline loading
+            if (prop instanceof TypeDefinition.Prop.ElementCollection) {
+                return true;
+            }
             if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.composition()) {
                 return true;
             }
@@ -117,7 +118,6 @@ public final class HydrationEmitter {
     /**
      * Emits per-collection loader methods for each to-many collection.
      * Returns a list of method specs (may be empty).
-     * Note: ElementCollections are NOT loaded separately - they use inline queries.
      */
     public List<MethodSpec> emitCollectionLoaders(RepositoryContext ctx) {
         List<MethodSpec> methods = new ArrayList<>();
@@ -129,9 +129,12 @@ public final class HydrationEmitter {
                 if (loader != null) {
                     methods.add(loader);
                 }
-            }
-            // Skip ElementCollection - these don't get separate hydration loaders
-            else if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.composition()) {
+            } else if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
+                MethodSpec loader = emitElementCollectionLoader(ctx, ec);
+                if (loader != null) {
+                    methods.add(loader);
+                }
+            } else if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.composition()) {
                 MethodSpec loader = emitCompositionAssociationLoader(ctx, assoc);
                 if (loader != null) {
                     methods.add(loader);
@@ -249,18 +252,13 @@ public final class HydrationEmitter {
             body.add("    .map(row -> row.get(0, $T.class))\n", elementClass);
             body.add("    .list();\n");
         } else {
-            // For value objects, we cannot use a RowMapper (VOs don't get them generated).
-            // Instead, map each column by name matching the VO's property names.
-            // This assumes the SELECT * returns columns matching VO property names.
+            // For value objects, use the generated RowMapper with query()
+            ClassName rowMapperClass = deriveRowMapperType(elementFqn);
+            
             body.add("$T<$T> items = jdbcClient\n", List.class, elementClass);
             body.add("    .sql($L)\n", constName);
             body.add("    .param($S, entity.getId())\n", "parentId");
-            body.add("    .map(row -> {\n");
-            body.add("        $T item = new $T();\n", elementClass, elementClass);
-            // TODO: Map individual columns based on VO metadata
-            // For now, this is a placeholder - real implementation would iterate VO properties
-            body.add("        return item;\n");
-            body.add("    })\n");
+            body.add("    .query(new $T())\n", rowMapperClass);
             body.add("    .list();\n");
         }
         body.add("entity.$L(items);", setterName);

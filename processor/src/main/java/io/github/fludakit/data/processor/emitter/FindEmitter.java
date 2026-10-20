@@ -293,7 +293,7 @@ public final class FindEmitter {
         String baseSql;
         String joinAlias = null; // Declare here so it's available for seek term generation
 
-        if (hasToManySort && ecRelForHydration != null) {
+        if (hasToManySort && ecRelForHydration != null && ecRelForHydration.target() != null) {
             // For ENTITY_COLLECTION sorts, add a LEFT JOIN to hydrate the relation for cursor extraction.
             // Also add aggregate expressions to SELECT for ORDER BY compatibility with DISTINCT.
             String rootTable = dialect.quoteIdentifier(ctx.entity().tableName());
@@ -424,9 +424,9 @@ public final class FindEmitter {
                     }
                 }
 
-                if (isToManyPath && (ecRel != null || elemColRel != null)) {
+                if (isToManyPath && ((ecRel != null && ecRel.target() != null) || elemColRel != null)) {
                     String colPart = prop.substring(prop.indexOf('.') + 1).replace('.', '_');
-                    String childTable = ecRel != null
+                    String childTable = ecRel != null && ecRel.target() != null
                         ? dialect.quoteIdentifier(ecRel.target().tableName())
                         : dialect.quoteIdentifier(elemColRel.childTable());
                     String fkColumn = ecRel != null
@@ -751,7 +751,7 @@ public final class FindEmitter {
         for (TypeDefinition.Prop prop : ctx.entity().properties()) {
             if (prop instanceof TypeDefinition.Prop.EntityCollection ec
                     && prop.name().equals(firstSegment)) {
-                return ec.target().typeName();
+                return ec.target() != null ? ec.target().typeName() : ec.javaType();
             } else if (prop instanceof TypeDefinition.Prop.ElementCollection elemCol
                     && prop.name().equals(firstSegment)) {
                 return elemCol.elementType();

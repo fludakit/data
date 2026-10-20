@@ -273,6 +273,15 @@ public final class TypeModelEmitter {
         }
     }
 
+    private CodeBlock entityTargetLiteral(TypeDefinition.Entity entity) {
+        // Reference the target entity's TypeModel.definition() method and cast to Entity
+        String typeName = entity.typeName();
+        String packageName = typeName.substring(0, typeName.lastIndexOf('.'));
+        String simpleName = typeName.substring(typeName.lastIndexOf('.') + 1);
+        ClassName typeModelClass = ClassName.get(packageName, simpleName + "TypeModel");
+        return CodeBlock.of("($T.Entity)$L.INSTANCE.definition()", TYPE_DEFINITION, typeModelClass);
+    }
+
     private CodeBlock propLiteral(TypeDefinition.Prop prop) {
         return switch (prop) {
             case TypeDefinition.Prop.Scalar s -> CodeBlock.of("new $T($S, $S, $S, $L)",
@@ -287,14 +296,24 @@ public final class TypeModelEmitter {
             case TypeDefinition.Prop.Embedded e -> CodeBlock.of("new $T($S, $S, null, $S)",
                     ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "Embedded"),
                     e.name(), e.javaType(), e.prefix());
-            case TypeDefinition.Prop.Association a -> CodeBlock.of("new $T($S, $S, null, $S, $L, $L, $L)",
-                    ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "Association"),
-                    a.name(), a.javaType(), a.fkColumn(), a.backReference(), a.composition(),
-                    a.cascade() != null ? CodeBlock.of("$T.$L", ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "Association", "Cascade"), a.cascade()) : CodeBlock.of("null"));
-            case TypeDefinition.Prop.EntityCollection ec -> CodeBlock.of("new $T($S, $S, null, $S, null)",
-                    ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "EntityCollection"),
-                    ec.name(), ec.javaType(), ec.fkColumn());
-            case TypeDefinition.Prop.ElementCollection ec -> CodeBlock.of("new $T($S, $S, $S, $S)",
+            case TypeDefinition.Prop.Association a -> {
+                CodeBlock targetLiteral = a.target() != null 
+                    ? entityTargetLiteral(a.target())
+                    : CodeBlock.of("null");
+                yield CodeBlock.of("new $T($S, $S, $L, $S, $L, $L, $L)",
+                        ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "Association"),
+                        a.name(), a.javaType(), targetLiteral, a.fkColumn(), a.backReference(), a.composition(),
+                        a.cascade() != null ? CodeBlock.of("$T.$L", ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "Association", "Cascade"), a.cascade()) : CodeBlock.of("null"));
+            }
+            case TypeDefinition.Prop.EntityCollection ec -> {
+                CodeBlock targetLiteral = ec.target() != null 
+                    ? entityTargetLiteral(ec.target())
+                    : CodeBlock.of("null");
+                yield CodeBlock.of("new $T($S, $S, $L, $S, null)",
+                        ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "EntityCollection"),
+                        ec.name(), ec.javaType(), targetLiteral, ec.fkColumn());
+            }
+            case TypeDefinition.Prop.ElementCollection ec -> CodeBlock.of("new $T($S, $S, $S, $S, null)",
                     ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "ElementCollection"),
                     ec.name(), ec.elementType(), ec.childTable(), ec.fkColumn());
             default -> throw new IllegalStateException("Unexpected prop: " + prop);

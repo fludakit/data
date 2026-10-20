@@ -4,6 +4,7 @@ import io.github.fludakit.data.query.Connector;
 import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.SortSpec;
+import io.github.fludakit.data.sql.QueryCompiler;
 import org.antlr.v4.runtime.tree.TerminalNode;
 import java.util.ArrayList;
 import java.util.List;
@@ -60,7 +61,9 @@ public class QbnMethodNameVisitor extends QbnBaseVisitor<ParsedMethodName> {
 
     private Predicate predicate(QbnParser.ConditionContext ctx, Connector connector) {
         String prop = propertyName(ctx.property());
-        return Predicate.of(prop, operator(ctx), prop, connector, ctx.IGNORE_CASE() != null);
+        // Transform property path to SQL parameter name (e.g., "contacts.value" -> "contacts_value")
+        String paramName = QueryCompiler.paramName(prop);
+        return Predicate.of(prop, operator(ctx), paramName, connector, ctx.IGNORE_CASE() != null);
     }
 
     private Operator operator(QbnParser.ConditionContext ctx) {

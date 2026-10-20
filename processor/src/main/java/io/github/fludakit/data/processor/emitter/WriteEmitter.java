@@ -72,10 +72,18 @@ public final class WriteEmitter {
         Operation op = method.operation();
 
         // Skip batch lifecycle methods — handled by LifecycleEmitter
+        // Detect by name or by parameter type (List/Collection)
         String name = method.name();
         if ("saveAll".equals(name) || "deleteAll".equals(name) || "deleteByIds".equals(name)
                 || "insertAll".equals(name) || "updateAll".equals(name)) {
             return null;
+        }
+        // Also skip if the first parameter is a collection type (batch operation)
+        if (!method.parameters().isEmpty()) {
+            String paramType = method.parameters().get(0).asType().toString();
+            if (paramType.startsWith("java.util.List") || paramType.startsWith("java.util.Collection")) {
+                return null;
+            }
         }
 
         if (op == Operation.SAVE) {
@@ -98,7 +106,9 @@ public final class WriteEmitter {
     private MethodSpec emitSave(RepositoryContext ctx, MethodContext method) {
         MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
         TypeDefinition entity = ctx.entity();
-        String entityVar = "entity";
+        // Extract the entity parameter name from the method signature
+        String entityVar = method.parameters().isEmpty() ? "entity" 
+                : method.parameters().get(0).getSimpleName().toString();
         TypeDefinition.Prop.Id idProp = idProp(entity);
         String idTypeFqn = idProp != null ? idProp.javaType() : "java.lang.Long";
         IdStrategy strategy = idStrategy(idTypeFqn);
@@ -190,10 +200,16 @@ public final class WriteEmitter {
 
         builder.addCode(body.build());
 
-        // Post-insert cascade: entity collections
-        // (compositions were already handled pre-insert)
+        // Post-insert cascade: entity collections (aggregate roots only) and element collections (all entities)
         if (ctx.entity().ownsAggregateLifecycle()) {
             emitPostInsertCascade(builder, ctx, entityVar);
+        } else {
+            // For non-aggregate entities, still persist element collections
+            for (TypeDefinition.Prop prop : ctx.entity().properties()) {
+                if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
+                    emitElementCollectionSave(builder, ctx, entityVar, ec);
+                }
+            }
         }
 
         // Return after cascade so the return statement isn't placed before cascade code
@@ -286,7 +302,7 @@ public final class WriteEmitter {
     }
 
     /**
-     * Post-insert cascade for aggregate roots: handles entity collections
+     * Post-insert cascade for aggregate roots: handles entity collections and element collections
      * AFTER the root has been inserted.
      */
     private void emitPostInsertCascade(MethodSpec.Builder builder, RepositoryContext ctx, String entityVar) {
@@ -295,6 +311,8 @@ public final class WriteEmitter {
         for (TypeDefinition.Prop prop : entity.properties()) {
             if (prop instanceof TypeDefinition.Prop.EntityCollection ec && ec.target() != null) {
                 emitEntityCollectionSave(builder, ctx, entityVar, ec);
+            } else if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
+                emitElementCollectionSave(builder, ctx, entityVar, ec);
             }
         }
     }
@@ -413,16 +431,17 @@ public final class WriteEmitter {
         CodeBlock.Builder cascade = CodeBlock.builder();
 
         // Load existing child IDs into a set
+        ClassName childIdType = ClassName.bestGuess(childIdTypeFqn);
         cascade.add("$T<$T> $L = new $T<>(jdbcClient\n",
-                java.util.Set.class, Long.class, "existingIds_" + ec.name(), java.util.HashSet.class);
+                java.util.Set.class, childIdType, "existingIds_" + ec.name(), java.util.HashSet.class);
         cascade.add("    .sql($L)\n", selectIdsConst);
         cascade.add("    .param($S, $L)\n", "parentId", parentIdExpr);
-        cascade.add("    .query($T.class)\n", Long.class);
+        cascade.add("    .query($T.class)\n", childIdType);
         cascade.add("    .list());\n");
 
         // Track which IDs are still in the collection
         cascade.add("$T<$T> $L = new $T<>();\n",
-                java.util.Set.class, Long.class, "currentIds_" + ec.name(), java.util.HashSet.class);
+                java.util.Set.class, childIdType, "currentIds_" + ec.name(), java.util.HashSet.class);
 
         // Upsert each in-memory child
         cascade.add("if ($L != null) {\n", collectionGetter);
@@ -430,7 +449,12 @@ public final class WriteEmitter {
 
         if (childStrategy == IdStrategy.APP_ASSIGNED) {
             cascade.add("        jdbcClient.sql($L)", childUpdateConst);
-            appendChildPropBindings(cascade, childEntity, childVar, parentIdExpr, inverseName);
+            appendChildPropBindings(cascade, childEntity, childVar, parentIdExpr, inverseName, ec.fkColumn());
+            // Explicitly re-bind FK to parent ID in case inverse detection failed
+            String fkParamName1 = findFkParamName(childEntity, ec.fkColumn());
+            if (fkParamName1 != null) {
+                cascade.add(".param($S, $L)", fkParamName1, parentIdExpr);
+            }
             cascade.add(".update();\n");
             cascade.add("        $L.add($L.getId());\n", "currentIds_" + ec.name(), childVar);
         } else {
@@ -438,7 +462,12 @@ public final class WriteEmitter {
             cascade.add("            $T $L = new $T();\n", GENERATED_KEY_HOLDER,
                     "ecKeys_" + ec.name(), GENERATED_KEY_HOLDER);
             cascade.add("            jdbcClient.sql($L)", childInsertConst);
-            appendChildNonIdBindings(cascade, childEntity, childVar, parentIdExpr, inverseName);
+            appendChildNonIdBindings(cascade, childEntity, childVar, parentIdExpr, inverseName, ec.fkColumn());
+            // Explicitly re-bind FK to parent ID in case inverse detection failed
+            String fkParamName2 = findFkParamName(childEntity, ec.fkColumn());
+            if (fkParamName2 != null) {
+                cascade.add(".param($S, $L)", fkParamName2, parentIdExpr);
+            }
             cascade.add(".update($L);\n", "ecKeys_" + ec.name());
             if (childStrategy == IdStrategy.NUMERIC) {
                 cascade.add("            if ($L.getKey() != null) {\n", "ecKeys_" + ec.name());
@@ -453,7 +482,12 @@ public final class WriteEmitter {
             }
             cascade.add("        } else {\n");
             cascade.add("            jdbcClient.sql($L)", childUpdateConst);
-            appendChildPropBindings(cascade, childEntity, childVar, parentIdExpr, inverseName);
+            appendChildPropBindings(cascade, childEntity, childVar, parentIdExpr, inverseName, ec.fkColumn());
+            // Explicitly re-bind FK to parent ID in case inverse detection failed
+            String fkParamName3 = findFkParamName(childEntity, ec.fkColumn());
+            if (fkParamName3 != null) {
+                cascade.add(".param($S, $L)", fkParamName3, parentIdExpr);
+            }
             cascade.add(".update();\n");
             cascade.add("        }\n");
             cascade.add("        $L.add($L.getId());\n", "currentIds_" + ec.name(), childVar);
@@ -464,11 +498,81 @@ public final class WriteEmitter {
 
         // Delete orphans: existing IDs that are not in the current collection
         cascade.add("$L.removeAll($L);\n", "existingIds_" + ec.name(), "currentIds_" + ec.name());
-        cascade.add("for ($T $L : $L) {\n", Long.class, "orphanId", "existingIds_" + ec.name());
+        cascade.add("for ($T $L : $L) {\n", childIdType, "orphanId", "existingIds_" + ec.name());
         cascade.add("    jdbcClient.sql($L).param($S, $L).param($S, $L).update();\n",
                 deleteConst, "childId", "orphanId", "parentId", parentIdExpr);
         cascade.add("}");
 
+        builder.addStatement(cascade.build());
+    }
+
+    /**
+     * Cascade save for an ElementCollection: inserts all value objects into the child table
+     * with the parent FK. Unlike EntityCollections, element collections don't have IDs so we
+     * always delete old and insert new (no upsert logic).
+     */
+    private void emitElementCollectionSave(MethodSpec.Builder builder, RepositoryContext ctx,
+                                            String entityVar, TypeDefinition.Prop.ElementCollection ec) {
+        String getter = entityVar + ".get" + capitalize(ec.name()) + "()";
+        String parentIdExpr = entityVar + ".getId()";
+        
+        // Get the element type definition to build proper INSERT
+        TypeDefinition elementType = ec.targetType();
+        if (elementType == null) return; // Can't proceed without type info
+        
+        String childTable = dialect.quoteIdentifier(ec.childTable());
+        String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
+        
+        // Build column list from element type properties (scalars only)
+        java.util.List<String> columns = new java.util.ArrayList<>();
+        columns.add(fkColumn);
+        for (TypeDefinition.Prop prop : elementType.properties()) {
+            if (prop instanceof TypeDefinition.Prop.Scalar s) {
+                columns.add(dialect.quoteIdentifier(s.columnName()));
+            }
+        }
+        
+        // Build param placeholders
+        java.util.List<String> params = new java.util.ArrayList<>();
+        params.add(":parentId");
+        for (TypeDefinition.Prop prop : elementType.properties()) {
+            if (prop instanceof TypeDefinition.Prop.Scalar s) {
+                params.add(":" + s.name());
+            }
+        }
+        
+        String insertSql = "INSERT INTO " + childTable + " (" + String.join(", ", columns) + 
+                          ") VALUES (" + String.join(", ", params) + ")";
+        String insertConst = ctx.registerConstant("EC_INSERT_" + ec.name().toUpperCase(), insertSql);
+        
+        // Build DELETE SQL to clear old elements before re-inserting
+        String deleteSql = "DELETE FROM " + childTable + " WHERE " + fkColumn + " = :parentId";
+        String deleteConst = ctx.registerConstant("EC_DELETE_" + ec.name().toUpperCase(), deleteSql);
+        
+        CodeBlock.Builder cascade = CodeBlock.builder();
+        
+        // Delete existing elements first (simple approach: delete all, re-insert all)
+        cascade.add("jdbcClient.sql($L).param($S, $L).update();\n", 
+                deleteConst, "parentId", parentIdExpr);
+        
+        // Insert each element in the collection
+        cascade.add("if ($L != null) {\n", getter);
+        cascade.add("    for (var element : $L) {\n", getter);
+        cascade.add("        jdbcClient.sql($L)", insertConst);
+        cascade.add(".param($S, $L)", "parentId", parentIdExpr);
+        
+        // Bind element properties
+        for (TypeDefinition.Prop prop : elementType.properties()) {
+            if (prop instanceof TypeDefinition.Prop.Scalar s) {
+                String getterName = "get" + capitalize(s.name());
+                cascade.add(".param($S, element.$L())", s.name(), getterName);
+            }
+        }
+        
+        cascade.add(".update();\n");
+        cascade.add("    }\n");
+        cascade.add("}");
+        
         builder.addStatement(cascade.build());
     }
 
@@ -477,7 +581,8 @@ public final class WriteEmitter {
     private MethodSpec emitInsert(RepositoryContext ctx, MethodContext method) {
         MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
         TypeDefinition entity = ctx.entity();
-        String entityVar = "entity";
+        String entityVar = method.parameters().isEmpty() ? "entity" 
+                : method.parameters().get(0).getSimpleName().toString();
         TypeDefinition.Prop.Id idProp = idProp(entity);
         String idTypeFqn = idProp != null ? idProp.javaType() : "java.lang.Long";
         IdStrategy strategy = idStrategy(idTypeFqn);
@@ -527,7 +632,8 @@ public final class WriteEmitter {
     private MethodSpec emitUpdate(RepositoryContext ctx, MethodContext method) {
         MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
         TypeDefinition entity = ctx.entity();
-        String entityVar = "entity";
+        String entityVar = method.parameters().isEmpty() ? "entity" 
+                : method.parameters().get(0).getSimpleName().toString();
 
         SqlBuilder sb = new SqlBuilder(entity, entity);
         sb.dialect(dialect);
@@ -545,6 +651,13 @@ public final class WriteEmitter {
         // Cascade writes for aggregate roots (same diff sync as save)
         if (ctx.entity().ownsAggregateLifecycle()) {
             emitCascadeWrites(builder, ctx, entityVar);
+        } else {
+            // For non-aggregate entities, still persist element collections on update
+            for (TypeDefinition.Prop prop : ctx.entity().properties()) {
+                if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
+                    emitElementCollectionSave(builder, ctx, entityVar, ec);
+                }
+            }
         }
 
         if (returnsEntity) body.add("\nreturn $L;", entityVar);
@@ -564,14 +677,40 @@ public final class WriteEmitter {
         String deleteSql = sb.deleteById();
         String constName = ctx.registerConstant("DELETE", deleteSql);
 
-        // Find the id parameter name from the method signature
-        String idParam = findIdParam(method);
+        // Extract the entity parameter name from the method signature
+        String entityVar = method.parameters().isEmpty() ? "entity" 
+                : method.parameters().get(0).getSimpleName().toString();
 
         CodeBlock.Builder body = CodeBlock.builder();
-        body.add("jdbcClient.sql($L).param($S, $L).update();", constName, "id", idParam);
+        
+        // Cascade delete element collections first (before deleting parent row)
+        for (TypeDefinition.Prop prop : entity.properties()) {
+            if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
+                emitElementCollectionDelete(body, ctx, entityVar, ec);
+            }
+        }
+        
+        // Then delete the parent row
+        body.add("jdbcClient.sql($L).param($S, $L.getId()).update();", constName, "id", entityVar);
 
         builder.addCode(body.build());
         return builder.build();
+    }
+    
+    /**
+     * Emits code to delete all elements in an element collection when the parent is deleted.
+     */
+    private void emitElementCollectionDelete(CodeBlock.Builder body, RepositoryContext ctx,
+                                              String entityVar, TypeDefinition.Prop.ElementCollection ec) {
+        String parentIdExpr = entityVar + ".getId()";
+        String childTable = dialect.quoteIdentifier(ec.childTable());
+        String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
+        
+        String deleteSql = "DELETE FROM " + childTable + " WHERE " + fkColumn + " = :parentId";
+        String deleteConst = ctx.registerConstant("EC_DELETE_" + ec.name().toUpperCase(), deleteSql);
+        
+        body.add("jdbcClient.sql($L).param($S, $L).update();\n", 
+                deleteConst, "parentId", parentIdExpr);
     }
 
     // ── Binding helpers ──────────────────────────────────────────────────
@@ -598,13 +737,13 @@ public final class WriteEmitter {
      */
     private void appendChildPropBindings(CodeBlock.Builder body, TypeDefinition.Entity childEntity,
                                           String childVar, String parentIdExpr,
-                                          String inverseName) {
+                                          String inverseName, String fkColumn) {
         TypeDefinition.Prop.Id idProp = idProp(childEntity);
         if (idProp != null) {
             body.add(".param($S, $L.getId())", idProp.name(), childVar);
         }
         for (TypeDefinition.Prop prop : childEntity.properties()) {
-            appendChildPropBinding(body, prop, childVar, "", parentIdExpr, inverseName);
+            appendChildPropBinding(body, prop, childVar, "", parentIdExpr, inverseName, fkColumn);
         }
     }
 
@@ -614,9 +753,9 @@ public final class WriteEmitter {
      */
     private void appendChildNonIdBindings(CodeBlock.Builder body, TypeDefinition.Entity childEntity,
                                            String childVar, String parentIdExpr,
-                                           String inverseName) {
+                                           String inverseName, String fkColumn) {
         for (TypeDefinition.Prop prop : childEntity.properties()) {
-            appendChildPropBinding(body, prop, childVar, "", parentIdExpr, inverseName);
+            appendChildPropBinding(body, prop, childVar, "", parentIdExpr, inverseName, fkColumn);
         }
     }
 
@@ -625,12 +764,13 @@ public final class WriteEmitter {
      */
     private void appendChildPropBinding(CodeBlock.Builder body, TypeDefinition.Prop prop,
                                          String varName, String prefix, String parentIdExpr,
-                                         String inverseName) {
+                                         String inverseName, String fkColumn) {
         // Scalar props — just bind normally
         if (prop instanceof TypeDefinition.Prop.Scalar s) {
             appendColumnBinding(body, s, varName, prefix);
-        } else if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.name().equals(inverseName)) {
-            // This is the inverse FK — bind parent ID
+        } else if (prop instanceof TypeDefinition.Prop.Association assoc && 
+                   (assoc.name().equals(inverseName) || (fkColumn != null && fkColumn.equals(assoc.fkColumn())))) {
+            // This is the inverse FK — bind parent ID directly
             String paramName = prefix.isEmpty() ? assoc.name() : prefix + assoc.name();
             body.add(".param($S, $L)", paramName, parentIdExpr);
         } else if (prop instanceof TypeDefinition.Prop.Association assoc) {
@@ -766,9 +906,28 @@ public final class WriteEmitter {
      * Used to identify the inverse FK when binding child entity parameters.
      */
     private static String findInverseRelationName(TypeDefinition.Entity childDef, String parentTypeName) {
+        // First pass: exact type name match
         for (TypeDefinition.Prop prop : childDef.properties()) {
-            if (prop instanceof TypeDefinition.Prop.Association assoc && parentTypeName.equals(assoc.target().typeName())) {
+            if (prop instanceof TypeDefinition.Prop.Association assoc 
+                    && assoc.target() != null 
+                    && parentTypeName.equals(assoc.target().typeName())) {
                 return assoc.name();
+            }
+        }
+        // Second pass: relaxed match - check simple class name (without package)
+        String parentSimpleName = parentTypeName.contains(".") 
+                ? parentTypeName.substring(parentTypeName.lastIndexOf('.') + 1)
+                : parentTypeName;
+        for (TypeDefinition.Prop prop : childDef.properties()) {
+            if (prop instanceof TypeDefinition.Prop.Association assoc 
+                    && assoc.target() != null 
+                    && assoc.target().typeName() != null) {
+                String targetSimpleName = assoc.target().typeName().contains(".")
+                        ? assoc.target().typeName().substring(assoc.target().typeName().lastIndexOf('.') + 1)
+                        : assoc.target().typeName();
+                if (parentSimpleName.equals(targetSimpleName)) {
+                    return assoc.name();
+                }
             }
         }
         return null;
@@ -795,6 +954,21 @@ public final class WriteEmitter {
 
     // ── Utility ──────────────────────────────────────────────────────────
 
+    /**
+     * Finds the parameter name for the FK column by looking for an Association with matching fkColumn.
+     */
+    private String findFkParamName(TypeDefinition.Entity childEntity, String fkColumn) {
+        if (fkColumn == null) return null;
+        for (TypeDefinition.Prop prop : childEntity.properties()) {
+            if (prop instanceof TypeDefinition.Prop.Association assoc 
+                    && assoc.fkColumn() != null 
+                    && fkColumn.equals(assoc.fkColumn())) {
+                return assoc.name();
+            }
+        }
+        return null;
+    }
+
     private String getter(String propertyName) {
         return "get" + Character.toUpperCase(propertyName.charAt(0)) + propertyName.substring(1);
     }
@@ -817,5 +991,10 @@ public final class WriteEmitter {
     private boolean isEnum(String typeFqn) {
         TypeElement typeElement = elements.getTypeElement(typeFqn);
         return typeElement != null && typeElement.getKind() == ElementKind.ENUM;
+    }
+
+    private String capitalize(String s) {
+        if (s == null || s.isEmpty()) return s;
+        return Character.toUpperCase(s.charAt(0)) + s.substring(1);
     }
 }

@@ -52,9 +52,9 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
      */
     default String idColumn() {
         if (this instanceof Entity e) {
-            return e.id().columnName();
+            return e.id() != null ? e.id().columnName() : null;
         } else if (this instanceof Aggregate a) {
-            return a.id().columnName();
+            return a.id() != null ? a.id().columnName() : null;
         }
         return null;
     }
@@ -163,6 +163,7 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
         List<JoinEdge> edges = new ArrayList<>();
         TypeDefinition current = this;
         StringBuilder columnPrefix = new StringBuilder();
+        String elementCollectionTable = null; // Track the child table when navigating through ElementCollection
 
         // Walk through all segments except the last to build edges and track embedded prefix
         for (int i = 0; i < segments.length - 1; i++) {
@@ -197,12 +198,14 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
                 ColumnRef.ForeignKey childFk = new ColumnRef.ForeignKey(
                         ec.fkColumn(), ec.childTable());
                 edges.add(new JoinEdge.ToMany(ownerId, childFk));
-                // For element collections of VOs, we need to continue navigation into the VO
-                // But we don't have a TypeDefinition for the element type here - it needs to be
-                // resolved by the caller (processor) which has access to the type cache
-                // For now, create a placeholder and let the caller handle nested resolution
-                throw new UnknownAttributePathException(path,
-                        "Cannot navigate through element collection without runtime type resolution: " + segment);
+                // Track the element collection's child table for leaf qualification
+                elementCollectionTable = ec.childTable();
+                // Continue navigation into the element type (ValueObject)
+                if (ec.targetType() == null) {
+                    throw new UnknownAttributePathException(path,
+                            "Element collection target type not resolved: " + segment);
+                }
+                current = ec.targetType();
             } else if (prop instanceof Prop.Embedded emb) {
                 // Embedded relations don't create join edges - they're flattened into the same table
                 if (columnPrefix.length() > 0) {
@@ -248,25 +251,30 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
             String columnName = columnPrefix.length() > 0
                     ? columnPrefix.toString() + "_" + s.columnName()
                     : s.columnName();
-            String tableName = current.tableName() != null ? current.tableName() : this.tableName();
+            // Use elementCollectionTable if we navigated through an ElementCollection
+            String tableName = elementCollectionTable != null ? elementCollectionTable
+                    : (current.tableName() != null ? current.tableName() : this.tableName());
             leaf = new ColumnRef.Simple(columnName, tableName);
         } else if (lastProp instanceof Prop.Id id) {
             String columnName = columnPrefix.length() > 0
                     ? columnPrefix.toString() + "_" + id.columnName()
                     : id.columnName();
-            String tableName = current.tableName() != null ? current.tableName() : this.tableName();
+            String tableName = elementCollectionTable != null ? elementCollectionTable
+                    : (current.tableName() != null ? current.tableName() : this.tableName());
             leaf = new ColumnRef.Simple(columnName, tableName);
         } else if (lastProp instanceof Prop.Version v) {
             String columnName = columnPrefix.length() > 0
                     ? columnPrefix.toString() + "_" + v.columnName()
                     : v.columnName();
-            String tableName = current.tableName() != null ? current.tableName() : this.tableName();
+            String tableName = elementCollectionTable != null ? elementCollectionTable
+                    : (current.tableName() != null ? current.tableName() : this.tableName());
             leaf = new ColumnRef.Simple(columnName, tableName);
         } else if (lastProp instanceof Prop.Association assoc) {
             String columnName = columnPrefix.length() > 0
                     ? columnPrefix.toString() + "_" + assoc.fkColumn()
                     : assoc.fkColumn();
-            String tableName = current.tableName() != null ? current.tableName() : this.tableName();
+            String tableName = elementCollectionTable != null ? elementCollectionTable
+                    : (current.tableName() != null ? current.tableName() : this.tableName());
             leaf = new ColumnRef.ForeignKey(columnName, tableName);
         } else {
             throw new UnknownAttributePathException(path,
@@ -462,7 +470,7 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
         /**
          * A value object element collection stored in a child table.
          */
-        record ElementCollection(String name, String elementType, String childTable, String fkColumn) implements Prop {
+        record ElementCollection(String name, String elementType, String childTable, String fkColumn, TypeDefinition targetType) implements Prop {
             @Override
             public String javaType() {
                 return elementType;

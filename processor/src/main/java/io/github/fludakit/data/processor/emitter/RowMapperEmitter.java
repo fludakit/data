@@ -151,7 +151,14 @@ public final class RowMapperEmitter {
         // Create entity instance
         method.addStatement("$T $L = new $T()", entityType, entityVar, entityType);
 
-        // Read columns (including id)
+        // Read ID column first (if present)
+        if (mapping instanceof TypeDefinition.Entity entity && entity.id() != null) {
+            addScalarRead(method, entityVar, "id", entity.id().columnName(), entity.id().javaType(), "rs");
+        } else if (mapping instanceof TypeDefinition.Aggregate aggregate && aggregate.id() != null) {
+            addScalarRead(method, entityVar, "id", aggregate.id().columnName(), aggregate.id().javaType(), "rs");
+        }
+
+        // Read scalar columns
         for (TypeDefinition.Prop prop : mapping.properties()) {
             if (prop instanceof TypeDefinition.Prop.Scalar s) {
                 addScalarRead(method, entityVar, s.name(), s.columnName(), s.javaType(), "rs");

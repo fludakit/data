@@ -55,20 +55,36 @@ public final class LifecycleEmitter {
         Operation op = method.operation();
         String name = method.name();
 
-        if (op == Operation.SAVE && "saveAll".equals(name)) {
+        // Detect batch methods by name or by parameter type (List/Collection)
+        boolean isBatch = false;
+        if ("saveAll".equals(name) || "insertAll".equals(name) || "updateAll".equals(name)
+                || "deleteAll".equals(name) || "deleteByIds".equals(name)) {
+            isBatch = true;
+        } else if (!method.parameters().isEmpty()) {
+            String paramType = method.parameters().get(0).asType().toString();
+            if (paramType.startsWith("java.util.List") || paramType.startsWith("java.util.Collection")) {
+                isBatch = true;
+            }
+        }
+
+        if (!isBatch) {
+            return null;
+        }
+
+        if (op == Operation.SAVE) {
             return emitSaveAll(ctx, method);
         }
-        if (op == Operation.INSERT && "insertAll".equals(name)) {
+        if (op == Operation.INSERT) {
             return emitInsertAll(ctx, method);
         }
-        if (op == Operation.UPDATE && "updateAll".equals(name)) {
+        if (op == Operation.UPDATE) {
             return emitUpdateAll(ctx, method);
         }
-        if (op == Operation.DELETE && "deleteAll".equals(name)) {
+        if (op == Operation.DELETE) {
+            if ("deleteByIds".equals(name)) {
+                return emitDeleteByIds(ctx, method);
+            }
             return emitDeleteAll(ctx, method);
-        }
-        if (op == Operation.DELETE && "deleteByIds".equals(name)) {
-            return emitDeleteByIds(ctx, method);
         }
         return null;
     }
@@ -78,6 +94,9 @@ public final class LifecycleEmitter {
     private MethodSpec emitSaveAll(RepositoryContext ctx, MethodContext method) {
         MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
         ClassName entityClass = ClassName.bestGuess(ctx.entity().typeName());
+        // Extract the collection parameter name from the method signature
+        String collectionVar = method.parameters().isEmpty() ? "entities" 
+                : method.parameters().get(0).getSimpleName().toString();
 
         // Register the SAVE SQL constant (same as single save)
         WriteEmitter writeEmitter = new WriteEmitter(types, elements, baseRepositoryType, repositoryOwnType);
@@ -91,7 +110,7 @@ public final class LifecycleEmitter {
 
         CodeBlock.Builder body = CodeBlock.builder();
         body.add("$T result = new $T();\n", List.class, arrayListType);
-        body.add("for ($T entity : entities) {\n", listTypeArg);
+        body.add("for ($T entity : $L) {\n", listTypeArg, collectionVar);
         body.add("    save(entity);\n");
         body.add("    result.add(entity);\n");
         body.add("}\n");
@@ -106,12 +125,14 @@ public final class LifecycleEmitter {
     private MethodSpec emitInsertAll(RepositoryContext ctx, MethodContext method) {
         MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
         ClassName entityClass = ClassName.bestGuess(ctx.entity().typeName());
+        String collectionVar = method.parameters().isEmpty() ? "entities" 
+                : method.parameters().get(0).getSimpleName().toString();
         TypeName listTypeArg = resolveListTypeArg(method, entityClass);
         TypeName arrayListType = ParameterizedTypeName.get(ClassName.get(ArrayList.class), listTypeArg);
 
         CodeBlock.Builder body = CodeBlock.builder();
         body.add("$T result = new $T();\n", List.class, arrayListType);
-        body.add("for ($T entity : entities) {\n", listTypeArg);
+        body.add("for ($T entity : $L) {\n", listTypeArg, collectionVar);
         body.add("    insert(entity);\n");
         body.add("    result.add(entity);\n");
         body.add("}\n");
@@ -126,12 +147,14 @@ public final class LifecycleEmitter {
     private MethodSpec emitUpdateAll(RepositoryContext ctx, MethodContext method) {
         MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
         ClassName entityClass = ClassName.bestGuess(ctx.entity().typeName());
+        String collectionVar = method.parameters().isEmpty() ? "entities" 
+                : method.parameters().get(0).getSimpleName().toString();
         TypeName listTypeArg = resolveListTypeArg(method, entityClass);
         TypeName arrayListType = ParameterizedTypeName.get(ClassName.get(ArrayList.class), listTypeArg);
 
         CodeBlock.Builder body = CodeBlock.builder();
         body.add("$T result = new $T();\n", List.class, arrayListType);
-        body.add("for ($T entity : entities) {\n", listTypeArg);
+        body.add("for ($T entity : $L) {\n", listTypeArg, collectionVar);
         body.add("    update(entity);\n");
         body.add("    result.add(entity);\n");
         body.add("}\n");
@@ -146,9 +169,11 @@ public final class LifecycleEmitter {
     private MethodSpec emitDeleteAll(RepositoryContext ctx, MethodContext method) {
         MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
         ClassName entityClass = ClassName.bestGuess(ctx.entity().typeName());
+        String collectionVar = method.parameters().isEmpty() ? "entities" 
+                : method.parameters().get(0).getSimpleName().toString();
 
         CodeBlock.Builder body = CodeBlock.builder();
-        body.add("for ($T entity : entities) {\n", entityClass);
+        body.add("for ($T entity : $L) {\n", entityClass, collectionVar);
         body.add("    deleteById(entity.getId());\n");
         body.add("}");
 

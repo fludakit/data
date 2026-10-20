@@ -913,7 +913,7 @@ class QueryByMethodNameEmissionTest {
         compile(sourceDir, classesDir, generatedDir, "Contact.java", "Profile.java", "Profiles.java");
 
         String impl = sqlFlat(generatedDir.resolve("exv/Profiles_.java"));
-        assertTrue(impl.contains("EXISTS (SELECT 1 FROM \"profile_contacts\" \"profile_contacts\" WHERE \"profile_contacts\".\"profile_id\" = \"profile\".\"id\" AND \"profile_contacts\".\"value\" = :contactsValue)"),
+        assertTrue(impl.contains("EXISTS (SELECT 1 FROM \"profile_contacts\" \"profile_contacts\" WHERE \"profile_contacts\".\"profile_id\" = \"profile\".\"id\" AND \"profile_contacts\".\"value\" = :contacts_value)"),
                 "element-list predicate must render EXISTS over the child table:"
                         + System.lineSeparator() + impl);
         assertTrue(!impl.contains("LEFT JOIN"),

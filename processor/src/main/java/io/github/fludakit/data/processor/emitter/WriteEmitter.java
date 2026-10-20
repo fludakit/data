@@ -450,11 +450,6 @@ public final class WriteEmitter {
         if (childStrategy == IdStrategy.APP_ASSIGNED) {
             cascade.add("        jdbcClient.sql($L)", childUpdateConst);
             appendChildPropBindings(cascade, childEntity, childVar, parentIdExpr, inverseName, ec.fkColumn());
-            // Explicitly re-bind FK to parent ID in case inverse detection failed
-            String fkParamName1 = findFkParamName(childEntity, ec.fkColumn());
-            if (fkParamName1 != null) {
-                cascade.add(".param($S, $L)", fkParamName1, parentIdExpr);
-            }
             cascade.add(".update();\n");
             cascade.add("        $L.add($L.getId());\n", "currentIds_" + ec.name(), childVar);
         } else {
@@ -463,11 +458,6 @@ public final class WriteEmitter {
                     "ecKeys_" + ec.name(), GENERATED_KEY_HOLDER);
             cascade.add("            jdbcClient.sql($L)", childInsertConst);
             appendChildNonIdBindings(cascade, childEntity, childVar, parentIdExpr, inverseName, ec.fkColumn());
-            // Explicitly re-bind FK to parent ID in case inverse detection failed
-            String fkParamName2 = findFkParamName(childEntity, ec.fkColumn());
-            if (fkParamName2 != null) {
-                cascade.add(".param($S, $L)", fkParamName2, parentIdExpr);
-            }
             cascade.add(".update($L);\n", "ecKeys_" + ec.name());
             if (childStrategy == IdStrategy.NUMERIC) {
                 cascade.add("            if ($L.getKey() != null) {\n", "ecKeys_" + ec.name());
@@ -483,11 +473,6 @@ public final class WriteEmitter {
             cascade.add("        } else {\n");
             cascade.add("            jdbcClient.sql($L)", childUpdateConst);
             appendChildPropBindings(cascade, childEntity, childVar, parentIdExpr, inverseName, ec.fkColumn());
-            // Explicitly re-bind FK to parent ID in case inverse detection failed
-            String fkParamName3 = findFkParamName(childEntity, ec.fkColumn());
-            if (fkParamName3 != null) {
-                cascade.add(".param($S, $L)", fkParamName3, parentIdExpr);
-            }
             cascade.add(".update();\n");
             cascade.add("        }\n");
             cascade.add("        $L.add($L.getId());\n", "currentIds_" + ec.name(), childVar);

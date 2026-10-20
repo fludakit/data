@@ -81,6 +81,9 @@ public class RepositoryProcessor extends AbstractProcessor {
         // Phase 3: Generate row mappers for all entity types (including association targets)
         generateMissingRowMappers();
         
+        // Phase 3: Generate row mappers for all entity types (including association targets)
+        generateMissingRowMappers();
+        
         return false;
     }
     

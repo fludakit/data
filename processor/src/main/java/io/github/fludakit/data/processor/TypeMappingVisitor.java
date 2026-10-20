@@ -264,11 +264,10 @@ final class TypeMappingVisitor {
             if (isAggregate && isEntityOrAggregate(fieldTypeElement)) {
                 String targetFqn = fieldTypeElement.getQualifiedName().toString();
                 TypeDefinition target = get(targetFqn);
-                // Aggregate-to-aggregate/entity reference: treat as association (not composition)
-                // unless explicitly marked with @Composition
+                // Aggregate-to-aggregate/entity reference: treat as COMPOSITION by default
                 if (target instanceof TypeDefinition.Entity entityTarget) {
                     associations.add(new TypeDefinition.Prop.Association(fieldName,
-                            targetFqn, entityTarget, Names.fkColumn(fieldName), false, false, null));
+                            targetFqn, entityTarget, Names.fkColumn(fieldName), false, true, null));
                 } else if (target instanceof TypeDefinition.Aggregate aggregateTarget) {
                     // Create a synthetic Entity view of the Aggregate for the FK reference
                     TypeDefinition.Entity entityView = new TypeDefinition.Entity(
@@ -283,7 +282,7 @@ final class TypeMappingVisitor {
                         List.of()
                     );
                     associations.add(new TypeDefinition.Prop.Association(fieldName,
-                            targetFqn, entityView, Names.fkColumn(fieldName), false, false, null));
+                            targetFqn, entityView, Names.fkColumn(fieldName), false, true, null));
                 }
                 return;
             }

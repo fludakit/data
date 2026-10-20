@@ -220,12 +220,15 @@ public final class QueryCompiler {
     /** Renders a classic no-join SELECT, optionally {@code DISTINCT}. */
     public static String selectBy(SqlDialect dialect, TableSchema schema, List<Predicate> predicates,
                                   List<SortSpec> sorts, int limit, String cursorClause, boolean distinct) {
+        String mainAlias = schema.tableName().toLowerCase() + "_0";
         String cols = schema.columns().stream()
-                .map(c -> dialect.quoteIdentifier(c.column())).collect(Collectors.joining(", "));
+                .map(c -> dialect.quoteIdentifier(mainAlias) + "." + dialect.quoteIdentifier(c.column()))
+                .collect(Collectors.joining(", "));
         StringBuilder sb = new StringBuilder(distinct ? "SELECT DISTINCT " : "SELECT ").append(cols)
-                .append(" FROM ").append(dialect.quoteIdentifier(schema.tableName()));
+                .append(" FROM ").append(dialect.quoteIdentifier(schema.tableName()))
+                .append(" AS ").append(dialect.quoteIdentifier(mainAlias));
         appendWhere(dialect, sb, predicates, cursorClause);
-        sb.append(classicOrderBy(dialect, schema, sorts));
+        sb.append(classicOrderBy(dialect, schema, sorts, mainAlias));
         if (limit > 0) {
             sb.append(dialect.limitClause(Integer.toString(limit)));
         }
@@ -471,11 +474,22 @@ public final class QueryCompiler {
 
     /** The ORDER BY clause of a classic no-join statement, one term per declared sort. */
     public static String classicOrderBy(SqlDialect dialect, TableSchema schema, List<SortSpec> sorts) {
+        return classicOrderBy(dialect, schema, sorts, null);
+    }
+
+    /** Renders an ORDER BY clause for a simple (no-join) query. */
+    public static String classicOrderBy(SqlDialect dialect, TableSchema schema, List<SortSpec> sorts, String mainAlias) {
         if (sorts.isEmpty()) {
             return "";
         }
         return " ORDER BY " + sorts.stream()
-                .map(s -> orderTerm(dialect.quoteIdentifier(s.property().replace('.', '_')), s, false))
+                .map(s -> {
+                    String column = s.property().replace('.', '_');
+                    String qualifiedColumn = mainAlias != null 
+                        ? dialect.quoteIdentifier(mainAlias) + "." + dialect.quoteIdentifier(column)
+                        : dialect.quoteIdentifier(column);
+                    return orderTerm(qualifiedColumn, s, false);
+                })
                 .collect(Collectors.joining(", "));
     }
 

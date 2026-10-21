@@ -6,6 +6,7 @@ import com.squareup.javapoet.MethodSpec;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.RepositoryContext;
+import io.github.fludakit.data.processor.support.ExceptionTranslation;
 import io.github.fludakit.data.processor.support.MethodOverrides;
 import io.github.fludakit.data.query.LikePattern;
 import io.github.fludakit.data.query.LimitSpec;
@@ -280,7 +281,7 @@ public final class FindEmitter {
         
         // Add LEFT JOINs and columns for composing associations
         for (TypeDefinition.Prop.Association assoc : composingAssocs) {
-            String childTable = dialect.quoteIdentifier(assoc.target().tableName());
+            String childTable = dialect.quoteIdentifier(assoc.definition().tableName());
             // Use association name as the join alias to match RowMapperEmitter expectations
             String joinAlias = assoc.name();
             String fkColumn = dialect.quoteIdentifier(assoc.fkColumn());
@@ -291,7 +292,7 @@ public final class FindEmitter {
             
             // Add child table columns with association name prefix for row mapper compatibility
             String columnPrefix = assoc.name() + "_join_";
-            for (TypeDefinition.Prop childProp : getAllProperties(assoc.target())) {
+            for (TypeDefinition.Prop childProp : getAllProperties(assoc.definition())) {
                 if (childProp instanceof TypeDefinition.Prop.Scalar s) {
                     selectColumns.add(joinAlias + "." + dialect.quoteIdentifier(s.columnName()) 
                         + " AS " + dialect.quoteIdentifier(columnPrefix + s.columnName()));
@@ -424,7 +425,7 @@ public final class FindEmitter {
             emitTerminal(body, method.resultKind(), ctx);
             body.add(";");
         }
-        builder.addCode(body.build());
+        builder.addCode(ExceptionTranslation.wrap(body.build()));
     }
 
     // ── Offset-paged finder ──────────────────────────────────────────────
@@ -557,7 +558,7 @@ public final class FindEmitter {
         // return new SimplePage<>(pageRequest, content, total);
         body.addStatement("return new $T<>($L, $L, $L)", SIMPLE_PAGE, pageRequestParam, "content", "total");
 
-        builder.addCode(body.build());
+        builder.addCode(ExceptionTranslation.wrap(body.build()));
         return builder.build();
     }
 
@@ -611,11 +612,11 @@ public final class FindEmitter {
         String baseSql;
         String joinAlias = null; // Declare here so it's available for seek term generation
 
-        if (hasToManySort && ecRelForHydration != null && ecRelForHydration.target() != null) {
+        if (hasToManySort && ecRelForHydration != null && ecRelForHydration.definition() != null) {
             // For ENTITY_COLLECTION sorts, add a LEFT JOIN to hydrate the relation for cursor extraction.
             // Also add aggregate expressions to SELECT for ORDER BY compatibility with DISTINCT.
             String rootTable = dialect.quoteIdentifier(ctx.entity().tableName());
-            String childTable = dialect.quoteIdentifier(ecRelForHydration.target().tableName());
+            String childTable = dialect.quoteIdentifier(ecRelForHydration.definition().tableName());
             String fkColumn = dialect.quoteIdentifier(ecRelForHydration.fkColumn());
             String ownerIdColumn = dialect.quoteIdentifier(ctx.entity().idColumn());
             joinAlias = toManyPropForHydration + "_";
@@ -702,7 +703,7 @@ public final class FindEmitter {
 
         // If we have TO_MANY sorts, we need to ensure the id is the last sort key for uniqueness
         if (hasToManySort && !sorts.isEmpty()) {
-            SortSpec lastSort = sorts.get(sorts.size() - 1);
+            SortSpec lastSort = sorts.getLast();
             String idPropName = null;
             if (ctx.entity() instanceof TypeDefinition.Entity e) {
                 idPropName = e.id().name();
@@ -742,10 +743,10 @@ public final class FindEmitter {
                     }
                 }
 
-                if (isToManyPath && ((ecRel != null && ecRel.target() != null) || elemColRel != null)) {
+                if (isToManyPath && ((ecRel != null && ecRel.definition() != null) || elemColRel != null)) {
                     String colPart = prop.substring(prop.indexOf('.') + 1).replace('.', '_');
-                    String childTable = ecRel != null && ecRel.target() != null
-                        ? dialect.quoteIdentifier(ecRel.target().tableName())
+                    String childTable = ecRel != null && ecRel.definition() != null
+                        ? dialect.quoteIdentifier(ecRel.definition().tableName())
                         : dialect.quoteIdentifier(elemColRel.childTable());
                     String fkColumn = ecRel != null
                         ? dialect.quoteIdentifier(ecRel.fkColumn())
@@ -889,12 +890,12 @@ public final class FindEmitter {
 
         // Bind cursor keys if cursor is present
         if (!seekTerms.isEmpty()) {
-            body.add("    .param($S, $L.cursor().isPresent() ? $L.cursor().get().get(0) : null)\n",
-                    "cursor0", pageRequestParam, pageRequestParam);
+            body.add("    .param($S, $L.cursor().map(c -> c.get(0)).orElse(null))\n",
+                    "cursor0", pageRequestParam);
             // For multi-key cursors, add more bindings
             for (int i = 1; i < seekTerms.size(); i++) {
-                body.add("    .param($S, $L.cursor().isPresent() ? $L.cursor().get().get($L) : null)\n",
-                        "cursor" + i, pageRequestParam, pageRequestParam, i);
+                body.add("    .param($S, $L.cursor().map(c -> c.get($L)).orElse(null))\n",
+                        "cursor" + i, pageRequestParam, i);
             }
         }
 
@@ -1041,38 +1042,18 @@ public final class FindEmitter {
         body.addStatement("return new $T<>($L, $L, $L, $L)",
                 SIMPLE_CURSORED_PAGE, pageRequestParam, "content", "cursors", "total");
 
-        builder.addCode(body.build());
+        builder.addCode(ExceptionTranslation.wrap(body.build()));
         return builder.build();
-    }
-
-    private String buildSortTerms(List<SortSpec> sorts) {
-        List<String> terms = new ArrayList<>();
-        for (SortSpec sort : sorts) {
-            String col = dialect.quoteIdentifier(sort.property().replace('.', '_'));
-            terms.add(col + (sort.ascending() ? " ASC" : " DESC"));
-        }
-        return String.join(", ", terms);
-    }
-
-    private boolean isToManyPath(RepositoryContext ctx, String firstSegment) {
-        for (TypeDefinition.Prop prop : ctx.entity().properties()) {
-            if ((prop instanceof TypeDefinition.Prop.EntityCollection
-                    || prop instanceof TypeDefinition.Prop.ElementCollection)
-                    && prop.name().equals(firstSegment)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private String resolveCollectionElementType(RepositoryContext ctx, String firstSegment) {
         for (TypeDefinition.Prop prop : ctx.entity().properties()) {
             if (prop instanceof TypeDefinition.Prop.EntityCollection ec
                     && prop.name().equals(firstSegment)) {
-                return ec.target() != null ? ec.target().typeName() : ec.javaType();
+                return ec.definition() != null ? ec.definition().typeName() : ec.javaType();
             } else if (prop instanceof TypeDefinition.Prop.ElementCollection elemCol
                     && prop.name().equals(firstSegment)) {
-                return elemCol.elementType();
+                return elemCol.javaType();
             }
         }
         return null;
@@ -1094,7 +1075,7 @@ public final class FindEmitter {
         body.add("    .sql($L)\n", constName);
         appendParamBindings(body, bindings, method);
         body.add("    .query($T.class).single();", Long.class);
-        builder.addCode(body.build());
+        builder.addCode(ExceptionTranslation.wrap(body.build()));
 
         return builder.build();
     }
@@ -1115,7 +1096,7 @@ public final class FindEmitter {
         body.add("    .sql($L)\n", constName);
         appendParamBindings(body, bindings, method);
         body.add("    .query($T.class).single();", Boolean.class);
-        builder.addCode(body.build());
+        builder.addCode(ExceptionTranslation.wrap(body.build()));
 
         return builder.build();
     }
@@ -1147,7 +1128,7 @@ public final class FindEmitter {
         body.add("    .sql($L)\n", constName);
         appendParamBindings(body, bindings, method);
         body.add("    .update();");
-        builder.addCode(body.build());
+        builder.addCode(ExceptionTranslation.wrap(body.build()));
 
         return builder.build();
     }
@@ -1190,7 +1171,7 @@ public final class FindEmitter {
             body.add(";");
         }
 
-        builder.addCode(body.build());
+        builder.addCode(ExceptionTranslation.wrap(body.build()));
         return builder.build();
     }
 
@@ -1247,39 +1228,6 @@ public final class FindEmitter {
                     ClassName.get("java.util.stream", "Collectors"));
             default -> body.add(".list()");
         }
-    }
-
-    /**
-     * Renders an operator expression, matching QueryCompiler's rendering.
-     */
-    private String renderOperator(io.github.fludakit.data.query.Operator operator,
-                                   String column, String param, boolean ignoreCase) {
-        String col = ignoreCase ? "LOWER(" + column + ")" : column;
-        String val = ignoreCase ? "LOWER(:" + param + ")" : ":" + param;
-        return switch (operator) {
-            case EQ, IGNORE_CASE_EQ -> col + " = " + val;
-            case NOT_EQ -> col + " <> " + val;
-            case GREATER_THAN -> col + " > " + val;
-            case GREATER_THAN_EQUAL -> col + " >= " + val;
-            case LESS_THAN -> col + " < " + val;
-            case LESS_THAN_EQUAL -> col + " <= " + val;
-            case LIKE -> col + " LIKE " + val;
-            case NOT_LIKE -> col + " NOT LIKE " + val;
-            case STARTS_WITH -> col + " LIKE " + val;
-            case ENDS_WITH -> col + " LIKE " + val;
-            case CONTAINS -> col + " LIKE " + val;
-            case NOT_STARTS_WITH -> col + " NOT LIKE " + val;
-            case NOT_ENDS_WITH -> col + " NOT LIKE " + val;
-            case NOT_CONTAINS -> col + " NOT LIKE " + val;
-            case BETWEEN -> col + " BETWEEN :" + param + "_from AND :" + param + "_to";
-            case NOT_BETWEEN -> col + " NOT BETWEEN :" + param + "_from AND :" + param + "_to";
-            case IN -> col + " IN (:" + param + ")";
-            case NOT_IN -> col + " NOT IN (:" + param + ")";
-            case IS_NULL -> col + " IS NULL";
-            case IS_NOT_NULL -> col + " IS NOT NULL";
-            case TRUE -> col + " = TRUE";
-            case FALSE -> col + " = FALSE";
-        };
     }
 
     // ── Hydration helpers ────────────────────────────────────────────────
@@ -1357,14 +1305,6 @@ public final class FindEmitter {
         }
         sb.append("_SQL");
         return sb.toString();
-    }
-
-    /**
-     * Returns the Stream API method name for aggregate extraction.
-     * @param ascending true for MIN (min), false for MAX (max)
-     */
-    private static String aggMethodName(boolean ascending) {
-        return ascending ? "min" : "max";
     }
 
     // ── Dynamic Order support ────────────────────────────────────────────

@@ -267,7 +267,7 @@ public final class MetamodelEmitter {
 
         if (claimedMetamodelFqns.contains(navFqn)) {
             // Collision: degrade to plain entity attribute record
-            if (!(assoc.target() instanceof TypeDefinition.Entity targetEntity)) {
+            if (!(assoc.definition() instanceof TypeDefinition.Entity targetEntity)) {
                 return;
             }
             TypeName fieldType = ParameterizedTypeName.get(ENTITY_ATTRIBUTE, entityType,
@@ -387,7 +387,7 @@ public final class MetamodelEmitter {
                                         String packageName, String entitySimpleName,
                                         String fieldName, String navClassName,
                                         String fullPath) {
-        if (!(assoc.target() instanceof TypeDefinition.Entity targetEntity)) return;
+        if (!(assoc.definition() instanceof TypeDefinition.Entity targetEntity)) return;
 
         ClassName targetType = ClassName.bestGuess(targetEntity.typeName());
         ParameterizedTypeName superInterface = ParameterizedTypeName.get(
@@ -412,7 +412,7 @@ public final class MetamodelEmitter {
                                                String packageName, String entitySimpleName,
                                                String fieldName, String navClassName,
                                                String fullPath) {
-        if (!(ec.target() instanceof TypeDefinition.Entity targetEntity)) return;
+        if (!(ec.definition() instanceof TypeDefinition.Entity targetEntity)) return;
 
         ClassName targetType = ClassName.bestGuess(targetEntity.typeName());
         ParameterizedTypeName superInterface = ParameterizedTypeName.get(
@@ -440,14 +440,14 @@ public final class MetamodelEmitter {
         // ElementCollection stores elementType as String FQN, not a TypeDefinition
         // For primitive element types (String, Integer, etc.), we don't generate nav classes
         // This method is kept for compatibility but generates minimal implementation
-        TypeName elementType = switch (ec.elementType()) {
+        TypeName elementType = switch (ec.javaType()) {
             case "java.lang.String" -> ClassName.get(String.class);
             case "java.lang.Integer", "int" -> ClassName.get(Integer.class);
             case "java.lang.Long", "long" -> ClassName.get(Long.class);
             case "java.lang.Double", "double" -> ClassName.get(Double.class);
             case "java.lang.Float", "float" -> ClassName.get(Float.class);
             case "java.lang.Boolean", "boolean" -> ClassName.get(Boolean.class);
-            default -> ClassName.bestGuess(ec.elementType());
+            default -> ClassName.bestGuess(ec.javaType());
         };
 
         ParameterizedTypeName superInterface = ParameterizedTypeName.get(

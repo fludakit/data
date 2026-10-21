@@ -51,16 +51,16 @@ public final class CursorKeys {
             if (value == null) {
                 continue;
             }
-            if (!(value instanceof Comparable)) {
+            if (!(value instanceof Comparable<?> c)) {
                 // A value list whose elements carry no natural order (e.g.
                 // value("workHistory.profile") -> List<Profile>) cannot produce a cursor edge — fail
                 // fast at cursor-build time instead of casting blind and surfacing a CCE mid-page.
                 throw new IllegalArgumentException("cursor sort on non-comparable path element: "
                         + value.getClass().getName());
             }
-            if (edge == null || (ascending ? ((Comparable) edge).compareTo(value) > 0
-                    : ((Comparable) edge).compareTo(value) < 0)) {
-                edge = value;
+            if (edge == null || (ascending ? ((Comparable) edge).compareTo(c) > 0
+                    : ((Comparable) edge).compareTo(c) < 0)) {
+                edge = c;
             }
         }
         return edge;

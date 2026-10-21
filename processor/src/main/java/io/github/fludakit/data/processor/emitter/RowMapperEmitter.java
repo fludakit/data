@@ -99,40 +99,6 @@ public final class RowMapperEmitter {
         return ClassName.get(packageName, mapperName);
     }
 
-    // ── Eligibility ──────────────────────────────────────────────────────
-
-    /**
-     * An entity is eligible for row mapper generation if all its props are JDBC-safe:
-     * scalars, enums, or embedded value objects. References, entity collections, and
-     * element collections make the entity ineligible.
-     */
-    private boolean isEligible(TypeDefinition mapping) {
-        for (TypeDefinition.Prop prop : mapping.properties()) {
-            // All scalar props are eligible
-        }
-        return true;
-    }
-
-    private boolean isRelationEligible(TypeDefinition.Prop rel) {
-        if (rel instanceof TypeDefinition.Prop.Embedded embedded) {
-            return isEmbeddedEligible(embedded.definition());
-        }
-        if (rel instanceof TypeDefinition.Prop.Association) {
-            // Non-back-reference associations are eligible (read FK + id-only partial)
-            return true;
-        }
-        // ENTITY_COLLECTION, ELEMENT_COLLECTION are NOT eligible
-        return false;
-    }
-
-    private boolean isEmbeddedEligible(TypeDefinition.ValueObject voMapping) {
-        if (voMapping == null) return false;
-        for (TypeDefinition.Prop prop : voMapping.properties()) {
-            // All VO props are eligible
-        }
-        return true;
-    }
-
     // ── mapRow method construction ───────────────────────────────────────
 
     private MethodSpec buildMapRowMethod(ClassName entityType, String entitySimpleName,
@@ -383,7 +349,7 @@ public final class RowMapperEmitter {
      */
     private void addAssociationRead(MethodSpec.Builder method, String entityVar,
                                   TypeDefinition.Prop.Association assoc, String rsVar) {
-        if (!(assoc.target() instanceof TypeDefinition.Entity targetEntity)) return;
+        if (!(assoc.definition() instanceof TypeDefinition.Entity targetEntity)) return;
 
         String targetFqn = targetEntity.typeName();
         ClassName targetType = ClassName.bestGuess(targetFqn);

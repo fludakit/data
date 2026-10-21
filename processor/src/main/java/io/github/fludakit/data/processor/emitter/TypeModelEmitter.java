@@ -297,8 +297,8 @@ public final class TypeModelEmitter {
                     ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "Embedded"),
                     e.name(), e.javaType(), e.prefix());
             case TypeDefinition.Prop.Association a -> {
-                CodeBlock targetLiteral = a.target() != null 
-                    ? entityTargetLiteral(a.target())
+                CodeBlock targetLiteral = a.definition() != null 
+                    ? entityTargetLiteral(a.definition())
                     : CodeBlock.of("null");
                 yield CodeBlock.of("new $T($S, $S, $L, $S, $L, $L, $L)",
                         ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "Association"),
@@ -306,16 +306,16 @@ public final class TypeModelEmitter {
                         a.cascade() != null ? CodeBlock.of("$T.$L", ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "Association", "Cascade"), a.cascade()) : CodeBlock.of("null"));
             }
             case TypeDefinition.Prop.EntityCollection ec -> {
-                CodeBlock targetLiteral = ec.target() != null 
-                    ? entityTargetLiteral(ec.target())
+                CodeBlock targetLiteral = ec.definition() != null 
+                    ? entityTargetLiteral(ec.definition())
                     : CodeBlock.of("null");
                 yield CodeBlock.of("new $T($S, $S, $L, $S, null)",
                         ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "EntityCollection"),
                         ec.name(), ec.javaType(), targetLiteral, ec.fkColumn());
             }
-            case TypeDefinition.Prop.ElementCollection ec -> CodeBlock.of("new $T($S, $S, $S, $S, null)",
+            case TypeDefinition.Prop.ElementCollection ec -> CodeBlock.of("new $T($S, $S, null, $S, $S)",
                     ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "ElementCollection"),
-                    ec.name(), ec.elementType(), ec.childTable(), ec.fkColumn());
+                    ec.name(), ec.javaType(), ec.childTable(), ec.fkColumn());
             default -> throw new IllegalStateException("Unexpected prop: " + prop);
         };
     }
@@ -473,16 +473,6 @@ public final class TypeModelEmitter {
     }
 
     /**
-     * Computes local column refs for a definition definition using an explicit table name.
-     * Used for element collection targets where the definition's own tableName may be null.
-     */
-    private Map<String, ColumnRef> computeLocalColumnRefsWithTable(TypeDefinition def, String tableName) {
-        Map<String, ColumnRef> refs = new LinkedHashMap<>();
-        addLocalRefs(refs, tableName, def, "", "");
-        return refs;
-    }
-
-    /**
      * Returns the ColumnRef literal for columnRefs() — preserves Simple vs ForeignKey distinction.
      */
     private CodeBlock columnRefLiteralForRefs(ColumnRef ref) {
@@ -543,10 +533,10 @@ public final class TypeModelEmitter {
         for (TypeDefinition.Prop prop : entity.properties()) {
             switch (prop) {
                 case TypeDefinition.Prop.Association assoc -> {
-                    if (assoc.target() != null) {
+                    if (assoc.definition() != null) {
                         JoinEdge.ToOne edge = buildAssociationEdge(entity, assoc);
                         if (edge == null) continue;
-                        TypeDefinition target = assoc.target();
+                        TypeDefinition target = assoc.definition();
                         Map<String, ColumnRef> targetRefs = computeLocalColumnRefs(target);
                         for (Map.Entry<String, ColumnRef> targetEntry : targetRefs.entrySet()) {
                             String fullPath = assoc.name() + "." + targetEntry.getKey();
@@ -556,10 +546,10 @@ public final class TypeModelEmitter {
                     }
                 }
                 case TypeDefinition.Prop.EntityCollection ec -> {
-                    if (ec.target() != null) {
+                    if (ec.definition() != null) {
                         JoinEdge.ToMany edge = buildEntityCollectionEdge(entity, ec);
                         if (edge == null) continue;
-                        TypeDefinition target = ec.target();
+                        TypeDefinition target = ec.definition();
                         Map<String, ColumnRef> targetRefs = computeLocalColumnRefs(target);
                         for (Map.Entry<String, ColumnRef> targetEntry : targetRefs.entrySet()) {
                             String fullPath = ec.name() + "." + targetEntry.getKey();
@@ -580,21 +570,21 @@ public final class TypeModelEmitter {
     }
 
     private JoinEdge.ToOne buildAssociationEdge(TypeDefinition owner, TypeDefinition.Prop.Association assoc) {
-        if (assoc.target() == null || assoc.target().tableName() == null
-                || assoc.target().idColumn() == null || assoc.fkColumn() == null) return null;
+        if (assoc.definition() == null || assoc.definition().tableName() == null
+                || assoc.definition().idColumn() == null || assoc.fkColumn() == null) return null;
         return new JoinEdge.ToOne(
                 new ColumnRef.ForeignKey(assoc.fkColumn(), owner.tableName()),
-                new ColumnRef.Simple(assoc.target().idColumn(), assoc.target().tableName()));
+                new ColumnRef.Simple(assoc.definition().idColumn(), assoc.definition().tableName()));
     }
 
     private JoinEdge.ToMany buildEntityCollectionEdge(TypeDefinition owner, TypeDefinition.Prop.EntityCollection ec) {
-        if (ec.target() == null || ec.target().tableName() == null
+        if (ec.definition() == null || ec.definition().tableName() == null
                 || ec.fkColumn() == null || owner.idColumn() == null) {
             return null;
         }
         return new JoinEdge.ToMany(
                 new ColumnRef.Simple(owner.idColumn(), owner.tableName()),
-                new ColumnRef.ForeignKey(ec.fkColumn(), ec.target().tableName()));
+                new ColumnRef.ForeignKey(ec.fkColumn(), ec.definition().tableName()));
     }
 
     private JoinEdge.ToMany buildToManyEdgeForElementCollection(TypeDefinition owner, TypeDefinition.Prop.ElementCollection ec) {
@@ -735,9 +725,9 @@ public final class TypeModelEmitter {
 
         // Reference traversals (one level)
         for (TypeDefinition.Prop prop : entity.properties()) {
-            if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.target() != null) {
+            if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.definition() != null) {
                 String refGetter = rootVar + "." + getter(assoc.name()) + "()";
-                TypeDefinition target = assoc.target();
+                TypeDefinition target = assoc.definition();
                 // Target's own columns
                 for (TypeDefinition.Prop targetProp : target.properties()) {
                     switch (targetProp) {

@@ -12,7 +12,6 @@ import java.util.Map;
 public final class RepositoryContext {
     private final TypeDefinition entity;
     private final boolean crud;
-    private final boolean spec;
     private final ClassName rowMapperType;
     private final String repositoryFqn;
 
@@ -21,18 +20,16 @@ public final class RepositoryContext {
     private final List<MethodSpec> auxMethods = new ArrayList<>();
     private final Map<String, Integer> queryDefinitionNames = new LinkedHashMap<>();
 
-    public RepositoryContext(TypeDefinition entity, boolean crud, boolean spec,
+    public RepositoryContext(TypeDefinition entity, boolean crud,
                              ClassName rowMapperType, String repositoryFqn) {
         this.entity = entity;
         this.crud = crud;
-        this.spec = spec;
         this.rowMapperType = rowMapperType;
         this.repositoryFqn = repositoryFqn;
     }
 
     public TypeDefinition entity() { return entity; }
     public boolean crud() { return crud; }
-    public boolean spec() { return spec; }
     public ClassName rowMapperType() { return rowMapperType; }
     public String repositoryFqn() { return repositoryFqn; }
     public Map<String, String> constants() { return constants; }

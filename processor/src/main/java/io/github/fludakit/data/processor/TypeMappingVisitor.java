@@ -374,7 +374,7 @@ final class TypeMappingVisitor {
                     }
                     
                     elementCollections.add(new TypeDefinition.Prop.ElementCollection(fieldName,
-                            elementFqn, childTable, parentFkCol, targetType));
+                            elementFqn, (TypeDefinition.ValueObject) targetType, childTable, parentFkCol));
                     return;
                 }
             }
@@ -454,7 +454,7 @@ final class TypeMappingVisitor {
         }
 
         elementCollections.add(new TypeDefinition.Prop.ElementCollection(fieldName,
-                voFqn, childTable, parentFkCol, targetType));
+                voFqn, (TypeDefinition.ValueObject) targetType, childTable, parentFkCol));
     }
 
     private void scanVOProps(TypeElement voType, List<TypeDefinition.Prop.Scalar> scalars,
@@ -563,7 +563,7 @@ final class TypeMappingVisitor {
     }
 
     private TypeDefinition.Prop.Association resolveAssociation(TypeDefinition.Prop.Association assoc, String ownerFqn) {
-        if (assoc.target() != null) return assoc;
+        if (assoc.definition() != null) return assoc;
 
         // Try to get target from javaType (fully qualified class name)
         TypeDefinition target = get(assoc.javaType());
@@ -602,7 +602,7 @@ final class TypeMappingVisitor {
     }
 
     private TypeDefinition.Prop.EntityCollection resolveEntityCollection(TypeDefinition.Prop.EntityCollection ec, String ownerFqn) {
-        if (ec.target() != null) return ec;
+        if (ec.definition() != null) return ec;
 
         // Try to get target from javaType (fully qualified class name)
         TypeDefinition target = get(ec.javaType());
@@ -671,7 +671,7 @@ final class TypeMappingVisitor {
         DeclaredType dt = (DeclaredType) listType;
         List<? extends TypeMirror> typeArgs = dt.getTypeArguments();
         if (typeArgs.isEmpty()) return null;
-        return typeArgs.get(0);
+        return typeArgs.getFirst();
     }
 
     private String typeFqn(TypeMirror type) {

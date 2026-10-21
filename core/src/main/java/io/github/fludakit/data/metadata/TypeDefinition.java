@@ -180,17 +180,17 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
                 ColumnRef.ForeignKey ownerFk = new ColumnRef.ForeignKey(
                         assoc.fkColumn(), current.tableName());
                 ColumnRef.Simple childId = new ColumnRef.Simple(
-                        assoc.target().id().columnName(), assoc.target().tableName());
+                        assoc.definition().id().columnName(), assoc.definition().tableName());
                 edges.add(new JoinEdge.ToOne(ownerFk, childId));
-                current = assoc.target();
+                current = assoc.definition();
             } else if (prop instanceof Prop.EntityCollection ec) {
                 // To-many: child table has FK pointing back to owner table's ID
                 ColumnRef.Simple ownerId = new ColumnRef.Simple(
                         current.idColumn(), current.tableName());
                 ColumnRef.ForeignKey childFk = new ColumnRef.ForeignKey(
-                        ec.fkColumn(), ec.target().tableName());
+                        ec.fkColumn(), ec.definition().tableName());
                 edges.add(new JoinEdge.ToMany(ownerId, childFk));
-                current = ec.target();
+                current = ec.definition();
             } else if (prop instanceof Prop.ElementCollection ec) {
                 // Element collection: child table has FK pointing back to owner table's ID
                 ColumnRef.Simple ownerId = new ColumnRef.Simple(
@@ -201,11 +201,11 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
                 // Track the element collection's child table for leaf qualification
                 elementCollectionTable = ec.childTable();
                 // Continue navigation into the element type (ValueObject)
-                if (ec.targetType() == null) {
+                if (ec.definition() == null) {
                     throw new UnknownAttributePathException(path,
                             "Element collection target type not resolved: " + segment);
                 }
-                current = ec.targetType();
+                current = ec.definition();
             } else if (prop instanceof Prop.Embedded emb) {
                 // Embedded relations don't create join edges - they're flattened into the same table
                 if (columnPrefix.length() > 0) {
@@ -213,22 +213,6 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
                 }
                 columnPrefix.append(segment);
                 current = emb.definition();
-            } else if (prop instanceof Prop.Association assoc) {
-                // Association within a VO - this creates a join edge
-                ColumnRef.ForeignKey ownerFk = new ColumnRef.ForeignKey(
-                        assoc.fkColumn(), current.tableName());
-                ColumnRef.Simple childId = new ColumnRef.Simple(
-                        assoc.target().id().columnName(), assoc.target().tableName());
-                edges.add(new JoinEdge.ToOne(ownerFk, childId));
-                current = assoc.target();
-            } else if (prop instanceof Prop.EntityCollection ec) {
-                // EntityCollection within a VO - this creates a join edge
-                ColumnRef.Simple ownerId = new ColumnRef.Simple(
-                        current.idColumn(), current.tableName());
-                ColumnRef.ForeignKey childFk = new ColumnRef.ForeignKey(
-                        ec.fkColumn(), ec.target().tableName());
-                edges.add(new JoinEdge.ToMany(ownerId, childFk));
-                current = ec.target();
             } else {
                 // Scalar, Id, Version cannot be navigated through
                 throw new UnknownAttributePathException(path,
@@ -449,7 +433,7 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
         /**
          * A to-one association (ManyToOne, OneToOne, or Composition when composition=true).
          */
-        record Association(String name, String javaType, Entity target, String fkColumn,
+        record Association(String name, String javaType, Entity definition, String fkColumn,
                            boolean backReference, boolean composition, Cascade cascade) implements Prop {
 
             public enum Cascade {
@@ -462,7 +446,7 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
         /**
          * A to-many entity collection stored in the child table (OneToMany or ManyToMany).
          */
-        record EntityCollection(String name, String javaType, Entity target, String fkColumn, String mappedBy) implements Prop {
+        record EntityCollection(String name, String javaType, Entity definition, String fkColumn, String mappedBy) implements Prop {
         }
 
         // ── ElementCollection property ───────────────────────────────────
@@ -470,11 +454,7 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
         /**
          * A value object element collection stored in a child table.
          */
-        record ElementCollection(String name, String elementType, String childTable, String fkColumn, TypeDefinition targetType) implements Prop {
-            @Override
-            public String javaType() {
-                return elementType;
-            }
+        record ElementCollection(String name, String javaType, ValueObject definition, String childTable, String fkColumn) implements Prop {
         }
 
         // ── Id property ──────────────────────────────────────────────────

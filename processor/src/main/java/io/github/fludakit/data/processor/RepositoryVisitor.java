@@ -163,7 +163,7 @@ final class RepositoryVisitor {
 
         // 5. Create RepositoryContext
         RepositoryContext ctx = new RepositoryContext(
-                entityMapping, crud, false, rowMapperType,
+                entityMapping, crud, rowMapperType,
                 repository.getQualifiedName().toString());
 
         // 6. Iterate abstract methods
@@ -302,7 +302,7 @@ final class RepositoryVisitor {
         if (fqn.equals(CRUD_REPOSITORY) || fqn.equals(BASIC_REPOSITORY) || fqn.equals(DATA_REPOSITORY)) {
             List<? extends TypeMirror> typeArgs = dt.getTypeArguments();
             if (!typeArgs.isEmpty()) {
-                return typeArgs.get(0);
+                return typeArgs.getFirst();
             }
         }
         return null;
@@ -421,7 +421,7 @@ final class RepositoryVisitor {
         // Validate that write operations accept entity or entity collection parameters
         if (operation == Operation.SAVE || operation == Operation.INSERT || operation == Operation.UPDATE || operation == Operation.DELETE) {
             if (!method.getParameters().isEmpty()) {
-                VariableElement firstParam = method.getParameters().get(0);
+                VariableElement firstParam = method.getParameters().getFirst();
                 String paramType = firstParam.asType().toString();
                 String entityType = entityMapping.typeName();
                 
@@ -571,7 +571,7 @@ final class RepositoryVisitor {
                     
                     // Special handling for ElementCollection - can't use resolve() directly
                     if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
-                        TypeDefinition elementType = typeMappingVisitor.get(ec.elementType());
+                        TypeDefinition elementType = typeMappingVisitor.get(ec.javaType());
                         if (elementType != null && elementType.findProperty(tail) != null) {
                             return fullPath;
                         }
@@ -604,12 +604,12 @@ final class RepositoryVisitor {
      */
     private TypeDefinition getTargetMapping(TypeDefinition mapping, String propName) {
         TypeDefinition.Prop prop = mapping.findProperty(propName);
-        if (prop instanceof TypeDefinition.Prop.Association assoc) return assoc.target();
-        if (prop instanceof TypeDefinition.Prop.EntityCollection ec) return ec.target();
+        if (prop instanceof TypeDefinition.Prop.Association assoc) return assoc.definition();
+        if (prop instanceof TypeDefinition.Prop.EntityCollection ec) return ec.definition();
         if (prop instanceof TypeDefinition.Prop.Embedded emb) return emb.definition();
         if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
             // For element collections, look up the element type definition from cache
-            return typeMappingVisitor.get(ec.elementType());
+            return typeMappingVisitor.get(ec.javaType());
         }
         return null;
     }

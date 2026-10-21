@@ -8,6 +8,7 @@ import com.squareup.javapoet.TypeName;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.RepositoryContext;
+import io.github.fludakit.data.processor.support.ExceptionTranslation;
 import io.github.fludakit.data.processor.support.MethodOverrides;
 import io.github.fludakit.data.query.Operation;
 
@@ -61,7 +62,7 @@ public final class LifecycleEmitter {
                 || "deleteAll".equals(name) || "deleteByIds".equals(name)) {
             isBatch = true;
         } else if (!method.parameters().isEmpty()) {
-            String paramType = method.parameters().get(0).asType().toString();
+            String paramType = method.parameters().getFirst().asType().toString();
             if (paramType.startsWith("java.util.List") || paramType.startsWith("java.util.Collection")) {
                 isBatch = true;
             }
@@ -96,7 +97,7 @@ public final class LifecycleEmitter {
         ClassName entityClass = ClassName.bestGuess(ctx.entity().typeName());
         // Extract the collection parameter name from the method signature
         String collectionVar = method.parameters().isEmpty() ? "entities" 
-                : method.parameters().get(0).getSimpleName().toString();
+                : method.parameters().getFirst().getSimpleName().toString();
 
         // Register the SAVE SQL constant (same as single save)
         WriteEmitter writeEmitter = new WriteEmitter(types, elements, baseRepositoryType, repositoryOwnType);
@@ -116,7 +117,7 @@ public final class LifecycleEmitter {
         body.add("}\n");
         body.add("return result;");
 
-        builder.addCode(body.build());
+        builder.addCode(ExceptionTranslation.wrap(body.build()));
         return builder.build();
     }
 
@@ -126,7 +127,7 @@ public final class LifecycleEmitter {
         MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
         ClassName entityClass = ClassName.bestGuess(ctx.entity().typeName());
         String collectionVar = method.parameters().isEmpty() ? "entities" 
-                : method.parameters().get(0).getSimpleName().toString();
+                : method.parameters().getFirst().getSimpleName().toString();
         TypeName listTypeArg = resolveListTypeArg(method, entityClass);
         TypeName arrayListType = ParameterizedTypeName.get(ClassName.get(ArrayList.class), listTypeArg);
 
@@ -138,7 +139,7 @@ public final class LifecycleEmitter {
         body.add("}\n");
         body.add("return result;");
 
-        builder.addCode(body.build());
+        builder.addCode(ExceptionTranslation.wrap(body.build()));
         return builder.build();
     }
 
@@ -148,7 +149,7 @@ public final class LifecycleEmitter {
         MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
         ClassName entityClass = ClassName.bestGuess(ctx.entity().typeName());
         String collectionVar = method.parameters().isEmpty() ? "entities" 
-                : method.parameters().get(0).getSimpleName().toString();
+                : method.parameters().getFirst().getSimpleName().toString();
         TypeName listTypeArg = resolveListTypeArg(method, entityClass);
         TypeName arrayListType = ParameterizedTypeName.get(ClassName.get(ArrayList.class), listTypeArg);
 
@@ -160,7 +161,7 @@ public final class LifecycleEmitter {
         body.add("}\n");
         body.add("return result;");
 
-        builder.addCode(body.build());
+        builder.addCode(ExceptionTranslation.wrap(body.build()));
         return builder.build();
     }
 
@@ -170,14 +171,14 @@ public final class LifecycleEmitter {
         MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
         ClassName entityClass = ClassName.bestGuess(ctx.entity().typeName());
         String collectionVar = method.parameters().isEmpty() ? "entities" 
-                : method.parameters().get(0).getSimpleName().toString();
+                : method.parameters().getFirst().getSimpleName().toString();
 
         CodeBlock.Builder body = CodeBlock.builder();
         body.add("for ($T entity : $L) {\n", entityClass, collectionVar);
         body.add("    deleteById(entity.getId());\n");
         body.add("}");
 
-        builder.addCode(body.build());
+        builder.addCode(ExceptionTranslation.wrap(body.build()));
         return builder.build();
     }
 
@@ -193,7 +194,7 @@ public final class LifecycleEmitter {
         body.add("    deleteById(id);\n");
         body.add("}");
 
-        builder.addCode(body.build());
+        builder.addCode(ExceptionTranslation.wrap(body.build()));
         return builder.build();
     }
 
@@ -217,7 +218,7 @@ public final class LifecycleEmitter {
         TypeName returnType = TypeName.get(method.method().getReturnType());
         if (returnType instanceof ParameterizedTypeName pt) {
             if (!pt.typeArguments.isEmpty()) {
-                return pt.typeArguments.get(0);
+                return pt.typeArguments.getFirst();
             }
         }
         return entityClass;

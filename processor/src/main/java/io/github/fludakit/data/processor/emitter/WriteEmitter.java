@@ -6,6 +6,7 @@ import com.squareup.javapoet.MethodSpec;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.RepositoryContext;
+import io.github.fludakit.data.processor.support.ExceptionTranslation;
 import io.github.fludakit.data.processor.support.MethodOverrides;
 import io.github.fludakit.data.query.Operation;
 import io.github.fludakit.data.query.ResultKind;
@@ -80,7 +81,7 @@ public final class WriteEmitter {
         }
         // Also skip if the first parameter is a collection type (batch operation)
         if (!method.parameters().isEmpty()) {
-            String paramType = method.parameters().get(0).asType().toString();
+            String paramType = method.parameters().getFirst().asType().toString();
             if (paramType.startsWith("java.util.List") || paramType.startsWith("java.util.Collection")) {
                 return null;
             }
@@ -108,7 +109,7 @@ public final class WriteEmitter {
         TypeDefinition entity = ctx.entity();
         // Extract the entity parameter name from the method signature
         String entityVar = method.parameters().isEmpty() ? "entity" 
-                : method.parameters().get(0).getSimpleName().toString();
+                : method.parameters().getFirst().getSimpleName().toString();
         TypeDefinition.Prop.Id idProp = idProp(entity);
         String idTypeFqn = idProp != null ? idProp.javaType() : "java.lang.Long";
         IdStrategy strategy = idStrategy(idTypeFqn);
@@ -143,7 +144,7 @@ public final class WriteEmitter {
         // to ensure child IDs are generated before binding them as FKs
         boolean hasComposingAssociation = ctx.entity().ownsAggregateLifecycle() &&
                 ctx.entity().properties().stream()
-                    .anyMatch(prop -> prop instanceof TypeDefinition.Prop.Association assoc && assoc.composition() && assoc.target() != null);
+                    .anyMatch(prop -> prop instanceof TypeDefinition.Prop.Association assoc && assoc.composition() && assoc.definition() != null);
 
         if (hasComposingAssociation) {
             emitPreInsertCascade(body, ctx, entityVar);
@@ -198,7 +199,7 @@ public final class WriteEmitter {
             body.add("}");
         }
 
-        builder.addCode(body.build());
+        builder.addCode(ExceptionTranslation.wrap(body.build()));
 
         // Post-insert cascade: entity collections (aggregate roots only) and element collections (all entities)
         if (ctx.entity().ownsAggregateLifecycle()) {
@@ -229,10 +230,10 @@ public final class WriteEmitter {
         TypeDefinition entity = ctx.entity();
 
         for (TypeDefinition.Prop prop : entity.properties()) {
-            if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.composition() && assoc.target() != null) {
+            if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.composition() && assoc.definition() != null) {
                 // Composition: cascade save to the composed child
                 emitCompositionSave(builder, ctx, entityVar, assoc);
-            } else if (prop instanceof TypeDefinition.Prop.EntityCollection ec && ec.target() != null) {
+            } else if (prop instanceof TypeDefinition.Prop.EntityCollection ec && ec.definition() != null) {
                 // Entity collection: save each child with parent FK
                 emitEntityCollectionSave(builder, ctx, entityVar, ec);
             }
@@ -247,7 +248,7 @@ public final class WriteEmitter {
         TypeDefinition entity = ctx.entity();
 
         for (TypeDefinition.Prop prop : entity.properties()) {
-            if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.composition() && assoc.target() instanceof TypeDefinition.Entity childEntity) {
+            if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.composition() && assoc.definition() instanceof TypeDefinition.Entity childEntity) {
                 // Generate cascade save code inline in the body
                 String childVar = entityVar + "." + assoc.name();
 
@@ -309,7 +310,7 @@ public final class WriteEmitter {
         TypeDefinition entity = ctx.entity();
 
         for (TypeDefinition.Prop prop : entity.properties()) {
-            if (prop instanceof TypeDefinition.Prop.EntityCollection ec && ec.target() != null) {
+            if (prop instanceof TypeDefinition.Prop.EntityCollection ec && ec.definition() != null) {
                 emitEntityCollectionSave(builder, ctx, entityVar, ec);
             } else if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
                 emitElementCollectionSave(builder, ctx, entityVar, ec);
@@ -323,7 +324,7 @@ public final class WriteEmitter {
      */
     private void emitCompositionSave(MethodSpec.Builder builder, RepositoryContext ctx,
                                       String entityVar, TypeDefinition.Prop.Association assoc) {
-        if (!(assoc.target() instanceof TypeDefinition.Entity childEntity)) return;
+        if (!(assoc.definition() instanceof TypeDefinition.Entity childEntity)) return;
 
         String childVar = entityVar + "." + getter(assoc.name()) + "()";
 
@@ -391,7 +392,7 @@ public final class WriteEmitter {
      */
     private void emitEntityCollectionSave(MethodSpec.Builder builder, RepositoryContext ctx,
                                            String entityVar, TypeDefinition.Prop.EntityCollection ec) {
-        if (!(ec.target() instanceof TypeDefinition.Entity childEntity)) return;
+        if (!(ec.definition() instanceof TypeDefinition.Entity childEntity)) return;
 
         String collectionGetter = entityVar + "." + getter(ec.name()) + "()";
         String childVar = "child_" + ec.name();
@@ -502,7 +503,7 @@ public final class WriteEmitter {
         String parentIdExpr = entityVar + ".getId()";
         
         // Get the element type definition to build proper INSERT
-        TypeDefinition elementType = ec.targetType();
+        TypeDefinition elementType = ec.definition();
         if (elementType == null) return; // Can't proceed without type info
         
         String childTable = dialect.quoteIdentifier(ec.childTable());
@@ -567,7 +568,7 @@ public final class WriteEmitter {
         MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
         TypeDefinition entity = ctx.entity();
         String entityVar = method.parameters().isEmpty() ? "entity" 
-                : method.parameters().get(0).getSimpleName().toString();
+                : method.parameters().getFirst().getSimpleName().toString();
         TypeDefinition.Prop.Id idProp = idProp(entity);
         String idTypeFqn = idProp != null ? idProp.javaType() : "java.lang.Long";
         IdStrategy strategy = idStrategy(idTypeFqn);
@@ -608,7 +609,7 @@ public final class WriteEmitter {
             if (returnsEntity) body.add("\nreturn $L;", entityVar);
         }
 
-        builder.addCode(body.build());
+        builder.addCode(ExceptionTranslation.wrap(body.build()));
         return builder.build();
     }
 
@@ -618,7 +619,7 @@ public final class WriteEmitter {
         MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
         TypeDefinition entity = ctx.entity();
         String entityVar = method.parameters().isEmpty() ? "entity" 
-                : method.parameters().get(0).getSimpleName().toString();
+                : method.parameters().getFirst().getSimpleName().toString();
 
         SqlBuilder sb = new SqlBuilder(entity, entity);
         sb.dialect(dialect);
@@ -647,7 +648,7 @@ public final class WriteEmitter {
 
         if (returnsEntity) body.add("\nreturn $L;", entityVar);
 
-        builder.addCode(body.build());
+        builder.addCode(ExceptionTranslation.wrap(body.build()));
         return builder.build();
     }
 
@@ -664,7 +665,7 @@ public final class WriteEmitter {
 
         // Extract the entity parameter name from the method signature
         String entityVar = method.parameters().isEmpty() ? "entity" 
-                : method.parameters().get(0).getSimpleName().toString();
+                : method.parameters().getFirst().getSimpleName().toString();
 
         CodeBlock.Builder body = CodeBlock.builder();
         
@@ -678,7 +679,7 @@ public final class WriteEmitter {
         // Then delete the parent row
         body.add("jdbcClient.sql($L).param($S, $L.getId()).update();", constName, "id", entityVar);
 
-        builder.addCode(body.build());
+        builder.addCode(ExceptionTranslation.wrap(body.build()));
         return builder.build();
     }
     
@@ -894,8 +895,8 @@ public final class WriteEmitter {
         // First pass: exact type name match
         for (TypeDefinition.Prop prop : childDef.properties()) {
             if (prop instanceof TypeDefinition.Prop.Association assoc 
-                    && assoc.target() != null 
-                    && parentTypeName.equals(assoc.target().typeName())) {
+                    && assoc.definition() != null 
+                    && parentTypeName.equals(assoc.definition().typeName())) {
                 return assoc.name();
             }
         }
@@ -905,11 +906,11 @@ public final class WriteEmitter {
                 : parentTypeName;
         for (TypeDefinition.Prop prop : childDef.properties()) {
             if (prop instanceof TypeDefinition.Prop.Association assoc 
-                    && assoc.target() != null 
-                    && assoc.target().typeName() != null) {
-                String targetSimpleName = assoc.target().typeName().contains(".")
-                        ? assoc.target().typeName().substring(assoc.target().typeName().lastIndexOf('.') + 1)
-                        : assoc.target().typeName();
+                    && assoc.definition() != null 
+                    && assoc.definition().typeName() != null) {
+                String targetSimpleName = assoc.definition().typeName().contains(".")
+                        ? assoc.definition().typeName().substring(assoc.definition().typeName().lastIndexOf('.') + 1)
+                        : assoc.definition().typeName();
                 if (parentSimpleName.equals(targetSimpleName)) {
                     return assoc.name();
                 }
@@ -939,30 +940,8 @@ public final class WriteEmitter {
 
     // ── Utility ──────────────────────────────────────────────────────────
 
-    /**
-     * Finds the parameter name for the FK column by looking for an Association with matching fkColumn.
-     */
-    private String findFkParamName(TypeDefinition.Entity childEntity, String fkColumn) {
-        if (fkColumn == null) return null;
-        for (TypeDefinition.Prop prop : childEntity.properties()) {
-            if (prop instanceof TypeDefinition.Prop.Association assoc 
-                    && assoc.fkColumn() != null 
-                    && fkColumn.equals(assoc.fkColumn())) {
-                return assoc.name();
-            }
-        }
-        return null;
-    }
-
     private String getter(String propertyName) {
         return "get" + Character.toUpperCase(propertyName.charAt(0)) + propertyName.substring(1);
-    }
-
-    private String findIdParam(MethodContext method) {
-        for (VariableElement param : method.parameters()) {
-            return param.getSimpleName().toString();
-        }
-        return "id";
     }
 
     /**

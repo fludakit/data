@@ -4,6 +4,7 @@ import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.CodeBlock;
 import com.squareup.javapoet.MethodSpec;
 import com.squareup.javapoet.ParameterizedTypeName;
+import io.github.fludakit.data.processor.support.ExceptionTranslation;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.context.RepositoryContext;
 import io.github.fludakit.data.sql.SqlDialect;
@@ -85,7 +86,7 @@ public final class HydrationEmitter {
             }
         }
 
-        builder.addCode(body.build());
+        builder.addCode(ExceptionTranslation.wrap(body.build()));
         return builder.build();
     }
 
@@ -111,7 +112,7 @@ public final class HydrationEmitter {
         body.add("    hydrate(entity);\n");
         body.add("}");
 
-        builder.addCode(body.build());
+        builder.addCode(ExceptionTranslation.wrap(body.build()));
         return builder.build();
     }
 
@@ -151,7 +152,7 @@ public final class HydrationEmitter {
      */
     private MethodSpec emitEntityCollectionLoader(RepositoryContext ctx,
                                                    TypeDefinition.Prop.EntityCollection ec) {
-        if (!(ec.target() instanceof TypeDefinition.Entity childEntity)) return null;
+        if (!(ec.definition() instanceof TypeDefinition.Entity childEntity)) return null;
 
         ClassName entityClass = ClassName.bestGuess(ctx.entity().typeName());
         ClassName childClass = ClassName.bestGuess(childEntity.typeName());
@@ -208,7 +209,7 @@ public final class HydrationEmitter {
         body.add("    .list();\n");
         body.add("entity.$L(items);", setterName);
 
-        builder.addCode(body.build());
+        builder.addCode(ExceptionTranslation.wrap(body.build()));
         return builder.build();
     }
 
@@ -231,7 +232,7 @@ public final class HydrationEmitter {
         String constName = ctx.registerConstant("HYDRATE_" + ec.name().toUpperCase(), selectSql);
 
         // Determine element type
-        String elementFqn = ec.elementType();
+        String elementFqn = ec.javaType();
         ClassName elementClass = ClassName.bestGuess(elementFqn);
 
         String setterName = "set" + Character.toUpperCase(ec.name().charAt(0)) + ec.name().substring(1);
@@ -263,7 +264,7 @@ public final class HydrationEmitter {
         }
         body.add("entity.$L(items);", setterName);
 
-        builder.addCode(body.build());
+        builder.addCode(ExceptionTranslation.wrap(body.build()));
         return builder.build();
     }
 
@@ -273,7 +274,7 @@ public final class HydrationEmitter {
      */
     private MethodSpec emitCompositionAssociationLoader(RepositoryContext ctx,
                                                        TypeDefinition.Prop.Association assoc) {
-        if (!(assoc.target() instanceof TypeDefinition.Entity childEntity)) return null;
+        if (!(assoc.definition() instanceof TypeDefinition.Entity childEntity)) return null;
         // Only proceed if it's an aggregate root (has tableName and idColumn)
         if (childEntity.tableName() == null || childEntity.idColumn() == null) return null;
 
@@ -332,7 +333,7 @@ public final class HydrationEmitter {
         body.add("    entity.$L(full);\n", setter);
         body.add("}");
 
-        builder.addCode(body.build());
+        builder.addCode(ExceptionTranslation.wrap(body.build()));
         return builder.build();
     }
 

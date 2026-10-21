@@ -265,8 +265,8 @@ public final class MetamodelEmitter {
         String navClassName = "_" + entitySimpleName + capitalize(assoc.name());
         String navFqn = packageName + "." + navClassName;
 
-        if (claimedMetamodelFqns.contains(navFqn)) {
-            // Collision: degrade to plain entity attribute record
+        if (claimedMetamodelFqns.contains(navFqn) || assoc.backReference()) {
+            // Collision or back-reference: degrade to plain entity attribute record
             if (!(assoc.definition() instanceof TypeDefinition.Entity targetEntity)) {
                 return;
             }
@@ -278,8 +278,13 @@ public final class MetamodelEmitter {
                             Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
                     .initializer("new $T($S, $L)", recordType, assoc.name(), constName)
                     .build());
-            diagnostics.note("static metamodel collision on navigable member '" + assoc.name()
-                    + "': type '" + navFqn + "' already claimed", null);
+            if (assoc.backReference()) {
+                diagnostics.note("static metamodel back-reference on navigable member '" + assoc.name()
+                        + "': degraded to plain attribute", null);
+            } else {
+                diagnostics.note("static metamodel collision on navigable member '" + assoc.name()
+                        + "': type '" + navFqn + "' already claimed", null);
+            }
             return;
         }
 

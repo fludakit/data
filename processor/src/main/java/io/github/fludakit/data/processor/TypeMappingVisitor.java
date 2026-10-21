@@ -294,6 +294,10 @@ final class TypeMappingVisitor {
                     associations.add(new TypeDefinition.Prop.Association(fieldName,
                             targetFqn, entityTarget, Names.fkColumn(fieldName), false, false, null));
                 } else if (target instanceof TypeDefinition.Aggregate aggregateTarget) {
+                    // Detect back-reference: aggregate has EntityCollection pointing to owner
+                    boolean isBackRef = aggregateTarget.entityCollections().stream()
+                            .anyMatch(ec -> ec.javaType().equals(ownerFqn));
+                    
                     // Treat aggregate target as entity for FK purposes
                     // Create a synthetic Entity view of the Aggregate for the association
                     TypeDefinition.Entity entityView = new TypeDefinition.Entity(
@@ -308,7 +312,7 @@ final class TypeMappingVisitor {
                         List.of()  // No element collections in the FK reference
                     );
                     associations.add(new TypeDefinition.Prop.Association(fieldName,
-                            targetFqn, entityView, Names.fkColumn(fieldName), false, false, null));
+                            targetFqn, entityView, Names.fkColumn(fieldName), isBackRef, false, null));
                 } else if (target == null) {
                     // Target not available yet - add placeholder with null target for resolution pass
                     associations.add(new TypeDefinition.Prop.Association(fieldName,
@@ -563,39 +567,49 @@ final class TypeMappingVisitor {
     }
 
     private TypeDefinition.Prop.Association resolveAssociation(TypeDefinition.Prop.Association assoc, String ownerFqn) {
-        if (assoc.definition() != null) return assoc;
-
-        // Try to get target from javaType (fully qualified class name)
-        TypeDefinition target = get(assoc.javaType());
+        // Get the original target type from javaType (not the synthetic Entity view)
+        TypeDefinition originalTarget = get(assoc.javaType());
         
-        if (target == null) {
+        if (originalTarget == null) {
             Map<String, String> pending = pendingTargets.get(ownerFqn);
             if (pending != null) {
                 String targetFqn = pending.get(assoc.name());
                 if (targetFqn != null) {
-                    target = get(targetFqn);
+                    originalTarget = get(targetFqn);
                 }
             }
         }
 
-        if (target instanceof TypeDefinition.Entity entityTarget) {
+        // Detect back-reference: if original target is Aggregate with EntityCollection pointing to owner
+        boolean isBackRef = assoc.backReference();
+        if (!isBackRef && originalTarget instanceof TypeDefinition.Aggregate aggregateTarget) {
+            isBackRef = aggregateTarget.entityCollections().stream()
+                    .anyMatch(ec -> ec.javaType().equals(ownerFqn));
+        }
+
+        if (originalTarget instanceof TypeDefinition.Entity entityTarget) {
             return new TypeDefinition.Prop.Association(assoc.name(), assoc.javaType(),
-                    entityTarget, assoc.fkColumn(), assoc.backReference(), assoc.composition(), assoc.cascade());
-        } else if (target instanceof TypeDefinition.Aggregate aggregateTarget) {
-            // Create synthetic Entity view for association
-            TypeDefinition.Entity entityView = new TypeDefinition.Entity(
-                aggregateTarget.typeName(),
-                aggregateTarget.tableName(),
-                aggregateTarget.id(),
-                aggregateTarget.version(),
-                aggregateTarget.scalars(),
-                aggregateTarget.embedded(),
-                List.of(),
-                List.of(),
-                List.of()
-            );
+                    entityTarget, assoc.fkColumn(), isBackRef, assoc.composition(), assoc.cascade());
+        } else if (originalTarget instanceof TypeDefinition.Aggregate aggregateTarget) {
+            // Create synthetic Entity view if needed
+            TypeDefinition.Entity entityView;
+            if (assoc.definition() != null) {
+                entityView = assoc.definition();
+            } else {
+                entityView = new TypeDefinition.Entity(
+                    aggregateTarget.typeName(),
+                    aggregateTarget.tableName(),
+                    aggregateTarget.id(),
+                    aggregateTarget.version(),
+                    aggregateTarget.scalars(),
+                    aggregateTarget.embedded(),
+                    List.of(),
+                    List.of(),
+                    List.of()
+                );
+            }
             return new TypeDefinition.Prop.Association(assoc.name(), assoc.javaType(),
-                    entityView, assoc.fkColumn(), assoc.backReference(), assoc.composition(), assoc.cascade());
+                    entityView, assoc.fkColumn(), isBackRef, assoc.composition(), assoc.cascade());
         }
 
         return assoc;

@@ -270,9 +270,9 @@ class QueryByMethodNameParserTest {
     @Test
     void preservesUnderscoresInPropertyNames() {
         // The visitor used to concatenate humps and drop the UNDERSCORE tokens, turning
-        // address_street into addressstreet.
+        // address_street into addressstreet. Now underscores become dots for path navigation.
         var p = parser.parse("findByAddress_street");
-        assertThat(p.predicates().get(0).property()).isEqualTo("address_street");
+        assertThat(p.predicates().get(0).property()).isEqualTo("address.street");
     }
 
     @Test

@@ -167,8 +167,8 @@ class SqlBuilderBuildTest {
         // The no-join statements predate the model, so they keep the explicit flag the model now
         // supplies — both spellings must render the same SQL.
         List<Predicate> where = List.of(Predicate.of("status", Operator.EQ, "status"));
-        assertEquals("SELECT DISTINCT \"id\", \"status\", \"customer_id\" FROM \"order_table\""
-                        + " WHERE \"status\" = :status",
+        assertEquals("SELECT DISTINCT \"order_table_0\".\"id\", \"order_table_0\".\"status\", \"order_table_0\".\"customer_id\" FROM \"order_table\""
+                        + " AS \"order_table_0\" WHERE \"status\" = :status",
                 QueryCompiler.selectBy(H2Dialect.INSTANCE, ORDER, where, List.of(), 0, null, true));
         assertEquals("SELECT COUNT(DISTINCT \"id\") FROM \"order_table\" WHERE \"status\" = :status",
                 QueryCompiler.countBy(H2Dialect.INSTANCE, ORDER, where, true));

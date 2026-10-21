@@ -66,10 +66,10 @@ class StaticMetamodelTest {
         assertTrue(mm.contains("StringID=\"id\";"), mm);
         assertTrue(mm.contains("StringTITLE=\"title\";"), mm);
         // Slim record constructors take the name only; column placement is descriptor-owned.
-        assertTrue(mm.contains("IdAttribute<Book>id=newIdAttributeRecord<>(\"id\",ID);") ||
-                   mm.contains("IdAttribute<Book>id=newIdAttributeRecord<Book>(\"id\",ID);"), mm);
-        assertTrue(mm.contains("TextScalarAttribute<Book>title=newTextScalarAttributeRecord<>(\"title\",TITLE);") ||
-                   mm.contains("TextScalarAttribute<Book>title=newTextScalarAttributeRecord<Book>(\"title\",TITLE);"), mm);
+        assertTrue(mm.contains("IdAttribute<Book>id=newIdAttributeRecord<>(\"id\",PropertyPath.of(\"id\"));") ||
+                   mm.contains("IdAttribute<Book>id=newIdAttributeRecord<Book>(\"id\",PropertyPath.of(\"id\"));"), mm);
+        assertTrue(mm.contains("TextScalarAttribute<Book>title=newTextScalarAttributeRecord<>(\"title\",PropertyPath.of(\"title\"));") ||
+                   mm.contains("TextScalarAttribute<Book>title=newTextScalarAttributeRecord<Book>(\"title\",PropertyPath.of(\"title\"));"), mm);
     }
 
     @Test
@@ -139,22 +139,22 @@ class StaticMetamodelTest {
         assertTrue(!mm.contains("StringADDRESS_CITY"), mm);
         assertTrue(!mm.contains("StringADDRESS_POINT_LAT"), mm);
         assertTrue(mm.contains("_ProfileAddressaddress=new_ProfileAddress();"), mm);
-        assertTrue(mm.contains("IdAttribute<Profile>id=newIdAttributeRecord") && mm.contains("(\"id\",ID);"), mm);
+        assertTrue(mm.contains("IdAttribute<Profile>id=newIdAttributeRecord") && mm.contains("(\"id\",PropertyPath.of(\"id\"));"), mm);
 
         String addr = Files.readString(generatedDir.resolve("mmgp/_ProfileAddress.java")).replaceAll("\\s+", "");
         assertTrue(addr.contains("publicfinalclass_ProfileAddressimplementsEmbeddableAttribute<Profile,Address>"), addr);
         assertTrue(addr.contains("TextScalarAttribute<Profile>city=") && 
-                   (addr.contains("newTextScalarAttributeRecord<>(\"city\",\"address.city\");") ||
-                    addr.contains("newTextScalarAttributeRecord<Profile>(\"city\",\"address.city\");")),
+                   (addr.contains("newTextScalarAttributeRecord<>(\"city\",PropertyPath.of(\"address\").child(\"city\"));") ||
+                    addr.contains("newTextScalarAttributeRecord<Profile>(\"city\",PropertyPath.of(\"address\").child(\"city\"));")),
                 "embedded leaf keeps the dot-path name (column placement is descriptor-owned):"
                         + System.lineSeparator() + addr);
         assertTrue(addr.contains("SortableScalarAttribute<Profile>zip=") &&
-                   (addr.contains("newSortableScalarAttributeRecord<>(\"zip\",\"address.zip\");") ||
-                    addr.contains("newSortableScalarAttributeRecord<Profile>(\"zip\",\"address.zip\");")), addr);
+                   (addr.contains("newSortableScalarAttributeRecord<>(\"zip\",PropertyPath.of(\"address\").child(\"zip\"));") ||
+                    addr.contains("newSortableScalarAttributeRecord<Profile>(\"zip\",PropertyPath.of(\"address\").child(\"zip\"));")), addr);
         assertTrue(addr.contains("_ProfileAddressPointpoint=new_ProfileAddressPoint();"),
                 "nested embedded recurses into its own nav class instead of flat leaves:" + System.lineSeparator() + addr);
         assertTrue(addr.contains("publicStringname(){return\"address\";}"), addr);
-        assertTrue(addr.contains("publicStringpath(){return\"address\";}"), addr);
+        assertTrue(addr.contains("publicPropertyPathpath(){returnPropertyPath.of(\"address\");}"), addr);
         assertTrue(!addr.contains("embedded()"),
                 "the slim nav class must not emit the removed embedded() override:"
                         + System.lineSeparator() + addr);
@@ -163,11 +163,11 @@ class StaticMetamodelTest {
         assertTrue(point.contains("publicfinalclass_ProfileAddressPointimplementsEmbeddableAttribute<Profile,GeoPoint>"),
                 point);
         assertTrue(point.contains("SortableScalarAttribute<Profile>lat="
-                        + "newSortableScalarAttributeRecord<>(\"lat\",\"address.point.lat\");"), point);
+                        + "newSortableScalarAttributeRecord<Profile>(\"lat\",PropertyPath.of(\"address\").child(\"point\").child(\"lat\"));"), point);
         assertTrue(point.contains("SortableScalarAttribute<Profile>lng="
-                        + "newSortableScalarAttributeRecord<>(\"lng\",\"address.point.lng\");"), point);
+                        + "newSortableScalarAttributeRecord<Profile>(\"lng\",PropertyPath.of(\"address\").child(\"point\").child(\"lng\"));"), point);
         assertTrue(point.contains("publicStringname(){return\"point\";}"), point);
-        assertTrue(point.contains("publicStringpath(){return\"address.point\";}"), point);
+        assertTrue(point.contains("publicPropertyPathpath(){returnPropertyPath.of(\"address\").child(\"point\");}"), point);
         // Value objects never get their own metamodel classes (aggregate roots only).
         assertTrue(!Files.exists(generatedDir.resolve("mmgp/_Address.java")),
                 "no _VO class for a value object");
@@ -228,7 +228,7 @@ class StaticMetamodelTest {
         assertTrue(cfgNav.contains("_HolderCfgGeogeo=new_HolderCfgGeo();"), cfgNav);
         String geoNav = Files.readString(generatedDir.resolve("nestvo/_HolderCfgGeo.java")).replaceAll("\\s+", "");
         assertTrue(geoNav.contains("publicfinalclass_HolderCfgGeoimplementsEmbeddableAttribute<Holder,Cfg.Geo>"), geoNav);
-        assertTrue(geoNav.contains("TextScalarAttribute<Holder>tag=newTextScalarAttributeRecord") && geoNav.contains("(\"tag\",\"cfg.geo.tag\");"),
+        assertTrue(geoNav.contains("TextScalarAttribute<Holder>tag=newTextScalarAttributeRecord") && geoNav.contains("(\"tag\",PropertyPath.of(\"cfg\").child(\"geo\").child(\"tag\"));"),
                 "the nav must expose the nested leaf via its owner-rooted dot path:" + System.lineSeparator() + geoNav);
     }
 
@@ -304,7 +304,9 @@ class StaticMetamodelTest {
         assertTrue(!orderMm.contains("new _OrderItem()"),
                 "the colliding nav must NOT be instantiated:" + System.lineSeparator() + orderMm);
         assertTrue(orderMm.contains(
-                        "EntityAttribute<Order,OrderItem>item=newEntityAttributeRecord<>(\"item\",ITEM);"),
+                        "EntityAttribute<Order,OrderItem>item=newEntityAttributeRecord<>(\"item\",PropertyPath.of(\"item\"));")
+                || orderMm.contains(
+                        "EntityAttribute<Order,OrderItem>item=newEntityAttributeRecord<Order,OrderItem>(\"item\",PropertyPath.of(\"item\"));"),
                 "the member must fall back to the plain entity attribute record:" + System.lineSeparator() + orderMm);
 
         // The degradation is recorded as a NOTE (never an ERROR — asserted by the success above).
@@ -376,7 +378,8 @@ class StaticMetamodelTest {
 
         // The chain recurses one cycle lap: _RootHead → _RootHeadTail → the back-reference nav.
         String headNav = Files.readString(generatedDir.resolve("cyc/_RootHead.java")).replaceAll("\\s+", "");
-        assertTrue(headNav.contains("TextScalarAttribute<Root>label=newTextScalarAttributeRecord<>(\"label\",\"head.label\");"),
+        assertTrue(headNav.contains("TextScalarAttribute<Root>label=newTextScalarAttributeRecord<>(\"label\",PropertyPath.of(\"head\").child(\"label\"));")
+                || headNav.contains("TextScalarAttribute<Root>label=newTextScalarAttributeRecord<Root>(\"label\",PropertyPath.of(\"head\").child(\"label\"));"),
                 headNav);
         assertTrue(headNav.contains("_RootHeadTailtail=new_RootHeadTail();"), headNav);
 
@@ -390,7 +393,7 @@ class StaticMetamodelTest {
         assertTrue(!backNav.contains("new _"),
                 "the cycle nav must not recurse into further navs:" + System.lineSeparator() + backNav);
         assertTrue(backNav.contains("publicStringname(){return\"node\";}"), backNav);
-        assertTrue(backNav.contains("publicStringpath(){return\"head.tail.node\";}"), backNav);
+        assertTrue(backNav.contains("publicPropertyPathpath(){returnPropertyPath.of(\"head\").child(\"tail\").child(\"node\");}"), backNav);
         // The cycle guard (descriptorFor) bounds the recursion with an EMPTY placeholder model that
         // keeps the type name — so the observable degrade is: no leaves, just the typed container
         // name() (the embedded() INSTANCE plumbing was removed entirely).
@@ -493,12 +496,16 @@ class StaticMetamodelTest {
         // nested embedded VO flattens into definition-local chained columns, dotted in the path.
         String fkNav = Files.readString(generatedDir.resolve("navleaf/_LoadDepot.java")).replaceAll("\\s+", "");
         assertTrue(fkNav.contains("publicfinalclass_LoadDepotimplementsEntityAttribute<Load,Depot>"), fkNav);
-        assertTrue(fkNav.contains("IdAttribute<Load>id=newIdAttributeRecord<>(\"id\",\"depot.id\");"), fkNav);
-        assertTrue(fkNav.contains("TextScalarAttribute<Load>city=newTextScalarAttributeRecord<>(\"city\",\"depot.city\");"), fkNav);
-        assertTrue(fkNav.contains("TextScalarAttribute<Load>street=newTextScalarAttributeRecord<>(\"street\",\"depot.addr.street\");"),
+        assertTrue(fkNav.contains("IdAttribute<Load>id=newIdAttributeRecord<>(\"id\",PropertyPath.of(\"depot\").child(\"id\"));")
+                || fkNav.contains("IdAttribute<Load>id=newIdAttributeRecord<Load>(\"id\",PropertyPath.of(\"depot\").child(\"id\"));"), fkNav);
+        assertTrue(fkNav.contains("TextScalarAttribute<Load>city=newTextScalarAttributeRecord<>(\"city\",PropertyPath.of(\"depot\").child(\"city\"));")
+                || fkNav.contains("TextScalarAttribute<Load>city=newTextScalarAttributeRecord<Load>(\"city\",PropertyPath.of(\"depot\").child(\"city\"));"), fkNav);
+        assertTrue(fkNav.contains("TextScalarAttribute<Load>street=newTextScalarAttributeRecord<>(\"street\",PropertyPath.of(\"depot\").child(\"addr\").child(\"street\"));")
+                || fkNav.contains("TextScalarAttribute<Load>street=newTextScalarAttributeRecord<Load>(\"street\",PropertyPath.of(\"depot\").child(\"addr\").child(\"street\"));"),
                 "the definition's nested embedded leaf keeps the definition-local dotted path:"
                         + System.lineSeparator() + fkNav);
-        assertTrue(fkNav.contains("SortableScalarAttribute<Load>no=newSortableScalarAttributeRecord<>(\"no\",\"depot.addr.no\");"), fkNav);
+        assertTrue(fkNav.contains("SortableScalarAttribute<Load>no=newSortableScalarAttributeRecord<>(\"no\",PropertyPath.of(\"depot\").child(\"addr\").child(\"no\"));")
+                || fkNav.contains("SortableScalarAttribute<Load>no=newSortableScalarAttributeRecord<Load>(\"no\",PropertyPath.of(\"depot\").child(\"addr\").child(\"no\"));"), fkNav);
 
         // (b) EC nav: leaves rebuilt from the element VO props must carry the elementColumns
         // paths/columns exactly (child table contributes no table prefix to the leaf columns).
@@ -506,8 +513,10 @@ class StaticMetamodelTest {
         // ListAttribute covers both one-to-many and element collections — the interface name
         // no longer separates them; the columnRefs join shape does (child table + parent fk).
         assertTrue(ecNav.contains("publicfinalclass_LoadTagsimplementsListAttribute<Load,Tags>"), ecNav);
-        assertTrue(ecNav.contains("TextScalarAttribute<Load>sku=newTextScalarAttributeRecord<>(\"sku\",\"tags.sku\");"), ecNav);
-        assertTrue(ecNav.contains("SortableScalarAttribute<Load>qty=newSortableScalarAttributeRecord<>(\"qty\",\"tags.qty\");"), ecNav);
+        assertTrue(ecNav.contains("TextScalarAttribute<Load>sku=newTextScalarAttributeRecord<>(\"sku\",PropertyPath.of(\"tags\").child(\"sku\"));")
+                || ecNav.contains("TextScalarAttribute<Load>sku=newTextScalarAttributeRecord<Load>(\"sku\",PropertyPath.of(\"tags\").child(\"sku\"));"), ecNav);
+        assertTrue(ecNav.contains("SortableScalarAttribute<Load>qty=newSortableScalarAttributeRecord<>(\"qty\",PropertyPath.of(\"tags\").child(\"qty\"));")
+                || ecNav.contains("SortableScalarAttribute<Load>qty=newSortableScalarAttributeRecord<Load>(\"qty\",PropertyPath.of(\"tags\").child(\"qty\"));"), ecNav);
     }
 
     @Test
@@ -577,23 +586,30 @@ class StaticMetamodelTest {
         assertTrue(pm.contains("_ParentChildrenchildren=new_ParentChildren();"), pm);
         assertTrue(pm.contains("StringPRIMARY=\"primary\";"), pm);
         assertTrue(pm.contains("_ParentPrimaryprimary=new_ParentPrimary();"), pm);
-        assertTrue(pm.contains("TextScalarAttribute<Parent>name=newTextScalarAttributeRecord<>(\"name\",NAME);"), pm);
+        assertTrue(pm.contains("TextScalarAttribute<Parent>name=newTextScalarAttributeRecord<>(\"name\",PropertyPath.of(\"name\"));")
+                || pm.contains("TextScalarAttribute<Parent>name=newTextScalarAttributeRecord<Parent>(\"name\",PropertyPath.of(\"name\"));"), pm);
         String fkNav = Files.readString(generatedDir.resolve("mmrel/_ParentPrimary.java")).replaceAll("\\s+", "");
         assertTrue(fkNav.contains("publicfinalclass_ParentPrimaryimplementsEntityAttribute<Parent,Child>"), fkNav);
-        assertTrue(fkNav.contains("IdAttribute<Parent>id=newIdAttributeRecord<>(\"id\",\"primary.id\");"),
+        assertTrue(fkNav.contains("IdAttribute<Parent>id=newIdAttributeRecord<>(\"id\",PropertyPath.of(\"primary\").child(\"id\"));")
+                || fkNav.contains("IdAttribute<Parent>id=newIdAttributeRecord<Parent>(\"id\",PropertyPath.of(\"primary\").child(\"id\"));"),
                 "the child's id must be a nav leaf named by its owner-rooted path:" + System.lineSeparator() + fkNav);
         String otmNav = Files.readString(generatedDir.resolve("mmrel/_ParentChildren.java")).replaceAll("\\s+", "");
         assertTrue(otmNav.contains("publicfinalclass_ParentChildrenimplementsListAttribute<Parent,Child>"), otmNav);
-        assertTrue(otmNav.contains("ScalarAttribute<Parent>owner=newScalarAttributeRecord<>(\"owner\",\"children.owner\");"),
+        assertTrue(otmNav.contains("ScalarAttribute<Parent>owner=newScalarAttributeRecord<>(\"owner\",PropertyPath.of(\"children\").child(\"owner\"));")
+                || otmNav.contains("ScalarAttribute<Parent>owner=newScalarAttributeRecord<Parent>(\"owner\",PropertyPath.of(\"children\").child(\"owner\"));"),
                 "the child's own FK column path must flatten into the collection nav:" + System.lineSeparator() + otmNav);
         String cm = Files.readString(generatedDir.resolve("mmrel/_Child.java")).replaceAll("\\s+", "");
         assertTrue(cm.contains("_ChildOwnerowner=new_ChildOwner();"), cm);
         String ownerNav = Files.readString(generatedDir.resolve("mmrel/_ChildOwner.java")).replaceAll("\\s+", "");
         assertTrue(ownerNav.contains("publicfinalclass_ChildOwnerimplementsEntityAttribute<Child,Parent>"), ownerNav);
         assertTrue(ownerNav.contains("TextScalarAttribute<Child>name="
-                        + "newTextScalarAttributeRecord<>(\"name\",\"owner.name\");"), ownerNav);
+                        + "newTextScalarAttributeRecord<>(\"name\",PropertyPath.of(\"owner\").child(\"name\"));")
+                || ownerNav.contains("TextScalarAttribute<Child>name="
+                        + "newTextScalarAttributeRecord<Child>(\"name\",PropertyPath.of(\"owner\").child(\"name\"));"), ownerNav);
         assertTrue(ownerNav.contains("ScalarAttribute<Child>primary="
-                        + "newScalarAttributeRecord<>(\"primary\",\"owner.primary\");"), ownerNav);
+                        + "newScalarAttributeRecord<>(\"primary\",PropertyPath.of(\"owner\").child(\"primary\"));")
+                || ownerNav.contains("ScalarAttribute<Child>primary="
+                        + "newScalarAttributeRecord<Child>(\"primary\",PropertyPath.of(\"owner\").child(\"primary\"));"), ownerNav);
 
         // Sort dot paths now resolve through the descriptor: the flattened embedded leaves live in
         // the generated columns(), the paging impl calls <Entity>Metadata.columnRef, and an

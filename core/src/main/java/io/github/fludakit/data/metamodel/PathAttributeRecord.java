@@ -10,4 +10,4 @@ package io.github.fludakit.data.metamodel;
  *
  * @param <T> the root entity type
  */
-public record PathAttributeRecord<T>(String name, String path) implements PathAttribute<T> { }
+public record PathAttributeRecord<T>(String name, PropertyPath path) implements PathAttribute<T> { }

@@ -18,12 +18,12 @@ public interface TextScalarAttribute<T> extends SortableScalarAttribute<T>, Text
     /** Case-insensitive ascending {@link Sort} over {@link #path()}. */
     @Override
     default Sort<T> ascIgnoreCase() {
-        return Sort.ascIgnoreCase(path());
+        return Sort.ascIgnoreCase(path().toDotPath());
     }
 
     /** Case-insensitive descending {@link Sort} over {@link #path()}. */
     @Override
     default Sort<T> descIgnoreCase() {
-        return Sort.descIgnoreCase(path());
+        return Sort.descIgnoreCase(path().toDotPath());
     }
 }

@@ -624,7 +624,7 @@ class RowMapperAndDescriptorTest {
         assertTrue(addrNav.contains("publicfinalclass_ContactAddressimplementsEmbeddableAttribute<Contact,Address>"),
                 addrNav);
         assertTrue(addrNav.contains(
-                "TextScalarAttribute<Contact>city=newTextScalarAttributeRecord<>(\"city\",\"address.city\");"),
+                "TextScalarAttribute<Contact>city=newTextScalarAttributeRecord<>(\"city\",PropertyPath.of(\"address\").child(\"city\"));"),
                 "embedded leaf must be an owner-typed nav field carrying the path only, no column slot:"
                         + System.lineSeparator() + addrNav);
         assertTrue(addrNav.contains("_ContactAddressPointpoint=new_ContactAddressPoint();"),
@@ -632,18 +632,18 @@ class RowMapperAndDescriptorTest {
         // The container contract is the name() accessor alone; the embedded() INSTANCE
         // wiring is gone (leaf placement lives in the descriptor's flattened columns()).
         assertTrue(addrNav.contains("publicStringname(){return\"address\";}"), addrNav);
-        assertTrue(addrNav.contains("publicStringpath(){return\"address\";}"), addrNav);
+        assertTrue(addrNav.contains("publicPropertyPathpath(){returnPropertyPath.of(\"address\");}"), addrNav);
         assertTrue(!addrNav.contains("embedded()"),
                 "the slim nav class must not emit the removed embedded() override:" + System.lineSeparator() + addrNav);
         String pointNav = Files.readString(generatedDir.resolve("emb/_ContactAddressPoint.java")).replaceAll("\\s+", "");
         assertTrue(pointNav.contains("publicfinalclass_ContactAddressPointimplementsEmbeddableAttribute<Contact,GeoPoint>"),
                 pointNav);
         assertTrue(pointNav.contains("SortableScalarAttribute<Contact>lat="
-                        + "newSortableScalarAttributeRecord<>(\"lat\",\"address.point.lat\");"),
+                        + "newSortableScalarAttributeRecord<>(\"lat\",PropertyPath.of(\"address\").child(\"point\").child(\"lat\"));"),
                 "nested leaf keeps the full owner-rooted dot path (column placement moved to columns()):"
                         + System.lineSeparator() + pointNav);
         assertTrue(pointNav.contains("publicStringname(){return\"point\";}"), pointNav);
-        assertTrue(pointNav.contains("publicStringpath(){return\"address.point\";}"), pointNav);
+        assertTrue(pointNav.contains("publicPropertyPathpath(){returnPropertyPath.of(\"address\").child(\"point\");}"), pointNav);
     }
 
     @Test

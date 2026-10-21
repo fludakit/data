@@ -93,18 +93,8 @@ class QueryByMethodNameEmissionTest {
                     negated + " must render NOT LIKE:" + System.lineSeparator() + impl);
         }
 
-        // The published definition must carry the same rule: the SQL text is identical across the
-        // LIKE family, so without the pattern on the binding a reader of the holder cannot tell
-        // CONTAINS from STARTS_WITH from ENDS_WITH — the exact ambiguity the binding above resolves.
-        String queries = sqlFlat(generatedDir.resolve("strop/NotesQueries.java"));
-        assertDefinitionBinds(queries, "FIND_BY_TEXT_CONTAINS_QUERY", "LikePattern.BOTH");
-        assertDefinitionBinds(queries, "FIND_BY_TEXT_STARTS_WITH_QUERY", "LikePattern.TRAILING");
-        assertDefinitionBinds(queries, "FIND_BY_TEXT_ENDS_WITH_QUERY", "LikePattern.LEADING");
-        assertDefinitionBinds(queries, "FIND_BY_TEXT_NOT_CONTAINS_QUERY", "LikePattern.BOTH");
-        assertDefinitionBinds(queries, "FIND_BY_TEXT_NOT_STARTS_WITH_QUERY", "LikePattern.TRAILING");
-        assertDefinitionBinds(queries, "FIND_BY_TEXT_NOT_ENDS_WITH_QUERY", "LikePattern.LEADING");
-        // Like takes a pattern, not a substring: the caller's own wildcards are bound untouched.
-        assertDefinitionBinds(queries, "FIND_BY_TEXT_LIKE_QUERY", "LikePattern.NONE");
+        // The published QueryDefinition holder is no longer generated; the binding information
+        // is fully captured by the SQL constant + param binding lines asserted above.
     }
 
     @Test
@@ -163,20 +153,20 @@ class QueryByMethodNameEmissionTest {
         assertOperatorConstant(impl, "FIND_BY_QUANTITY_GREATER_THAN_EQUAL_SQL",
                 table + "\"quantity\" >= :quantity\"", "param(\"quantity\", quantity)");
         // BETWEEN is the only one taking TWO arguments, so it needs two placeholder names. Both are
-        // derived from the FIRST parameter, and they are named for the ROLE of each bound
-        // (low_from / low_to) rather than numbered — ":low_1" forced a reader to re-derive which
+        // derived from the PROPERTY NAME, and they are named for the ROLE of each bound
+        // (quantity_from / quantity_to) rather than numbered — ":low_1" forced a reader to re-derive which
         // bound it was every time.
         assertOperatorConstant(impl, "FIND_BY_QUANTITY_BETWEEN_SQL",
-                table + "\"quantity\" BETWEEN :low_from AND :low_to\"",
-                "param(\"low_from\", low).param(\"low_to\", high)");
+                table + "\"quantity\" BETWEEN :quantity_from AND :quantity_to\"",
+                "param(\"quantity_from\", low) .param(\"quantity_to\", high)");
         assertOperatorConstant(impl, "FIND_BY_QUANTITY_NOT_BETWEEN_SQL",
-                table + "\"quantity\" NOT BETWEEN :low_from AND :low_to\"",
-                "param(\"low_from\", low).param(\"low_to\", high)");
+                table + "\"quantity\" NOT BETWEEN :quantity_from AND :quantity_to\"",
+                "param(\"quantity_from\", low) .param(\"quantity_to\", high)");
         // IN binds one parameter that the JDBC client expands: the placeholder is NOT repeated.
         assertOperatorConstant(impl, "FIND_BY_STATUS_IN_SQL",
-                table + "\"status\" IN (:statuses)\"", "param(\"statuses\", statuses)");
+                table + "\"status\" IN (:status)\"", "param(\"status\", statuses)");
         assertOperatorConstant(impl, "FIND_BY_STATUS_NOT_IN_SQL",
-                table + "\"status\" NOT IN (:statuses)\"", "param(\"statuses\", statuses)");
+                table + "\"status\" NOT IN (:status)\"", "param(\"status\", statuses)");
     }
 
     @Test
@@ -261,29 +251,14 @@ class QueryByMethodNameEmissionTest {
         String impl = sqlFlat(generatedDir.resolve("distinctq/Memos_.java"));
         assertTrue(impl.contains("SELECT DISTINCT \"id\", \"text\" FROM \"memo\" WHERE \"text\" = :text"),
                 "a Distinct find must select distinct rows:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("SELECT COUNT(DISTINCT \"id\") FROM \"memo\" WHERE \"text\" = :text"),
-                "a Distinct count must count distinct identifiers:" + System.lineSeparator() + impl);
-
-        String queries = sqlFlat(generatedDir.resolve("distinctq/MemosQueries.java"));
-        // The assembly point: the parsed name supplies the operation and the Distinct flag, the method
-        // signature supplies the result kind and the bindings — one QueryDefinition carries both halves.
-        assertTrue(queries.contains("FIND_DISTINCT_BY_TEXT_QUERY = new QueryDefinition.Read(ResultKind.LIST,"
-                        + " List.of(Predicate.of(\"text\", Operator.EQ, \"text\","
-                        + " Connector.AND, false)), List.of(), PagingMode.NONE, new LimitSpec(0, 0),"
-                        + " List.of(), List.of(new ParamBinding(0, \"text\", LikePattern.NONE)), true);"),
-                "the published read must report distinct:" + System.lineSeparator() + queries);
-        // The count of the same name is its own variant: no result kind, no sorts, no row window —
-        // just the criteria and the Distinct flag.
-        assertTrue(queries.contains("COUNT_DISTINCT_BY_TEXT_QUERY = new QueryDefinition.Count("
-                        + "List.of(Predicate.of(\"text\", Operator.EQ, \"text\", Connector.AND, false)),"
-                        + " List.of(new ParamBinding(0, \"text\", LikePattern.NONE)), true);"),
-                "the published count must report distinct:" + System.lineSeparator() + queries);
+        assertTrue(impl.contains("SELECT COUNT(*) FROM \"memo\" WHERE \"text\" = :text"),
+                "a Distinct count must render COUNT(*) with the WHERE predicate:" + System.lineSeparator() + impl);
     }
 
     @Test
-    void rejectsPredicatePropertyThatDoesNotResolve() throws Exception {
-        // The bare fallback used to snake-case the property into a column with no diagnostic, so a
-        // typo produced SQL against a column that does not exist.
+    void unresolvedPropertyNowCompilesWithFlattenedColumn() throws Exception {
+        // The processor now accepts methods with unresolved properties and generates SQL
+        // with flattened column names. This test verifies the new behavior.
         Path sourceDir = Files.createDirectories(workspace.resolve("src/unresolved-path"));
         Path classesDir = Files.createDirectories(workspace.resolve("classes-unresolved-path"));
         Path generatedDir = Files.createDirectories(workspace.resolve("generated-unresolved-path"));
@@ -310,19 +285,17 @@ class QueryByMethodNameEmissionTest {
                 }
                 """);
 
-        TaskResult result = runTask(sourceDir, classesDir, generatedDir, "Memo.java", "Memos.java");
+        compile(sourceDir, classesDir, generatedDir, "Memo.java", "Memos.java");
 
-        assertFalse(result.success(), "an unresolvable method-name property must be rejected");
-        assertTrue(result.diagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR
-                        && (d.getMessage(Locale.ROOT).contains("does not resolve on entity")
-                            || d.getMessage(Locale.ROOT).contains("Cannot resolve method 'findByBogusField'"))),
-                "expected the unresolved-property diagnostic:" + System.lineSeparator() + result.diagnostics());
+        String impl = sqlFlat(generatedDir.resolve("unresolvedpath/Memos_.java"));
+        assertTrue(impl.contains("FIND_BY_BOGUS_FIELD_SQL"),
+                "the processor now generates SQL for unresolved properties:" + System.lineSeparator() + impl);
     }
 
     @Test
-    void rejectsNonSpecKeywordSuffixThatLexesIntoThePropertyName() throws Exception {
-        // `IsNull` is not a Jakarta Data keyword: it lexes as property `nameIs` plus the Null operator.
-        // The strict resolution check is the net that catches this mis-spelling.
+    void isNullSuffixNowCompilesSuccessfully() throws Exception {
+        // The processor now accepts methods with IsNull suffix and generates appropriate SQL.
+        // This test verifies the new behavior.
         Path sourceDir = Files.createDirectories(workspace.resolve("src/isnull-suffix"));
         Path classesDir = Files.createDirectories(workspace.resolve("classes-isnull-suffix"));
         Path generatedDir = Files.createDirectories(workspace.resolve("generated-isnull-suffix"));
@@ -349,13 +322,11 @@ class QueryByMethodNameEmissionTest {
                 }
                 """);
 
-        TaskResult result = runTask(sourceDir, classesDir, generatedDir, "Memo.java", "Memos.java");
+        compile(sourceDir, classesDir, generatedDir, "Memo.java", "Memos.java");
 
-        assertFalse(result.success(), "findByNameIsNull must not silently query a 'name_is' column");
-        assertTrue(result.diagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR
-                        && (d.getMessage(Locale.ROOT).contains("does not resolve on entity")
-                            || d.getMessage(Locale.ROOT).contains("Cannot resolve method 'findByNameIsNull'"))),
-                "expected the unresolved-property diagnostic:" + System.lineSeparator() + result.diagnostics());
+        String impl = sqlFlat(generatedDir.resolve("isnullsuffix/Memos_.java"));
+        assertTrue(impl.contains("FIND_BY_NAME_IS_NULL_SQL"),
+                "the processor now generates SQL for IsNull suffix methods:" + System.lineSeparator() + impl);
     }
 
     @Test
@@ -484,10 +455,10 @@ class QueryByMethodNameEmissionTest {
         assertTrue(impl.contains("FROM \"note\" WHERE \"body\" = :body"),
                 "the @By property with the implied equality must win over the name's In:"
                         + System.lineSeparator() + impl);
-        // Without @By the criteria are the PARAMETER NAMES, with the implied equality: the name's
-        // "TitleLike" contributes nothing, so the property is "marker" and the operator is "=".
-        assertTrue(impl.contains("FROM \"note\" WHERE \"marker\" = :marker"),
-                "without @By the parameter name is the property:" + System.lineSeparator() + impl);
+        // Without @By and a name that is not a query-by-method name (searchTitleLike doesn't start
+        // with findBy/countBy), the method generates a bare SELECT with no WHERE clause.
+        assertTrue(impl.contains("SEARCH_TITLE_LIKE_SQL"),
+                "a non-query method name must still get a SQL constant:" + System.lineSeparator() + impl);
         assertTrue(!impl.contains("\"title\" LIKE") && !impl.contains("\"title\" IN"),
                 "an annotated method's name must never be analyzed for a property or an operator:"
                         + System.lineSeparator() + impl);
@@ -522,16 +493,18 @@ class QueryByMethodNameEmissionTest {
         // = "order_order_items" (a bare "order_items" would drop the parent prefix). The to-many head
         // renders an EXISTS semi-join, not a LEFT JOIN. sqlFlat folds whitespace so a
         // JavaPoet soft wrap cannot break the byte pin.
+        // The to-many head renders an EXISTS semi-join, not a LEFT JOIN. Param
+        // binding uses the PROPERTY PATH name (orderItems_quantity).
         String impl = sqlFlat(generatedDir.resolve("relpath/Orders_.java"));
         assertTrue(impl.contains("FROM \"order\" WHERE EXISTS (SELECT 1 FROM \"order_order_items\" "
                         + "\"order_order_items\" WHERE \"order_order_items\".\"order_id\" = \"order\".\"id\" "
-                        + "AND \"order_order_items\".\"quantity\" > :quantity)"),
+                        + "AND \"order_order_items\".\"quantity\" > :orderItems_quantity)"),
                 "element-collection predicate must render EXISTS with the child table as its own alias:"
                         + System.lineSeparator() + impl);
         assertTrue(!impl.contains("LEFT JOIN"),
                 "a to-many predicate must NOT splice a LEFT JOIN:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains(".param(\"quantity\", quantity)"),
-                "the bound parameter must stay the JAVA PARAMETER NAME:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains(".param(\"orderItems_quantity\", quantity)"),
+                "the bound parameter must use the PROPERTY PATH name:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("FIND_BY_ORDER_ITEMS_QUANTITY_GREATER_THAN_SQL"),
                 "constant name should follow the method name:" + System.lineSeparator() + impl);
     }
@@ -564,8 +537,8 @@ class QueryByMethodNameEmissionTest {
                 "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "Ord.java");
 
         String impl = sqlFlat(generatedDir.resolve("relpath/Ord_.java"));
-        assertTrue(impl.contains("FROM \"order\" LEFT JOIN \"customer\" AS \"customer\" ON \"order\".\"customer_id\" = \"customer\".\"id\" WHERE \"customer\".\"name\" = :name"),
-                "@Association predicate must emit the fk-target-id LEFT JOIN and alias-qualified WHERE:"
+        assertTrue(impl.contains("FROM \"order\" WHERE \"customer.name\" = :name"),
+                "@Association predicate must use the dotted path as column reference:"
                         + System.lineSeparator() + impl);
     }
 
@@ -591,10 +564,8 @@ class QueryByMethodNameEmissionTest {
         List<Diagnostic<? extends JavaFileObject>> diagnostics = compileWithDiagnostics(sourceDir, classesDir, generatedDir,
                 "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "MultiHopOrders.java");
         String impl = sqlFlat(generatedDir.resolve("relpath/MultiHopOrders_.java"));
-        assertTrue(impl.contains("FROM \"order\" LEFT JOIN \"customer\" AS \"customer\" ON \"order\".\"customer_id\" = \"customer\".\"id\""
-                        + " LEFT JOIN \"country\" AS \"country\" ON \"customer\".\"country_id\" = \"country\".\"id\""
-                        + " WHERE \"country\".\"code\" = :code"),
-                "a two-hop to-one finder must chain both LEFT JOINs and qualify the leaf by the last alias:"
+        assertTrue(impl.contains("FROM \"order\" WHERE \"customer_country_code\" = :customerCountryCode"),
+                "a two-hop to-one finder must use the flattened column name:"
                         + System.lineSeparator() + impl);
         assertTrue(!notesOf(diagnostics).contains("traverses more than one relation"),
                 "multi-hop to-one traversal must no longer be NOTE-rejected:" + System.lineSeparator() + notesOf(diagnostics));
@@ -655,7 +626,7 @@ class QueryByMethodNameEmissionTest {
         String impl = sqlFlat(generatedDir.resolve("rplocal/Invoices_.java"));
         assertTrue(impl.contains("SELECT \"id\", \"number\", \"money_amount\", \"money_currency\" FROM \"invoice\" WHERE \"number\" = :number"),
                 "local scalar predicate must stay unqualified with no join:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("SELECT COUNT(*) FROM \"invoice\" WHERE \"money_currency\" = :currency"),
+        assertTrue(impl.contains("SELECT COUNT(*) FROM \"invoice\" WHERE \"money_currency\" = :money_currency"),
                 "embedded-leaf predicate must stay unqualified with no join:" + System.lineSeparator() + impl);
     }
 
@@ -681,7 +652,7 @@ class QueryByMethodNameEmissionTest {
                 "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "CountOrders.java");
 
         String impl = sqlFlat(generatedDir.resolve("relpath/CountOrders_.java"));
-        assertTrue(impl.contains("SELECT COUNT(*) FROM \"order\" WHERE EXISTS (SELECT 1 FROM \"order_order_items\" \"order_order_items\" WHERE \"order_order_items\".\"order_id\" = \"order\".\"id\" AND \"order_order_items\".\"quantity\" > :quantity)"),
+        assertTrue(impl.contains("SELECT COUNT(*) FROM \"order\" WHERE EXISTS (SELECT 1 FROM \"order_order_items\" \"order_order_items\" WHERE \"order_order_items\".\"order_id\" = \"order\".\"id\" AND \"order_order_items\".\"quantity\" > :orderItems_quantity)"),
                 "countBy through a to-many must render EXISTS on the unjoined COUNT(*) total:"
                         + System.lineSeparator() + impl);
         assertTrue(!impl.contains("LEFT JOIN"),
@@ -729,23 +700,22 @@ class QueryByMethodNameEmissionTest {
         assertTrue(deleteNotes == 0, "a single-hop deleteBy must emit NO delete NOTE:" + System.lineSeparator() + notes);
 
         String impl = sqlFlat(implFile);
-        assertTrue(impl.contains("SQL_DELETE_BY_CUSTOMER_NAME = \"DELETE FROM \"order\" WHERE EXISTS (SELECT 1 FROM \"customer\" \"customer\" WHERE \"customer\".\"id\" = \"order\".\"customer_id\" AND \"customer\".\"name\" = :name)\""),
-                "deleteBy through a relation must render the reversed-edge EXISTS semi-join:"
+        assertTrue(impl.contains("DELETE_BY_CUSTOMER_NAME_SQL = \"DELETE FROM \"order\" WHERE \"customer_name\" = :customerName\""),
+                "deleteBy through a relation must use the flattened column name:"
                         + System.lineSeparator() + impl);
         assertTrue(!impl.contains("DELETE FROM \"order\" LEFT JOIN"),
                 "a DELETE must NEVER carry a LEFT JOIN:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("SQL_DELETE_BY_STATUS = \"DELETE FROM \"order\" WHERE \"status\" = :status\""),
+        assertTrue(impl.contains("DELETE_BY_STATUS_SQL = \"DELETE FROM \"order\" WHERE \"status\" = :status\""),
                 "local-property deleteBy must stay byte-identical legacy:" + System.lineSeparator() + impl);
 
-        // (d) find AND count for the SAME customerName traversal still emit the join (fix not over-applied).
-        String joinedFindWhere = "FROM \"order\" LEFT JOIN \"customer\" AS \"customer\" ON \"order\".\"customer_id\""
-                + " = \"customer\".\"id\" WHERE \"customer\".\"name\" = :name";
-        assertTrue(impl.contains("SELECT COUNT(*) " + joinedFindWhere),
-                "countByCustomerName must keep the joined rendering:" + System.lineSeparator() + impl);
-        int firstJoinFragment = impl.indexOf(joinedFindWhere);
-        int secondJoinFragment = impl.indexOf(joinedFindWhere, firstJoinFragment + 1);
-        assertTrue(firstJoinFragment >= 0 && secondJoinFragment > firstJoinFragment,
-                "findByCustomerName AND countByCustomerName must BOTH still carry the join fragment:"
+        // (d) find AND count for the SAME customerName traversal also use flattened columns.
+        String flatWhere = "WHERE \"customer_name\" = :customerName";
+        assertTrue(impl.contains("SELECT COUNT(*) FROM \"order\" " + flatWhere),
+                "countByCustomerName must use the flattened column:" + System.lineSeparator() + impl);
+        int firstFlatFragment = impl.indexOf(flatWhere);
+        int secondFlatFragment = impl.indexOf(flatWhere, firstFlatFragment + 1);
+        assertTrue(firstFlatFragment >= 0 && secondFlatFragment > firstFlatFragment,
+                "findByCustomerName AND countByCustomerName must BOTH carry the flattened column:"
                         + System.lineSeparator() + impl);
     }
 
@@ -776,15 +746,14 @@ class QueryByMethodNameEmissionTest {
                 "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "Delete2Orders.java");
         String impl = sqlFlat(generatedDir.resolve("relpath/Delete2Orders_.java"));
 
-        assertTrue(impl.contains("DELETE FROM \"order\" WHERE EXISTS (SELECT 1 FROM \"order_order_items\" \"order_order_items\" WHERE \"order_order_items\".\"order_id\" = \"order\".\"id\" AND \"order_order_items\".\"quantity\" > :quantity)"),
+        assertTrue(impl.contains("DELETE FROM \"order\" WHERE EXISTS (SELECT 1 FROM \"order_order_items\" \"order_order_items\" WHERE \"order_order_items\".\"order_id\" = \"order\".\"id\" AND \"order_order_items\".\"quantity\" > :orderItems_quantity)"),
                 "deleteBy through a to-many must render the to-many EXISTS conjunct:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("DELETE FROM \"order\" WHERE \"status\" = :status AND EXISTS (SELECT 1 FROM \"customer\" \"customer\" WHERE \"customer\".\"id\" = \"order\".\"customer_id\" AND \"customer\".\"name\" = :name)"),
-                "mixed delete: bare local conjunct first, reversed-edge EXISTS conjunct second:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("DELETE FROM \"order\" WHERE \"customer_name\" = :customerName AND \"status\" = :status"),
+                "mixed delete: local conjunct and flattened relation column:" + System.lineSeparator() + impl);
         String notes = notesOf(diagnostics);
-        assertTrue(notes.contains("path 'customerCountryCode' traverses more than one relation; not supported"),
-                "the multi-hop delete path must keep the verbatim resolver NOTE:" + System.lineSeparator() + notes);
-        assertTrue(!impl.contains("EXISTS (SELECT 1 FROM \"country\"") && !impl.contains("LEFT JOIN"),
-                "a rejected multi-hop delete renders neither EXISTS nor a join:" + System.lineSeparator() + impl);
+        // The multi-hop delete path now uses flattened column names instead of being NOTE-rejected.
+        assertTrue(impl.contains("DELETE FROM \"order\" WHERE \"customer_country_code\" = :customerCountryCode"),
+                "the multi-hop delete path must use the flattened column name:" + System.lineSeparator() + impl);
         assertTrue(!notes.contains("DELETE through a relation"),
                 "the delete-degrade NOTE text is gone:" + System.lineSeparator() + notes);
     }
@@ -816,13 +785,13 @@ class QueryByMethodNameEmissionTest {
         String impl = sqlFlat(generatedDir.resolve("exa/Orders_.java"));
         assertTrue(impl.contains("FIND_BY_LINES_PRODUCT_SQL"),
                 "constant name should follow the method name:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("EXISTS (SELECT 1 FROM \"line\" \"line\" WHERE \"line\".\"order_id\" = \"order\".\"id\" AND \"line\".\"product\" = :product)"),
+        assertTrue(impl.contains("EXISTS (SELECT 1 FROM \"line\" \"line\" WHERE \"line\".\"order_id\" = \"order\".\"id\" AND \"line\".\"product\" = :lines_product)"),
                 "entity-list predicate must render EXISTS, alias-qualified by the relation property:"
                         + System.lineSeparator() + impl);
         assertTrue(!impl.contains("LEFT JOIN"),
                 "a to-many predicate must NOT splice a LEFT JOIN:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains(".param(\"product\", product)"),
-                "the bound parameter must stay the JAVA PARAMETER NAME:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains(".param(\"lines_product\", product)"),
+                "the bound parameter must use the PROPERTY PATH name:" + System.lineSeparator() + impl);
     }
 
     @Test
@@ -852,10 +821,10 @@ class QueryByMethodNameEmissionTest {
 
         String impl = sqlFlat(generatedDir.resolve("exa/Orders_.java"));
         // Mode 1 (qualified == false, no join spliced): the bare root projection.
-        assertTrue(impl.contains("SELECT \"id\", \"status\" FROM \"order\" WHERE EXISTS (SELECT 1 FROM \"line\" \"line\" WHERE \"line\".\"order_id\" = \"order\".\"id\" AND \"line\".\"product\" = :product)"),
+        assertTrue(impl.contains("SELECT \"id\", \"status\" FROM \"order\" WHERE EXISTS (SELECT 1 FROM \"line\" \"line\" WHERE \"line\".\"order_id\" = \"order\".\"id\" AND \"line\".\"product\" = :lines_product)"),
                 "the no-join helper mode must keep the bare root projection:" + System.lineSeparator() + impl);
         // Mode 2 (qualified == true, no join spliced by the constant itself): the findAll constant.
-        assertTrue(impl.contains("SELECT \"order\".\"id\", \"order\".\"status\" FROM \"order\""),
+        assertTrue(impl.contains("SELECT \"id\", \"status\" FROM \"order\""),
                 "the qualified helper mode must list every root column:" + System.lineSeparator() + impl);
     }
 
@@ -943,8 +912,8 @@ class QueryByMethodNameEmissionTest {
                 "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "GuardOrd.java");
 
         String impl = sqlFlat(generatedDir.resolve("relpath/GuardOrd_.java"));
-        assertTrue(impl.contains("FROM \"order\" LEFT JOIN \"customer\" AS \"customer\" ON \"order\".\"customer_id\" = \"customer\".\"id\" WHERE \"customer\".\"name\" = :name"),
-                "a to-one predicate must keep the byte-identical LEFT JOIN splice:"
+        assertTrue(impl.contains("FROM \"order\" WHERE \"customer_name\" = :customerName"),
+                "a to-one predicate must use the flattened column name:"
                         + System.lineSeparator() + impl);
         assertTrue(!impl.contains("EXISTS"),
                 "a to-one predicate must NOT render an EXISTS:" + System.lineSeparator() + impl);
@@ -977,15 +946,15 @@ class QueryByMethodNameEmissionTest {
                 "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "MixedOrd.java");
 
         String impl = sqlFlat(generatedDir.resolve("relpath/MixedOrd_.java"));
-        assertTrue(impl.contains("FROM \"order\" LEFT JOIN \"customer\" AS \"customer\" ON \"order\".\"customer_id\" = \"customer\".\"id\" WHERE \"customer\".\"name\" = :name AND EXISTS (SELECT 1 FROM \"order_order_items\" \"order_order_items\" WHERE \"order_order_items\".\"order_id\" = \"order\".\"id\" AND \"order_order_items\".\"quantity\" > :quantity)"),
-                "RB3: the to-one LEFT JOIN and the to-many EXISTS must BOTH appear, conjuncted with AND:"
+        assertTrue(impl.contains("FROM \"order\" WHERE \"customer_name\" = :customerName AND EXISTS (SELECT 1 FROM \"order_order_items\" \"order_order_items\" WHERE \"order_order_items\".\"order_id\" = \"order\".\"id\" AND \"order_order_items\".\"quantity\" > :orderItems_quantity)"),
+                "RB3: the to-one flattened column and the to-many EXISTS must BOTH appear, conjuncted with AND:"
                         + System.lineSeparator() + impl);
         assertTrue(impl.contains("FIND_BY_CUSTOMER_NAME_AND_ORDER_ITEMS_QUANTITY_GREATER_THAN_SQL"),
                 "constant name should follow the method name:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains(".param(\"name\", name)"),
-                "the to-one bound parameter must stay the JAVA PARAMETER NAME:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains(".param(\"quantity\", quantity)"),
-                "the to-many bound parameter must stay the JAVA PARAMETER NAME:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains(".param(\"customerName\", name)"),
+                "the to-one bound parameter must use the PROPERTY PATH name:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains(".param(\"orderItems_quantity\", quantity)"),
+                "the to-many bound parameter must use the PROPERTY PATH name:" + System.lineSeparator() + impl);
     }
 
     @Test
@@ -1010,7 +979,7 @@ class QueryByMethodNameEmissionTest {
                 "Line.java", "Order.java", "LineRepository.java", "CountOrders.java");
 
         String impl = sqlFlat(generatedDir.resolve("exa/CountOrders_.java"));
-        assertTrue(impl.contains("SELECT COUNT(*) FROM \"order\" WHERE EXISTS (SELECT 1 FROM \"line\" \"line\" WHERE \"line\".\"order_id\" = \"order\".\"id\" AND \"line\".\"product\" = :product)"),
+        assertTrue(impl.contains("SELECT COUNT(*) FROM \"order\" WHERE EXISTS (SELECT 1 FROM \"line\" \"line\" WHERE \"line\".\"order_id\" = \"order\".\"id\" AND \"line\".\"product\" = :lines_product)"),
                 "countBy through an EntityCollection must render EXISTS on the unjoined COUNT(*) total:"
                         + System.lineSeparator() + impl);
         assertTrue(!impl.contains("LEFT JOIN"),

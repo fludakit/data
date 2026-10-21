@@ -200,8 +200,9 @@ class ValidationDiagnosticsTest {
                 package freestyleinvalid;
                 import jakarta.data.repository.Find;
                 import jakarta.data.repository.Repository;
+                import jakarta.data.repository.CrudRepository;
                 @Repository
-                public interface CustomerRepository {
+                public interface CustomerRepository extends CrudRepository<Customer, Long> {
                     @Find Customer annotated();
                     Customer findByName(String name);
                 }
@@ -233,8 +234,9 @@ class ValidationDiagnosticsTest {
                 import jakarta.data.repository.Find;
                 import jakarta.data.repository.Query;
                 import jakarta.data.repository.Repository;
+                import jakarta.data.repository.CrudRepository;
                 @Repository
-                public interface CustomerRepository {
+                public interface CustomerRepository extends CrudRepository<Customer, Long> {
                     @Find @Query("SELECT id FROM customer")
                     Customer customer();
                 }
@@ -401,7 +403,7 @@ class ValidationDiagnosticsTest {
                 @Repository
                 public interface BadSort extends CrudRepository<Order, Long> {
                     @OrderBy(value = "nope")
-                    CursoredPage<Order> findBy(PageRequest pageRequest);
+                    CursoredPage<Order> findAllBy(PageRequest pageRequest);
                 }
                 """);
 

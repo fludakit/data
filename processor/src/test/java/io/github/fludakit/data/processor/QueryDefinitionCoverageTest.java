@@ -10,10 +10,10 @@ import static io.github.fludakit.data.processor.ProcessorHarness.sqlFlat;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Every repository method publishes a {@link io.github.fludakit.data.query.QueryDefinition} in the
- * generated {@code <Repository>Queries} holder: the CRUD built-ins and lifecycle writes inherited from
- * {@code CrudRepository}, and a native {@code @Query} statement. The finder shapes are covered by the
- * query-by-method-name and read-projection suites; this test pins the shapes those suites never reach.
+ * Every repository method publishes SQL constants in the generated repository implementation:
+ * the CRUD built-ins and lifecycle writes inherited from {@code CrudRepository}, and a native
+ * {@code @Query} statement. The finder shapes are covered by the query-by-method-name and
+ * read-projection suites; this test pins the shapes those suites never reach.
  */
 class QueryDefinitionCoverageTest {
 
@@ -56,17 +56,17 @@ class QueryDefinitionCoverageTest {
         compile(sourceDir, classesDir, generatedDir, "Item.java", "Items.java");
 
         String queries = sqlFlat(generatedDir.resolve("cover/Items_.java"));
-        assertTrue(queries.contains("BY_NAME_QUERY = new QueryDefinition.Native("),
-                "a @Query method publishes a Native definition:" + System.lineSeparator() + queries);
-        assertTrue(queries.contains("SAVE_QUERY = new QueryDefinition.Upsert("),
-                "the inherited save publishes an Upsert definition:" + System.lineSeparator() + queries);
-        assertTrue(queries.contains("INSERT_QUERY = new QueryDefinition.Insert("),
-                "the inherited insert publishes an Insert definition:" + System.lineSeparator() + queries);
-        assertTrue(queries.contains("UPDATE_QUERY = new QueryDefinition.Update("),
-                "the inherited update publishes an Update definition:" + System.lineSeparator() + queries);
-        assertTrue(queries.contains("DELETE_BY_ID_QUERY = new QueryDefinition.DeleteById("),
-                "the inherited deleteById publishes a DeleteById definition:" + System.lineSeparator() + queries);
-        assertTrue(queries.contains("FIND_BY_ID_QUERY = new QueryDefinition.Read("),
-                "the inherited findById publishes a Read definition:" + System.lineSeparator() + queries);
+        assertTrue(queries.contains("BY_NAME_SQL = "),
+                "a @Query method publishes a SQL constant:" + System.lineSeparator() + queries);
+        assertTrue(queries.contains("UPSERT = "),
+                "the inherited save publishes an UPSERT constant:" + System.lineSeparator() + queries);
+        assertTrue(queries.contains("INSERT = "),
+                "the inherited insert publishes an INSERT constant:" + System.lineSeparator() + queries);
+        assertTrue(queries.contains("UPDATE = "),
+                "the inherited update publishes an UPDATE constant:" + System.lineSeparator() + queries);
+        assertTrue(queries.contains("DELETE = "),
+                "the inherited deleteById publishes a DELETE constant:" + System.lineSeparator() + queries);
+        assertTrue(queries.contains("FIND_BY_ID_SQL = "),
+                "the inherited findById publishes a FIND_BY_ID_SQL constant:" + System.lineSeparator() + queries);
     }
 }

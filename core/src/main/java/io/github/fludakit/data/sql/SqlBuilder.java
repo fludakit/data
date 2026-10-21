@@ -5,6 +5,7 @@ import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.ColumnResolver;
 import io.github.fludakit.data.metadata.JoinEdge;
 import io.github.fludakit.data.metadata.NonLocalAttributePathException;
+import io.github.fludakit.data.metadata.ResolvedPath;
 import io.github.fludakit.data.metadata.TableSchema;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.query.Operator;
@@ -246,13 +247,61 @@ public final class SqlBuilder {
      * and is rejected with {@link NonLocalAttributePathException}, so callers fall back to
      * relation-aware resolution (an aggregate sort term) — a path that does not exist at all fails
      * with {@link UnknownAttributePathException} instead, and the two must stay distinct.
+     *
+     * <p>The column name is validated against the schema's column list to ensure it exists in the
+     * TypeDefinition.</p>
      */
     public String resolveColumn(String path) {
         ColumnPlacement placement = requireResolver().resolve(path);
         if (!placement.local()) {
             throw new NonLocalAttributePathException(path, placement);
         }
-        return placement.leaf().column();
+        String columnName = placement.leaf().column();
+        validateColumnExists(columnName, path);
+        return columnName;
+    }
+
+    /**
+     * Extracts the column name from a resolved path. The path must be local (no navigation through
+     * associations) — a non-local path has no single table-local column and throws
+     * {@link IllegalArgumentException}.
+     *
+     * <p>The column name is validated against the schema's column list to ensure it exists in the
+     * TypeDefinition. This prevents SQL generation with invalid column references.</p>
+     *
+     * @param path the resolved property path
+     * @return the column name for the leaf property
+     * @throws IllegalArgumentException if the path navigates through associations
+     * @throws IllegalStateException if the column is not defined in the schema
+     */
+    public String resolveColumn(ResolvedPath path) {
+        if (!path.isLocal()) {
+            throw new IllegalArgumentException(
+                "'" + path.toDotPath() + "' traverses a relationship and has no table-local column");
+        }
+        String columnName = path.columnName();
+        validateColumnExists(columnName, path.toDotPath());
+        return columnName;
+    }
+
+    /**
+     * Validates that a column exists in the schema's column list.
+     *
+     * @param columnName the column name to validate
+     * @param propertyPath the property path that resolved to this column (for error messages)
+     * @throws IllegalStateException if the column is not found in the schema
+     */
+    private void validateColumnExists(String columnName, String propertyPath) {
+        boolean found = schema.columns().stream()
+            .anyMatch(col -> col.column().equals(columnName));
+        if (!found) {
+            throw new IllegalStateException(
+                "Column '" + columnName + "' (from property '" + propertyPath + 
+                "') is not defined in table '" + schema.tableName() + "'. " +
+                "Available columns: " + schema.columns().stream()
+                    .map(ColumnRef::column)
+                    .collect(Collectors.joining(", ")));
+        }
     }
 
     /**
@@ -307,6 +356,17 @@ public final class SqlBuilder {
     /** Whether the first segment of an entity-rooted path is a to-many relation or collection. */
     public boolean isToManyPath(String path) {
         return requireResolver().isToManyPath(path);
+    }
+
+    /**
+     * Whether the resolved path navigates through a to-many relationship (EntityCollection or
+     * ElementCollection).
+     *
+     * @param path the resolved property path
+     * @return true if any property in the path is a collection
+     */
+    public boolean isToManyPath(ResolvedPath path) {
+        return path.isToMany();
     }
 
     /**

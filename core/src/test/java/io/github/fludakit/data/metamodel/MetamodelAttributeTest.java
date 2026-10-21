@@ -26,7 +26,7 @@ class MetamodelAttributeTest {
     @Test
     void aSortableScalarSortsByItsPathNotItsName() {
         SortableScalarAttributeRecord<String> city =
-                new SortableScalarAttributeRecord<>("city", "address.city");
+                new SortableScalarAttributeRecord<>("city", PropertyPath.of("address").child("city"));
         assertEquals("city", city.name());
         assertEquals(ASC, city.asc());
         assertEquals(DESC, city.desc());
@@ -34,14 +34,14 @@ class MetamodelAttributeTest {
 
     @Test
     void anIdAttributeSortsByItsPath() {
-        IdAttributeRecord<String> id = new IdAttributeRecord<>("id", "id");
+        IdAttributeRecord<String> id = new IdAttributeRecord<>("id", PropertyPath.of("id"));
         assertEquals(new Sort<>("id", true, false), id.asc());
         assertEquals(new Sort<>("id", false, false), id.desc());
     }
 
     @Test
     void aTextAttributeSortsByItsPathWithAndWithoutCase() {
-        TextScalarAttributeRecord<String> title = new TextScalarAttributeRecord<>("title", "title");
+        TextScalarAttributeRecord<String> title = new TextScalarAttributeRecord<>("title", PropertyPath.of("title"));
         assertEquals(new Sort<>("title", true, false), title.asc());
         assertEquals(new Sort<>("title", false, false), title.desc());
         assertEquals(new Sort<>("title", true, true), title.ascIgnoreCase());
@@ -51,7 +51,7 @@ class MetamodelAttributeTest {
     @Test
     void aTextAttributeSortsCaseInsensitivelyByItsPathNotItsName() {
         TextScalarAttributeRecord<String> city =
-                new TextScalarAttributeRecord<>("city", "address.city");
+                new TextScalarAttributeRecord<>("city", PropertyPath.of("address").child("city"));
         assertEquals(ASC, city.asc());
         assertEquals(ASC_IGNORED, city.ascIgnoreCase());
         assertEquals(DESC, city.desc());
@@ -61,15 +61,15 @@ class MetamodelAttributeTest {
     @Test
     void aSingleSegmentAttributeDefaultsItsPathToItsName() {
         SortableScalarAttributeRecord<String> title = new SortableScalarAttributeRecord<>("title");
-        assertEquals("title", title.path());
+        assertEquals("title", title.path().toDotPath());
         assertEquals(new Sort<>("title", true, false), title.asc());
     }
 
-    /** {@link PathAttribute#path()} defaults to {@code name()}; a navigable attribute may not. */
+    /** {@link PathAttribute#path()} defaults to {@code PropertyPath.of(name())}; a navigable attribute may not. */
     @Test
     void aPathOnlyAttributeKeepsTheInheritedNameDefaultForPath() {
-        PathAttributeRecord<String> leaf = new PathAttributeRecord<>("city", "address.city");
+        PathAttributeRecord<String> leaf = new PathAttributeRecord<>("city", PropertyPath.of("address").child("city"));
         assertEquals("city", leaf.name());
-        assertEquals("address.city", leaf.path());
+        assertEquals("address.city", leaf.path().toDotPath());
     }
 }

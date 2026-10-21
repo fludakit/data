@@ -72,7 +72,7 @@ final class ProcessorHarness {
      */
 
     static void assertPinned(String impl, String constant, String binding) {
-        assertTrue(impl.contains("sql(" + constant + ").param(\"text\", " + binding + ")"),
+        assertTrue(impl.contains("sql(" + constant + ") .param(\"text\", " + binding + ")"),
                 constant + " must bind `" + binding + "`:" + System.lineSeparator() + impl);
     }
 

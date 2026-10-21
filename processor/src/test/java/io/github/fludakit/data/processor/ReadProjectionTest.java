@@ -106,10 +106,10 @@ class ReadProjectionTest {
 
         String fkNav = Files.readString(generatedDir.resolve("rel/_ParentPrimary.java")).replaceAll("\\s+", "");
         assertTrue(fkNav.contains("publicfinalclass_ParentPrimaryimplementsEntityAttribute<Parent,Child>"), fkNav);
-        assertTrue(fkNav.contains("publicStringpath(){return\"primary\";}"), fkNav);
-        assertTrue(fkNav.contains("IdAttribute<Parent>id=newIdAttributeRecord<>(\"id\",\"primary.id\");"),
+        assertTrue(fkNav.contains("publicPropertyPathpath(){returnPropertyPath.of(\"primary\");}"), fkNav);
+        assertTrue(fkNav.contains("IdAttribute<Parent>id=newIdAttributeRecord<>(\"id\",PropertyPath.of(\"primary\").child(\"id\"));"),
                 "the managed target's id must surface as an owner-typed leaf field:" + System.lineSeparator() + fkNav);
-        assertTrue(fkNav.contains("ScalarAttribute<Parent>owner=newScalarAttributeRecord<>(\"owner\",\"primary.owner\");"),
+        assertTrue(fkNav.contains("ScalarAttribute<Parent>owner=newScalarAttributeRecord<>(\"owner\",PropertyPath.of(\"primary\").child(\"owner\"));"),
                 "the target's own FK column must surface as a plain leaf:" + System.lineSeparator() + fkNav);
         assertTrue(!fkNav.contains("targetDescriptor") && !fkNav.contains("publicStringcolumn()"),
                 "the nav classes must not emit the removed column()/targetDescriptor() plumbing:"
@@ -119,8 +119,8 @@ class ReadProjectionTest {
         // The one-to-many rides the unified ListAttribute; the inverseName()/childFkColumn()
         // contract is gone — the resolved inverse fk is pinned through columnRefs below.
         assertTrue(otmNav.contains("publicfinalclass_ParentChildrenimplementsListAttribute<Parent,Child>"), otmNav);
-        assertTrue(otmNav.contains("publicStringpath(){return\"children\";}"), otmNav);
-        assertTrue(otmNav.contains("IdAttribute<Parent>id=newIdAttributeRecord<>(\"id\",\"children.id\");"), otmNav);
+        assertTrue(otmNav.contains("publicPropertyPathpath(){returnPropertyPath.of(\"children\");}"), otmNav);
+        assertTrue(otmNav.contains("IdAttribute<Parent>id=newIdAttributeRecord<>(\"id\",PropertyPath.of(\"children\").child(\"id\"));"), otmNav);
         String pmd = Files.readString(generatedDir.resolve("rel/ParentMetadata.java")).replaceAll("\\s+", "");
         assertTrue(pmd.contains("privatestaticfinalJoinEdgeEDGE_PRIMARY=newJoinEdge.ToOne(newColumnRef.ForeignKey(\"primary_id\",\"parent\"),newColumnRef.Simple(\"id\",\"child\"))"),
                 "the to-one head must pin its FK edge (owner fk -> target id):" + System.lineSeparator() + pmd);
@@ -1431,7 +1431,7 @@ class ReadProjectionTest {
         assertTrue(ownerNav.contains(
                 "publicfinalclass_TeamWithBareRefOwnerimplementsEntityAttribute<TeamWithBareRef,Owner>"), ownerNav);
         assertTrue(ownerNav.contains("TextScalarAttribute<TeamWithBareRef>label="
-                        + "newTextScalarAttributeRecord<>(\"label\",\"owner.label\");"), ownerNav);
+                        + "newTextScalarAttributeRecord<>(\"label\",PropertyPath.of(\"owner\").child(\"label\"));"), ownerNav);
 
         // The composition-gated managed-target NOTE is only emitted for composing references; an
         // association is skipped entirely, so no relationship NOTE appears for owner.

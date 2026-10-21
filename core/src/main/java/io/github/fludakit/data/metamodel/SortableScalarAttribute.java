@@ -21,12 +21,12 @@ public interface SortableScalarAttribute<T> extends ScalarAttribute<T>, Sortable
     /** Ascending {@link Sort} over {@link #path()}. */
     @Override
     default Sort<T> asc() {
-        return Sort.asc(path());
+        return Sort.asc(path().toDotPath());
     }
 
     /** Descending {@link Sort} over {@link #path()}. */
     @Override
     default Sort<T> desc() {
-        return Sort.desc(path());
+        return Sort.desc(path().toDotPath());
     }
 }

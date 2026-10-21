@@ -14,6 +14,7 @@ public final class RepositoryContext {
     private final boolean crud;
     private final ClassName rowMapperType;
     private final String repositoryFqn;
+    private final TypeDefinitionCache typeDefinitionCache;
 
     // Emission state (mutable, appended by emitters)
     private final Map<String, String> constants = new LinkedHashMap<>();
@@ -22,16 +23,29 @@ public final class RepositoryContext {
 
     public RepositoryContext(TypeDefinition entity, boolean crud,
                              ClassName rowMapperType, String repositoryFqn) {
+        this(entity, crud, rowMapperType, repositoryFqn, new TypeDefinitionCache());
+    }
+
+    public RepositoryContext(TypeDefinition entity, boolean crud,
+                             ClassName rowMapperType, String repositoryFqn,
+                             TypeDefinitionCache typeDefinitionCache) {
         this.entity = entity;
         this.crud = crud;
         this.rowMapperType = rowMapperType;
         this.repositoryFqn = repositoryFqn;
+        this.typeDefinitionCache = typeDefinitionCache;
+        
+        // Pre-cache the root entity
+        if (entity instanceof TypeDefinition.Entity e) {
+            typeDefinitionCache.put(e.typeName(), entity);
+        }
     }
 
     public TypeDefinition entity() { return entity; }
     public boolean crud() { return crud; }
     public ClassName rowMapperType() { return rowMapperType; }
     public String repositoryFqn() { return repositoryFqn; }
+    public TypeDefinitionCache typeDefinitionCache() { return typeDefinitionCache; }
     public Map<String, String> constants() { return constants; }
     public List<MethodSpec> auxMethods() { return auxMethods; }
     public Map<String, Integer> queryDefinitionNames() { return queryDefinitionNames; }

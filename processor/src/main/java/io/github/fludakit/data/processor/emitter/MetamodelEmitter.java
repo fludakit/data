@@ -67,6 +67,8 @@ public final class MetamodelEmitter {
             ClassName.get(METAMODEL_PACKAGE, "EntityAttributeRecord");
     private static final ClassName EMBEDDABLE_ATTRIBUTE_RECORD =
             ClassName.get(METAMODEL_PACKAGE, "EmbeddableAttributeRecord");
+    private static final ClassName PROPERTY_PATH =
+            ClassName.get(METAMODEL_PACKAGE, "PropertyPath");
 
     /** Types whose scalar attribute is {@link TextScalarAttribute}. */
     private static final Set<String> TEXT_TYPES = Set.of(
@@ -140,9 +142,10 @@ public final class MetamodelEmitter {
 
             TypeName fieldType = ParameterizedTypeName.get(ID_ATTRIBUTE, entityType);
             TypeName recordType = ParameterizedTypeName.get(ID_ATTRIBUTE_RECORD, entityType);
+            com.squareup.javapoet.CodeBlock pathLiteral = propertyPathLiteral(idProp.name());
             interfaceBuilder.addField(FieldSpec.builder(fieldType, idProp.name(),
                             Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
-                    .initializer("new $T($S, $L)", recordType, idProp.name(), constName)
+                    .initializer("new $T($S, $L)", recordType, idProp.name(), pathLiteral)
                     .build());
         }
 
@@ -189,11 +192,11 @@ public final class MetamodelEmitter {
         TypeName recordType = ParameterizedTypeName.get(attributeRecord, entityType);
 
         String path = pathPrefix.isEmpty() ? col.name() : pathPrefix + "." + col.name();
-        String pathArg = pathPrefix.isEmpty() ? constName : "\"" + path + "\"";
+        com.squareup.javapoet.CodeBlock pathLiteral = propertyPathLiteral(path);
 
         builder.addField(FieldSpec.builder(fieldType, col.name(),
                         Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
-                .initializer("new $T($S, $L)", recordType, col.name(), pathArg)
+                .initializer("new $T($S, $L)", recordType, col.name(), pathLiteral)
                 .build());
     }
 
@@ -274,9 +277,11 @@ public final class MetamodelEmitter {
                     ClassName.bestGuess(targetEntity.typeName()));
             TypeName recordType = ParameterizedTypeName.get(ENTITY_ATTRIBUTE_RECORD, entityType,
                     ClassName.bestGuess(targetEntity.typeName()));
+            String path = pathPrefix.isEmpty() ? assoc.name() : pathPrefix + "." + assoc.name();
+            com.squareup.javapoet.CodeBlock pathLiteral = propertyPathLiteral(path);
             builder.addField(FieldSpec.builder(fieldType, assoc.name(),
                             Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
-                    .initializer("new $T($S, $L)", recordType, assoc.name(), constName)
+                    .initializer("new $T($S, $L)", recordType, assoc.name(), pathLiteral)
                     .build());
             if (assoc.backReference()) {
                 diagnostics.note("static metamodel back-reference on navigable member '" + assoc.name()
@@ -506,9 +511,10 @@ public final class MetamodelEmitter {
             String leafPath = fullPath + "." + targetIdProp.name();
             TypeName fieldType = ParameterizedTypeName.get(ID_ATTRIBUTE, entityType);
             TypeName recordType = ParameterizedTypeName.get(ID_ATTRIBUTE_RECORD, entityType);
+            com.squareup.javapoet.CodeBlock pathLiteral = propertyPathLiteral(leafPath);
             navBuilder.addField(FieldSpec.builder(fieldType, targetIdProp.name(),
                             Modifier.PUBLIC, Modifier.FINAL)
-                    .initializer("new $T($S, $S)", recordType, targetIdProp.name(), leafPath)
+                    .initializer("new $T($S, $L)", recordType, targetIdProp.name(), pathLiteral)
                     .build());
         }
 
@@ -532,9 +538,10 @@ public final class MetamodelEmitter {
                 String leafPath = fullPath + "." + assoc.name();
                 TypeName fieldType = ParameterizedTypeName.get(SCALAR_ATTRIBUTE, entityType);
                 TypeName recordType = ParameterizedTypeName.get(SCALAR_ATTRIBUTE_RECORD, entityType);
+                com.squareup.javapoet.CodeBlock pathLiteral = propertyPathLiteral(leafPath);
                 navBuilder.addField(FieldSpec.builder(fieldType, assoc.name(),
                                 Modifier.PUBLIC, Modifier.FINAL)
-                        .initializer("new $T($S, $S)", recordType, assoc.name(), leafPath)
+                        .initializer("new $T($S, $L)", recordType, assoc.name(), pathLiteral)
                         .build());
             }
         }
@@ -550,9 +557,11 @@ public final class MetamodelEmitter {
         TypeName fieldType = ParameterizedTypeName.get(attributeInterface, entityType);
         TypeName recordType = ParameterizedTypeName.get(attributeRecord, entityType);
 
+        com.squareup.javapoet.CodeBlock pathLiteral = propertyPathLiteral(leafPath);
+
         navBuilder.addField(FieldSpec.builder(fieldType, col.name(),
                         Modifier.PUBLIC, Modifier.FINAL)
-                .initializer("new $T($S, $S)", recordType, col.name(), leafPath)
+                .initializer("new $T($S, $L)", recordType, col.name(), pathLiteral)
                 .build());
     }
 
@@ -609,11 +618,12 @@ public final class MetamodelEmitter {
                 .addStatement("return $S", name)
                 .build());
 
+        com.squareup.javapoet.CodeBlock pathLiteral = propertyPathLiteral(path);
         navBuilder.addMethod(MethodSpec.methodBuilder("path")
                 .addAnnotation(Override.class)
                 .addModifiers(Modifier.PUBLIC)
-                .returns(String.class)
-                .addStatement("return $S", path)
+                .returns(PROPERTY_PATH)
+                .addStatement("return $L", pathLiteral)
                 .build());
     }
 
@@ -656,6 +666,28 @@ public final class MetamodelEmitter {
         } catch (IOException e) {
             // Filer will report the error; silently skip
         }
+    }
+
+    // ── PropertyPath literal generation ──────────────────────────────────
+
+    /**
+     * Generates a PropertyPath literal from a dot-separated path.
+     *
+     * <p>Examples:</p>
+     * <ul>
+     *   <li>"id" → PropertyPath.of("id")</li>
+     *   <li>"customer.name" → PropertyPath.of("customer").child("name")</li>
+     *   <li>"order.customer.id" → PropertyPath.of("order").child("customer").child("id")</li>
+     * </ul>
+     */
+    private com.squareup.javapoet.CodeBlock propertyPathLiteral(String dotPath) {
+        String[] segments = dotPath.split("\\.");
+        com.squareup.javapoet.CodeBlock.Builder builder = com.squareup.javapoet.CodeBlock.builder();
+        builder.add("$T.of($S)", PROPERTY_PATH, segments[0]);
+        for (int i = 1; i < segments.length; i++) {
+            builder.add(".child($S)", segments[i]);
+        }
+        return builder.build();
     }
 
     // ── Naming utilities ─────────────────────────────────────────────────

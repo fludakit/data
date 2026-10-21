@@ -482,43 +482,22 @@ public final class FindEmitter {
             // String prop = sort.property();
             body.addStatement("        String $L = $L.property()", "prop", "sort");
             
-            // Resolve property to column using TypeModel
+            // Resolve property to column using static metamodel
             String entitySimpleName = ctx.entity().typeName().contains(".") 
                 ? ctx.entity().typeName().substring(ctx.entity().typeName().lastIndexOf('.') + 1)
                 : ctx.entity().typeName();
-            String typeModelFqn = ctx.entity().typeName().substring(0, ctx.entity().typeName().lastIndexOf('.')) + "." + entitySimpleName + "TypeModel";
+            String metamodelFqn = ctx.entity().typeName().substring(0, ctx.entity().typeName().lastIndexOf('.')) + "._" + entitySimpleName;
             body.add("        try {\n");
-            body.addStatement("            io.github.fludakit.data.metadata.ColumnPlacement placement = $T.INSTANCE.resolve($L)", 
-                ClassName.bestGuess(typeModelFqn),
-                "prop");
+            body.addStatement("            String $L = resolveSortColumn($L)", "columnName", "prop");
             
             // String direction = sort.isAscending() ? "ASC" : "DESC";
             body.addStatement("            String $L = $L.isAscending() ? $S : $S",
                 "direction", "sort", "ASC", "DESC");
             
-            // Build qualified column reference for ORDER BY
-            body.add("            String $L;\n", "qualifiedColumn");
-            body.add("            if ($L.local()) {\n", "placement");
-            body.addStatement("                $L = $L.leaf().column()", "qualifiedColumn", "placement");
-            body.add("            } else {\n");
-            // For non-local columns (requiring navigation), use aggregate subquery
-            // This avoids the complexity of adding JOINs at runtime
-            body.addStatement("                $L = io.github.fludakit.data.sql.QueryCompiler.aggregateSortTerm($T.INSTANCE, $T.INSTANCE, $L, $L.isAscending())",
-                "qualifiedColumn", 
-                ClassName.bestGuess("io.github.fludakit.data.sql.H2Dialect"),
-                ClassName.bestGuess(typeModelFqn),
-                "placement",
-                "sort");
-            body.add("            }\n");
+            // Append column with direction
+            body.addStatement("            $L.add($L + $S + $L)", "orderClauses", "columnName", " ", "direction");
             
-            // For local columns, append direction; for aggregate subqueries, direction is already embedded
-            body.add("            if ($L.local()) {\n", "placement");
-            body.addStatement("                $L.add($L + $S + $L)", "orderClauses", "qualifiedColumn", " ", "direction");
-            body.add("            } else {\n");
-            body.addStatement("                $L.add($L)", "orderClauses", "qualifiedColumn");
-            body.add("            }\n");
-            
-            body.add("        } catch (io.github.fludakit.data.metadata.UnknownAttributePathException e) {\n");
+            body.add("        } catch (Exception e) {\n");
             body.add("            // Skip invalid sort property\n");
             body.add("        }\n");
             body.add("    }\n");

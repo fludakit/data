@@ -13,7 +13,6 @@ import io.github.fludakit.data.processor.emitter.HydrationEmitter;
 import io.github.fludakit.data.processor.emitter.LifecycleEmitter;
 import io.github.fludakit.data.processor.emitter.MetamodelEmitter;
 import io.github.fludakit.data.processor.emitter.RowMapperEmitter;
-import io.github.fludakit.data.processor.emitter.TypeModelEmitter;
 import io.github.fludakit.data.processor.emitter.WriteEmitter;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.qbn.ParsedMethodName;
@@ -157,9 +156,6 @@ final class RepositoryVisitor {
         }
 
         metamodelEmitter.emit(entityMapping);
-
-        // 4c. Generate TypeModel (runtime TypeDefinition implementation)
-        new TypeModelEmitter(filer).emit(entityMapping);
 
         // 5. Create RepositoryContext
         RepositoryContext ctx = new RepositoryContext(
@@ -915,6 +911,9 @@ final class RepositoryVisitor {
                     .build());
         }
 
+        // Add resolveSortColumn helper method for runtime sort resolution
+        shell.addMethod(generateResolveSortColumnMethod(ctx));
+
         // Add generated method overrides
         for (MethodSpec auxMethod : ctx.auxMethods()) {
             shell.addMethod(auxMethod);
@@ -934,6 +933,52 @@ final class RepositoryVisitor {
         } catch (IOException e) {
             diagnostics.error("Failed to write " + generatedName + ": " + e.getMessage(), repository);
         }
+    }
+
+    /**
+     * Generates a helper method that resolves sort property paths to column names
+     * using the static metamodel. This replaces the old TypeModel-based resolution.
+     */
+    private MethodSpec generateResolveSortColumnMethod(RepositoryContext ctx) {
+        MethodSpec.Builder method = MethodSpec.methodBuilder("resolveSortColumn")
+                .addModifiers(Modifier.PRIVATE, Modifier.STATIC)
+                .returns(String.class)
+                .addParameter(String.class, "propertyPath");
+        
+        // Build switch expression
+        StringBuilder switchCode = new StringBuilder("return switch (propertyPath) {\n");
+        
+        // Add cases for each scalar property
+        TypeDefinition typeDef = ctx.entity();
+        boolean hasCases = false;
+        if (typeDef instanceof TypeDefinition.Entity entity) {
+            for (TypeDefinition.Prop prop : entity.properties()) {
+                if (prop instanceof TypeDefinition.Prop.Scalar s) {
+                    String path = s.name();
+                    String column = s.columnName();
+                    switchCode.append(String.format("    case \"%s\" -> \"%s\";\n", path, column));
+                    hasCases = true;
+                } else if (prop instanceof TypeDefinition.Prop.Id id) {
+                    String path = id.name();
+                    String column = id.columnName();
+                    switchCode.append(String.format("    case \"%s\" -> \"%s\";\n", path, column));
+                    hasCases = true;
+                }
+            }
+        }
+        
+        // Default case: throw exception for unknown property
+        switchCode.append("    default -> throw new IllegalArgumentException(\"Unknown sort property: \" + propertyPath);\n");
+        switchCode.append("};");
+        
+        // If no cases, just throw immediately
+        if (!hasCases) {
+            method.addStatement("throw new IllegalArgumentException($S + propertyPath)", "Unknown sort property: ");
+        } else {
+            method.addCode(switchCode.toString());
+        }
+        
+        return method.build();
     }
 
     /**

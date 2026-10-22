@@ -1,21 +1,17 @@
 package io.github.fludakit.data.metadata;
 
-import java.util.LinkedHashMap;
-import java.util.Map;
-
 /**
  * Generates unique table aliases following the pattern {@code tableName_index}.
  *
- * <p>Thread-safe: each instance maintains its own counter. A fresh instance should be created
- * per query plan.</p>
+ * <p>Each instance maintains a global counter to ensure all aliases are unique across
+ * all table references in a query plan. A fresh instance should be created per query plan.</p>
  */
 public final class TableAlias {
-    private final Map<String, Integer> counters = new LinkedHashMap<>();
+    private int counter = 0;
 
     /** Generates the next alias for the given table name. */
     public String next(String tableName) {
-        int index = counters.getOrDefault(tableName, 0);
-        counters.put(tableName, index + 1);
+        int index = counter++;
         return tableName + "_" + index;
     }
 

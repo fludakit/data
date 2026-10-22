@@ -5,6 +5,7 @@ import io.github.fludakit.data.metadata.ColumnPlacement;
 import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.ColumnResolver;
 import io.github.fludakit.data.metadata.JoinEdge;
+import io.github.fludakit.data.metadata.NavigationPlan;
 import io.github.fludakit.data.metadata.TableSchema;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.metadata.UnknownAttributePathException;
@@ -124,6 +125,28 @@ public final class QueryCompiler {
         };
     }
 
+    /**
+     * As {@link #render(TableSchema, ColumnResolver, SqlDialect, QueryDefinition, String)},
+     * using a {@link NavigationPlan} for alias-aware join rendering.
+     */
+    public static String render(TableSchema schema, ColumnResolver resolver, SqlDialect dialect,
+                                QueryDefinition model, NavigationPlan navPlan, String extraProjection) {
+        Objects.requireNonNull(navPlan, "navPlan");
+        return switch (model) {
+            case QueryDefinition.Insert insert -> insert(dialect, schema, requireResolver(resolver),
+                    insert.includeId());
+            case QueryDefinition.Upsert ignored -> upsert(dialect, schema, requireResolver(resolver));
+            case QueryDefinition.Update ignored -> update(dialect, schema, requireResolver(resolver));
+            case QueryDefinition.DeleteById ignored -> deleteById(dialect, schema);
+            case QueryDefinition.Native nativeQuery -> nativeQuery.sql();
+            case QueryDefinition.Criteria criteria -> {
+                Objects.requireNonNull(resolver, "resolver");
+                Plan plan = new QueryPlanner(schema, resolver, dialect, criteria, List.of(), navPlan).plan();
+                yield fragment(schema, dialect, criteria, plan, extraProjection, navPlan).render(dialect);
+            }
+        };
+    }
+
     /** Resolves and classifies one criteria statement without rendering it. */
     public static Plan plan(TableSchema schema, ColumnResolver resolver, SqlDialect dialect,
                             QueryDefinition.Criteria model) {
@@ -134,6 +157,12 @@ public final class QueryCompiler {
     public static Plan plan(TableSchema schema, ColumnResolver resolver, SqlDialect dialect,
                             QueryDefinition.Criteria model, List<JoinEdge> extraEdges) {
         return new QueryPlanner(schema, resolver, dialect, model, extraEdges).plan();
+    }
+
+    /** As {@link #plan}, using a {@link NavigationPlan} for alias-aware planning. */
+    public static Plan plan(TableSchema schema, ColumnResolver resolver, SqlDialect dialect,
+                            QueryDefinition.Criteria model, NavigationPlan navPlan) {
+        return new QueryPlanner(schema, resolver, dialect, model, List.of(), navPlan).plan();
     }
 
     private static ColumnResolver requireResolver(ColumnResolver resolver) {
@@ -169,6 +198,54 @@ public final class QueryCompiler {
             // become ambiguous the moment a join adds a table sharing a column name (e.g. the definition's
             // own "id"), and a full-materialisation read joins exactly such a table. Qualifying keeps
             // each label = its physical column, so the generated row mapper still reads it by name.
+            fragment.keyword("SELECT")
+                    .projection(rootProjection(dialect, schema, spliceJoins, extraProjection))
+                    .distinct(distinct(model));
+        }
+        for (Conjunct conjunct : plan.where()) {
+            fragment.where(conjunct.sql(), conjunct.orJoined());
+        }
+        for (String term : plan.orderBy()) {
+            fragment.orderBy(term);
+        }
+        if (plan.limit() > 0) {
+            fragment.limit(plan.limit());
+        }
+        return fragment;
+    }
+
+    /**
+     * As {@link #fragment(TableSchema, SqlDialect, QueryDefinition.Criteria, Plan, String)},
+     * using a {@link NavigationPlan} for alias-aware join rendering.
+     */
+    public static SqlFragment fragment(TableSchema schema, SqlDialect dialect, QueryDefinition.Criteria model,
+                                       Plan plan, String extraProjection, NavigationPlan navPlan) {
+        Objects.requireNonNull(navPlan, "navPlan");
+        boolean spliceJoins = !plan.joins().isEmpty();
+        boolean countMode = model instanceof QueryDefinition.Count || model instanceof QueryDefinition.Exists;
+        boolean deleteMode = model instanceof QueryDefinition.DeleteWhere;
+
+        SqlFragment fragment = new SqlFragment()
+                .table(schema.tableName())
+                .aliases(navPlan.aliasMap());
+
+        // Use alias-aware join method
+        for (JoinEdge edge : plan.joins()) {
+            String alias = navPlan.aliasFor(edge.childTable());
+            if (alias != null) {
+                fragment.join(edge, alias);
+            } else {
+                fragment.join(edge);
+            }
+        }
+
+        if (countMode) {
+            fragment.keyword("SELECT").projection(distinct(model) && schema.idColumn() != null
+                    ? "COUNT(DISTINCT " + dialect.quoteIdentifier(schema.idColumn()) + ")"
+                    : "COUNT(*)");
+        } else if (deleteMode) {
+            fragment.keyword("DELETE");
+        } else {
             fragment.keyword("SELECT")
                     .projection(rootProjection(dialect, schema, spliceJoins, extraProjection))
                     .distinct(distinct(model));

@@ -680,7 +680,7 @@ final class TypeMappingVisitor {
     }
 
     private LoadStrategy entityCollectionLoadStrategy(boolean isAggregate) {
-        return isAggregate ? LoadStrategy.EAGER : LoadStrategy.NOT_LOADED;
+        return LoadStrategy.EAGER;
     }
 
     private LoadStrategy elementCollectionLoadStrategy() {

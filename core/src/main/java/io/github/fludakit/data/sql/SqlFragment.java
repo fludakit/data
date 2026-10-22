@@ -51,6 +51,7 @@ public final class SqlFragment {
     private boolean distinct;
     private String table;
     private final Map<String, JoinEdge> joins = new LinkedHashMap<>();
+    private Map<String, String> aliasMap;
     private final List<Conjunct> where = new ArrayList<>();
     private final List<String> orderBy = new ArrayList<>();
     private Integer limit;
@@ -86,10 +87,22 @@ public final class SqlFragment {
         return this;
     }
 
+    /** Sets the alias map for join rendering; keys are child tables, values are aliases. */
+    public SqlFragment aliases(Map<String, String> aliasMap) {
+        this.aliasMap = aliasMap == null ? Map.of() : Map.copyOf(aliasMap);
+        return this;
+    }
+
     /** Adds one relation edge; a second edge reaching the same child table is dropped. */
     public SqlFragment join(JoinEdge edge) {
+        return join(edge, edge.childTable());
+    }
+
+    /** As {@link #join(JoinEdge)}, using the alias from the map if present. */
+    public SqlFragment join(JoinEdge edge, String alias) {
         Objects.requireNonNull(edge, "edge");
-        joins.putIfAbsent(edge.childTable(), edge);
+        Objects.requireNonNull(alias, "alias");
+        joins.putIfAbsent(alias, edge);
         return this;
     }
 
@@ -244,14 +257,17 @@ public final class SqlFragment {
     }
 
     private void renderJoins(StringBuilder sql, SqlDialect dialect) {
-        for (JoinEdge join : joins.values()) {
+        for (Map.Entry<String, JoinEdge> entry : joins.entrySet()) {
+            String alias = entry.getKey();
+            JoinEdge join = entry.getValue();
             String owner = dialect.quoteIdentifier(join.ownerTable());
-            String alias = dialect.quoteIdentifier(join.childTable());
-            sql.append(" LEFT JOIN ").append(alias)
-                    .append(" AS ").append(alias)
+            String quotedAlias = dialect.quoteIdentifier(alias);
+            String childTable = dialect.quoteIdentifier(join.childTable());
+            sql.append(" LEFT JOIN ").append(childTable)
+                    .append(" AS ").append(quotedAlias)
                     .append(" ON ").append(owner).append('.')
                     .append(dialect.quoteIdentifier(join.ownerColumn()))
-                    .append(" = ").append(alias).append('.')
+                    .append(" = ").append(quotedAlias).append('.')
                     .append(dialect.quoteIdentifier(join.childColumn()));
         }
     }

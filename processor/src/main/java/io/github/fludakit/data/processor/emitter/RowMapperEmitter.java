@@ -7,7 +7,6 @@ import com.squareup.javapoet.MethodSpec;
 import com.squareup.javapoet.ParameterizedTypeName;
 import com.squareup.javapoet.TypeName;
 import com.squareup.javapoet.TypeSpec;
-import io.github.fludakit.data.metadata.LoadStrategy;
 import io.github.fludakit.data.metadata.TypeDefinition;
 
 import javax.annotation.processing.Filer;
@@ -350,11 +349,6 @@ public final class RowMapperEmitter {
      */
     private void addAssociationRead(MethodSpec.Builder method, String entityVar,
                                   TypeDefinition.Prop.Association assoc, String rsVar) {
-        // Skip associations that are not loaded at all
-        if (assoc.loadStrategy() == LoadStrategy.NOT_LOADED) {
-            return;
-        }
-
         if (!(assoc.definition() instanceof TypeDefinition.Entity targetEntity)) return;
 
         String targetFqn = targetEntity.typeName();

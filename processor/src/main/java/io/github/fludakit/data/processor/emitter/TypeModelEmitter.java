@@ -300,25 +300,22 @@ public final class TypeModelEmitter {
                 CodeBlock targetLiteral = a.definition() != null 
                     ? entityTargetLiteral(a.definition())
                     : CodeBlock.of("null");
-                yield CodeBlock.of("new $T($S, $S, $L, $S, $L, $L, $L, $T.$L)",
+                yield CodeBlock.of("new $T($S, $S, $L, $S, $L, $L, $L)",
                         ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "Association"),
                         a.name(), a.javaType(), targetLiteral, a.fkColumn(), a.backReference(), a.composition(),
-                        a.cascade() != null ? CodeBlock.of("$T.$L", ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "Association", "Cascade"), a.cascade()) : CodeBlock.of("null"),
-                        ClassName.get(METADATA_PACKAGE, "LoadStrategy"), a.loadStrategy());
+                        a.cascade() != null ? CodeBlock.of("$T.$L", ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "Association", "Cascade"), a.cascade()) : CodeBlock.of("null"));
             }
             case TypeDefinition.Prop.EntityCollection ec -> {
                 CodeBlock targetLiteral = ec.definition() != null 
                     ? entityTargetLiteral(ec.definition())
                     : CodeBlock.of("null");
-                yield CodeBlock.of("new $T($S, $S, $L, $S, null, $T.$L)",
+                yield CodeBlock.of("new $T($S, $S, $L, $S, null)",
                         ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "EntityCollection"),
-                        ec.name(), ec.javaType(), targetLiteral, ec.fkColumn(),
-                        ClassName.get(METADATA_PACKAGE, "LoadStrategy"), ec.loadStrategy());
+                        ec.name(), ec.javaType(), targetLiteral, ec.fkColumn());
             }
-            case TypeDefinition.Prop.ElementCollection ec -> CodeBlock.of("new $T($S, $S, null, $S, $S, $T.$L)",
+            case TypeDefinition.Prop.ElementCollection ec -> CodeBlock.of("new $T($S, $S, null, $S, $S)",
                     ClassName.get(METADATA_PACKAGE, "TypeDefinition", "Prop", "ElementCollection"),
-                    ec.name(), ec.javaType(), ec.childTable(), ec.fkColumn(),
-                    ClassName.get(METADATA_PACKAGE, "LoadStrategy"), ec.loadStrategy());
+                    ec.name(), ec.javaType(), ec.childTable(), ec.fkColumn());
             default -> throw new IllegalStateException("Unexpected prop: " + prop);
         };
     }

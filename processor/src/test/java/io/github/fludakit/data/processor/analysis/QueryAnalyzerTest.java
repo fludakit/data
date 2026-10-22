@@ -26,7 +26,7 @@ class QueryAnalyzerTest {
         var orderStatus = new TypeDefinition.Prop.Scalar("status", "java.lang.String", "status", true);
         var customerAssoc = new TypeDefinition.Prop.Association(
             "customer", "com.example.Customer", customerType, "customer_id",
-            false, false, null, LoadStrategy.FK_ONLY
+            false, false, null
         );
         var orderType = new TypeDefinition.Entity(
             "com.example.Order", "orders", orderId, null,

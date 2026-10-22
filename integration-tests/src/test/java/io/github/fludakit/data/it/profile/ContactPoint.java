@@ -4,7 +4,7 @@ import io.github.fludakit.data.annotation.ValueObject;
 
 /**
  * Element-collection member of {@code Profile.contacts} — stored in the child table
- * {@code profiles_contacts} (fk {@code profile_id} + flattened leaves {@code kind}, {@code value}).
+ * {@code contact_points} (fk {@code profile_id} + flattened leaves {@code kind}, {@code value}).
  */
 @ValueObject
 public class ContactPoint {

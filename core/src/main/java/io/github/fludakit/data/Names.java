@@ -56,5 +56,13 @@ public final class Names {
         // Default: add "s"
         return lower + "s";
     }
+    /**
+     * Element collection child table: derived from the ELEMENT TYPE name, not the parent.
+     * {@code OrderItem} → {@code order_items}.
+     */
+    public static String childTable(String elementTypeName) {
+        return pluralize(toSnakeCase(elementTypeName));
+    }
+
     public static String childTable(String parentTable, String field) { return parentTable + "_" + toSnakeCase(field); }
 }

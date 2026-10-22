@@ -367,7 +367,8 @@ final class TypeMappingVisitor {
                     // For non-entity list elements in VOs, treat as ElementCollection
                     String elementFqn = typeFqn(elementType);
                     String ownerTable = "unknown"; // VOs don't have tables, this will be set by parent
-                    String childTable = Names.childTable("vo", fieldName);
+                    String elementTypeName = elementTE.getSimpleName().toString();
+                    String childTable = Names.childTable(elementTypeName);
                     String parentFkCol = Names.fkColumn(fieldName);
                     
                     // Look up the element type's TypeDefinition from cache
@@ -441,7 +442,8 @@ final class TypeMappingVisitor {
                                         String ownerSingular,
                                         List<TypeDefinition.Prop.ElementCollection> elementCollections) {
         String voFqn = elementTE.getQualifiedName().toString();
-        String childTable = Names.childTable(ownerTable, fieldName);
+        String elementTypeName = elementTE.getSimpleName().toString();
+        String childTable = Names.childTable(elementTypeName);
         String parentFkCol = Names.fkColumn(ownerSingular);
 
         // Track this VO as used in an element collection

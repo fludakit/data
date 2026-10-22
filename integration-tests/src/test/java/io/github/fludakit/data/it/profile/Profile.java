@@ -10,7 +10,7 @@ import java.util.List;
  * CV aggregate root: flattened embedded address plus two composition entity collections
  * ({@code workHistory}, {@code education} — targets manage their own tables via their fk
  * {@code profile_id}) and an element collection of {@link ContactPoint} value objects
- * (child table {@code profiles_contacts}).
+ * (child table {@code contact_points}).
  */
 @AggregateRoot
 public class Profile {

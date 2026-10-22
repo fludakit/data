@@ -30,4 +30,10 @@ class NamesTest {
         assertEquals("orders", Names.tableName("Order"));
         assertEquals("customer_profiles", Names.tableName("CustomerProfile"));
     }
+
+    @Test
+    void childTableFromElementType() {
+        assertEquals("order_items", Names.childTable("OrderItem"));
+        assertEquals("contact_points", Names.childTable("ContactPoint"));
+    }
 }

@@ -288,7 +288,7 @@ class WriteEmissionTest {
         compile(sourceDir, classesDir, generatedDir, "Product.java", "Line.java", "Basket.java", "Baskets.java");
 
         String impl = sqlFlat(generatedDir.resolve("voca/Baskets_.java"));
-        assertTrue(impl.contains("INSERT INTO \"baskets_lines\" (\"basket_id\", \"product_id\", \"quantity\")"
+        assertTrue(impl.contains("INSERT INTO \"lines\" (\"basket_id\", \"product_id\", \"quantity\")"
                         + " VALUES (:basket_id, :product_id, :quantity)"),
                 "child-table insert must keep the fk column:" + System.lineSeparator() + impl);
         assertTrue(impl.contains(".param(\"product_id\", item.getProduct() == null ? null : item.getProduct().getId())"),
@@ -382,7 +382,7 @@ class WriteEmissionTest {
         // `quantity`. The loose `IN (` token alone would also match a wrong column list.
         // The file's `\"` escapes are normalised to `"` by the read above, so the expected literal uses plain quotes.
         assertTrue(impl.contains("SELECT_LINES = \"SELECT \"basket_id\", \"quantity\" FROM "
-                        + "\"baskets_lines\" WHERE \"basket_id\" IN (\";"),
+                        + "\"lines\" WHERE \"basket_id\" IN (\";"),
                 "hydration SELECT constant value must be pinned:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("IN ("), "loader must build a runtime IN (:key0, ...) list:" + System.lineSeparator() + impl);
         // NOTE (ruling #7): JavaPoet's skipJavaLangImports still IMPORTS java.util.Collection, so the
@@ -430,7 +430,7 @@ class WriteEmissionTest {
         // Replace-all update: children deleted by parent fk (child param stays COLUMN-named), then re-inserted.
         assertTrue(impl.contains(".param(\"basket_id\", entity.getId())"),
                 "update must delete children by the parent fk before re-inserting:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("DELETE FROM \"baskets_lines\" WHERE \"basket_id\" = :basket_id"),
+        assertTrue(impl.contains("DELETE FROM \"lines\" WHERE \"basket_id\" = :basket_id"),
                 "delete-cascade constant:" + System.lineSeparator() + impl);
 
         // The generated VO row mapper reads the primitive leaf with the wasNull guard and never touches
@@ -501,14 +501,14 @@ class WriteEmissionTest {
         String impl = sqlFlat(generatedDir.resolve("casc/Baskets_.java"));
 
         // Save still inserts child rows for the gate-failed collection (unchanged write side).
-        assertTrue(impl.contains("INSERT INTO \"baskets_lines\""),
+        assertTrue(impl.contains("INSERT INTO \"lines\""),
                 "child rows must be inserted for every collection:" + System.lineSeparator() + impl);
 
         // The DELETE cascade (replace-all update + deleteById) is emitted even for the gate-failed
         // collection: the cascade keeps the child rows from orphaning.
         assertTrue(impl.contains("DELETE_LINES"),
                 "gate-failed collection must still get its child DELETE constant:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("DELETE FROM \"baskets_lines\" WHERE \"basket_id\" = :basket_id"),
+        assertTrue(impl.contains("DELETE FROM \"lines\" WHERE \"basket_id\" = :basket_id"),
                 "gate-failed collection must still get the child DELETE SQL:" + System.lineSeparator() + impl);
 
         // Hydration degrades: no loader SELECT, no hydrateLines loader, no umbrella, no VO row mapper.

@@ -830,7 +830,7 @@ class ReadProjectionTest {
                 "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "SortOrd.java");
 
         String impl = sqlFlat(generatedDir.resolve("relpath/SortOrdImpl.java"));
-        assertTrue(impl.contains("ORDER BY (SELECT MAX(\"order_order_items\".\"quantity\") FROM \"order_order_items\" \"order_order_items\" WHERE \"order_order_items\".\"order_id\" = \"order\".\"id\") DESC"),
+        assertTrue(impl.contains("ORDER BY (SELECT MAX(\"order_items\".\"quantity\") FROM \"order_items\" \"order_items\" WHERE \"order_items\".\"order_id\" = \"order\".\"id\") DESC"),
                 "the non-paged ORDER BY must carry the aggregate term verbatim:" + System.lineSeparator() + impl);
         assertTrue(!impl.contains("LEFT JOIN"),
                 "no to-many join may be spliced by the non-paged emission:" + System.lineSeparator() + impl);

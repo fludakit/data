@@ -518,19 +518,19 @@ class QueryByMethodNameEmissionTest {
         compile(sourceDir, classesDir, generatedDir,
                 "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "Orders.java");
 
-        // The pin uses the framework's child-table naming: Names.childTable("order", "orderItems")
-        // = "order_order_items" (a bare "order_items" would drop the parent prefix). The to-many head
+        // The pin uses the framework's child-table naming: Names.childTable("OrderItem")
+        // = "order_items" (derived from the element type, not the parent). The to-many head
         // renders an EXISTS semi-join, not a LEFT JOIN. sqlFlat folds whitespace so a
         // JavaPoet soft wrap cannot break the byte pin.
         String impl = sqlFlat(generatedDir.resolve("relpath/Orders_.java"));
-        assertTrue(impl.contains("FROM \"orders\" WHERE EXISTS (SELECT 1 FROM \"orders_order_items\" "
-                        + "\"orders_order_items\" WHERE \"orders_order_items\".\"order_id\" = \"orders\".\"id\" "
-                        + "AND \"orders_order_items\".\"quantity\" > :quantity)"),
+        assertTrue(impl.contains("FROM \"orders\" WHERE EXISTS (SELECT 1 FROM \"order_items\" "
+                        + "\"order_items\" WHERE \"order_items\".\"order_id\" = \"orders\".\"id\" "
+                        + "AND \"order_items\".\"quantity\" > :orderItems_quantity)"),
                 "element-collection predicate must render EXISTS with the child table as its own alias:"
                         + System.lineSeparator() + impl);
         assertTrue(!impl.contains("LEFT JOIN"),
                 "a to-many predicate must NOT splice a LEFT JOIN:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains(".param(\"quantity\", quantity)"),
+        assertTrue(impl.contains(".param(\"orderItems_quantity\", quantity)"),
                 "the bound parameter must stay the JAVA PARAMETER NAME:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("FIND_BY_ORDER_ITEMS_QUANTITY_GREATER_THAN_SQL"),
                 "constant name should follow the method name:" + System.lineSeparator() + impl);
@@ -681,7 +681,7 @@ class QueryByMethodNameEmissionTest {
                 "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "CountOrders.java");
 
         String impl = sqlFlat(generatedDir.resolve("relpath/CountOrders_.java"));
-        assertTrue(impl.contains("SELECT COUNT(*) FROM \"orders\" WHERE EXISTS (SELECT 1 FROM \"orders_order_items\" \"orders_order_items\" WHERE \"orders_order_items\".\"order_id\" = \"orders\".\"id\" AND \"orders_order_items\".\"quantity\" > :quantity)"),
+        assertTrue(impl.contains("SELECT COUNT(*) FROM \"orders\" WHERE EXISTS (SELECT 1 FROM \"order_items\" \"order_items\" WHERE \"order_items\".\"order_id\" = \"orders\".\"id\" AND \"order_items\".\"quantity\" > :orderItems_quantity)"),
                 "countBy through a to-many must render EXISTS on the unjoined COUNT(*) total:"
                         + System.lineSeparator() + impl);
         assertTrue(!impl.contains("LEFT JOIN"),
@@ -776,7 +776,7 @@ class QueryByMethodNameEmissionTest {
                 "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "Delete2Orders.java");
         String impl = sqlFlat(generatedDir.resolve("relpath/Delete2Orders_.java"));
 
-        assertTrue(impl.contains("DELETE FROM \"orders\" WHERE EXISTS (SELECT 1 FROM \"orders_order_items\" \"orders_order_items\" WHERE \"orders_order_items\".\"order_id\" = \"orders\".\"id\" AND \"orders_order_items\".\"quantity\" > :quantity)"),
+        assertTrue(impl.contains("DELETE FROM \"orders\" WHERE EXISTS (SELECT 1 FROM \"order_items\" \"order_items\" WHERE \"order_items\".\"order_id\" = \"orders\".\"id\" AND \"order_items\".\"quantity\" > :orderItems_quantity)"),
                 "deleteBy through a to-many must render the to-many EXISTS conjunct:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("DELETE FROM \"orders\" WHERE \"status\" = :status AND EXISTS (SELECT 1 FROM \"customers\" \"customers\" WHERE \"customers\".\"id\" = \"orders\".\"customer_id\" AND \"customers\".\"name\" = :name)"),
                 "mixed delete: bare local conjunct first, reversed-edge EXISTS conjunct second:" + System.lineSeparator() + impl);
@@ -913,7 +913,7 @@ class QueryByMethodNameEmissionTest {
         compile(sourceDir, classesDir, generatedDir, "Contact.java", "Profile.java", "Profiles.java");
 
         String impl = sqlFlat(generatedDir.resolve("exv/Profiles_.java"));
-        assertTrue(impl.contains("EXISTS (SELECT 1 FROM \"profiles_contacts\" \"profiles_contacts\" WHERE \"profiles_contacts\".\"profile_id\" = \"profiles\".\"id\" AND \"profiles_contacts\".\"value\" = :contacts_value)"),
+        assertTrue(impl.contains("EXISTS (SELECT 1 FROM \"contacts\" \"contacts\" WHERE \"contacts\".\"profile_id\" = \"profiles\".\"id\" AND \"contacts\".\"value\" = :contacts_value)"),
                 "element-list predicate must render EXISTS over the child table:"
                         + System.lineSeparator() + impl);
         assertTrue(!impl.contains("LEFT JOIN"),
@@ -977,7 +977,7 @@ class QueryByMethodNameEmissionTest {
                 "Customer.java", "Country.java", "Region.java", "OrderItem.java", "Order.java", "MixedOrd.java");
 
         String impl = sqlFlat(generatedDir.resolve("relpath/MixedOrd_.java"));
-        assertTrue(impl.contains("FROM \"orders\" LEFT JOIN \"customers\" AS \"customers\" ON \"orders\".\"customer_id\" = \"customers\".\"id\" WHERE \"customers\".\"name\" = :name AND EXISTS (SELECT 1 FROM \"orders_order_items\" \"orders_order_items\" WHERE \"orders_order_items\".\"order_id\" = \"orders\".\"id\" AND \"orders_order_items\".\"quantity\" > :quantity)"),
+        assertTrue(impl.contains("FROM \"orders\" LEFT JOIN \"customers\" AS \"customers\" ON \"orders\".\"customer_id\" = \"customers\".\"id\" WHERE \"customers\".\"name\" = :name AND EXISTS (SELECT 1 FROM \"order_items\" \"order_items\" WHERE \"order_items\".\"order_id\" = \"orders\".\"id\" AND \"order_items\".\"quantity\" > :orderItems_quantity)"),
                 "RB3: the to-one LEFT JOIN and the to-many EXISTS must BOTH appear, conjuncted with AND:"
                         + System.lineSeparator() + impl);
         assertTrue(impl.contains("FIND_BY_CUSTOMER_NAME_AND_ORDER_ITEMS_QUANTITY_GREATER_THAN_SQL"),

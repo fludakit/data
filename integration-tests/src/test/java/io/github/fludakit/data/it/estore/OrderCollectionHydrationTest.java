@@ -74,7 +74,7 @@ class OrderCollectionHydrationTest {
 
         // delete cascades children: the header is gone and the child table no longer references it.
         orders.delete(found);
-        Long remaining = jdbcClient.sql("SELECT COUNT(*) FROM orders_order_items WHERE order_id = :id")
+        Long remaining = jdbcClient.sql("SELECT COUNT(*) FROM order_items WHERE order_id = :id")
                 .param("id", saved.getId()).singleValue(Long.class);
         assertThat(remaining).isZero();
     }

@@ -543,9 +543,13 @@ final class RepositoryVisitor {
             // Try to split the camelCase path
             String resolvedPath = trySplitCamelCasePath(path, entityMapping);
             if (resolvedPath != null && !resolvedPath.equals(path)) {
-                // When path is resolved, update param to match the resolved path
-                String resolvedParam = io.github.fludakit.data.sql.QueryCompiler.paramName(resolvedPath);
-                resolved.add(new Predicate(resolvedPath, p.operator(), resolvedParam, p.connector(), p.ignoreCase()));
+                // When a camelCase path is resolved to a dotted path, the param name should be the
+                // leaf property name (e.g., "orderItemsQuantity" → "orderItems.quantity" → param "quantity").
+                // This matches the Java parameter name convention.
+                String leafPropName = resolvedPath.contains(".")
+                        ? resolvedPath.substring(resolvedPath.lastIndexOf('.') + 1)
+                        : resolvedPath;
+                resolved.add(new Predicate(resolvedPath, p.operator(), leafPropName, p.connector(), p.ignoreCase()));
             } else {
                 resolved.add(p);
             }

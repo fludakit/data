@@ -3,6 +3,7 @@ package io.github.fludakit.data.processor.emitter;
 import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.CodeBlock;
 import com.squareup.javapoet.MethodSpec;
+import io.github.fludakit.data.metadata.LoadStrategy;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.RepositoryContext;
@@ -1237,9 +1238,10 @@ public final class FindEmitter {
      */
     private boolean hasToManyCollections(io.github.fludakit.data.metadata.TypeDefinition entity) {
         for (TypeDefinition.Prop prop : entity.properties()) {
-            if (prop instanceof TypeDefinition.Prop.EntityCollection
-                    || prop instanceof TypeDefinition.Prop.ElementCollection) {
-                return true;
+            if (prop instanceof TypeDefinition.Prop.EntityCollection ec) {
+                if (ec.loadStrategy() == LoadStrategy.EAGER) return true;
+            } else if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
+                if (ec.loadStrategy() == LoadStrategy.EAGER) return true;
             }
         }
         return false;

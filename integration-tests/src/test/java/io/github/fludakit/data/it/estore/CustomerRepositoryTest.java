@@ -131,9 +131,9 @@ class CustomerRepositoryTest {
 
         JdbcClient client = customers.getJdbcClient();
         assertThat(client).isNotNull();
-        assertThat(client.sql("SELECT COUNT(*) FROM \"customer\"").singleValue(Long.class)).isEqualTo(2L);
+        assertThat(client.sql("SELECT COUNT(*) FROM \"customers\"").singleValue(Long.class)).isEqualTo(2L);
         // A statement the repository would never generate itself — which is the point of the hatch.
-        assertThat(client.sql("SELECT name FROM \"customer\" ORDER BY name").query(String.class).list())
+        assertThat(client.sql("SELECT name FROM \"customers\" ORDER BY name").query(String.class).list())
                 .containsExactly("Ana", "Bo");
     }
 

@@ -33,6 +33,28 @@ public final class Names {
     public static String columnBase(String property) { return toSnakeCase(property); }
     public static String fkColumn(String property) { return toSnakeCase(property) + "_id"; }
     public static String tableName(Class<?> type) { return tableName(type.getSimpleName()); }
-    public static String tableName(String simpleName) { return toSnakeCase(simpleName); }
+    public static String tableName(String simpleName) { return pluralize(toSnakeCase(simpleName)); }
+
+    public static String pluralize(String singular) {
+        if (singular == null || singular.isEmpty()) return singular;
+        String lower = singular.toLowerCase();
+
+        // Sibilant endings: -s, -x, -z, -ch, -sh → add "es"
+        if (lower.endsWith("s") || lower.endsWith("x") || lower.endsWith("z")
+                || lower.endsWith("ch") || lower.endsWith("sh")) {
+            return lower + "es";
+        }
+
+        // Consonant + y → ies
+        if (lower.endsWith("y") && lower.length() > 1) {
+            char before = lower.charAt(lower.length() - 2);
+            if ("aeiou".indexOf(before) < 0) {
+                return lower.substring(0, lower.length() - 1) + "ies";
+            }
+        }
+
+        // Default: add "s"
+        return lower + "s";
+    }
     public static String childTable(String parentTable, String field) { return parentTable + "_" + toSnakeCase(field); }
 }

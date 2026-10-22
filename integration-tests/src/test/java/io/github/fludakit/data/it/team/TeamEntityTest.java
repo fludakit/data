@@ -151,7 +151,7 @@ class TeamEntityTest {
         PageRequest beyond = PageRequest.ofPage(1).size(10)
                 .afterCursor(PageRequest.Cursor.forKey("Zzz", 0L));
         CursoredPage<Team> page = teams.orderedByPlayerName(beyond);
-        // Cursor beyond the whole keyset: the qualified ("player"."name" > :cursor0) conjunct ran
+        // Cursor beyond the whole keyset: the qualified ("players"."name" > :cursor0) conjunct ran
         // without the ambiguity error and matched nothing.
         assertThat(page.content()).isEmpty();
     }

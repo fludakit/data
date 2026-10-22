@@ -12,7 +12,7 @@ public interface TaskRepository extends CrudRepository<Task, Long> {
 
     default Task[] findByStatus(Status status){
         return getJdbcClient()
-                .sql("SELECT \"id\", \"title\", \"status\" FROM \"task\" WHERE \"status\" = :status")
+                .sql("SELECT \"id\", \"title\", \"status\" FROM \"tasks\" WHERE \"status\" = :status")
                 .param("status", status == null ? null : status.name())
                 .query(new TaskRowMapper())
                 .list()

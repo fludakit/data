@@ -40,7 +40,7 @@ class OrderDeleteByRelationTest {
         Customer bob = customers.save(customer("Bob", "bob@example.com"));
         Order anaOrder = orders.save(order(ana));
         Order bobOrder = orders.save(order(bob));
-        // NULL-fk root: the semi-join edge "customer"."id" = "order"."customer_id" can never be true,
+        // NULL-fk root: the semi-join edge "customers"."id" = "orders"."customer_id" can never be true,
         // exactly the LEFT JOIN drop semantics of the matching read.
         Order nullFkOrder = orders.save(order(null));
 

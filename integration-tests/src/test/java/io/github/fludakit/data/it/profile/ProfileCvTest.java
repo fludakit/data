@@ -20,7 +20,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * aggregate mixing (a) composition entity collections ({@code workHistory}, {@code education} —
  * targets are managed {@code @Entity} classes with their own repositories and a bare inverse
  * {@code Profile profile} field), (b) an element collection of {@code @ValueObject} contacts
- * (child table {@code profile_contacts}), and (c) navigable static-metamodel paths for sorting —
+ * (child table {@code profiles_contacts}), and (c) navigable static-metamodel paths for sorting —
  * both through an embedded VO ({@code _Profile.address.city}) and through an entity collection
  * ({@code _Profile.workHistory.company}).
  *
@@ -73,7 +73,7 @@ class ProfileCvTest {
         assertThat(back.getEducation().get(0).getInstitution()).isEqualTo("University of London");
         assertThat(back.getEducation().get(0).getYear()).isEqualTo(1840);
 
-        // Element collection of value objects round-trips through profile_contacts.
+        // Element collection of value objects round-trips through profiles_contacts.
         assertThat(back.getContacts()).hasSize(2);
         assertThat(back.getContacts()).extracting(ContactPoint::getKind)
                 .containsExactlyInAnyOrder("EMAIL", "PHONE");

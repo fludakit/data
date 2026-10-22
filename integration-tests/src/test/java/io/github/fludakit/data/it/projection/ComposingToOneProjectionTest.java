@@ -21,7 +21,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>{@link Book#author} is a bare entity field on an {@code @AggregateRoot} whose definition is managed
  * (it has its own {@code @Repository}), so every CRUD read JOIN-projects it: the generated constant
- * carries {@code LEFT JOIN "author" AS "author"} plus {@code "author"."name" AS "author_join_name"},
+ * carries {@code LEFT JOIN "authors" AS "authors"} plus {@code "authors"."name" AS "authors_join_name"},
  * and a generated {@code mapRow_full_crud} materialises the definition from those labels. The definition
  * therefore comes back FULL — not the id-only partial an {@code @Association} would produce.</p>
  *
@@ -100,7 +100,7 @@ class ComposingToOneProjectionTest {
 
     @Test
     void pagedReadSortedThroughTheProjectedJoinDoesNotDuplicateIt() {
-        // The base constant already carries LEFT JOIN "author". A runtime sort on author.name resolves
+        // The base constant already carries LEFT JOIN "authors". A runtime sort on author.name resolves
         // to an edge onto the SAME table; splicing it again would repeat the alias and fail at parse
         // time, so the emission must suppress an edge the base already joins.
         Author ursula = authors.save(author("Ursula"));

@@ -122,10 +122,10 @@ class WriteEmissionTest {
                 import java.util.List;
                 @Repository
                 public interface Shelf extends CrudRepository<Book, Long> {
-                    @Query("SELECT id, title FROM book WHERE title = :title")
+                    @Query("SELECT id, title FROM books WHERE title = :title")
                     List<Book> search(String title);
 
-                    @Query("SELECT id, title FROM book WHERE id = :id")
+                    @Query("SELECT id, title FROM books WHERE id = :id")
                     List<Book> search(Long id);
                 }
                 """);
@@ -133,9 +133,9 @@ class WriteEmissionTest {
         compile(sourceDir, classesDir, generatedDir, "Book.java", "Shelf.java");
 
         String impl = sqlFlat(generatedDir.resolve("collidingconstants/Shelf_.java"));
-        assertTrue(impl.contains("SQL_SEARCH = \"SELECT id, title FROM book WHERE title = :title\""),
+        assertTrue(impl.contains("SQL_SEARCH = \"SELECT id, title FROM books WHERE title = :title\""),
                 "the first statement must keep the bare base name:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("SQL_SEARCH_2 = \"SELECT id, title FROM book WHERE id = :id\""),
+        assertTrue(impl.contains("SQL_SEARCH_2 = \"SELECT id, title FROM books WHERE id = :id\""),
                 "a second, different statement must be renamed rather than overwrite the first:"
                         + System.lineSeparator() + impl);
         // Both must still be USED, each by its own method: a rename that left one caller pointing at

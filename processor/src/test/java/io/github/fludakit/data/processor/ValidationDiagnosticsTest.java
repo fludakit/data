@@ -235,7 +235,7 @@ class ValidationDiagnosticsTest {
                 import jakarta.data.repository.Repository;
                 @Repository
                 public interface CustomerRepository {
-                    @Find @Query("SELECT id FROM customer")
+                    @Find @Query("SELECT id FROM customers")
                     Customer customer();
                 }
                 """);

@@ -6,6 +6,7 @@ import io.github.fludakit.data.annotation.Association;
 import io.github.fludakit.data.annotation.Entity;
 import io.github.fludakit.data.annotation.Identity;
 import io.github.fludakit.data.annotation.ValueObject;
+import io.github.fludakit.data.metadata.LoadStrategy;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.support.Diagnostics;
 
@@ -237,7 +238,7 @@ final class TypeMappingVisitor {
                 return;
             }
             if (isEntityOrAggregate(elementTE)) {
-                buildEntityCollection(fieldName, elementTE, ownerSingular, ownerFqn, entityCollections);
+                buildEntityCollection(fieldName, elementTE, ownerSingular, ownerFqn, isAggregate, entityCollections);
                 return;
             }
             return;
@@ -257,7 +258,8 @@ final class TypeMappingVisitor {
                 TypeDefinition target = get(targetFqn);
                 if (target instanceof TypeDefinition.Entity entityTarget) {
                     associations.add(new TypeDefinition.Prop.Association(fieldName,
-                            targetFqn, entityTarget, Names.fkColumn(fieldName), false, false, null));
+                            targetFqn, entityTarget, Names.fkColumn(fieldName), false, false, null,
+                            associationLoadStrategy(isAggregate, true, false)));
                 }
                 return;
             }
@@ -267,7 +269,8 @@ final class TypeMappingVisitor {
                 // Aggregate-to-aggregate/entity reference: treat as COMPOSITION by default
                 if (target instanceof TypeDefinition.Entity entityTarget) {
                     associations.add(new TypeDefinition.Prop.Association(fieldName,
-                            targetFqn, entityTarget, Names.fkColumn(fieldName), false, true, null));
+                            targetFqn, entityTarget, Names.fkColumn(fieldName), false, true, null,
+                            associationLoadStrategy(isAggregate, false, true)));
                 } else if (target instanceof TypeDefinition.Aggregate aggregateTarget) {
                     // Create a synthetic Entity view of the Aggregate for the FK reference
                     TypeDefinition.Entity entityView = new TypeDefinition.Entity(
@@ -282,7 +285,8 @@ final class TypeMappingVisitor {
                         List.of()
                     );
                     associations.add(new TypeDefinition.Prop.Association(fieldName,
-                            targetFqn, entityView, Names.fkColumn(fieldName), false, true, null));
+                            targetFqn, entityView, Names.fkColumn(fieldName), false, true, null,
+                            associationLoadStrategy(isAggregate, false, true)));
                 }
                 return;
             }
@@ -292,7 +296,8 @@ final class TypeMappingVisitor {
                 TypeDefinition target = get(targetFqn);
                 if (target instanceof TypeDefinition.Entity entityTarget) {
                     associations.add(new TypeDefinition.Prop.Association(fieldName,
-                            targetFqn, entityTarget, Names.fkColumn(fieldName), false, false, null));
+                            targetFqn, entityTarget, Names.fkColumn(fieldName), false, false, null,
+                            associationLoadStrategy(isAggregate, false, false)));
                 } else if (target instanceof TypeDefinition.Aggregate aggregateTarget) {
                     // Detect back-reference: aggregate has EntityCollection pointing to owner
                     boolean isBackRef = aggregateTarget.entityCollections().stream()
@@ -312,11 +317,13 @@ final class TypeMappingVisitor {
                         List.of()  // No element collections in the FK reference
                     );
                     associations.add(new TypeDefinition.Prop.Association(fieldName,
-                            targetFqn, entityView, Names.fkColumn(fieldName), isBackRef, false, null));
+                            targetFqn, entityView, Names.fkColumn(fieldName), isBackRef, false, null,
+                            associationLoadStrategy(isAggregate, false, false)));
                 } else if (target == null) {
                     // Target not available yet - add placeholder with null target for resolution pass
                     associations.add(new TypeDefinition.Prop.Association(fieldName,
-                            targetFqn, null, Names.fkColumn(fieldName), false, false, null));
+                            targetFqn, null, Names.fkColumn(fieldName), false, false, null,
+                            associationLoadStrategy(isAggregate, false, false)));
                     // Track for resolution pass
                     pendingTargets
                             .computeIfAbsent(ownerFqn, k -> new HashMap<>())
@@ -360,7 +367,8 @@ final class TypeMappingVisitor {
                         TypeDefinition target = get(targetFqn);
                         if (target instanceof TypeDefinition.Entity entityTarget) {
                             entityCollections.add(new TypeDefinition.Prop.EntityCollection(fieldName,
-                                    targetFqn, entityTarget, Names.fkColumn(fieldName), null));
+                                    targetFqn, entityTarget, Names.fkColumn(fieldName), null,
+                                    entityCollectionLoadStrategy(false)));
                         }
                         return;
                     }
@@ -379,7 +387,8 @@ final class TypeMappingVisitor {
                     }
                     
                     elementCollections.add(new TypeDefinition.Prop.ElementCollection(fieldName,
-                            elementFqn, (TypeDefinition.ValueObject) targetType, childTable, parentFkCol));
+                            elementFqn, (TypeDefinition.ValueObject) targetType, childTable, parentFkCol,
+                            elementCollectionLoadStrategy()));
                     return;
                 }
             }
@@ -391,7 +400,8 @@ final class TypeMappingVisitor {
             TypeDefinition target = get(targetFqn);
             if (target instanceof TypeDefinition.Entity entityTarget) {
                 associations.add(new TypeDefinition.Prop.Association(fieldName,
-                        targetFqn, entityTarget, Names.fkColumn(fieldName), false, false, null));
+                        targetFqn, entityTarget, Names.fkColumn(fieldName), false, false, null,
+                        associationLoadStrategy(false, false, false)));
             } else if (target instanceof TypeDefinition.Aggregate aggregateTarget) {
                 // Create synthetic Entity view for association
                 TypeDefinition.Entity entityView = new TypeDefinition.Entity(
@@ -406,7 +416,8 @@ final class TypeMappingVisitor {
                     List.of()
                 );
                 associations.add(new TypeDefinition.Prop.Association(fieldName,
-                        targetFqn, entityView, Names.fkColumn(fieldName), false, false, null));
+                        targetFqn, entityView, Names.fkColumn(fieldName), false, false, null,
+                        associationLoadStrategy(false, false, false)));
             }
             return;
         }
@@ -460,7 +471,8 @@ final class TypeMappingVisitor {
         }
 
         elementCollections.add(new TypeDefinition.Prop.ElementCollection(fieldName,
-                voFqn, (TypeDefinition.ValueObject) targetType, childTable, parentFkCol));
+                voFqn, (TypeDefinition.ValueObject) targetType, childTable, parentFkCol,
+                elementCollectionLoadStrategy()));
     }
 
     private void scanVOProps(TypeElement voType, List<TypeDefinition.Prop.Scalar> scalars,
@@ -485,6 +497,7 @@ final class TypeMappingVisitor {
 
     private void buildEntityCollection(String fieldName, TypeElement elementTE,
                                        String ownerSingular, String ownerFqn,
+                                       boolean isAggregate,
                                        List<TypeDefinition.Prop.EntityCollection> entityCollections) {
         String targetFqn = elementTE.getQualifiedName().toString();
         TypeDefinition target = get(targetFqn);
@@ -497,10 +510,12 @@ final class TypeMappingVisitor {
                     .put(fieldName, targetFqn);
             // Still add a placeholder with null target for now
             entityCollections.add(new TypeDefinition.Prop.EntityCollection(fieldName,
-                    targetFqn, null, inverseFkColumn, null));
+                    targetFqn, null, inverseFkColumn, null,
+                    entityCollectionLoadStrategy(isAggregate)));
         } else if (target instanceof TypeDefinition.Entity entityTarget) {
             entityCollections.add(new TypeDefinition.Prop.EntityCollection(fieldName,
-                    targetFqn, entityTarget, inverseFkColumn, null));
+                    targetFqn, entityTarget, inverseFkColumn, null,
+                    entityCollectionLoadStrategy(isAggregate)));
         }
     }
 
@@ -591,7 +606,8 @@ final class TypeMappingVisitor {
 
         if (originalTarget instanceof TypeDefinition.Entity entityTarget) {
             return new TypeDefinition.Prop.Association(assoc.name(), assoc.javaType(),
-                    entityTarget, assoc.fkColumn(), isBackRef, assoc.composition(), assoc.cascade());
+                    entityTarget, assoc.fkColumn(), isBackRef, assoc.composition(), assoc.cascade(),
+                    assoc.loadStrategy());
         } else if (originalTarget instanceof TypeDefinition.Aggregate aggregateTarget) {
             // Create synthetic Entity view if needed
             TypeDefinition.Entity entityView;
@@ -611,7 +627,8 @@ final class TypeMappingVisitor {
                 );
             }
             return new TypeDefinition.Prop.Association(assoc.name(), assoc.javaType(),
-                    entityView, assoc.fkColumn(), isBackRef, assoc.composition(), assoc.cascade());
+                    entityView, assoc.fkColumn(), isBackRef, assoc.composition(), assoc.cascade(),
+                    assoc.loadStrategy());
         }
 
         return assoc;
@@ -634,7 +651,7 @@ final class TypeMappingVisitor {
 
         if (target instanceof TypeDefinition.Entity entityTarget) {
             return new TypeDefinition.Prop.EntityCollection(ec.name(), ec.javaType(),
-                    entityTarget, ec.fkColumn(), ec.mappedBy());
+                    entityTarget, ec.fkColumn(), ec.mappedBy(), ec.loadStrategy());
         }
 
         return ec;
@@ -653,6 +670,21 @@ final class TypeMappingVisitor {
                 out.add(te);
             }
         }
+    }
+
+    // ── Load-strategy derivation ─────────────────────────────────────────
+
+    private LoadStrategy associationLoadStrategy(boolean isAggregate, boolean hasAssociationAnnotation, boolean isComposition) {
+        if (!isAggregate) return LoadStrategy.FK_ONLY;
+        return isComposition ? LoadStrategy.EAGER : LoadStrategy.FK_ONLY;
+    }
+
+    private LoadStrategy entityCollectionLoadStrategy(boolean isAggregate) {
+        return isAggregate ? LoadStrategy.EAGER : LoadStrategy.NOT_LOADED;
+    }
+
+    private LoadStrategy elementCollectionLoadStrategy() {
+        return LoadStrategy.EAGER;
     }
 
     // ── Type utilities ───────────────────────────────────────────────────

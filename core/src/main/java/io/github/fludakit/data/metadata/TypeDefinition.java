@@ -434,7 +434,8 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
          * A to-one association (ManyToOne, OneToOne, or Composition when composition=true).
          */
         record Association(String name, String javaType, Entity definition, String fkColumn,
-                           boolean backReference, boolean composition, Cascade cascade) implements Prop {
+                           boolean backReference, boolean composition, Cascade cascade,
+                           LoadStrategy loadStrategy) implements Prop {
 
             public enum Cascade {
                 ALL, PERSIST, MERGE, REMOVE
@@ -446,7 +447,8 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
         /**
          * A to-many entity collection stored in the child table (OneToMany or ManyToMany).
          */
-        record EntityCollection(String name, String javaType, Entity definition, String fkColumn, String mappedBy) implements Prop {
+        record EntityCollection(String name, String javaType, Entity definition, String fkColumn, String mappedBy,
+                                LoadStrategy loadStrategy) implements Prop {
         }
 
         // ── ElementCollection property ───────────────────────────────────
@@ -454,7 +456,8 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
         /**
          * A value object element collection stored in a child table.
          */
-        record ElementCollection(String name, String javaType, ValueObject definition, String childTable, String fkColumn) implements Prop {
+        record ElementCollection(String name, String javaType, ValueObject definition, String childTable, String fkColumn,
+                                 LoadStrategy loadStrategy) implements Prop {
         }
 
         // ── Id property ──────────────────────────────────────────────────

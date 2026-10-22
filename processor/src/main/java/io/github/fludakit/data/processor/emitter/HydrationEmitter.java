@@ -5,6 +5,7 @@ import com.squareup.javapoet.CodeBlock;
 import com.squareup.javapoet.MethodSpec;
 import com.squareup.javapoet.ParameterizedTypeName;
 import io.github.fludakit.data.processor.support.ExceptionTranslation;
+import io.github.fludakit.data.metadata.LoadStrategy;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.context.RepositoryContext;
 import io.github.fludakit.data.sql.SqlDialect;
@@ -44,14 +45,12 @@ public final class HydrationEmitter {
      */
     public boolean hasCollectionsToHydrate(TypeDefinition entity) {
         for (TypeDefinition.Prop prop : entity.properties()) {
-            if (prop instanceof TypeDefinition.Prop.EntityCollection) {
-                return true;
-            }
-            if (prop instanceof TypeDefinition.Prop.ElementCollection) {
-                return true;
-            }
-            if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.composition()) {
-                return true;
+            if (prop instanceof TypeDefinition.Prop.EntityCollection ec) {
+                if (ec.loadStrategy() == LoadStrategy.EAGER) return true;
+            } else if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
+                if (ec.loadStrategy() == LoadStrategy.EAGER) return true;
+            } else if (prop instanceof TypeDefinition.Prop.Association assoc) {
+                if (assoc.composition() && assoc.loadStrategy() == LoadStrategy.EAGER) return true;
             }
         }
         return false;
@@ -78,11 +77,17 @@ public final class HydrationEmitter {
 
         for (TypeDefinition.Prop prop : entity.properties()) {
             if (prop instanceof TypeDefinition.Prop.EntityCollection ec) {
-                body.add("load$L(entity);\n", capitalize(ec.name()));
+                if (ec.loadStrategy() == LoadStrategy.EAGER) {
+                    body.add("load$L(entity);\n", capitalize(ec.name()));
+                }
             } else if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
-                body.add("load$L(entity);\n", capitalize(ec.name()));
-            } else if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.composition()) {
-                body.add("load$L(entity);\n", capitalize(assoc.name()));
+                if (ec.loadStrategy() == LoadStrategy.EAGER) {
+                    body.add("load$L(entity);\n", capitalize(ec.name()));
+                }
+            } else if (prop instanceof TypeDefinition.Prop.Association assoc) {
+                if (assoc.composition() && assoc.loadStrategy() == LoadStrategy.EAGER) {
+                    body.add("load$L(entity);\n", capitalize(assoc.name()));
+                }
             }
         }
 
@@ -126,19 +131,25 @@ public final class HydrationEmitter {
 
         for (TypeDefinition.Prop prop : entity.properties()) {
             if (prop instanceof TypeDefinition.Prop.EntityCollection ec) {
-                MethodSpec loader = emitEntityCollectionLoader(ctx, ec);
-                if (loader != null) {
-                    methods.add(loader);
+                if (ec.loadStrategy() == LoadStrategy.EAGER) {
+                    MethodSpec loader = emitEntityCollectionLoader(ctx, ec);
+                    if (loader != null) {
+                        methods.add(loader);
+                    }
                 }
             } else if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
-                MethodSpec loader = emitElementCollectionLoader(ctx, ec);
-                if (loader != null) {
-                    methods.add(loader);
+                if (ec.loadStrategy() == LoadStrategy.EAGER) {
+                    MethodSpec loader = emitElementCollectionLoader(ctx, ec);
+                    if (loader != null) {
+                        methods.add(loader);
+                    }
                 }
-            } else if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.composition()) {
-                MethodSpec loader = emitCompositionAssociationLoader(ctx, assoc);
-                if (loader != null) {
-                    methods.add(loader);
+            } else if (prop instanceof TypeDefinition.Prop.Association assoc) {
+                if (assoc.composition() && assoc.loadStrategy() == LoadStrategy.EAGER) {
+                    MethodSpec loader = emitCompositionAssociationLoader(ctx, assoc);
+                    if (loader != null) {
+                        methods.add(loader);
+                    }
                 }
             }
         }

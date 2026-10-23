@@ -211,6 +211,17 @@ final class TypeMappingVisitor {
         return Collections.unmodifiableSet(elementCollectionValueObjects);
     }
 
+    /** Returns the set of ALL value object FQNs (including embedded VOs, not just element collections). */
+    Set<String> allValueObjects() {
+        Set<String> vos = new LinkedHashSet<>();
+        for (Map.Entry<String, TypeDefinition> entry : cache.entrySet()) {
+            if (entry.getValue() instanceof TypeDefinition.ValueObject) {
+                vos.add(entry.getKey());
+            }
+        }
+        return Collections.unmodifiableSet(vos);
+    }
+
     // ── Field classification — entities / aggregate roots ────────────────
 
     private void classifyEntityField(VariableElement field, String fieldName,

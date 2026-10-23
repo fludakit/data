@@ -145,18 +145,8 @@ final class RepositoryVisitor {
         // Note: ElementCollection stores element type FQN, not a TypeDefinition
         // Row mappers for element types are generated when scanning the VO itself
 
-        // 4b. Generate static metamodel (_Entity interface + navigable member classes)
-        MetamodelEmitter metamodelEmitter = new MetamodelEmitter(filer, diagnostics);
-
-        // Pre-claim all entity metamodel FQNs so collision detection works across entities
-        for (String managedEntityFqn : typeMappingVisitor.managedEntities()) {
-            TypeDefinition managedMapping = typeMappingVisitor.get(managedEntityFqn);
-            if (managedMapping != null) {
-                metamodelEmitter.preclaimEntityMetamodel(managedMapping);
-            }
-        }
-
-        metamodelEmitter.emit(entityMapping);
+        // 4b. Generate static metamodel (_Entity interface)
+        new MetamodelEmitter(filer, diagnostics).emit(entityMapping);
 
         // 4c. Generate TypeModel (runtime TypeDefinition implementation)
         new TypeModelEmitter(filer).emit(entityMapping);

@@ -367,14 +367,15 @@ public final class RowMapperEmitter {
         String joinIdColumn = joinPrefix + (targetIdProp != null ? targetIdProp.columnName() : "id");
 
         // Check if join-projected column exists using ResultSetMetaData
+        String hasJoinVar = "hasJoinProjection_" + assoc.name();
         method.addStatement("$T $L = null", boxType(idTypeFqn), joinedIdVar);
-        method.addStatement("boolean hasJoinProjection = false");
+        method.addStatement("boolean $L = false", hasJoinVar);
         method.beginControlFlow("try");
         method.addStatement("$T metaData = $L.getMetaData()", ClassName.get("java.sql", "ResultSetMetaData"), rsVar);
         method.addStatement("int colCount = metaData.getColumnCount()");
         method.beginControlFlow("for (int i = 1; i <= colCount; i++)");
         method.beginControlFlow("if ($S.equals(metaData.getColumnLabel(i)))", joinIdColumn);
-        method.addStatement("hasJoinProjection = true");
+        method.addStatement("$L = true", hasJoinVar);
         method.addStatement("break");
         method.endControlFlow();
         method.endControlFlow();
@@ -382,7 +383,7 @@ public final class RowMapperEmitter {
         method.endControlFlow();
 
         // If join projection exists, read all joined columns to create full object
-        method.beginControlFlow("if (hasJoinProjection)");
+        method.beginControlFlow("if ($L)", hasJoinVar);
         CodeBlock joinedIdRead = buildReadExpression(joinIdColumn, idTypeFqn, rsVar);
         method.addStatement("$L = $L", joinedIdVar, joinedIdRead);
         method.beginControlFlow("if ($L != null)", joinedIdVar);
@@ -405,14 +406,15 @@ public final class RowMapperEmitter {
         String fkVar = assoc.name() + "_fk";
 
         // Check if FK column exists using ResultSetMetaData before reading
+        String hasFkVar = "hasFkColumn_" + assoc.name();
         method.addStatement("$T $L = null", boxType(idTypeFqn), fkVar);
-        method.addStatement("boolean hasFkColumn = false");
+        method.addStatement("boolean $L = false", hasFkVar);
         method.beginControlFlow("try");
         method.addStatement("$T metaData = $L.getMetaData()", ClassName.get("java.sql", "ResultSetMetaData"), rsVar);
         method.addStatement("int colCount = metaData.getColumnCount()");
         method.beginControlFlow("for (int i = 1; i <= colCount; i++)");
         method.beginControlFlow("if ($S.equals(metaData.getColumnLabel(i)))", fkColumn);
-        method.addStatement("hasFkColumn = true");
+        method.addStatement("$L = true", hasFkVar);
         method.addStatement("break");
         method.endControlFlow();
         method.endControlFlow();
@@ -420,7 +422,7 @@ public final class RowMapperEmitter {
         method.endControlFlow();
 
         // Only read FK if column exists
-        method.beginControlFlow("if (hasFkColumn)");
+        method.beginControlFlow("if ($L)", hasFkVar);
         CodeBlock fkRead = buildReadExpression(fkColumn, idTypeFqn, rsVar);
         method.addStatement("$L = $L", fkVar, fkRead);
         method.beginControlFlow("if ($L != null)", fkVar);

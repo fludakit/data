@@ -33,14 +33,18 @@ class AggregateChildSyncTest {
 
     @Inject ProfileRepository profiles;
     @Inject WorkExperienceRepository workExperiences;
+    @Inject CompanyRepository companies;
 
     @Test
     void childIdentitiesSurviveASecondSave() {
         // The regression: save() routes a root with an id through the upsert path, which used to
         // delete the whole child set by fk and re-insert it, minting fresh ids every time.
+        Company analyticalEngines = companies.save(new Company("Analytical Engines", "industry"));
+        Company differenceEngines = companies.save(new Company("Difference Engines", "industry"));
+
         Profile ada = profile("Ada");
-        ada.getWorkHistory().add(new WorkExperience("Analytical Engines", 1842, 1843));
-        ada.getWorkHistory().add(new WorkExperience("Difference Engines", 1844, 1845));
+        ada.getWorkHistory().add(new WorkExperience(analyticalEngines, 1842, 1843));
+        ada.getWorkHistory().add(new WorkExperience(differenceEngines, 1844, 1845));
         Profile saved = profiles.save(ada);
         List<Long> assigned = ids(saved.getWorkHistory());
         assertThat(assigned).doesNotContainNull();
@@ -57,30 +61,36 @@ class AggregateChildSyncTest {
     @Test
     void childIdentitiesSurviveAnUpdate() {
         // update() syncs the same way — it is the same diff, not a replace-all.
+        Company analyticalEngines = companies.save(new Company("Analytical Engines", "industry"));
+        Company analyticalEngineNo2 = companies.save(new Company("Analytical Engine, No. 2", "industry"));
+
         Profile ada = profile("Ada");
-        ada.getWorkHistory().add(new WorkExperience("Analytical Engines", 1842, 1843));
+        ada.getWorkHistory().add(new WorkExperience(analyticalEngines, 1842, 1843));
         Profile saved = profiles.save(ada);
         Long childId = saved.getWorkHistory().get(0).getId();
 
-        saved.getWorkHistory().get(0).setCompany("Analytical Engine, No. 2");
+        saved.getWorkHistory().get(0).setCompany(analyticalEngineNo2);
         profiles.update(saved);
 
         Profile back = profiles.findById(saved.getId()).orElseThrow();
         assertThat(back.getWorkHistory()).hasSize(1);
         assertThat(back.getWorkHistory().get(0).getId()).isEqualTo(childId);
-        assertThat(back.getWorkHistory().get(0).getCompany()).isEqualTo("Analytical Engine, No. 2");
+        assertThat(back.getWorkHistory().get(0).getCompany().getId()).isEqualTo(analyticalEngineNo2.getId());
     }
 
     @Test
     void aChildDroppedFromTheCollectionLosesItsRow() {
         // The other half of a diff sync: an upsert-only sync would leave the dropped child's row
         // behind forever, because nothing in the collection names it any more.
+        Company alpha = companies.save(new Company("alpha", "industry"));
+        Company zeta = companies.save(new Company("zeta", "industry"));
+
         Profile ada = profile("Ada");
-        ada.getWorkHistory().add(new WorkExperience("alpha", 1842, 1843));
-        ada.getWorkHistory().add(new WorkExperience("zeta", 1844, 1845));
+        ada.getWorkHistory().add(new WorkExperience(alpha, 1842, 1843));
+        ada.getWorkHistory().add(new WorkExperience(zeta, 1844, 1845));
         Profile saved = profiles.save(ada);
-        WorkExperience keep = child(saved, "alpha");
-        WorkExperience drop = child(saved, "zeta");
+        WorkExperience keep = child(saved, alpha);
+        WorkExperience drop = child(saved, zeta);
         Long droppedId = drop.getId();
 
         saved.getWorkHistory().remove(drop);
@@ -98,28 +108,34 @@ class AggregateChildSyncTest {
     @Test
     void aNewChildIsInsertedAlongsideTheExistingOnes() {
         // Mixed diff: the known child upserts, the new one inserts and gets an id.
+        Company alpha = companies.save(new Company("alpha", "industry"));
+        Company beta = companies.save(new Company("beta", "industry"));
+
         Profile ada = profile("Ada");
-        ada.getWorkHistory().add(new WorkExperience("alpha", 1842, 1843));
+        ada.getWorkHistory().add(new WorkExperience(alpha, 1842, 1843));
         Profile saved = profiles.save(ada);
         Long firstId = saved.getWorkHistory().get(0).getId();
 
-        saved.getWorkHistory().add(new WorkExperience("beta", 1846, 1847));
+        saved.getWorkHistory().add(new WorkExperience(beta, 1846, 1847));
         profiles.save(saved);
 
         Profile back = profiles.findById(saved.getId()).orElseThrow();
         assertThat(back.getWorkHistory()).hasSize(2);
         assertThat(ids(back.getWorkHistory())).contains(firstId);
         assertThat(ids(back.getWorkHistory())).doesNotContainNull();
-        assertThat(back.getWorkHistory()).extracting(WorkExperience::getCompany)
-                .containsExactlyInAnyOrder("alpha", "beta");
+        assertThat(back.getWorkHistory()).extracting(we -> we.getCompany().getId())
+                .containsExactlyInAnyOrder(alpha.getId(), beta.getId());
     }
 
     @Test
     void emptyingTheCollectionRemovesEveryChildRow() {
         // Degenerate diff: nothing to upsert, so the parent's whole child set is orphaned.
+        Company alpha = companies.save(new Company("alpha", "industry"));
+        Company zeta = companies.save(new Company("zeta", "industry"));
+
         Profile ada = profile("Ada");
-        ada.getWorkHistory().add(new WorkExperience("alpha", 1842, 1843));
-        ada.getWorkHistory().add(new WorkExperience("zeta", 1844, 1845));
+        ada.getWorkHistory().add(new WorkExperience(alpha, 1842, 1843));
+        ada.getWorkHistory().add(new WorkExperience(zeta, 1844, 1845));
         Profile saved = profiles.save(ada);
         List<Long> assigned = ids(saved.getWorkHistory());
 
@@ -139,11 +155,11 @@ class AggregateChildSyncTest {
         return p;
     }
 
-    private static WorkExperience child(Profile profile, String company) {
+    private static WorkExperience child(Profile profile, Company company) {
         return profile.getWorkHistory().stream()
-                .filter(w -> company.equals(w.getCompany()))
+                .filter(w -> company.getId().equals(w.getCompany().getId()))
                 .findFirst()
-                .orElseThrow(() -> new AssertionError("no child '" + company + "' in " + ids(profile.getWorkHistory())));
+                .orElseThrow(() -> new AssertionError("no child with company id '" + company.getId() + "' in " + ids(profile.getWorkHistory())));
     }
 
     private static List<Long> ids(List<WorkExperience> children) {

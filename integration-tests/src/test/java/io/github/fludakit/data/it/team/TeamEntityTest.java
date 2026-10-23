@@ -109,7 +109,7 @@ class TeamEntityTest {
         players.save(player("Alpha", ajax));
 
         Page<Team> page = teams.findAll(
-                PageRequest.ofPage(1).size(10), Order.by(_Team.players.name.asc()));
+                PageRequest.ofPage(1).size(10), Order.by(_Team.players.get(_Player.name).asc()));
 
         // LEFT JOIN semantics: the childless team survives; join owners come back ordered by the
         // joined player's name ("Alpha" before "Zeta").

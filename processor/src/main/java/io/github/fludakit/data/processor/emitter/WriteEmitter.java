@@ -489,23 +489,13 @@ public final class WriteEmitter {
     /**
      * Builds a CodeBlock for CASCADE_DELETE (DELETE by FK).
      */
-    private CodeBlock buildCascadeDeleteCodeBlock(CascadeSpec spec, RepositoryContext ctx, String entityVar) {
-        String parentIdExpr = entityVar + ".getId()";
-
+    private CodeBlock buildCascadeDeleteCodeBlock(CascadeSpec spec, RepositoryContext ctx, String parentIdExpr) {
         if (spec.prop() instanceof TypeDefinition.Prop.EntityCollection ec
                 && spec.target() instanceof TypeDefinition.Entity childEntity) {
             String childTable = dialect.quoteIdentifier(childEntity.tableName());
             String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
             String deleteSql = "DELETE FROM " + childTable + " WHERE " + fkColumn + " = :parentId";
             String deleteConst = ctx.registerConstant("EC_COLL_DELETE_" + ec.name().toUpperCase(), deleteSql);
-            return CodeBlock.builder().add("jdbcClient.sql($L).param($S, $L).update()",
-                    deleteConst, "parentId", parentIdExpr).build();
-        } else if (spec.prop() instanceof TypeDefinition.Prop.Association assoc
-                && spec.target() instanceof TypeDefinition.Entity childEntity) {
-            String childTable = dialect.quoteIdentifier(childEntity.tableName());
-            String fkColumn = dialect.quoteIdentifier(assoc.fkColumn() != null ? assoc.fkColumn() : childEntity.idColumn());
-            String deleteSql = "DELETE FROM " + childTable + " WHERE " + fkColumn + " = :parentId";
-            String deleteConst = ctx.registerConstant("CASCADE_DELETE_" + assoc.name().toUpperCase(), deleteSql);
             return CodeBlock.builder().add("jdbcClient.sql($L).param($S, $L).update()",
                     deleteConst, "parentId", parentIdExpr).build();
         }
@@ -662,19 +652,20 @@ public final class WriteEmitter {
         // Bind non-id columns (SET clause), then id (WHERE clause)
         body.add("jdbcClient.sql($L)", constName);
         appendNonIdBindings(body, entity, entityVar);
-        body.add(".param($S, $L.getId()).update();", "id", entityVar);
-
-        if (returnsEntity) body.add("\nreturn $L;", entityVar);
-
-        builder.addCode(ExceptionTranslation.wrap(body.build()));
+        body.add(".param($S, $L.getId()).update();\n", "id", entityVar);
 
         // Post-update cascade: iterate over plan's cascade specs
         for (CascadeSpec spec : plan.cascadeSpecs()) {
             CodeBlock code = buildPostCascadeCodeBlock(spec, ctx, entityVar);
             if (!code.toString().isEmpty()) {
-                builder.addStatement(code);
+                body.add(code);
+                body.add("\n");
             }
         }
+
+        if (returnsEntity) body.add("return $L;", entityVar);
+
+        builder.addCode(ExceptionTranslation.wrap(body.build()));
 
         return builder.build();
     }
@@ -693,21 +684,37 @@ public final class WriteEmitter {
         String deleteSql = sb.deleteById();
         String constName = ctx.registerConstant("DELETE", deleteSql);
 
-        // Extract the entity parameter name from the method signature
+        // Determine if this is deleteById(ID) or delete(Entity)
+        // deleteById takes the entity's ID type as parameter, delete takes the entity itself
         String entityVar = method.parameters().isEmpty() ? "entity" 
                 : method.parameters().getFirst().getSimpleName().toString();
+        String parentIdExpr = method.firstParameterIsEntity(entity) ? entityVar + ".getId()" : entityVar;
 
         CodeBlock.Builder body = CodeBlock.builder();
 
-        // Pre-delete cascade: CASCADE_DELETE steps (before root delete)
+        // Phase 1: Load FK values for composing to-one associations (before parent delete)
         for (CascadeSpec spec : plan.cascadeSpecs()) {
-            if (spec.mode() == CascadeMode.CASCADE_DELETE) {
-                emitCascadeDelete(body, spec, ctx, entityVar);
+            if (spec.mode() == CascadeMode.CASCADE_DELETE && spec.prop() instanceof TypeDefinition.Prop.Association) {
+                emitCompositionLoadFk(body, spec, ctx, parentIdExpr);
             }
         }
 
-        // Then delete the parent row
-        body.add("jdbcClient.sql($L).param($S, $L.getId()).update();", constName, "id", entityVar);
+        // Phase 2: Pre-delete cascade for element collections and entity collections
+        for (CascadeSpec spec : plan.cascadeSpecs()) {
+            if (spec.mode() == CascadeMode.CASCADE_DELETE && !(spec.prop() instanceof TypeDefinition.Prop.Association)) {
+                emitCascadeDelete(body, spec, ctx, parentIdExpr);
+            }
+        }
+
+        // Phase 3: Delete the parent row
+        body.add("jdbcClient.sql($L).param($S, $L).update();\n", constName, "id", parentIdExpr);
+
+        // Phase 4: Delete composing to-one associations (after parent delete, using loaded FK values)
+        for (CascadeSpec spec : plan.cascadeSpecs()) {
+            if (spec.mode() == CascadeMode.CASCADE_DELETE && spec.prop() instanceof TypeDefinition.Prop.Association) {
+                emitCompositionDelete(body, spec, ctx, entityVar);
+            }
+        }
 
         builder.addCode(ExceptionTranslation.wrap(body.build()));
         return builder.build();
@@ -718,10 +725,9 @@ public final class WriteEmitter {
      * Delegates to {@link #buildCascadeDeleteCodeBlock} which handles
      * EntityCollection, Association (composition), and ElementCollection deletes by FK.
      */
-    private void emitCascadeDelete(CodeBlock.Builder body, CascadeSpec spec, RepositoryContext ctx, String entityVar) {
+    private void emitCascadeDelete(CodeBlock.Builder body, CascadeSpec spec, RepositoryContext ctx, String parentIdExpr) {
         if (spec.prop() instanceof TypeDefinition.Prop.ElementCollection ec) {
             // Element collection: delete by FK from the element child table
-            String parentIdExpr = entityVar + ".getId()";
             String childTable = dialect.quoteIdentifier(ec.childTable());
             String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
             String deleteSql = "DELETE FROM " + childTable + " WHERE " + fkColumn + " = :parentId";
@@ -729,12 +735,49 @@ public final class WriteEmitter {
             body.add("jdbcClient.sql($L).param($S, $L).update();\n", deleteConst, "parentId", parentIdExpr);
         } else {
             // Entity collection or composition association: delegate to shared builder
-            CodeBlock code = buildCascadeDeleteCodeBlock(spec, ctx, entityVar);
+            CodeBlock code = buildCascadeDeleteCodeBlock(spec, ctx, parentIdExpr);
             if (!code.toString().isEmpty()) {
                 body.add(code);
                 body.add(";\n");
             }
         }
+    }
+
+    /**
+     * Emits code to load the FK value for a composing to-one association before the parent is deleted.
+     */
+    private void emitCompositionLoadFk(CodeBlock.Builder body, CascadeSpec spec, RepositoryContext ctx, String parentIdExpr) {
+        if (!(spec.prop() instanceof TypeDefinition.Prop.Association assoc)) return;
+        if (!(spec.target() instanceof TypeDefinition.Entity)) return;
+
+        String parentTable = dialect.quoteIdentifier(ctx.entity().tableName());
+        String fkColumn = dialect.quoteIdentifier(assoc.fkColumn());
+        String idColumn = dialect.quoteIdentifier(ctx.entity().idColumn());
+
+        String loadSql = "SELECT " + fkColumn + " FROM " + parentTable + " WHERE " + idColumn + " = :id";
+        String loadConst = ctx.registerConstant("LOAD_FK_" + assoc.name().toUpperCase(), loadSql);
+
+        body.add("Long $L = jdbcClient.sql($L).param($S, $L).query(Long.class).single();\n",
+                "childId_" + assoc.name(), loadConst, "id", parentIdExpr);
+    }
+
+    /**
+     * Emits code to delete a composing to-one association after the parent is deleted.
+     */
+    private void emitCompositionDelete(CodeBlock.Builder body, CascadeSpec spec, RepositoryContext ctx, String entityVar) {
+        if (!(spec.prop() instanceof TypeDefinition.Prop.Association assoc)) return;
+        if (!(spec.target() instanceof TypeDefinition.Entity childEntity)) return;
+
+        String childTable = dialect.quoteIdentifier(childEntity.tableName());
+        String childIdColumn = dialect.quoteIdentifier(childEntity.idColumn());
+
+        String deleteSql = "DELETE FROM " + childTable + " WHERE " + childIdColumn + " = :childId";
+        String deleteConst = ctx.registerConstant("CASCADE_DELETE_" + assoc.name().toUpperCase(), deleteSql);
+
+        body.add("if ($L != null) {\n", "childId_" + assoc.name())
+            .add("    jdbcClient.sql($L).param($S, $L).update();\n",
+                    deleteConst, "childId", "childId_" + assoc.name())
+            .add("}\n");
     }
 
     // ── Binding helpers ──────────────────────────────────────────────────

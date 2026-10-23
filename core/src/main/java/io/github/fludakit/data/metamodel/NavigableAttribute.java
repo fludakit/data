@@ -10,6 +10,12 @@ package io.github.fludakit.data.metamodel;
  * lives in the processor's compile-time entity model and, at runtime, in the generated
  * {@code TypeMapping.columnRefs()} index.</p>
  *
+ * <p>The {@code get()} overloads compose paths without wrapper classes:
+ * {@code _Order.customer.get(_Customer.name)} yields a {@code TextScalarAttribute<Order>}
+ * whose {@link #path()} is {@code "customer.name"}. Each overload preserves the attribute kind
+ * (text, sortable, id, entity, embeddable, list) so the result is usable in sorts, predicates,
+ * and further navigation.</p>
+ *
  * @param <T> the owner type
  * @param <U> the navigated definition type (value object, associated entity, or element type)
  */
@@ -25,4 +31,36 @@ public sealed interface NavigableAttribute<T, U> extends PathAttribute<T>
      */
     @Override
     String path();
+
+    default TextScalarAttribute<T> get(TextScalarAttribute<U> target) {
+        return new TextScalarAttributeRecord<>(target.name(), path() + "." + target.path());
+    }
+
+    default IdAttribute<T> get(IdAttribute<U> target) {
+        return new IdAttributeRecord<>(target.name(), path() + "." + target.path());
+    }
+
+    default SortableScalarAttribute<T> get(SortableScalarAttribute<U> target) {
+        return new SortableScalarAttributeRecord<>(target.name(), path() + "." + target.path());
+    }
+
+    default ScalarAttribute<T> get(ScalarAttribute<U> target) {
+        return new ScalarAttributeRecord<>(target.name(), path() + "." + target.path());
+    }
+
+    default <V> EntityAttribute<T, V> get(EntityAttribute<U, V> target) {
+        return new EntityAttributeRecord<>(target.name(), path() + "." + target.path());
+    }
+
+    default <V> EmbeddableAttribute<T, V> get(EmbeddableAttribute<U, V> target) {
+        return new EmbeddableAttributeRecord<>(target.name(), path() + "." + target.path());
+    }
+
+    default <E> ListAttribute<T, E> get(ListAttribute<U, E> target) {
+        return new ListAttributeRecord<>(target.name(), path() + "." + target.path());
+    }
+
+    default PathAttribute<T> get(PathAttribute<U> target) {
+        return new PathAttributeRecord<>(target.name(), path() + "." + target.path());
+    }
 }

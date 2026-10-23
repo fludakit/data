@@ -10,6 +10,8 @@ import io.github.fludakit.data.query.SortSpec;
 
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.VariableElement;
+import javax.lang.model.type.TypeKind;
+import javax.lang.model.type.TypeMirror;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -80,6 +82,27 @@ public final class MethodContext {
     public List<SortSpec> sorts() { return sorts; }
     public PagingMode pagingMode() { return pagingMode; }
     public String customSql() { return customSql; }
+
+    /**
+     * Whether the first parameter is the entity itself rather than its identifier.
+     *
+     * <p>A built-in CRUD method is inherited from {@code BasicRepository<T, K>}, and
+     * {@link javax.lang.model.util.Elements#getAllMembers} hands back the member AS DECLARED: its
+     * parameter type is the type variable — {@code T} for {@code delete(T)} and
+     * {@code deleteById(K)} alike — never the entity the repository substitutes for it. A type
+     * variable is therefore resolved by method name; a concrete parameter type is compared to the
+     * entity's type name.</p>
+     */
+    public boolean firstParameterIsEntity(TypeDefinition entity) {
+        if (parameters.isEmpty()) {
+            return true;
+        }
+        TypeMirror type = parameters.getFirst().asType();
+        if (type.getKind() == TypeKind.TYPEVAR) {
+            return !"deleteById".equals(name);
+        }
+        return type.toString().equals(entity.typeName());
+    }
 
     /**
      * Marks a property path as navigated during query method scanning.

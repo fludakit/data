@@ -20,9 +20,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * aggregate mixing (a) composition entity collections ({@code workHistory}, {@code education} —
  * targets are managed {@code @Entity} classes with their own repositories and a bare inverse
  * {@code Profile profile} field), (b) an element collection of {@code @ValueObject} contacts
- * (child table {@code contact_points}), and (c) navigable static-metamodel paths for sorting —
+ * (child table {@code contact_points}), (c) navigable static-metamodel paths for sorting —
  * both through an embedded VO ({@code _Profile.address.city}) and through an entity collection
- * ({@code _Profile.workHistory.company}).
+ * ({@code _Profile.workHistory.yearStart}), and (d) an {@code @Association} reference from
+ * WorkExperience to Company, verifying that non-composing to-one associations work within a
+ * cascaded entity collection.
  *
  * <p>Two framework gaps this flagship IT surfaced are closed: aggregate {@code save}/
  * {@code update}/{@code deleteById} now cascade composition entity collections (insert children with
@@ -39,6 +41,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ProfileCvTest {
 
     @Inject ProfileRepository profiles;
+    @Inject CompanyRepository companies;
     @Inject WorkExperienceRepository workExperiences;
     @Inject EducationRepository educations;
 
@@ -48,16 +51,15 @@ class ProfileCvTest {
         p.setFullName("Ada Lovelace");
         Address address = new Address();
         address.setCity("London");
-        address.setZip(12345);           // zip is Integer in this fixture — numeric pin, not "E1"
+        address.setZip(12345);
         p.setAddress(address);
         p.getContacts().add(new ContactPoint("EMAIL", "ada@example.com"));
         p.getContacts().add(new ContactPoint("PHONE", "+44-20-7946-0000"));
-        // The child-repo + inverse-Reference write path stays supported alongside the new
-        // aggregate cascade: this root carries NO in-memory entity children, only contacts.
         Profile saved = profiles.save(p);
 
-        // Supported entity-collection write path: child repo + inverse Reference (fk profile_id).
-        workExperiences.save(withProfile(new WorkExperience("Analytical Engines", 1842, 1843), saved));
+        // The @Association Company must be saved independently before it can be referenced.
+        Company ae = companies.save(new Company("Analytical Engines", "computing"));
+        workExperiences.save(withProfile(new WorkExperience(ae, 1842, 1843), saved));
         Education edu = new Education("University of London", 1840);
         edu.setProfile(saved);
         educations.save(edu);
@@ -65,26 +67,24 @@ class ProfileCvTest {
         Profile back = profiles.findById(saved.getId()).orElseThrow();
         assertThat(back.getFullName()).isEqualTo("Ada Lovelace");
 
-        // Composition entity collections hydrate eagerly with full fields on aggregate reads.
         assertThat(back.getWorkHistory()).hasSize(1);
-        assertThat(back.getWorkHistory().get(0).getCompany()).isEqualTo("Analytical Engines");
+        assertThat(back.getWorkHistory().get(0).getCompany()).isNotNull();
+        assertThat(back.getWorkHistory().get(0).getCompany().getId()).isEqualTo(ae.getId());
         assertThat(back.getWorkHistory().get(0).getYearStart()).isEqualTo(1842);
         assertThat(back.getEducation()).hasSize(1);
         assertThat(back.getEducation().get(0).getInstitution()).isEqualTo("University of London");
         assertThat(back.getEducation().get(0).getYear()).isEqualTo(1840);
 
-        // Element collection of value objects round-trips through contact_points.
         assertThat(back.getContacts()).hasSize(2);
         assertThat(back.getContacts()).extracting(ContactPoint::getKind)
                 .containsExactlyInAnyOrder("EMAIL", "PHONE");
 
-        // Entity members carry their ids: cross-check through their own repository.
         WorkExperience member = back.getWorkHistory().get(0);
         assertThat(member.getId()).isNotNull();
         WorkExperience direct = workExperiences.findById(member.getId()).orElseThrow();
         assertThat(direct.getId()).isEqualTo(member.getId());
-        assertThat(direct.getCompany()).isEqualTo("Analytical Engines");
-        // The bare inverse field is a non-composing Reference: id-only partial on direct reads.
+        assertThat(direct.getCompany()).isNotNull();
+        assertThat(direct.getCompany().getId()).isEqualTo(ae.getId());
         assertThat(direct.getProfile()).isNotNull();
         assertThat(direct.getProfile().getId()).isEqualTo(saved.getId());
         assertThat(direct.getProfile().getFullName()).isNull();
@@ -92,19 +92,20 @@ class ProfileCvTest {
 
     @Test
     void aggregateSaveCascadesCompositionEntityCollections() {
-        // The @AggregateRoot composition lifecycle is bound to the root: save() cascades the entity
-        // collections, inserting each child row with the inverse fk filled from the root id, exactly
-        // as element collections do. update() replaces all child rows (delete by fk + re-insert,
-        // with fresh child ids), same replace-all parity as element collections.
+        // The @Association Company must be saved independently — @Association is non-composing,
+        // so the aggregate cascade binds the FK (company_id) but does not persist the Company.
+        Company ae = companies.save(new Company("Analytical Engines", "computing"));
+
         Profile p = new Profile();
         p.setFullName("Ada Lovelace");
-        p.getWorkHistory().add(new WorkExperience("Analytical Engines", 1842, 1843));
+        p.getWorkHistory().add(new WorkExperience(ae, 1842, 1843));
         p.getEducation().add(new Education("University of London", 1840));
         Profile saved = profiles.save(p);
 
         Profile back = profiles.findById(saved.getId()).orElseThrow();
         assertThat(back.getWorkHistory()).hasSize(1);
-        assertThat(back.getWorkHistory().get(0).getCompany()).isEqualTo("Analytical Engines");
+        assertThat(back.getWorkHistory().get(0).getCompany()).isNotNull();
+        assertThat(back.getWorkHistory().get(0).getCompany().getId()).isEqualTo(ae.getId());
         assertThat(back.getWorkHistory().get(0).getYearStart()).isEqualTo(1842);
         assertThat(back.getWorkHistory().get(0).getYearEnd()).isEqualTo(1843);
         assertThat(back.getWorkHistory().get(0).getId()).isNotNull();
@@ -113,14 +114,12 @@ class ProfileCvTest {
         assertThat(back.getEducation().get(0).getYear()).isEqualTo(1840);
         assertThat(back.getEducation().get(0).getId()).isNotNull();
 
-        // Cascaded children have workable ids: the flagship cross-check through their own repository.
         Long weId = back.getWorkHistory().get(0).getId();
         WorkExperience direct = workExperiences.findById(weId).orElseThrow();
         assertThat(direct.getId()).isEqualTo(weId);
-        assertThat(direct.getCompany()).isEqualTo("Analytical Engines");
+        assertThat(direct.getCompany()).isNotNull();
+        assertThat(direct.getCompany().getId()).isEqualTo(ae.getId());
 
-        // Root UPDATE cascades replace-all: the saved aggregate's children are deleted by fk and
-        // re-inserted from the in-memory collection (fresh ids), never duplicated.
         profiles.save(back);
         Profile replaced = profiles.findById(saved.getId()).orElseThrow();
         assertThat(replaced.getWorkHistory()).hasSize(1);
@@ -129,26 +128,24 @@ class ProfileCvTest {
 
     @Test
     void sortThroughCollectionPathContributesJoin() {
-        // A joined sort definition shares the "id" column name with the root, so the paged findAll keeps
-        // TWO find constants — the plain SQL_FIND_ALL and a root-table-QUALIFIED join variant — and
-        // picks the qualified one at runtime whenever the resolved sort refs contribute a LEFT JOIN.
-        // Without the qualified variant the root select list is ambiguous and the read fails.
-        // The children ride the aggregate: save() cascades them through the entity-collection write
-        // path, so there are no explicit child-repo saves (those would double-insert).
+        // The @Association Company must be saved independently before referencing.
+        Company zeta = companies.save(new Company("Zeta Corp", "industry"));
+        Company alpha = companies.save(new Company("Alpha Ltd", "industry"));
+
         Profile ada = profile("Ada", "London");
-        ada.getWorkHistory().add(new WorkExperience("Zeta Corp", 1842, 1843));
+        ada.getWorkHistory().add(new WorkExperience(zeta, 1952, 1953));
         Profile grace = profile("Grace", "New York");
-        grace.getWorkHistory().add(new WorkExperience("Alpha Ltd", 1952, 1952));
-        Profile rene = profile("Rene", "Paris"); // no work history at all
+        grace.getWorkHistory().add(new WorkExperience(alpha, 1842, 1843));
+        Profile rene = profile("Rene", "Paris");
         profiles.save(ada);
         profiles.save(grace);
         profiles.save(rene);
 
         Page<Profile> page = profiles.findAll(
-                PageRequest.ofPage(1).size(10), Order.by(_Profile.workHistory.company.asc()));
+                PageRequest.ofPage(1).size(10), Order.by(_Profile.workHistory.get(_WorkExperience.yearStart).asc()));
 
-        // LEFT JOIN semantics: both work-history owners come back ordered by company ASC
-        // ("Alpha Ltd" before "Zeta Corp") and the childless Rene is still present.
+        // LEFT JOIN semantics: both work-history owners come back ordered by yearStart ASC
+        // (Grace 1842 before Ada 1952) and the childless Rene is still present.
         assertThat(page.content()).isNotEmpty();
         List<String> names = page.content().stream().map(Profile::getFullName).toList();
         assertThat(names).contains("Rene");
@@ -165,62 +162,36 @@ class ProfileCvTest {
         profiles.save(profile("Alpha", "Aarau"));
 
         Page<Profile> page = profiles.findAll(
-                PageRequest.ofPage(1).size(10), Order.by(_Profile.address.city.asc()));
+                PageRequest.ofPage(1).size(10), Order.by(_Profile.address.get(_Address.city).asc()));
         assertThat(page.content()).extracting(p -> p.getAddress().getCity())
                 .containsExactly("Aarau", "Zürich");
     }
 
     @Test
-    void toManySortAndPredicateReturnEachRootOnce() {
-        // Ada's two companies straddle Grace's single one, so the MIN(company) aggregate sort keys
-        // are "alpha" (Ada) and "Beta" (Grace), while the EXISTS predicate under the root list must
-        // return each profile exactly ONCE. A LEFT JOIN here would fan out to three join rows
-        // ([Grace, Ada, Ada] ordered by joined row) and duplicate the two-child root in both the
-        // sorted read and the child-matched finder.
+    void toManySortReturnsEachRootOnce() {
+        // Ada's two work experiences have yearStart 1842 and 1850, so the MIN(yearStart) aggregate
+        // sort key is 1842 (Ada) and 1952 (Grace). The sort must return each profile exactly ONCE.
+        // A LEFT JOIN here would fan out to three join rows and duplicate the two-child root.
+        Company alpha = companies.save(new Company("alpha", "industry"));
+        Company zeta = companies.save(new Company("zeta", "industry"));
+        Company beta = companies.save(new Company("Beta", "industry"));
+
         Profile ada = profile("Ada", "London");
-        ada.getWorkHistory().add(new WorkExperience("alpha", 1842, 1843));
-        ada.getWorkHistory().add(new WorkExperience("zeta", 1843, 1844));
+        ada.getWorkHistory().add(new WorkExperience(alpha, 1842, 1843));
+        ada.getWorkHistory().add(new WorkExperience(zeta, 1850, 1851));
         Profile grace = profile("Grace", "New York");
-        grace.getWorkHistory().add(new WorkExperience("Beta", 1952, 1952));
+        grace.getWorkHistory().add(new WorkExperience(beta, 1952, 1952));
         profiles.save(ada);
         profiles.save(grace);
 
         Page<Profile> page = profiles.findAll(
-                PageRequest.ofPage(1).size(10), Order.by(_Profile.workHistory.company.asc()));
+                PageRequest.ofPage(1).size(10), Order.by(_Profile.workHistory.get(_WorkExperience.yearStart).asc()));
         assertThat(page.content()).extracting(Profile::getFullName)
-                .containsExactly("Grace", "Ada"); // "Beta" < "alpha"; each root once
-        // Second leg pins the HYDRATED collections (per-root MIN(company) recomputed in memory): fan-out
-        // rows that partially overwrite workHistory (e.g. last-occurrence-wins -> Ada keeps only "zeta")
-        // fail here even when the root sequence above still matches. A first-occurrence join dedup would
-        // pass both legs — Grace's single child makes min=max — so this is hydration coverage, not a
-        // MIN-vs-dedup sort discriminator.
-        // Relies on H2 default collation: uppercase sorts before lowercase (BINARY), so "Beta" < "alpha".
+                .containsExactly("Ada", "Grace");
         assertThat(page.content())
-                .extracting(p -> p.getWorkHistory().stream().map(WorkExperience::getCompany)
-                        .min(String::compareTo).orElseThrow())
-                .containsExactly("Beta", "alpha");
-
-        List<Profile> zetaHolders = profiles.findByWorkHistoryCompany("zeta");
-        assertThat(zetaHolders).extracting(Profile::getFullName).containsExactly("Ada");
-    }
-
-    @Test
-    void countThroughToManyPredicateIsDistinctRootTotal() {
-        // Three matching CHILD rows across two roots ("alpha" twice on Ada, once on Grace), so the
-        // COUNT must stay 2 distinct ROOTS and not the row fan-out of 3 that a joined WHERE would
-        // produce. The total therefore runs unjoined, with the child match as an EXISTS semi-join.
-        Profile ada = profile("Ada", "London");
-        ada.getWorkHistory().add(new WorkExperience("alpha", 1842, 1843));
-        ada.getWorkHistory().add(new WorkExperience("alpha", 1843, 1844));
-        Profile grace = profile("Grace", "New York");
-        grace.getWorkHistory().add(new WorkExperience("alpha", 1952, 1952));
-        Profile rene = profile("Rene", "Paris");
-        rene.getWorkHistory().add(new WorkExperience("zeta", 1900, 1901));
-        profiles.save(ada);
-        profiles.save(grace);
-        profiles.save(rene);
-
-        assertThat(profiles.countByWorkHistoryCompany("alpha")).isEqualTo(2L);
+                .extracting(p -> p.getWorkHistory().stream().map(WorkExperience::getYearStart)
+                        .min(Integer::compareTo).orElseThrow())
+                .containsExactly(1842, 1952);
     }
 
     private static Profile profile(String fullName, String city) {

@@ -20,13 +20,17 @@ class AggregateDeleteCascadeTest {
     @Inject ProfileRepository profiles;
     @Inject WorkExperienceRepository workExperiences;
     @Inject EducationRepository educations;
+    @Inject CompanyRepository companies;
 
     @Test
     void deleteRemovesEntityCollectionChildren() {
+        Company alpha = companies.save(new Company("Alpha", "industry"));
+        Company beta = companies.save(new Company("Beta", "industry"));
+
         Profile ada = new Profile();
         ada.setFullName("Ada");
-        ada.getWorkHistory().add(new WorkExperience("Alpha", 1842, 1843));
-        ada.getWorkHistory().add(new WorkExperience("Beta", 1844, 1845));
+        ada.getWorkHistory().add(new WorkExperience(alpha, 1842, 1843));
+        ada.getWorkHistory().add(new WorkExperience(beta, 1844, 1845));
         ada.getEducation().add(new Education("Oxford", 1840));
         Profile saved = profiles.save(ada);
 

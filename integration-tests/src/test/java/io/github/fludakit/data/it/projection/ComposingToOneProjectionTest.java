@@ -108,7 +108,7 @@ class ComposingToOneProjectionTest {
         books.save(book("Alpha", ursula));
         books.save(book("Beta", ted));
 
-        Page<Book> page = books.findAll(PageRequest.ofPage(1).size(10), Order.by(_Book.author.name.asc()));
+        Page<Book> page = books.findAll(PageRequest.ofPage(1).size(10), Order.by(_Book.author.get(_Author.name).asc()));
         assertThat(page.content()).extracting(Book::getTitle).containsExactly("Beta", "Alpha");
         assertThat(page.content()).allSatisfy(b -> assertThat(b.getAuthor().getName()).isNotNull());
     }

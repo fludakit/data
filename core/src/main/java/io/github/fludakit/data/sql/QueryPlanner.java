@@ -118,13 +118,16 @@ final class QueryPlanner {
 
     private List<String> orderBy() {
         List<String> terms = new ArrayList<>(sorts.size());
+        // A spliced join qualifies every other leaf, so a root-local sort term must be qualified
+        // too: a joined table sharing the column name would otherwise make ORDER BY ambiguous.
+        boolean spliceJoins = !joinEdges.isEmpty();
         for (int i = 0; i < sorts.size(); i++) {
             SortSpec sort = sorts.get(i);
             ColumnPlacement ref = sortRefs.get(i);
             boolean existential = Boolean.TRUE.equals(existentialSorts.get(i));
             String term = existential
                     ? QueryCompiler.aggregateSortTerm(dialect, schema, ref, sort.ascending())
-                    : QueryCompiler.isLocalTo(ref.leaf(), schema.tableName())
+                    : QueryCompiler.isLocalTo(ref.leaf(), schema.tableName()) && !spliceJoins
                             ? dialect.quoteIdentifier(ref.leaf().column())
                             : QueryCompiler.qualify(dialect, ref.leaf(), schema.tableName());
             terms.add(QueryCompiler.orderTerm(term, sort, existential));

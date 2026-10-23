@@ -21,12 +21,15 @@ class AggregateCascadeTest {
     @Inject ProfileRepository profiles;
     @Inject WorkExperienceRepository workExperiences;
     @Inject EducationRepository educations;
+    @Inject CompanyRepository companies;
 
     @Test
     void insertCascadesCompositionsBeforeRootAndCollectionsAfter() {
+        Company alpha = companies.save(new Company("Alpha", "industry"));
+
         Profile ada = new Profile();
         ada.setFullName("Ada");
-        ada.getWorkHistory().add(new WorkExperience("Alpha", 1842, 1843));
+        ada.getWorkHistory().add(new WorkExperience(alpha, 1842, 1843));
         ada.getEducation().add(new Education("Oxford", 1840));
         ada.getContacts().add(new ContactPoint("EMAIL", "ada@example.com"));
 
@@ -42,25 +45,30 @@ class AggregateCascadeTest {
 
     @Test
     void updateCascadesToAllChildren() {
+        Company alpha = companies.save(new Company("Alpha", "industry"));
+        Company analyticalSociety = companies.save(new Company("Analytical Society", "industry"));
+
         Profile ada = new Profile();
         ada.setFullName("Ada");
-        ada.getWorkHistory().add(new WorkExperience("Alpha", 1842, 1843));
+        ada.getWorkHistory().add(new WorkExperience(alpha, 1842, 1843));
         Profile saved = profiles.save(ada);
 
         saved.setFullName("Ada Lovelace");
-        saved.getWorkHistory().get(0).setCompany("Analytical Society");
+        saved.getWorkHistory().get(0).setCompany(analyticalSociety);
         profiles.save(saved);
 
         Profile reloaded = profiles.findById(saved.getId()).orElseThrow();
         assertThat(reloaded.getFullName()).isEqualTo("Ada Lovelace");
-        assertThat(reloaded.getWorkHistory().get(0).getCompany()).isEqualTo("Analytical Society");
+        assertThat(reloaded.getWorkHistory().get(0).getCompany().getId()).isEqualTo(analyticalSociety.getId());
     }
 
     @Test
     void deleteCascadesToAllChildren() {
+        Company alpha = companies.save(new Company("Alpha", "industry"));
+
         Profile ada = new Profile();
         ada.setFullName("Ada");
-        ada.getWorkHistory().add(new WorkExperience("Alpha", 1842, 1843));
+        ada.getWorkHistory().add(new WorkExperience(alpha, 1842, 1843));
         ada.getContacts().add(new ContactPoint("EMAIL", "ada@example.com"));
         Profile saved = profiles.save(ada);
         Long weId = saved.getWorkHistory().get(0).getId();
@@ -73,16 +81,21 @@ class AggregateCascadeTest {
 
     @Test
     void entityCollectionDiffSyncUpsertsAndDeletesOrphans() {
+        Company alpha = companies.save(new Company("Alpha", "industry"));
+        Company beta = companies.save(new Company("Beta", "industry"));
+        Company betaUpdated = companies.save(new Company("Beta Updated", "industry"));
+        Company gamma = companies.save(new Company("Gamma", "industry"));
+
         Profile ada = new Profile();
         ada.setFullName("Ada");
-        ada.getWorkHistory().add(new WorkExperience("Alpha", 1842, 1843));
-        ada.getWorkHistory().add(new WorkExperience("Beta", 1844, 1845));
+        ada.getWorkHistory().add(new WorkExperience(alpha, 1842, 1843));
+        ada.getWorkHistory().add(new WorkExperience(beta, 1844, 1845));
         Profile saved = profiles.save(ada);
         Long firstId = saved.getWorkHistory().get(0).getId();
 
         // Replace the collection: keep first, modify second, add third
-        saved.getWorkHistory().get(1).setCompany("Beta Updated");
-        saved.getWorkHistory().add(new WorkExperience("Gamma", 1846, 1847));
+        saved.getWorkHistory().get(1).setCompany(betaUpdated);
+        saved.getWorkHistory().add(new WorkExperience(gamma, 1846, 1847));
         profiles.save(saved);
 
         Profile reloaded = profiles.findById(saved.getId()).orElseThrow();

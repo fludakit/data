@@ -982,14 +982,6 @@ public final class WriteEmitter {
         return "get" + Character.toUpperCase(propertyName.charAt(0)) + propertyName.substring(1);
     }
 
-    /**
-     * Converts a method name to a SQL constant name base.
-     * Delegates to FindEmitter's shared utility.
-     */
-    static String toSqlConstantName(String methodName) {
-        return FindEmitter.toSqlConstantName(methodName);
-    }
-
     private boolean isEnum(String typeFqn) {
         TypeElement typeElement = elements.getTypeElement(typeFqn);
         return typeElement != null && typeElement.getKind() == ElementKind.ENUM;

@@ -273,13 +273,14 @@ public final class TypeModelEmitter {
         }
     }
 
-    private CodeBlock entityTargetLiteral(TypeDefinition.Entity entity) {
-        // Reference the target entity's TypeModel.definition() method and cast to Entity
+    private CodeBlock entityTargetLiteral(TypeDefinition entity) {
+        // Reference the target entity's TypeModel.definition() method and cast to the correct subtype
         String typeName = entity.typeName();
         String packageName = typeName.substring(0, typeName.lastIndexOf('.'));
         String simpleName = typeName.substring(typeName.lastIndexOf('.') + 1);
         ClassName typeModelClass = ClassName.get(packageName, simpleName + "TypeModel");
-        return CodeBlock.of("($T.Entity)$L.INSTANCE.definition()", TYPE_DEFINITION, typeModelClass);
+        String castType = entity instanceof TypeDefinition.Aggregate ? "Aggregate" : "Entity";
+        return CodeBlock.of("($T.$L)$L.INSTANCE.definition()", TYPE_DEFINITION, castType, typeModelClass);
     }
 
     private CodeBlock propLiteral(TypeDefinition.Prop prop) {

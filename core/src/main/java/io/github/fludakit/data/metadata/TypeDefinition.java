@@ -445,8 +445,9 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
 
         /**
          * A to-many entity collection stored in the child table (OneToMany or ManyToMany).
+         * The definition may be an Entity or an Aggregate (when the target is itself an aggregate root).
          */
-        record EntityCollection(String name, String javaType, Entity definition, String fkColumn, String mappedBy) implements Prop {
+        record EntityCollection(String name, String javaType, TypeDefinition definition, String fkColumn, String mappedBy) implements Prop {
         }
 
         // ── ElementCollection property ───────────────────────────────────

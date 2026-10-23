@@ -1112,7 +1112,8 @@ public final class FindEmitter {
     private MethodSpec emitDeleteBy(RepositoryContext ctx, MethodContext method) {
         MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
 
-        SqlBuilder sqlBuilder = new SqlBuilder(ctx.entity());
+        TypeDefinition entity = ctx.entity();
+        SqlBuilder sqlBuilder = new SqlBuilder(entity);
         sqlBuilder.dialect(dialect);
         ResultKind rk = method.resultKind() == ResultKind.VOID ? ResultKind.VOID : method.resultKind();
         String sql = sqlBuilder.render(new QueryDefinition.DeleteWhere(method.predicates(), List.of(), rk));
@@ -1122,6 +1123,28 @@ public final class FindEmitter {
         List<ParamBinding> bindings = method.paramBindings();
 
         CodeBlock.Builder body = CodeBlock.builder();
+
+        // Determine if this is a deleteById (single predicate on the ID column)
+        // so we can cascade deletes to child collections for aggregate roots
+        boolean isDeleteById = isDeleteByIdPredicate(entity, method);
+        String parentIdParam = isDeleteById ? idParamName(method) : null;
+
+        // Cascade delete child collections before parent delete (aggregate roots only)
+        if (isDeleteById && entity.ownsAggregateLifecycle() && parentIdParam != null) {
+            // Element collections
+            for (TypeDefinition.Prop prop : entity.properties()) {
+                if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
+                    emitFindEmitterElementCollectionDelete(body, ctx, parentIdParam, ec);
+                }
+            }
+            // Entity collections
+            for (TypeDefinition.Prop prop : entity.properties()) {
+                if (prop instanceof TypeDefinition.Prop.EntityCollection ec && ec.definition() != null) {
+                    emitFindEmitterEntityCollectionDelete(body, ctx, parentIdParam, ec);
+                }
+            }
+        }
+
         boolean isVoid = method.resultKind() == ResultKind.VOID;
         if (!isVoid) body.add("return ");
         body.add("jdbcClient\n");
@@ -1131,6 +1154,50 @@ public final class FindEmitter {
         builder.addCode(ExceptionTranslation.wrap(body.build()));
 
         return builder.build();
+    }
+
+    /**
+     * Checks whether the method is a deleteById: a single-predicate DELETE on the entity's ID column.
+     */
+    private static boolean isDeleteByIdPredicate(TypeDefinition entity, MethodContext method) {
+        if (method.operation() != Operation.DELETE) return false;
+        List<Predicate> preds = method.predicates();
+        if (preds.size() != 1) return false;
+        Predicate pred = preds.getFirst();
+        String idPropName = entity instanceof TypeDefinition.Entity e && e.id() != null ? e.id().name()
+                : entity instanceof TypeDefinition.Aggregate a && a.id() != null ? a.id().name()
+                : null;
+        return idPropName != null && pred.property().equals(idPropName);
+    }
+
+    /**
+     * Returns the method parameter name used as the parent ID for cascade deletes.
+     * For deleteById, this is the single method parameter (e.g. "id").
+     */
+    private static String idParamName(MethodContext method) {
+        if (method.parameters().isEmpty()) return "id";
+        return method.parameters().getFirst().getSimpleName().toString();
+    }
+
+    /** Emits DELETE for an element collection child table by FK = parentIdParam. */
+    private void emitFindEmitterElementCollectionDelete(CodeBlock.Builder body, RepositoryContext ctx,
+                                                        String parentIdParam, TypeDefinition.Prop.ElementCollection ec) {
+        String childTable = dialect.quoteIdentifier(ec.childTable());
+        String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
+        String deleteSql = "DELETE FROM " + childTable + " WHERE " + fkColumn + " = :parentId";
+        String deleteConst = ctx.registerConstant("EC_DELETE_" + ec.name().toUpperCase(), deleteSql);
+        body.add("jdbcClient.sql($L).param($S, $L).update();\n", deleteConst, "parentId", parentIdParam);
+    }
+
+    /** Emits DELETE for an entity collection child table by FK = parentIdParam. */
+    private void emitFindEmitterEntityCollectionDelete(CodeBlock.Builder body, RepositoryContext ctx,
+                                                       String parentIdParam, TypeDefinition.Prop.EntityCollection ec) {
+        if (!(ec.definition() instanceof TypeDefinition.Entity childEntity)) return;
+        String childTable = dialect.quoteIdentifier(childEntity.tableName());
+        String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
+        String deleteSql = "DELETE FROM " + childTable + " WHERE " + fkColumn + " = :parentId";
+        String deleteConst = ctx.registerConstant("EC_COLL_DELETE_" + ec.name().toUpperCase(), deleteSql);
+        body.add("jdbcClient.sql($L).param($S, $L).update();\n", deleteConst, "parentId", parentIdParam);
     }
 
     // ── Custom @Query methods ────────────────────────────────────────────

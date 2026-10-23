@@ -3,6 +3,7 @@ package io.github.fludakit.data.processor.emitter;
 import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.CodeBlock;
 import com.squareup.javapoet.MethodSpec;
+import io.github.fludakit.data.metadata.ColumnPlacement;
 import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.JoinEdge;
 import io.github.fludakit.data.metadata.TypeDefinition;
@@ -20,6 +21,7 @@ import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
 import io.github.fludakit.data.query.SortSpec;
 import io.github.fludakit.data.sql.H2Dialect;
+import io.github.fludakit.data.sql.QueryCompiler;
 import io.github.fludakit.data.sql.SqlBuilder;
 import io.github.fludakit.data.sql.SqlDialect;
 
@@ -28,7 +30,9 @@ import javax.lang.model.element.VariableElement;
 import javax.lang.model.type.DeclaredType;
 import javax.lang.model.util.Types;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Generates method implementations for finder, count, exists, and deleteBy methods.
@@ -442,44 +446,29 @@ public final class FindEmitter {
             // String prop = sort.property();
             body.addStatement("        String $L = $L.property()", "prop", "sort");
             
-            // Resolve property to column using TypeModel
-            String entitySimpleName = ctx.entity().typeName().contains(".") 
-                ? ctx.entity().typeName().substring(ctx.entity().typeName().lastIndexOf('.') + 1)
-                : ctx.entity().typeName();
-            String typeModelFqn = ctx.entity().typeName().substring(0, ctx.entity().typeName().lastIndexOf('.')) + "." + entitySimpleName + "TypeModel";
-            body.add("        try {\n");
-            body.addStatement("            io.github.fludakit.data.metadata.ColumnPlacement placement = $T.INSTANCE.resolve($L)", 
-                ClassName.bestGuess(typeModelFqn),
-                "prop");
-            
-            // String direction = sort.isAscending() ? "ASC" : "DESC";
-            body.addStatement("            String $L = $L.isAscending() ? $S : $S",
-                "direction", "sort", "ASC", "DESC");
-            
-            // Build qualified column reference for ORDER BY
-            body.add("            String $L;\n", "qualifiedColumn");
-            body.add("            if ($L.local()) {\n", "placement");
-            body.addStatement("                $L = $L.leaf().column()", "qualifiedColumn", "placement");
-            body.add("            } else {\n");
-            // For non-local columns (requiring navigation), use aggregate subquery
-            // This avoids the complexity of adding JOINs at runtime
-            body.addStatement("                $L = io.github.fludakit.data.sql.QueryCompiler.aggregateSortTerm($T.INSTANCE, $T.INSTANCE, $L, $L.isAscending())",
-                "qualifiedColumn", 
-                ClassName.bestGuess("io.github.fludakit.data.sql.H2Dialect"),
-                ClassName.bestGuess(typeModelFqn),
-                "placement",
-                "sort");
-            body.add("            }\n");
-            
-            // For local columns, append direction; for aggregate subqueries, direction is already embedded
-            body.add("            if ($L.local()) {\n", "placement");
-            body.addStatement("                $L.add($L + $S + $L)", "orderClauses", "qualifiedColumn", " ", "direction");
-            body.add("            } else {\n");
-            body.addStatement("                $L.add($L)", "orderClauses", "qualifiedColumn");
-            body.add("            }\n");
-            
-            body.add("        } catch (io.github.fludakit.data.metadata.UnknownAttributePathException e) {\n");
-            body.add("            // Skip invalid sort property\n");
+            // Compile-time switch over every resolvable sort path: local paths render their column
+            // plus a runtime direction; relation paths render a pre-computed correlated aggregate
+            // (MIN for ASC, MAX for DESC) whose direction is already embedded.
+            Map<String, ColumnPlacement> orderPaths = collectDynamicOrderPaths(ctx.entity());
+            body.add("        String $L = switch ($L) {\n", "orderTerm", "prop");
+            for (Map.Entry<String, ColumnPlacement> entry : orderPaths.entrySet()) {
+                String path = entry.getKey();
+                ColumnPlacement placement = entry.getValue();
+                if (placement.local()) {
+                    String column = placement.leaf().column();
+                    body.add("            case $S -> $S + ($L.isAscending() ? $S : $S);\n",
+                            path, column, "sort", " ASC", " DESC");
+                } else {
+                    String asc = QueryCompiler.aggregateSortTerm(dialect, ctx.entity(), placement, true);
+                    String desc = QueryCompiler.aggregateSortTerm(dialect, ctx.entity(), placement, false);
+                    body.add("            case $S -> $L.isAscending() ? $S : $S;\n",
+                            path, "sort", asc, desc);
+                }
+            }
+            body.add("            default -> null;\n");
+            body.add("        };\n");
+            body.add("        if ($L != null) {\n", "orderTerm");
+            body.addStatement("            $L.add($L)", "orderClauses", "orderTerm");
             body.add("        }\n");
             body.add("    }\n");
             
@@ -526,6 +515,93 @@ public final class FindEmitter {
         SqlBuilder sqlBuilder = new SqlBuilder(ctx.entity());
         sqlBuilder.dialect(dialect);
         return sqlBuilder.render(new QueryDefinition.Count(method.predicates(), List.of(), false));
+    }
+
+    /**
+     * The sortable paths for a dynamic {@code Order} parameter: the entity's local columns plus the
+     * one-level reference traversals the offset finder can turn into a correlated aggregate sort term.
+     */
+    private Map<String, ColumnPlacement> collectDynamicOrderPaths(TypeDefinition entity) {
+        Map<String, ColumnPlacement> paths = new LinkedHashMap<>();
+
+        Map<String, ColumnRef> localRefs = computeLocalColumnRefs(entity);
+        for (Map.Entry<String, ColumnRef> entry : localRefs.entrySet()) {
+            paths.put(entry.getKey(), new ColumnPlacement(entry.getValue()));
+        }
+
+        for (TypeDefinition.Prop prop : entity.properties()) {
+            if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.definition() != null) {
+                JoinEdge.ToOne edge = buildAssociationEdge(entity, assoc);
+                if (edge == null) continue;
+                for (Map.Entry<String, ColumnRef> targetEntry
+                        : computeLocalColumnRefs(assoc.definition()).entrySet()) {
+                    paths.put(assoc.name() + "." + targetEntry.getKey(),
+                            new ColumnPlacement(targetEntry.getValue(), List.of(edge)));
+                }
+            } else if (prop instanceof TypeDefinition.Prop.EntityCollection ec && ec.definition() != null) {
+                JoinEdge.ToMany edge = buildEntityCollectionEdge(entity, ec);
+                if (edge == null) continue;
+                for (Map.Entry<String, ColumnRef> targetEntry
+                        : computeLocalColumnRefs(ec.definition()).entrySet()) {
+                    paths.put(ec.name() + "." + targetEntry.getKey(),
+                            new ColumnPlacement(targetEntry.getValue(), List.of(edge)));
+                }
+            }
+        }
+        return paths;
+    }
+
+    /** Local column refs keyed by path, mirroring the column refs the removed TypeModel exposed. */
+    private Map<String, ColumnRef> computeLocalColumnRefs(TypeDefinition entity) {
+        Map<String, ColumnRef> refs = new LinkedHashMap<>();
+        addLocalRefs(refs, entity.tableName(), entity, "", "");
+        return refs;
+    }
+
+    private void addLocalRefs(Map<String, ColumnRef> refs, String tableName,
+                               TypeDefinition def, String pathPrefix, String columnPrefix) {
+        for (TypeDefinition.Prop prop : def.properties()) {
+            switch (prop) {
+                case TypeDefinition.Prop.Scalar s -> refs.put(pathPrefix + s.name(),
+                        new ColumnRef.Simple(columnPrefix + s.columnName(), tableName));
+                case TypeDefinition.Prop.Id id -> refs.put(pathPrefix + id.name(),
+                        new ColumnRef.Simple(columnPrefix + id.columnName(), tableName));
+                case TypeDefinition.Prop.Version v -> refs.put(pathPrefix + v.name(),
+                        new ColumnRef.Simple(columnPrefix + v.columnName(), tableName));
+                case TypeDefinition.Prop.Association a -> {
+                    if (a.fkColumn() != null) {
+                        refs.put(pathPrefix + a.name(),
+                                new ColumnRef.ForeignKey(columnPrefix + a.fkColumn(), tableName));
+                    }
+                }
+                case TypeDefinition.Prop.Embedded e -> {
+                    if (e.definition() != null) {
+                        addLocalRefs(refs, tableName, e.definition(),
+                                pathPrefix + e.name() + ".",
+                                columnPrefix + e.name() + "_");
+                    }
+                }
+                default -> {}
+            }
+        }
+    }
+
+    private JoinEdge.ToOne buildAssociationEdge(TypeDefinition owner, TypeDefinition.Prop.Association assoc) {
+        if (assoc.definition() == null || assoc.definition().tableName() == null
+                || assoc.definition().idColumn() == null || assoc.fkColumn() == null) return null;
+        return new JoinEdge.ToOne(
+                new ColumnRef.ForeignKey(assoc.fkColumn(), owner.tableName()),
+                new ColumnRef.Simple(assoc.definition().idColumn(), assoc.definition().tableName()));
+    }
+
+    private JoinEdge.ToMany buildEntityCollectionEdge(TypeDefinition owner, TypeDefinition.Prop.EntityCollection ec) {
+        if (ec.definition() == null || ec.definition().tableName() == null
+                || ec.fkColumn() == null || owner.idColumn() == null) {
+            return null;
+        }
+        return new JoinEdge.ToMany(
+                new ColumnRef.Simple(owner.idColumn(), owner.tableName()),
+                new ColumnRef.ForeignKey(ec.fkColumn(), ec.definition().tableName()));
     }
 
     // ── Cursor-paged finder ──────────────────────────────────────────────

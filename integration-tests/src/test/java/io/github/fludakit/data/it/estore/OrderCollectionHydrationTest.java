@@ -19,11 +19,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  * hydration: reads (findById, findAll, paged) materialize the parents then group children onto each
  * one; update replaces the whole child set (delete + re-insert); delete cascades the children.
  *
- * <p>Contract lock: hydration covers element collections only — the {@code @Association} header
- * definition ({@code Order.getCustomer()}) and the {@code @Association} child definition
- * ({@code OrderItem.getProduct()}) are never fully populated by the collection loader; an
- * {@code @Association} reference reached that way stays {@code null} rather than being hydrated. The
- * relationship kinds are exercised by the {@code it/team} corpus instead.</p>
+ * <p>Contract lock: hydration covers element collections only. The {@code @Association} child
+ * definition ({@code OrderItem.getProduct()}) is rebuilt by the collection loader as an id-only
+ * partial — its FK id is filled in while the rest of the target stays unhydrated — and the
+ * {@code @Association} header definition ({@code Order.getCustomer()}) is never fully populated by
+ * the collection loader. The relationship kinds are exercised by the {@code it/team} corpus
+ * instead.</p>
  */
 @EnableAutoWeld
 @AddPackages(Order.class)
@@ -51,10 +52,17 @@ class OrderCollectionHydrationTest {
         Order found = orders.findById(saved.getId()).orElseThrow();
         assertThat(found.getOrderItems()).hasSize(2);
         assertThat(found.getOrderItems()).extracting(OrderItem::getQuantity).containsExactlyInAnyOrder(2, 5);
-        // Partial materialisation covers entity row-mapper reads only: there an @Association definition
-        // is rebuilt as an id-only partial, whereas children rebuilt by the element-collection
-        // loader leave their association field untouched, i.e. null.
-        assertThat(found.getOrderItems()).allSatisfy(i -> assertThat(i.getProduct()).isNull());
+        // The element-collection loader rebuilds each child's @Association reference as an id-only
+        // partial: the FK id is filled in, the rest of the target stays unhydrated.
+        assertThat(found.getOrderItems())
+                .extracting(OrderItem::getProduct)
+                .allSatisfy(p -> {
+                    assertThat(p).isNotNull();
+                    assertThat(p.getName()).isNull();
+                });
+        assertThat(found.getOrderItems())
+                .extracting(i -> i.getProduct().getId())
+                .containsExactlyInAnyOrder(widget.getId(), gizmo.getId());
         assertThat(found.getCustomer()).isNotNull();
         assertThat(found.getCustomer().getId()).isEqualTo(ana.getId());
 
@@ -82,7 +90,8 @@ class OrderCollectionHydrationTest {
     @Test
     void findByAmountHydratesOrderItems() {
         // A hydrated LIST @Find must run the umbrella loader, so the returned orders carry hydrated
-        // orderItems — while the @Association child definition still stays null through this read too.
+        // orderItems — while the @Association child definition stays an id-only partial through this
+        // read too.
         Customer ana = customers.save(customer("Ana", "ana@example.com"));
         Product widget = products.save(product("Widget", new BigDecimal("1.00")));
         Order order = new Order(ana);
@@ -94,7 +103,10 @@ class OrderCollectionHydrationTest {
         assertThat(found).hasSize(1);
         assertThat(found.get(0).getOrderItems()).hasSize(1);
         assertThat(found.get(0).getOrderItems().get(0).getQuantity()).isEqualTo(3);
-        assertThat(found.get(0).getOrderItems().get(0).getProduct()).isNull();
+        Product itemProduct = found.get(0).getOrderItems().get(0).getProduct();
+        assertThat(itemProduct).isNotNull();
+        assertThat(itemProduct.getId()).isEqualTo(widget.getId());
+        assertThat(itemProduct.getName()).isNull();
     }
 
     private static Customer customer(String name, String email) {

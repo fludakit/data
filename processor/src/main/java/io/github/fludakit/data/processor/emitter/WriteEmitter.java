@@ -504,6 +504,12 @@ public final class WriteEmitter {
 
     /**
      * Builds a CodeBlock for element collection REPLACE (delete-all + re-insert-all).
+     *
+     * <p>The child-table INSERT iterates the element type's flattened leaves so it agrees with the
+     * hydration row mapper: a value object nested inside the element flattens to one column per leaf
+     * ({@code point_lat}/{@code point_lon}), and an {@code @Association} child contributes its
+     * foreign-key column bound through the association's id. Associations are emitted before scalars,
+     * mirroring the child-table classifier's global contract.</p>
      */
     private CodeBlock buildElementCollectionReplaceCodeBlock(RepositoryContext ctx,
                                                             String entityVar, TypeDefinition.Prop.ElementCollection ec) {
@@ -516,20 +522,16 @@ public final class WriteEmitter {
         String childTable = dialect.quoteIdentifier(ec.childTable());
         String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
 
+        java.util.List<Leaf> leaves = new java.util.ArrayList<>();
+        collectLeaves(elementType, leaves, "element", "");
+
         java.util.List<String> columns = new java.util.ArrayList<>();
         columns.add(fkColumn);
-        for (TypeDefinition.Prop prop : elementType.properties()) {
-            if (prop instanceof TypeDefinition.Prop.Scalar s) {
-                columns.add(dialect.quoteIdentifier(s.columnName()));
-            }
-        }
-
         java.util.List<String> params = new java.util.ArrayList<>();
         params.add(":parentId");
-        for (TypeDefinition.Prop prop : elementType.properties()) {
-            if (prop instanceof TypeDefinition.Prop.Scalar s) {
-                params.add(":" + s.name());
-            }
+        for (Leaf leaf : leaves) {
+            columns.add(dialect.quoteIdentifier(leaf.columnName()));
+            params.add(":" + leaf.columnName());
         }
 
         String insertSql = "INSERT INTO " + childTable + " (" + String.join(", ", columns) +
@@ -546,17 +548,59 @@ public final class WriteEmitter {
         cascade.add("    for (var element : $L) {\n", getterName);
         cascade.add("        jdbcClient.sql($L)", insertConst);
         cascade.add(".param($S, $L)", "parentId", parentIdExpr);
-        for (TypeDefinition.Prop prop : elementType.properties()) {
-            if (prop instanceof TypeDefinition.Prop.Scalar s) {
-                String propGetter = "get" + capitalize(s.name());
-                cascade.add(".param($S, element.$L())", s.name(), propGetter);
-            }
+        for (Leaf leaf : leaves) {
+            cascade.add(".param($S, $L)", leaf.columnName(), leaf.binding());
         }
         cascade.add(".update();\n");
         cascade.add("    }\n");
         cascade.add("}");
 
         return cascade.build();
+    }
+
+    /** One flattened child-table leaf: its physical column and the Java expression that binds it. */
+    private record Leaf(String columnName, String binding) {
+    }
+
+    /**
+     * Flattens a value object's write leaves: association FK columns first, then scalars, then
+     * recursively flattened embedded value objects. {@code chain} is the Java expression reaching the
+     * current owner (e.g. {@code element} or {@code element.getPoint()}) and {@code prefix} is the
+     * column prefix already accumulated from enclosing embedded objects.
+     */
+    private void collectLeaves(TypeDefinition type, java.util.List<Leaf> leaves, String chain, String prefix) {
+        for (TypeDefinition.Prop prop : type.properties()) {
+            if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.fkColumn() != null) {
+                String columnName = prefix.isEmpty() ? assoc.fkColumn() : prefix + "_" + assoc.fkColumn();
+                String getterCall = chain + "." + getter(assoc.name()) + "()";
+                String binding = prefix.isEmpty()
+                        ? getterCall + " == null ? null : " + getterCall + ".getId()"
+                        : chain + " == null ? null : " + getterCall + " == null ? null : " + getterCall + ".getId()";
+                leaves.add(new Leaf(columnName, binding));
+            }
+        }
+        for (TypeDefinition.Prop prop : type.properties()) {
+            if (prop instanceof TypeDefinition.Prop.Scalar s) {
+                String columnName = prefix.isEmpty() ? s.columnName() : prefix + "_" + s.columnName();
+                String getterCall = chain + "." + getter(s.name()) + "()";
+                String binding;
+                if (isEnum(s.javaType())) {
+                    binding = getterCall + " == null ? null : " + getterCall + ".name()";
+                } else if (prefix.isEmpty()) {
+                    binding = getterCall;
+                } else {
+                    binding = chain + " == null ? null : " + getterCall;
+                }
+                leaves.add(new Leaf(columnName, binding));
+            }
+        }
+        for (TypeDefinition.Prop prop : type.properties()) {
+            if (prop instanceof TypeDefinition.Prop.Embedded emb && emb.definition() != null) {
+                String newPrefix = prefix.isEmpty() ? emb.name() : prefix + "_" + emb.name();
+                String newChain = chain + "." + getter(emb.name()) + "()";
+                collectLeaves(emb.definition(), leaves, newChain, newPrefix);
+            }
+        }
     }
 
     // ── INSERT ───────────────────────────────────────────────────────────

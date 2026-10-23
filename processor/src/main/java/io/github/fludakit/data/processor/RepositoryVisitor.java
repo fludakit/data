@@ -13,7 +13,6 @@ import io.github.fludakit.data.processor.emitter.HydrationEmitter;
 import io.github.fludakit.data.processor.emitter.LifecycleEmitter;
 import io.github.fludakit.data.processor.emitter.MetamodelEmitter;
 import io.github.fludakit.data.processor.emitter.RowMapperEmitter;
-import io.github.fludakit.data.processor.emitter.TypeModelEmitter;
 import io.github.fludakit.data.processor.emitter.WriteEmitter;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.qbn.ParsedMethodName;
@@ -148,9 +147,6 @@ final class RepositoryVisitor {
         // 4b. Generate static metamodel (_Entity interface)
         new MetamodelEmitter(filer, diagnostics).emit(entityMapping);
 
-        // 4c. Generate TypeModel (runtime TypeDefinition implementation)
-        new TypeModelEmitter(filer).emit(entityMapping);
-
         // 5. Create RepositoryContext
         RepositoryContext ctx = new RepositoryContext(
                 entityMapping, crud, rowMapperType,
@@ -222,7 +218,7 @@ final class RepositoryVisitor {
         }
 
         // 6d. Emit write methods (save, insert, update, deleteById)
-        WriteEmitter writeEmitter = new WriteEmitter(types, elements, repositoryDeclaredType, repositoryOwnType);
+        WriteEmitter writeEmitter = new WriteEmitter(host.dialect(), types, elements, repositoryDeclaredType, repositoryOwnType);
         for (MethodContext mc : methods) {
             MethodSpec emitted = writeEmitter.emit(ctx, mc);
             if (emitted != null) {

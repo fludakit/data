@@ -194,10 +194,11 @@ public final class MetamodelEmitter {
         String constName = toScreamingSnakeCase(ec.name());
         addStringConstant(builder, constName, ec.name());
 
-        if (!(ec.definition() instanceof TypeDefinition.Entity targetEntity)) {
+        TypeDefinition target = ec.definition();
+        if (!(target instanceof TypeDefinition.Entity || target instanceof TypeDefinition.Aggregate)) {
             return;
         }
-        ClassName elementType = ClassName.bestGuess(targetEntity.typeName());
+        ClassName elementType = ClassName.bestGuess(target.typeName());
         TypeName fieldType = ParameterizedTypeName.get(LIST_ATTRIBUTE, entityType, elementType);
         TypeName recordType = ParameterizedTypeName.get(LIST_ATTRIBUTE_RECORD, entityType, elementType);
 

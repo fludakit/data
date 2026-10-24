@@ -38,7 +38,7 @@ class MutationPlanTest {
         var innerStep = new MutationPlan.CascadeSpec(
                 null, innerEc, MutationPlan.CascadeMode.REPLACE, List.of());
         var outerEc = new TypeDefinition.Prop.EntityCollection(
-                "workHistory", "java.util.List", null, "profile_id", "profile");
+                "workHistory", "java.util.List", null, "profile_id", "profile", null);
         var outerStep = new MutationPlan.CascadeSpec(
                 null, outerEc, MutationPlan.CascadeMode.DIFF_SYNC, List.of(innerStep));
         var plan = new MutationPlan(MutationPlan.MutationType.INSERT, List.of(outerStep));

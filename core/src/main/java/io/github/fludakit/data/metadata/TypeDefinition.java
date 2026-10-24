@@ -184,13 +184,27 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
                 edges.add(new JoinEdge.ToOne(ownerFk, childId));
                 current = assoc.definition();
             } else if (prop instanceof Prop.EntityCollection ec) {
-                // To-many: child table has FK pointing back to owner table's ID
-                ColumnRef.Simple ownerId = new ColumnRef.Simple(
-                        current.idColumn(), current.tableName());
-                ColumnRef.ForeignKey childFk = new ColumnRef.ForeignKey(
-                        ec.fkColumn(), ec.definition().tableName());
-                edges.add(new JoinEdge.ToMany(ownerId, childFk));
-                current = ec.definition();
+                if (ec.joinTable() != null) {
+                    // Many-to-many: root.id → join_table.root_col, then join_table.target_col → target.id
+                    JoinTable joinTable = ec.joinTable();
+                    String rootColumn = joinTable.columnFor(current.typeName());
+                    String targetColumn = joinTable.columnFor(ec.definition().typeName());
+                    edges.add(new JoinEdge.ToMany(
+                            new ColumnRef.Simple(current.idColumn(), current.tableName()),
+                            new ColumnRef.ForeignKey(rootColumn, joinTable.table())));
+                    edges.add(new JoinEdge.ToOne(
+                            new ColumnRef.ForeignKey(targetColumn, joinTable.table()),
+                            new ColumnRef.Simple(ec.definition().idColumn(), ec.definition().tableName())));
+                    current = ec.definition();
+                } else {
+                    // To-many: child table has FK pointing back to owner table's ID
+                    ColumnRef.Simple ownerId = new ColumnRef.Simple(
+                            current.idColumn(), current.tableName());
+                    ColumnRef.ForeignKey childFk = new ColumnRef.ForeignKey(
+                            ec.fkColumn(), ec.definition().tableName());
+                    edges.add(new JoinEdge.ToMany(ownerId, childFk));
+                    current = ec.definition();
+                }
             } else if (prop instanceof Prop.ElementCollection ec) {
                 // Element collection: child table has FK pointing back to owner table's ID
                 ColumnRef.Simple ownerId = new ColumnRef.Simple(
@@ -447,7 +461,8 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
          * A to-many entity collection stored in the child table (OneToMany or ManyToMany).
          * The definition may be an Entity or an Aggregate (when the target is itself an aggregate root).
          */
-        record EntityCollection(String name, String javaType, TypeDefinition definition, String fkColumn, String mappedBy) implements Prop {
+        record EntityCollection(String name, String javaType, TypeDefinition definition, String fkColumn,
+                               String mappedBy, JoinTable joinTable) implements Prop {
         }
 
         // ── ElementCollection property ───────────────────────────────────

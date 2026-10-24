@@ -454,21 +454,41 @@ public final class QueryCompiler {
 
     /**
      * The EXISTS conjunct a predicate on an existential (to-many head) — or on ANY traversed ref in a
-     * DELETE — renders instead of a joined WHERE term: the ref's LAST edge supplies the child table
-     * and the edge-side column; the correlation closes on the edge's owner-side column — the root id
-     * for a to-many head, the owner-side FK for a to-one head. The leaf term is
-     * {@link #render(SqlDialect, Predicate, ColumnPlacement)}'s table-qualified rendering, so the
-     * named parameter and the caller's binding are unchanged.
+     * DELETE — renders instead of a joined WHERE term: the ref's HEAD edge supplies the child table
+     * and the edge-side column; the correlation closes on the head edge's owner-side column — the
+     * root id for a to-many head. Deeper edges (the many-to-many second hop) chain as LEFT JOINs.
+     * The leaf term is {@link #render(SqlDialect, Predicate, ColumnPlacement)}'s table-qualified
+     * rendering, so the named parameter and the caller's binding are unchanged.
      */
     public static String existsConjunct(SqlDialect dialect, Predicate predicate, ColumnPlacement placement) {
         List<JoinEdge> edges = placement.edges();
-        JoinEdge join = edges.getLast();
-        String owner = join.ownerTable();
-        return "EXISTS (SELECT 1 FROM " + dialect.quoteIdentifier(join.childTable()) + " "
-                + dialect.quoteIdentifier(join.childTable())
-                + " WHERE " + dialect.quoteIdentifier(join.childTable()) + "." + dialect.quoteIdentifier(join.childColumn())
-                + " = " + dialect.quoteIdentifier(owner) + "." + dialect.quoteIdentifier(join.ownerColumn())
-                + " AND " + render(dialect, predicate, placement) + ")";
+        if (edges.isEmpty()) {
+            throw new IllegalArgumentException("exists conjunct requires a relation path");
+        }
+        // The HEAD edge opens the subquery FROM; any deeper edges (the many-to-many second hop)
+        // chain inside as LEFT JOINs. Correlation closes on the head edge: child.headColumn =
+        // owner.headColumn (root id for a to-many head). A one-to-many path has exactly one edge and
+        // renders as before.
+        JoinEdge head = edges.getFirst();
+        String owner = head.ownerTable();
+        StringBuilder sb = new StringBuilder("EXISTS (SELECT 1 FROM ")
+                .append(dialect.quoteIdentifier(head.childTable())).append(' ')
+                .append(dialect.quoteIdentifier(head.childTable()));
+        for (int i = 1; i < edges.size(); i++) {
+            JoinEdge join = edges.get(i);
+            sb.append(" LEFT JOIN ").append(dialect.quoteIdentifier(join.childTable()))
+                    .append(" AS ").append(dialect.quoteIdentifier(join.childTable()))
+                    .append(" ON ").append(dialect.quoteIdentifier(join.ownerTable())).append('.')
+                    .append(dialect.quoteIdentifier(join.ownerColumn()))
+                    .append(" = ").append(dialect.quoteIdentifier(join.childTable())).append('.')
+                    .append(dialect.quoteIdentifier(join.childColumn()));
+        }
+        sb.append(" WHERE ").append(dialect.quoteIdentifier(head.childTable())).append('.')
+                .append(dialect.quoteIdentifier(head.childColumn()))
+                .append(" = ").append(dialect.quoteIdentifier(owner)).append('.')
+                .append(dialect.quoteIdentifier(head.ownerColumn()))
+                .append(" AND ").append(render(dialect, predicate, placement)).append(')');
+        return sb.toString();
     }
 
 

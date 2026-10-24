@@ -154,42 +154,59 @@ public final class HydrationEmitter {
      */
     private MethodSpec emitEntityCollectionLoader(RepositoryContext ctx,
                                                    TypeDefinition.Prop.EntityCollection ec) {
-        if (!(ec.definition() instanceof TypeDefinition.Entity childEntity)) return null;
+        TypeDefinition child = ec.definition();
+        if (!(child instanceof TypeDefinition.Entity || child instanceof TypeDefinition.Aggregate)) return null;
+        if (child.tableName() == null || child.idColumn() == null) return null;
 
         ClassName entityClass = ClassName.bestGuess(ctx.entity().typeName());
-        ClassName childClass = ClassName.bestGuess(childEntity.typeName());
+        ClassName childClass = ClassName.bestGuess(child.typeName());
         String methodName = "load" + capitalize(ec.name());
 
-        // Build SELECT SQL for children by parent FK
-        String childTable = dialect.quoteIdentifier(childEntity.tableName());
-        String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
+        String childTable = dialect.quoteIdentifier(child.tableName());
+        String selectFrom;
+        String selectWhere;
+        if (ec.joinTable() != null) {
+            // Many-to-many: join_table.root_col = :parentId JOIN target ON join_table.target_col = target.id.
+            String joinTable = dialect.quoteIdentifier(ec.joinTable().table());
+            String rootCol = dialect.quoteIdentifier(ec.joinTable().columnFor(ctx.entity().typeName()));
+            String targetCol = dialect.quoteIdentifier(ec.joinTable().columnFor(child.typeName()));
+            selectFrom = " FROM " + joinTable + " AS " + joinTable
+                    + " JOIN " + childTable + " AS " + childTable
+                    + " ON " + joinTable + "." + targetCol + " = " + childTable + "." + dialect.quoteIdentifier(child.idColumn());
+            selectWhere = " WHERE " + joinTable + "." + rootCol + " = :parentId";
+        } else {
+            String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
+            selectFrom = " FROM " + childTable;
+            selectWhere = " WHERE " + fkColumn + " = :parentId";
+        }
 
         // Build column list from child mapping - include scalar columns AND ASSOCIATION FK columns
         // ASSOCIATION relations on entity collection elements are materialized as id-only partials
+        // The m2m JOIN shares column names with the join table (e.g. book.author_id), so child
+        // columns must be table-qualified there; the row mapper still reads them by alias.
+        String colQualifier = ec.joinTable() != null ? childTable + "." : "";
         List<String> columns = new ArrayList<>();
-        TypeDefinition.Prop.Id childIdProp = idProp(childEntity);
+        TypeDefinition.Prop.Id childIdProp = idProp(child);
         if (childIdProp != null) {
-            columns.add(dialect.quoteIdentifier(childIdProp.columnName()) + " AS "
+            columns.add(colQualifier + dialect.quoteIdentifier(childIdProp.columnName()) + " AS "
                     + dialect.quoteIdentifier(childIdProp.name()));
         }
-        for (TypeDefinition.Prop prop : childEntity.properties()) {
+        for (TypeDefinition.Prop prop : child.properties()) {
             if (prop instanceof TypeDefinition.Prop.Scalar s) {
-                columns.add(dialect.quoteIdentifier(s.columnName()) + " AS "
+                columns.add(colQualifier + dialect.quoteIdentifier(s.columnName()) + " AS "
                         + dialect.quoteIdentifier(s.name()));
             }
         }
         // Include ASSOCIATION FK columns so row mapper can create id-only partials for back-references
-        for (TypeDefinition.Prop prop : childEntity.properties()) {
+        for (TypeDefinition.Prop prop : child.properties()) {
             if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.fkColumn() != null) {
                 // Use column name as alias (not property name) so RowMapper can find it
-                columns.add(dialect.quoteIdentifier(assoc.fkColumn()) + " AS "
+                columns.add(colQualifier + dialect.quoteIdentifier(assoc.fkColumn()) + " AS "
                         + dialect.quoteIdentifier(assoc.fkColumn()));
             }
         }
 
-        String selectSql = "SELECT " + String.join(", ", columns)
-                + " FROM " + childTable
-                + " WHERE " + fkColumn + " = :parentId";
+        String selectSql = "SELECT " + String.join(", ", columns) + selectFrom + selectWhere;
         String constName = ctx.registerConstant("HYDRATE_" + ec.name().toUpperCase(), selectSql);
 
         MethodSpec.Builder builder = MethodSpec.methodBuilder(methodName)
@@ -201,7 +218,7 @@ public final class HydrationEmitter {
         String setterName = "set" + Character.toUpperCase(ec.name().charAt(0)) + ec.name().substring(1);
 
         // Derive child row mapper class name
-        ClassName childRowMapper = deriveRowMapperType(childEntity.typeName());
+        ClassName childRowMapper = deriveRowMapperType(child.typeName());
 
         CodeBlock.Builder body = CodeBlock.builder();
         body.add("$T<$T> items = jdbcClient\n", List.class, childClass);

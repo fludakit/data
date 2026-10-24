@@ -28,7 +28,9 @@ import java.util.Set;
 
 /**
  * Scans {@code @Entity}, {@code @AggregateRoot}, and {@code @ValueObject} annotated types from a
- * processing round and builds {@link TypeDefinition} instances cached by fully-qualified type name.
+ * processing round and builds {@link TypeDefinition} instances into the {@link TypeGraph} the
+ * processor owns. All building happens here, during the early scan — consumers downstream read
+ * the populated graph and never trigger a build.
  *
  * <p>Two-pass approach: the first pass builds all definitions with {@code definition=null} for unresolved
  * cross-references; the second pass fills in targets from the cache.
@@ -40,15 +42,16 @@ final class TypeMappingVisitor {
     private final Diagnostics diagnostics;
 
     /** The whole type graph: definitions, managed entities, and deferred targets. */
-    private final TypeGraph graph = new TypeGraph();
+    private final TypeGraph graph;
 
     /** FQNs currently being built — cycle detection. */
     private final Set<String> inProgress = new HashSet<>();
 
-    TypeMappingVisitor(Types types, Elements elements, Diagnostics diagnostics) {
+    TypeMappingVisitor(Types types, Elements elements, Diagnostics diagnostics, TypeGraph graph) {
         this.types = types;
         this.elements = elements;
         this.diagnostics = diagnostics;
+        this.graph = graph;
     }
 
     // ── Public API ───────────────────────────────────────────────────────
@@ -158,22 +161,17 @@ final class TypeMappingVisitor {
         return definition;
     }
 
-    private TypeDefinition.Prop.Id buildIdProp(String fieldName, TypeMirror fieldType, String ownerFqn) {
-        String typeFqn = typeFqn(fieldType);
-        String columnName = Names.toSnakeCase(fieldName);
-        // Default to NONE - could be enhanced to detect @GeneratedValue
-        return new TypeDefinition.Prop.Id(fieldName, typeFqn, columnName,
-                TypeDefinition.Prop.Id.GeneratedType.NONE);
-    }
-
-    /** Cache lookup by fully-qualified type name. */
-    TypeDefinition get(String fqn) {
+    /**
+     * Resolves a type by name while scanning: a cached definition when the graph already holds
+     * one, otherwise an on-demand build with forced entity treatment — the rule that makes a
+     * relation target an entity because it is referenced. Scan-internal only; repository entity
+     * types must carry their own annotation, and consumers read the populated graph exclusively.
+     */
+    private TypeDefinition get(String fqn) {
         TypeDefinition def = graph.get(fqn);
         if (def == null) {
-            // Try to scan this type on-demand if it exists
             TypeElement te = elements.getTypeElement(fqn);
             if (te != null && !inProgress.contains(te.getQualifiedName().toString())) {
-                // Force entity treatment for types referenced by repositories
                 visitType(te, true);
                 def = graph.get(fqn);
             }
@@ -181,9 +179,12 @@ final class TypeMappingVisitor {
         return def;
     }
 
-    /** The underlying type graph. */
-    TypeGraph graph() {
-        return graph;
+    private TypeDefinition.Prop.Id buildIdProp(String fieldName, TypeMirror fieldType, String ownerFqn) {
+        String typeFqn = typeFqn(fieldType);
+        String columnName = Names.toSnakeCase(fieldName);
+        // Default to NONE - could be enhanced to detect @GeneratedValue
+        return new TypeDefinition.Prop.Id(fieldName, typeFqn, columnName,
+                TypeDefinition.Prop.Id.GeneratedType.NONE);
     }
 
     // ── Field classification — entities / aggregate roots ────────────────

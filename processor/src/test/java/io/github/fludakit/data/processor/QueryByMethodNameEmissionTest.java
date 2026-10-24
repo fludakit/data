@@ -42,6 +42,7 @@ class QueryByMethodNameEmissionTest {
 
         Files.writeString(sourceDir.resolve("Note.java"), """
                 package strop;
+                @io.github.fludakit.data.annotation.Entity
                 public class Note {
                     public Long id;
                     public String text;
@@ -108,6 +109,7 @@ class QueryByMethodNameEmissionTest {
 
         Files.writeString(sourceDir.resolve("Ticket.java"), """
                 package cmpop;
+                @io.github.fludakit.data.annotation.Entity
                 public class Ticket {
                     public Long id;
                     public int quantity;
@@ -177,6 +179,7 @@ class QueryByMethodNameEmissionTest {
 
         Files.writeString(sourceDir.resolve("Memo.java"), """
                 package orsql;
+                @io.github.fludakit.data.annotation.Entity
                 public class Memo {
                     public Long id;
                     public String text;
@@ -223,6 +226,7 @@ class QueryByMethodNameEmissionTest {
 
         Files.writeString(sourceDir.resolve("Memo.java"), """
                 package distinctq;
+                @io.github.fludakit.data.annotation.Entity
                 public class Memo {
                     public Long id;
                     public String text;
@@ -264,6 +268,7 @@ class QueryByMethodNameEmissionTest {
 
         Files.writeString(sourceDir.resolve("Memo.java"), """
                 package unresolvedpath;
+                @io.github.fludakit.data.annotation.Entity
                 public class Memo {
                     public Long id;
                     public String text;
@@ -305,6 +310,7 @@ class QueryByMethodNameEmissionTest {
 
         Files.writeString(sourceDir.resolve("Memo.java"), """
                 package isnullsuffix;
+                @io.github.fludakit.data.annotation.Entity
                 public class Memo {
                     public Long id;
                     public String name;
@@ -341,6 +347,7 @@ class QueryByMethodNameEmissionTest {
 
         Files.writeString(sourceDir.resolve("Memo.java"), """
                 package qbnunparseable;
+                @io.github.fludakit.data.annotation.Entity
                 public class Memo {
                     public Long id;
                     public String text;
@@ -382,6 +389,7 @@ class QueryByMethodNameEmissionTest {
 
         Files.writeString(sourceDir.resolve("Memo.java"), """
                 package qbnreason;
+                @io.github.fludakit.data.annotation.Entity
                 public class Memo {
                     public Long id;
                     public Long price;
@@ -422,6 +430,7 @@ class QueryByMethodNameEmissionTest {
 
         Files.writeString(sourceDir.resolve("Note.java"), """
                 package bygoverns;
+                @io.github.fludakit.data.annotation.Entity
                 public class Note {
                     public Long id;
                     public String title;

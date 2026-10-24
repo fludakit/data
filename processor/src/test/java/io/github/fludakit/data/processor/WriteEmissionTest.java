@@ -105,6 +105,7 @@ class WriteEmissionTest {
 
         Files.writeString(sourceDir.resolve("Book.java"), """
                 package collidingconstants;
+                @io.github.fludakit.data.annotation.Entity
                 public class Book {
                     public Long id;
                     public String title;
@@ -161,6 +162,7 @@ class WriteEmissionTest {
         Files.writeString(sourceDir.resolve("Album.java"), """
                 package ecnestedvo;
                 import java.util.List;
+                @io.github.fludakit.data.annotation.Entity
                 public class Album {
                     Long id;
                     String title;
@@ -1147,6 +1149,7 @@ class WriteEmissionTest {
                 import io.github.fludakit.data.annotation.AggregateRoot;
                 import io.github.fludakit.data.annotation.Identity;
                 @AggregateRoot
+                @io.github.fludakit.data.annotation.Entity
                 public class Book {
                     @Identity Long id;
                     String title;

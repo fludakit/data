@@ -35,7 +35,9 @@ public class RepositoryProcessor extends AbstractProcessor {
     private Elements elements;
     private Filer filer;
     private SqlDialect dialect;
-    private TypeMappingVisitor typeMappingVisitor;
+
+    /** The type cache for the whole compilation: populated by the early scan, read by everything else. */
+    private final TypeGraph typeGraph = new TypeGraph();
 
     @Override
     public SourceVersion getSupportedSourceVersion() {
@@ -50,16 +52,15 @@ public class RepositoryProcessor extends AbstractProcessor {
         this.elements = processingEnv.getElementUtils();
         this.filer = processingEnv.getFiler();
         this.dialect = resolveDialect(processingEnv.getOptions().get("fluda.dialect"));
-        this.typeMappingVisitor = new TypeMappingVisitor(types, elements, diagnostics);
     }
 
     @Override
     public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
         if (roundEnv.processingOver()) return false;
 
-        // Phase 1: Scan types
+        // Phase 1: Scan types into the shared graph
         try {
-            typeMappingVisitor.scanRound(roundEnv);
+            new TypeMappingVisitor(types, elements, diagnostics, typeGraph).scanRound(roundEnv);
         } catch (RuntimeException e) {
             String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getName();
             diagnostics.error("fluda-data: " + msg, null);
@@ -70,7 +71,7 @@ public class RepositoryProcessor extends AbstractProcessor {
             if (element.getKind() != javax.lang.model.element.ElementKind.INTERFACE) continue;
             TypeElement repository = (TypeElement) element;
             try {
-                new RepositoryVisitor(repository, this).visit();
+                new RepositoryVisitor(repository, types, elements, diagnostics, filer, typeGraph, dialect).visit();
             } catch (RuntimeException e) {
                 String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getName();
                 diagnostics.error(
@@ -90,18 +91,18 @@ public class RepositoryProcessor extends AbstractProcessor {
     
     private void generateMissingRowMappers() {
         RowMapperEmitter emitter = new RowMapperEmitter(types, elements, filer);
-        
+
         // Generate row mappers for entities and aggregates
-        for (String fqn : typeMappingVisitor.graph().managedEntities()) {
-            TypeDefinition def = typeMappingVisitor.graph().get(fqn);
+        for (String fqn : typeGraph.managedEntities()) {
+            TypeDefinition def = typeGraph.get(fqn);
             if (def != null && (def instanceof TypeDefinition.Entity || def instanceof TypeDefinition.Aggregate)) {
                 emitter.emit(def);
             }
         }
-        
+
         // Generate row mappers for value objects used in element collections
-        for (String fqn : typeMappingVisitor.graph().elementCollectionValueObjects()) {
-            TypeDefinition def = typeMappingVisitor.graph().get(fqn);
+        for (String fqn : typeGraph.elementCollectionValueObjects()) {
+            TypeDefinition def = typeGraph.get(fqn);
             if (def != null && def instanceof TypeDefinition.ValueObject) {
                 emitter.emit(def);
             }
@@ -110,8 +111,8 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     private void generateValueObjectMetamodels() {
         MetamodelEmitter emitter = new MetamodelEmitter(filer, diagnostics);
-        for (String fqn : typeMappingVisitor.graph().valueObjects()) {
-            TypeDefinition def = typeMappingVisitor.graph().get(fqn);
+        for (String fqn : typeGraph.valueObjects()) {
+            TypeDefinition def = typeGraph.get(fqn);
             if (def != null) {
                 emitter.emit(def);
             }
@@ -122,12 +123,4 @@ public class RepositoryProcessor extends AbstractProcessor {
         if ("postgresql".equalsIgnoreCase(option)) return io.github.fludakit.data.sql.PostgreSqlDialect.INSTANCE;
         return H2Dialect.INSTANCE;
     }
-
-    // Package-private accessors for visitors/emitters
-    TypeMappingVisitor typeMappingVisitor() { return typeMappingVisitor; }
-    public SqlDialect dialect() { return dialect; }
-    public Filer filer() { return filer; }
-    public Diagnostics diagnostics() { return diagnostics; }
-    public Types types() { return types; }
-    public Elements elements() { return elements; }
 }

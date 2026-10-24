@@ -31,9 +31,8 @@ import java.util.stream.Collectors;
  *
  * <p><b>This class renders nothing of its own.</b> Every method delegates to
  * {@link QueryCompiler}, which is the ONE structured-query renderer, or to {@link SqlFragment},
- * which is the ONE ordered statement accumulator. The two are shared with {@link Sql}, the
- * compile-time fluent builder, so a statement built either way is rendered by the same code and
- * cannot drift.</p>
+ * which is the ONE ordered statement accumulator, so every statement is rendered by the same
+ * code and cannot drift.</p>
  *
  * <p>Physical lifecycle statements use a {@link TableSchema} for one table; structured queries also
  * use an {@link ColumnResolver} for entity-rooted paths. {@link #select()} / {@link #count()} /
@@ -44,9 +43,6 @@ import java.util.stream.Collectors;
  * {@link SqlDialect}; {@link H2Dialect} is the default and only shipped backend.
  * {@link #paramName(String)} is the one pure (stateless) helper kept here for generated-code
  * parity.</p>
- *
- * <p>Prefer {@link Sql} for new compile-time SQL: its staged types reject an illegal clause order at
- * compile time rather than at run time.</p>
  */
 public final class SqlBuilder {
 

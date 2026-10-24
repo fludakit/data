@@ -29,9 +29,9 @@ import java.util.stream.Collectors;
  * every predicate and sort ref, then assembles the whole statement as a {@link SqlFragment}.
  *
  * <p>This is the engine's only structured-query renderer. {@link SqlBuilder} exposes it as instance
- * methods for callers that splice dynamic SQL at runtime (the generated paged readers), and
- * {@link Sql} exposes it as a fluent chain; neither owns rendering logic of its own, so there is
- * exactly one place where a logical path becomes a physical column.</p>
+ * methods for callers that splice dynamic SQL at runtime (the generated paged readers); it owns no
+ * rendering logic of its own, so there is exactly one place where a logical path becomes a
+ * physical column.</p>
  *
  * <h2>The layout rules</h2>
  * <ul>

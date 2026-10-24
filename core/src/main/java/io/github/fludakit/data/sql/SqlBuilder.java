@@ -213,6 +213,19 @@ public final class SqlBuilder {
         return render(new QueryDefinition.DeleteById(resultKind));
     }
 
+    /**
+     * Renders a cascade DELETE of the named child table's rows by the parent's foreign key.
+     * The child table travels with the statement; this builder's schema is not used.
+     */
+    public String deleteByFk(String table, String fkColumn) {
+        return render(new QueryDefinition.DeleteByFk(table, fkColumn));
+    }
+
+    /** Renders the read of this builder's table foreign-key column for one identifier. */
+    public String selectForeignKey(String fkColumn) {
+        return render(new QueryDefinition.SelectForeignKey(fkColumn));
+    }
+
     // --------------------------------------------------------------- splice primitives
 
     /** Qualifies a table-local column by its owner table, or the schema's root table. */

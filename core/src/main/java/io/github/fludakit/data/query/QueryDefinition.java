@@ -269,6 +269,52 @@ public sealed interface QueryDefinition {
     }
 
     /**
+     * A cascade {@code DELETE} of one child table's rows by the owning parent's foreign key —
+     * how an aggregate's child tables (element collections and entity collections) are emptied
+     * when the parent is deleted. The table travels with the statement because a child table has
+     * no {@code TableSchema} of its own in the render context.
+     *
+     * <p>Renders {@code DELETE FROM <table> WHERE <fk> = :parentId}.</p>
+     *
+     * @param table    the child table's physical name
+     * @param fkColumn the child table's foreign-key column pointing at the parent
+     */
+    record DeleteByFk(String table, String fkColumn) implements QueryDefinition {
+
+        @Override
+        public Operation operation() {
+            return Operation.DELETE;
+        }
+
+        @Override
+        public ResultKind resultKind() {
+            return ResultKind.VOID;
+        }
+    }
+
+    /**
+     * Reads the context table's foreign-key column for one identifier — the composing child's
+     * key, loaded before the parent row (which carries it) is deleted.
+     *
+     * <p>Renders {@code SELECT <fk> FROM <table> WHERE <id> = :id} against the render context's
+     * {@code TableSchema}.</p>
+     *
+     * @param fkColumn the context table's foreign-key column
+     */
+    record SelectForeignKey(String fkColumn) implements QueryDefinition {
+
+        @Override
+        public Operation operation() {
+            return Operation.FIND;
+        }
+
+        @Override
+        public ResultKind resultKind() {
+            return ResultKind.VOID;
+        }
+    }
+
+    /**
      * A user-supplied native SQL statement declared with {@code @Query}. It has no logical attribute
      * paths — the statement text is the whole query — so it publishes only the SQL and the declared
      * result shape. {@link #operation()} returns {@link Operation#FIND} as a placeholder: a native

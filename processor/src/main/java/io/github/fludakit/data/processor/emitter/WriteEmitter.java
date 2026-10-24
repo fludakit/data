@@ -13,7 +13,6 @@ import io.github.fludakit.data.processor.support.ExceptionTranslation;
 import io.github.fludakit.data.processor.support.MethodOverrides;
 import io.github.fludakit.data.query.Operation;
 import io.github.fludakit.data.query.ResultKind;
-import io.github.fludakit.data.sql.H2Dialect;
 import io.github.fludakit.data.sql.SqlBuilder;
 import io.github.fludakit.data.sql.SqlDialect;
 import io.github.fludakit.data.sql.UpsertForm;
@@ -51,10 +50,6 @@ public final class WriteEmitter {
         this.elements = elements;
         this.baseRepositoryType = baseRepositoryType;
         this.repositoryOwnType = repositoryOwnType;
-    }
-
-    public WriteEmitter(Types types, Elements elements, DeclaredType baseRepositoryType, DeclaredType repositoryOwnType) {
-        this(H2Dialect.INSTANCE, types, elements, baseRepositoryType, repositoryOwnType);
     }
 
     private DeclaredType resolveTypeFor(ExecutableElement method) {

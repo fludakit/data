@@ -92,16 +92,16 @@ public class RepositoryProcessor extends AbstractProcessor {
         RowMapperEmitter emitter = new RowMapperEmitter(types, elements, filer);
         
         // Generate row mappers for entities and aggregates
-        for (String fqn : typeMappingVisitor.managedEntities()) {
-            TypeDefinition def = typeMappingVisitor.get(fqn);
+        for (String fqn : typeMappingVisitor.graph().managedEntities()) {
+            TypeDefinition def = typeMappingVisitor.graph().get(fqn);
             if (def != null && (def instanceof TypeDefinition.Entity || def instanceof TypeDefinition.Aggregate)) {
                 emitter.emit(def);
             }
         }
         
         // Generate row mappers for value objects used in element collections
-        for (String fqn : typeMappingVisitor.elementCollectionValueObjects()) {
-            TypeDefinition def = typeMappingVisitor.get(fqn);
+        for (String fqn : typeMappingVisitor.graph().elementCollectionValueObjects()) {
+            TypeDefinition def = typeMappingVisitor.graph().get(fqn);
             if (def != null && def instanceof TypeDefinition.ValueObject) {
                 emitter.emit(def);
             }
@@ -110,8 +110,8 @@ public class RepositoryProcessor extends AbstractProcessor {
 
     private void generateValueObjectMetamodels() {
         MetamodelEmitter emitter = new MetamodelEmitter(filer, diagnostics);
-        for (String fqn : typeMappingVisitor.allValueObjects()) {
-            TypeDefinition def = typeMappingVisitor.get(fqn);
+        for (String fqn : typeMappingVisitor.graph().valueObjects()) {
+            TypeDefinition def = typeMappingVisitor.graph().get(fqn);
             if (def != null) {
                 emitter.emit(def);
             }

@@ -25,8 +25,8 @@ import java.util.Set;
  * by name from the {@link java.sql.ResultSet} and constructs the entity via setters.</p>
  *
  * <p>Eligibility: an entity is eligible only if all its props are JDBC-safe (scalars, enums,
- * or embedded value objects). Entities with {@link RelationKind#TO_MANY},
- * or {@link RelationKind#ELEMENT_COLLECTION} are NOT eligible and {@link #emit(TypeDefinition)} returns
+ * or embedded value objects). Entities with {@link TypeDefinition.Prop.EntityCollection},
+ * or {@link TypeDefinition.Prop.ElementCollection} are NOT eligible and {@link #emit(TypeDefinition)} returns
  * {@code null}.</p>
  */
 public final class RowMapperEmitter {

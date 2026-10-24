@@ -61,16 +61,12 @@ public final class FindEmitter {
     private final DeclaredType baseRepositoryType;
     private final DeclaredType repositoryOwnType;
 
-    public FindEmitter(SqlDialect dialect, Types types, DeclaredType baseRepositoryType, DeclaredType repositoryOwnType) {
-        this.dialect = dialect;
+    /** Default constructor using H2 dialect. */
+    public FindEmitter(Types types, DeclaredType baseRepositoryType, DeclaredType repositoryOwnType) {
+        this.dialect = H2Dialect.INSTANCE;
         this.types = types;
         this.baseRepositoryType = baseRepositoryType;
         this.repositoryOwnType = repositoryOwnType;
-    }
-
-    /** Default constructor using H2 dialect. */
-    public FindEmitter(Types types, DeclaredType baseRepositoryType, DeclaredType repositoryOwnType) {
-        this(H2Dialect.INSTANCE, types, baseRepositoryType, repositoryOwnType);
     }
 
     /**
@@ -1430,7 +1426,7 @@ public final class FindEmitter {
      * Converts a method name to a SQL constant name base.
      * E.g. {@code findByName} → {@code FIND_BY_NAME_SQL}.
      */
-    static String toSqlConstantName(String methodName) {
+    private static String toSqlConstantName(String methodName) {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < methodName.length(); i++) {
             char c = methodName.charAt(i);

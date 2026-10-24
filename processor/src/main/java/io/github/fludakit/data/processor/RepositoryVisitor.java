@@ -129,10 +129,7 @@ final class RepositoryVisitor {
             return;
         }
 
-        // 3. Determine repository flavour
-        boolean crud = extendsInterface(CRUD_REPOSITORY);
-
-        // 4. Generate row mapper (or null if not eligible)
+        // 3. Generate row mapper (or null if not eligible)
         RowMapperEmitter rowMapperEmitter = new RowMapperEmitter(types, elements, filer);
         ClassName rowMapperType = rowMapperEmitter.emit(entityMapping);
         if (rowMapperType == null) {
@@ -147,10 +144,8 @@ final class RepositoryVisitor {
         // 4b. Generate static metamodel (_Entity interface)
         new MetamodelEmitter(filer, diagnostics).emit(entityMapping);
 
-        // 5. Create RepositoryContext
-        RepositoryContext ctx = new RepositoryContext(
-                entityMapping, crud, rowMapperType,
-                repository.getQualifiedName().toString());
+        // 4. Create RepositoryContext
+        RepositoryContext ctx = new RepositoryContext(entityMapping, rowMapperType);
 
         // 6. Iterate abstract methods
         for (javax.lang.model.element.Element member : elements.getAllMembers(repository)) {
@@ -209,7 +204,7 @@ final class RepositoryVisitor {
         }
 
         // 6c. Emit batch lifecycle methods (saveAll, deleteAll, deleteByIds)
-        LifecycleEmitter lifecycleEmitter = new LifecycleEmitter(types, elements, repositoryDeclaredType, repositoryOwnType);
+        LifecycleEmitter lifecycleEmitter = new LifecycleEmitter(types, repositoryDeclaredType, repositoryOwnType);
         for (MethodContext mc : methods) {
             MethodSpec emitted = lifecycleEmitter.emit(ctx, mc);
             if (emitted != null) {
@@ -240,8 +235,6 @@ final class RepositoryVisitor {
             List<MethodSpec> loaders = hydrationEmitter.emitCollectionLoaders(ctx);
             ctx.auxMethods().addAll(loaders);
         }
-
-        // 6f. Emit QueryModel (static QueryDefinition fields)
 
         // 7. Generate skeleton Repository_ class
         emitSkeleton(ctx);
@@ -309,25 +302,6 @@ final class RepositoryVisitor {
             result.addAll(getAllInterfaces(superElement));
         }
         return result;
-    }
-
-    // ── Repository flavour detection ─────────────────────────────────────
-
-    private boolean extendsInterface(String fqn) {
-        for (TypeMirror iface : repository.getInterfaces()) {
-            if (iface.getKind() == TypeKind.DECLARED) {
-                TypeElement te = (TypeElement) ((DeclaredType) iface).asElement();
-                if (te.getQualifiedName().contentEquals(fqn)) return true;
-            }
-        }
-        // Check transitive interfaces
-        for (TypeMirror iface : getAllInterfaces(repository)) {
-            if (iface.getKind() == TypeKind.DECLARED) {
-                TypeElement te = (TypeElement) ((DeclaredType) iface).asElement();
-                if (te.getQualifiedName().contentEquals(fqn)) return true;
-            }
-        }
-        return false;
     }
 
     // ── Method resolution ────────────────────────────────────────────────

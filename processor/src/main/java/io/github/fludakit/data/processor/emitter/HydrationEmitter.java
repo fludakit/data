@@ -17,7 +17,7 @@ import java.util.List;
  * Generates hydration methods for loading to-many collections on aggregate root entities.
  *
  * <p>After the main query returns parent entities, hydration methods execute separate queries
- * for each {@link RelationKind#TO_MANY} and {@link RelationKind#ELEMENT_COLLECTION},
+ * for each {@link TypeDefinition.Prop.EntityCollection} and {@link TypeDefinition.Prop.ElementCollection},
  * group results by parent FK, and set them on the parent entity.</p>
  *
  * <p>Generated methods:</p>

@@ -181,19 +181,9 @@ final class TypeMappingVisitor {
         return def;
     }
 
-    /** Returns the set of entity and aggregate-root FQNs (excludes value objects). */
-    Set<String> managedEntities() {
-        return graph.managedEntities();
-    }
-
-    /** Returns the set of value object FQNs used as element collection element types. */
-    Set<String> elementCollectionValueObjects() {
-        return graph.elementCollectionValueObjects();
-    }
-
-    /** Returns the set of ALL value object FQNs (including embedded VOs, not just element collections). */
-    Set<String> allValueObjects() {
-        return graph.valueObjects();
+    /** The underlying type graph. */
+    TypeGraph graph() {
+        return graph;
     }
 
     // ── Field classification — entities / aggregate roots ────────────────

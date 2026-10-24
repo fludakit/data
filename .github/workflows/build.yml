@@ -54,6 +54,7 @@ jobs:
           java-version: '21'
           distribution: temurin
           cache: maven
+          server-id: "github-fludakit"
 
       - name: Publish to GitHub Packages
         run: mvn -B -ntp deploy -DskipTests

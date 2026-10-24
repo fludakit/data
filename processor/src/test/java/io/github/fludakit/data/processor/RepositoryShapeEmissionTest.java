@@ -110,14 +110,6 @@ class RepositoryShapeEmissionTest {
 
         compile(sourceDir, classesDir, generatedDir, "Ticket.java", "Tickets.java");
 
-        String queries = sqlFlat(generatedDir.resolve("writekind/TicketsQueries.java"));
-        assertTrue(declarationOf(queries, "DELETE_BY_STATUS_QUERY").contains("new QueryDefinition.DeleteWhere("),
-                "a void delete publishes a DeleteWhere:" + System.lineSeparator() + queries);
-        assertTrue(declarationOf(queries, "DELETE_BY_STATUS_QUERY").contains("ResultKind.VOID)"),
-                "a void delete reports nothing:" + System.lineSeparator() + queries);
-        assertTrue(declarationOf(queries, "DELETE_BY_TITLE_QUERY").contains("ResultKind.AFFECTED)"),
-                "a long delete reports the rows it removed:" + System.lineSeparator() + queries);
-
         // The published shape must match what the impl actually does: the long delete returns the
         // JDBC update count, the void one discards it.
         String impl = sqlFlat(generatedDir.resolve("writekind/TicketsImpl.java"));
@@ -291,11 +283,6 @@ class RepositoryShapeEmissionTest {
         assertTrue(impl.contains(".list().toArray(Memo[]::new)"),
                 "an array return must materialize through toArray:" + System.lineSeparator() + impl);
 
-        String queries = sqlFlat(generatedDir.resolve("arrayreturn/MemosQueries.java"));
-        assertTrue(declarationOf(queries, "FIND_BY_TEXT_QUERY").contains("ResultKind.ARRAY,"),
-                "an array return must publish ARRAY:" + System.lineSeparator() + queries);
-        assertTrue(declarationOf(queries, "SEARCH_QUERY").contains("ResultKind.LIST,"),
-                "a List return must still publish LIST:" + System.lineSeparator() + queries);
     }
 
     @Test
@@ -334,12 +321,6 @@ class RepositoryShapeEmissionTest {
         // compile() also compiles the generated sources, so success proves both return types are
         // satisfied by the SAME materialization: a .single() or .toArray() terminal would not compile.
         compile(sourceDir, classesDir, generatedDir, "Memo.java", "Memos.java");
-
-        String queries = sqlFlat(generatedDir.resolve("collectionreturn/MemosQueries.java"));
-        assertTrue(declarationOf(queries, "FIND_BY_TEXT_QUERY").contains("ResultKind.LIST,"),
-                "a Collection return must publish LIST:" + System.lineSeparator() + queries);
-        assertTrue(declarationOf(queries, "FIND_BY_TEXT_LIKE_QUERY").contains("ResultKind.LIST,"),
-                "an Iterable return must publish LIST:" + System.lineSeparator() + queries);
 
         // Pair each constant with its own terminal rather than a file-wide "contains(.list())":
         // every finder on the repository ends in a terminal, so a file-wide match proves nothing.

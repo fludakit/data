@@ -1,6 +1,7 @@
 package io.github.fludakit.data.processor;
 
 import io.github.fludakit.data.metadata.TypeDefinition;
+import io.github.fludakit.data.processor.emitter.MetamodelEmitter;
 import io.github.fludakit.data.processor.emitter.RowMapperEmitter;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.sql.H2Dialect;
@@ -81,6 +82,9 @@ public class RepositoryProcessor extends AbstractProcessor {
         // Phase 3: Generate row mappers for all entity types (including association targets)
         generateMissingRowMappers();
         
+        // Phase 4: Generate metamodels for all value objects (needed for get() path composition)
+        generateValueObjectMetamodels();
+        
         return false;
     }
     
@@ -88,17 +92,27 @@ public class RepositoryProcessor extends AbstractProcessor {
         RowMapperEmitter emitter = new RowMapperEmitter(types, elements, filer);
         
         // Generate row mappers for entities and aggregates
-        for (String fqn : typeMappingVisitor.managedEntities()) {
-            TypeDefinition def = typeMappingVisitor.get(fqn);
+        for (String fqn : typeMappingVisitor.graph().managedEntities()) {
+            TypeDefinition def = typeMappingVisitor.graph().get(fqn);
             if (def != null && (def instanceof TypeDefinition.Entity || def instanceof TypeDefinition.Aggregate)) {
                 emitter.emit(def);
             }
         }
         
         // Generate row mappers for value objects used in element collections
-        for (String fqn : typeMappingVisitor.elementCollectionValueObjects()) {
-            TypeDefinition def = typeMappingVisitor.get(fqn);
+        for (String fqn : typeMappingVisitor.graph().elementCollectionValueObjects()) {
+            TypeDefinition def = typeMappingVisitor.graph().get(fqn);
             if (def != null && def instanceof TypeDefinition.ValueObject) {
+                emitter.emit(def);
+            }
+        }
+    }
+
+    private void generateValueObjectMetamodels() {
+        MetamodelEmitter emitter = new MetamodelEmitter(filer, diagnostics);
+        for (String fqn : typeMappingVisitor.graph().valueObjects()) {
+            TypeDefinition def = typeMappingVisitor.graph().get(fqn);
+            if (def != null) {
                 emitter.emit(def);
             }
         }

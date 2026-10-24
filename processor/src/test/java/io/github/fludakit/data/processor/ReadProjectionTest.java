@@ -18,9 +18,9 @@ import static io.github.fludakit.data.processor.ProcessorHarness.*;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * everything a READ adds on top of the base row: paging and its sort/seek wiring, how an
+ * everything a READ adds on top of the base row: paging and its sort/seek wiring, and how an
  * association is materialised (id-only partial, grouped loader, or a JOIN-projected full
- * instance), and the {@code <Repository>Queries} holder.
+ * instance).
  *
  * <p>Split out of {@code RepositoryProcessorTest}; the shared compile-and-assert plumbing
  * lives in {@link ProcessorHarness}.</p>
@@ -839,131 +839,6 @@ class ReadProjectionTest {
                         + System.lineSeparator() + impl);
     }
 
-    @Test
-    void generatesRepositoryQueriesWithNestedQueryDefinitions() throws Exception {
-        // Query-by-names methods publish their logical structure as a generated
-        // <Repo>Queries. Assert the shape, the logical predicate, the paging mode and the cursor
-        // tiebreak, plus the overload suffix. The <Repo>Impl bytes are unchanged by this emission.
-        Path sourceDir = Files.createDirectories(workspace.resolve("src/qmd"));
-        Path classesDir = Files.createDirectories(workspace.resolve("classes-qmd"));
-        Path generatedDir = Files.createDirectories(workspace.resolve("generated-qmd"));
-
-        Files.writeString(sourceDir.resolve("Widget.java"), """
-                package qmd;
-
-                public class Widget {
-                    public Long id;
-                    public String status;
-
-                    public Long getId() { return id; }
-                    public void setId(Long id) { this.id = id; }
-                    public String getStatus() { return status; }
-                    public void setStatus(String status) { this.status = status; }
-                }
-                """);
-        Files.writeString(sourceDir.resolve("Widgets.java"), """
-                package qmd;
-
-                import jakarta.data.page.Page;
-                import jakarta.data.page.PageRequest;
-                import jakarta.data.repository.CrudRepository;
-                import jakarta.data.repository.Repository;
-                import java.util.List;
-
-                @Repository
-                public interface Widgets extends CrudRepository<Widget, Long> {
-                    List<Widget> findByStatus(String status);
-                    long countByStatus(String status);
-                    Page<Widget> findByStatus(String status, PageRequest pageRequest);
-                }
-                """);
-
-        compile(sourceDir, classesDir, generatedDir, "Widget.java", "Widgets.java");
-
-        Path queriesFile = generatedDir.resolve("qmd/WidgetsQueries.java");
-        assertTrue(Files.exists(queriesFile), "expected generated " + queriesFile);
-        String queries = Files.readString(queriesFile).replaceAll("\\s+", " ");
-
-        assertTrue(queries.contains("public final class WidgetsQueries"),
-                "holder:" + System.lineSeparator() + queries);
-        // one query-definition field per query-by-names method, in declaration order, overload suffixed
-        assertTrue(queries.contains("public static final QueryDefinition FIND_BY_STATUS_QUERY = new QueryDefinition.Read("),
-                "find publishes a Read:" + System.lineSeparator() + queries);
-        assertTrue(queries.contains("public static final QueryDefinition FIND_BY_STATUS_QUERY2 = new QueryDefinition.Read("),
-                "paged overload must be suffixed and still a Read:" + System.lineSeparator() + queries);
-        assertTrue(queries.contains("public static final QueryDefinition COUNT_BY_STATUS_QUERY = new QueryDefinition.Count("),
-                "count publishes a Count:" + System.lineSeparator() + queries);
-        // query metadata retains logical paths; SqlBuilder resolves them against the schema.
-        assertTrue(queries.contains("Predicate.of(\"status\", Operator.EQ, \"status\", Connector.AND, false)"),
-                "logical predicate:" + System.lineSeparator() + queries);
-        assertTrue(queries.contains("ResultKind.LIST,"), "list result kind:" + System.lineSeparator() + queries);
-        assertTrue(queries.contains("ResultKind.PAGE,"), "paged result kind:"
-                + System.lineSeparator() + queries);
-        assertTrue(queries.contains("PagingMode.OFFSET,"), "paged mode:"
-                + System.lineSeparator() + queries);
-        assertTrue(queries.contains("PagingMode.NONE,"), "plain mode:" + System.lineSeparator() + queries);
-        assertTrue(queries.contains("new ParamBinding(0, \"status\", LikePattern.NONE)"), "param binding:"
-                + System.lineSeparator() + queries);
-        // the paged model declares no ORDER BY sorts of its own here, and its seek terms are the
-        // id-ascending default the runtime cursor uses
-        assertTrue(queries.contains("new SeekTerm(")
-                        && queries.contains("new ColumnRef.Simple(\"id\", \"widget\"), true)"),
-                "default cursor seek term:" + System.lineSeparator() + queries);
-        // the impl keeps its own constants regardless of the published query definitions
-        String impl = Files.readString(generatedDir.resolve("qmd/WidgetsImpl.java"));
-        assertTrue(impl.contains("SQL_FIND_BY_STATUS"), "impl constants survive:"
-                + System.lineSeparator() + impl);
-    }
-
-    @Test
-    void overriddenInheritedFinderProducesOneQueryDefinition() throws Exception {
-        Path sourceDir = Files.createDirectories(workspace.resolve("src/query-override"));
-        Path classesDir = Files.createDirectories(workspace.resolve("classes-query-override"));
-        Path generatedDir = Files.createDirectories(workspace.resolve("generated-query-override"));
-
-        Files.writeString(sourceDir.resolve("Widget.java"), """
-                package queryoverride;
-                public class Widget {
-                    public Long id;
-                    public String status;
-                    public Long getId() { return id; }
-                    public void setId(Long id) { this.id = id; }
-                    public String getStatus() { return status; }
-                    public void setStatus(String status) { this.status = status; }
-                }
-                """);
-        Files.writeString(sourceDir.resolve("WidgetFinder.java"), """
-                package queryoverride;
-                import java.util.List;
-                public interface WidgetFinder {
-                    List<Widget> findByStatus(String status);
-                }
-                """);
-        Files.writeString(sourceDir.resolve("Widgets.java"), """
-                package queryoverride;
-                import jakarta.data.repository.CrudRepository;
-                import jakarta.data.repository.Repository;
-                import java.util.List;
-                @Repository
-                public interface Widgets extends CrudRepository<Widget, Long>, WidgetFinder {
-                    @Override
-                    List<Widget> findByStatus(String status);
-                }
-                """);
-
-        compile(sourceDir, classesDir, generatedDir, "Widget.java", "WidgetFinder.java", "Widgets.java");
-
-        String queries = Files.readString(generatedDir.resolve("queryoverride/WidgetsQueries.java"))
-                .replaceAll("\\s+", " ");
-        String impl = Files.readString(generatedDir.resolve("queryoverride/WidgetsImpl.java"))
-                .replaceAll("\\s+", " ");
-        assertTrue(queries.contains("QueryDefinition FIND_BY_STATUS_QUERY = new QueryDefinition.Read("), queries);
-        assertTrue(!queries.contains("FIND_BY_STATUS_QUERY2"), "override must not look like an overload: " + queries);
-        assertTrue(occurrences(queries, "QueryDefinition FIND_BY_STATUS_QUERY = new QueryDefinition.Read(") == 1,
-                "one query definition per effective method: " + queries);
-        assertTrue(occurrences(impl, "List<Widget> findByStatus(String status)") == 1,
-                "one implementation method per effective method: " + impl);
-    }
 
     @Test
     void postgreSqlDialectSelectionGeneratesPostgreSqlDialectField() throws Exception {

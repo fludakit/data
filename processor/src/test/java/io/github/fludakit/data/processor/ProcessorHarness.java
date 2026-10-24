@@ -37,42 +37,12 @@ final class ProcessorHarness {
     }
 
     /**
-     * A write is not always fire-and-forget. A delete-by-criteria that declares {@code long} reports
-     * the rows it removed — which the emitter already does, returning the {@code .update()} count —
-     * so the published definition must say {@code AFFECTED}, not {@code VOID}. Before the sealed split
-     * it published SINGLE; afterwards, VOID. Both were wrong, and neither was detectable from the SQL,
-     * which is identical either way.
-     */
-
-    /** The one {@code QueryDefinition} field declaration in a generated holder. */
-
-    static String declarationOf(String queries, String field) {
-        return queries.lines()
-                .filter(line -> line.contains(field + " = new QueryDefinition."))
-                .findFirst()
-                .orElseThrow(() -> new AssertionError("no " + field + " field:" + System.lineSeparator() + queries));
-    }
-
-    /**
-     * One {@code QueryDefinition} field in the generated holder, asserted to bind its argument with
-     * {@code expected}. Matched on the FIELD rather than on the whole file: every field in the holder
-     * names the same parameter, so a file-wide {@code contains} would pass even if the patterns were
-     * all swapped.
-     */
-
-    static void assertDefinitionBinds(String queries, String field, String expected) {
-        String declaration = declarationOf(queries, field);
-        assertTrue(declaration.contains("new ParamBinding(0, \"text\", " + expected + ")"),
-                field + " must bind " + expected + ":" + System.lineSeparator() + declaration);
-    }
-
-    /**
      * Pins that the method using {@code constant} binds its parameter with exactly {@code binding}.
      * Asserting the two together is what stops a same-SQL operator from passing on the wrong binding.
      */
 
     static void assertPinned(String impl, String constant, String binding) {
-        assertTrue(impl.contains("sql(" + constant + ").param(\"text\", " + binding + ")"),
+        assertTrue(impl.contains("sql(" + constant + ") .param(\"text\", " + binding + ")"),
                 constant + " must bind `" + binding + "`:" + System.lineSeparator() + impl);
     }
 

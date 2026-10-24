@@ -3,7 +3,9 @@ package io.github.fludakit.data.processor.emitter;
 import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.CodeBlock;
 import com.squareup.javapoet.MethodSpec;
-import io.github.fludakit.data.metadata.LoadStrategy;
+import io.github.fludakit.data.metadata.ColumnPlacement;
+import io.github.fludakit.data.metadata.ColumnRef;
+import io.github.fludakit.data.metadata.JoinEdge;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.RepositoryContext;
@@ -19,6 +21,7 @@ import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
 import io.github.fludakit.data.query.SortSpec;
 import io.github.fludakit.data.sql.H2Dialect;
+import io.github.fludakit.data.sql.QueryCompiler;
 import io.github.fludakit.data.sql.SqlBuilder;
 import io.github.fludakit.data.sql.SqlDialect;
 
@@ -27,7 +30,9 @@ import javax.lang.model.element.VariableElement;
 import javax.lang.model.type.DeclaredType;
 import javax.lang.model.util.Types;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Generates method implementations for finder, count, exists, and deleteBy methods.
@@ -56,16 +61,12 @@ public final class FindEmitter {
     private final DeclaredType baseRepositoryType;
     private final DeclaredType repositoryOwnType;
 
-    public FindEmitter(SqlDialect dialect, Types types, DeclaredType baseRepositoryType, DeclaredType repositoryOwnType) {
-        this.dialect = dialect;
+    /** Default constructor using H2 dialect. */
+    public FindEmitter(Types types, DeclaredType baseRepositoryType, DeclaredType repositoryOwnType) {
+        this.dialect = H2Dialect.INSTANCE;
         this.types = types;
         this.baseRepositoryType = baseRepositoryType;
         this.repositoryOwnType = repositoryOwnType;
-    }
-
-    /** Default constructor using H2 dialect. */
-    public FindEmitter(Types types, DeclaredType baseRepositoryType, DeclaredType repositoryOwnType) {
-        this(H2Dialect.INSTANCE, types, baseRepositoryType, repositoryOwnType);
     }
 
     /**
@@ -253,140 +254,98 @@ public final class FindEmitter {
         
         return props;
     }
-    
+
+    /**
+     * Recursively adds SELECT column expressions for a property, expanding embedded value objects
+     * with underscore-delimited prefixes (e.g., address_city, address_point_lat).
+     */
+    private void addColumnsForProperty(TypeDefinition.Prop prop, String tableRef, String prefix,
+                                        List<String> selectColumns) {
+        if (prop instanceof TypeDefinition.Prop.Scalar s) {
+            String col = prefix.isEmpty() ? s.columnName() : prefix + "_" + s.columnName();
+            selectColumns.add(tableRef + "." + dialect.quoteIdentifier(col));
+        } else if (prop instanceof TypeDefinition.Prop.Id id) {
+            String col = prefix.isEmpty() ? id.columnName() : prefix + "_" + id.columnName();
+            selectColumns.add(tableRef + "." + dialect.quoteIdentifier(col));
+        } else if (prop instanceof TypeDefinition.Prop.Version v) {
+            String col = prefix.isEmpty() ? v.columnName() : prefix + "_" + v.columnName();
+            selectColumns.add(tableRef + "." + dialect.quoteIdentifier(col));
+        } else if (prop instanceof TypeDefinition.Prop.Association assoc && !assoc.composition()) {
+            if (assoc.fkColumn() != null) {
+                String col = prefix.isEmpty() ? assoc.fkColumn() : prefix + "_" + assoc.fkColumn();
+                selectColumns.add(tableRef + "." + dialect.quoteIdentifier(col));
+            }
+        } else if (prop instanceof TypeDefinition.Prop.Embedded emb && emb.definition() != null) {
+            String newPrefix = prefix.isEmpty() ? emb.name() : prefix + "_" + emb.name();
+            for (TypeDefinition.Prop childProp : getAllProperties(emb.definition())) {
+                addColumnsForProperty(childProp, tableRef, newPrefix, selectColumns);
+            }
+        }
+    }
+
     /**
      * Builds SELECT SQL with LEFT JOINs for composing associations.
+     * Delegates to SqlBuilder with JoinEdge objects for proper SQL generation.
      */
     private String buildSelectWithComposingJoins(RepositoryContext ctx, 
                                                   List<TypeDefinition.Prop.Association> composingAssocs,
                                                   MethodContext method) {
-        String rootTable = dialect.quoteIdentifier(ctx.entity().tableName());
-        List<String> selectColumns = new ArrayList<>();
-        List<String> joinClauses = new ArrayList<>();
+        SqlBuilder sqlBuilder = new SqlBuilder(ctx.entity());
+        sqlBuilder.dialect(dialect);
         
-        // Add root table columns
-        for (TypeDefinition.Prop prop : getAllProperties(ctx.entity())) {
-            if (prop instanceof TypeDefinition.Prop.Scalar s) {
-                selectColumns.add(rootTable + "." + dialect.quoteIdentifier(s.columnName()));
-            } else if (prop instanceof TypeDefinition.Prop.Id id) {
-                selectColumns.add(rootTable + "." + dialect.quoteIdentifier(id.columnName()));
-            } else if (prop instanceof TypeDefinition.Prop.Version v) {
-                selectColumns.add(rootTable + "." + dialect.quoteIdentifier(v.columnName()));
-            } else if (prop instanceof TypeDefinition.Prop.Association assoc && !assoc.composition()) {
-                // Non-composing associations: just the FK column
-                if (assoc.fkColumn() != null) {
-                    selectColumns.add(rootTable + "." + dialect.quoteIdentifier(assoc.fkColumn()));
-                }
-            }
-        }
-        
-        // Add LEFT JOINs and columns for composing associations
+        // Build JoinEdge.ToOne objects for each composing association
+        List<JoinEdge> joinEdges = new ArrayList<>();
         for (TypeDefinition.Prop.Association assoc : composingAssocs) {
-            String childTable = dialect.quoteIdentifier(assoc.definition().tableName());
-            // Use association name as the join alias to match RowMapperEmitter expectations
-            String joinAlias = assoc.name();
-            String fkColumn = dialect.quoteIdentifier(assoc.fkColumn());
-            
-            // Add LEFT JOIN - FK is on the root table, pointing to child's id
-            joinClauses.add("LEFT JOIN " + childTable + " AS " + joinAlias 
-                + " ON " + joinAlias + "." + dialect.quoteIdentifier("id") + " = " + rootTable + "." + fkColumn);
-            
-            // Add child table columns with association name prefix for row mapper compatibility
-            String columnPrefix = assoc.name() + "_join_";
-            for (TypeDefinition.Prop childProp : getAllProperties(assoc.definition())) {
-                if (childProp instanceof TypeDefinition.Prop.Scalar s) {
-                    selectColumns.add(joinAlias + "." + dialect.quoteIdentifier(s.columnName()) 
-                        + " AS " + dialect.quoteIdentifier(columnPrefix + s.columnName()));
-                } else if (childProp instanceof TypeDefinition.Prop.Id id) {
-                    selectColumns.add(joinAlias + "." + dialect.quoteIdentifier(id.columnName())
-                        + " AS " + dialect.quoteIdentifier(columnPrefix + id.columnName()));
+            if (assoc.definition() instanceof TypeDefinition.Entity childEntity) {
+                // ToOne edge: owner.fkColumn = child.idColumn
+                joinEdges.add(new JoinEdge.ToOne(
+                        new ColumnRef.ForeignKey(assoc.fkColumn(), ctx.entity().tableName()),
+                        new ColumnRef.Simple(childEntity.idColumn(), childEntity.tableName())));
+            }
+        }
+        
+        // Build extra projection for composing association columns. The qualifier is the JOIN's
+        // alias — the child table, by the one rule SqlFragment renders joins with — while the
+        // column label keeps the property name the row mapper reads.
+        StringBuilder extraProjection = new StringBuilder();
+        for (TypeDefinition.Prop.Association assoc : composingAssocs) {
+            if (assoc.definition() instanceof TypeDefinition.Entity childEntity) {
+                String joinAlias = dialect.quoteIdentifier(childEntity.tableName());
+                String columnPrefix = assoc.name() + "_join_";
+                
+                for (TypeDefinition.Prop childProp : getAllProperties(childEntity)) {
+                    if (childProp instanceof TypeDefinition.Prop.Scalar s) {
+                        if (extraProjection.length() > 0) extraProjection.append(", ");
+                        extraProjection.append(joinAlias).append(".").append(dialect.quoteIdentifier(s.columnName()))
+                            .append(" AS ").append(dialect.quoteIdentifier(columnPrefix + s.columnName()));
+                    } else if (childProp instanceof TypeDefinition.Prop.Id id) {
+                        if (extraProjection.length() > 0) extraProjection.append(", ");
+                        extraProjection.append(joinAlias).append(".").append(dialect.quoteIdentifier(id.columnName()))
+                            .append(" AS ").append(dialect.quoteIdentifier(columnPrefix + id.columnName()));
+                    } else if (childProp instanceof TypeDefinition.Prop.Embedded emb && emb.definition() != null) {
+                        // Handle embedded VOs in the child entity
+                        String embPrefix = columnPrefix + emb.name() + "_";
+                        for (TypeDefinition.Prop embProp : getAllProperties(emb.definition())) {
+                            if (embProp instanceof TypeDefinition.Prop.Scalar s) {
+                                if (extraProjection.length() > 0) extraProjection.append(", ");
+                                extraProjection.append(joinAlias).append(".").append(dialect.quoteIdentifier(emb.name() + "_" + s.columnName()))
+                                    .append(" AS ").append(dialect.quoteIdentifier(embPrefix + s.columnName()));
+                            }
+                        }
+                    }
                 }
             }
         }
         
-        // Build WHERE clause if needed
-        StringBuilder whereClause = new StringBuilder();
-        if (!method.predicates().isEmpty()) {
-            List<String> conjuncts = new ArrayList<>();
-            for (int i = 0; i < method.predicates().size(); i++) {
-                var pred = method.predicates().get(i);
-                String propPath = pred.property();
-                
-                // Determine the column reference for this predicate
-                String column = resolvePredicateColumn(propPath, rootTable, composingAssocs);
-                
-                String param = pred.param();
-                String conjunct = renderPredicate(pred.operator(), column, param, pred.ignoreCase());
-                
-                // Add connector (AND/OR) if not the first predicate
-                if (i > 0) {
-                    conjuncts.add((pred.connector() == io.github.fludakit.data.query.Connector.OR ? " OR " : " AND ") + conjunct);
-                } else {
-                    conjuncts.add(conjunct);
-                }
-            }
-            whereClause.append(" WHERE ").append(String.join("", conjuncts));
-        }
-        
-        return "SELECT " + String.join(", ", selectColumns) 
-            + " FROM " + rootTable 
-            + (joinClauses.isEmpty() ? "" : " " + String.join(" ", joinClauses))
-            + whereClause.toString();
-    }
-
-    /**
-     * Resolves a predicate property path to a SQL column reference.
-     * For traversed paths like "customer.name", uses the join alias.
-     * For simple properties, qualifies with root table.
-     */
-    private String resolvePredicateColumn(String propPath, String rootTable, 
-                                          List<TypeDefinition.Prop.Association> composingAssocs) {
-        if (propPath.contains(".")) {
-            String firstSegment = propPath.substring(0, propPath.indexOf('.'));
-            String restOfPath = propPath.substring(propPath.indexOf('.') + 1);
-            
-            // Check if first segment is an association we're joining
-            for (TypeDefinition.Prop.Association assoc : composingAssocs) {
-                if (assoc.name().equals(firstSegment)) {
-                    // Use the join alias (association name) and the leaf column
-                    return firstSegment + "." + dialect.quoteIdentifier(restOfPath.replace('.', '_'));
-                }
-            }
-            
-            // Fallback: treat as root table column with flattened name
-            return rootTable + "." + dialect.quoteIdentifier(propPath.replace('.', '_'));
-        } else {
-            // Simple property on root table - qualify to avoid ambiguity with joins
-            return rootTable + "." + dialect.quoteIdentifier(propPath);
-        }
-    }
-
-    /**
-     * Renders a predicate operator expression.
-     */
-    private String renderPredicate(io.github.fludakit.data.query.Operator operator, 
-                                    String column, String param, boolean ignoreCase) {
-        String col = ignoreCase ? "LOWER(" + column + ")" : column;
-        String val = ignoreCase ? "LOWER(:" + param + ")" : ":" + param;
-        
-        return switch (operator) {
-            case EQ, IGNORE_CASE_EQ -> col + " = " + val;
-            case NOT_EQ -> col + " <> " + val;
-            case GREATER_THAN -> col + " > " + val;
-            case GREATER_THAN_EQUAL -> col + " >= " + val;
-            case LESS_THAN -> col + " < " + val;
-            case LESS_THAN_EQUAL -> col + " <= " + val;
-            case LIKE, CONTAINS, STARTS_WITH, ENDS_WITH -> col + " LIKE " + val;
-            case NOT_LIKE, NOT_CONTAINS, NOT_STARTS_WITH, NOT_ENDS_WITH -> col + " NOT LIKE " + val;
-            case BETWEEN -> col + " BETWEEN :" + param + "_from AND :" + param + "_to";
-            case NOT_BETWEEN -> col + " NOT BETWEEN :" + param + "_from AND :" + param + "_to";
-            case IN -> col + " IN (:" + param + ")";
-            case NOT_IN -> col + " NOT IN (:" + param + ")";
-            case IS_NULL -> col + " IS NULL";
-            case IS_NOT_NULL -> col + " IS NOT NULL";
-            case TRUE -> col + " = TRUE";
-            case FALSE -> col + " = FALSE";
-        };
+        // Use SqlBuilder to render the query with JOINs
+        ResultKind rk = method.resultKind() == ResultKind.COUNT || method.resultKind() == ResultKind.EXISTS
+                ? ResultKind.LIST : method.resultKind();
+        return sqlBuilder.render(
+            new QueryDefinition.Read(rk, method.predicates(), method.sorts(),
+                PagingMode.NONE, LimitSpec.none(), List.of(), List.of(), method.distinct()),
+            joinEdges,
+            extraProjection.toString()
+        );
     }
 
     private void addPlainFinderBody(MethodSpec.Builder builder, RepositoryContext ctx,
@@ -483,44 +442,29 @@ public final class FindEmitter {
             // String prop = sort.property();
             body.addStatement("        String $L = $L.property()", "prop", "sort");
             
-            // Resolve property to column using TypeModel
-            String entitySimpleName = ctx.entity().typeName().contains(".") 
-                ? ctx.entity().typeName().substring(ctx.entity().typeName().lastIndexOf('.') + 1)
-                : ctx.entity().typeName();
-            String typeModelFqn = ctx.entity().typeName().substring(0, ctx.entity().typeName().lastIndexOf('.')) + "." + entitySimpleName + "TypeModel";
-            body.add("        try {\n");
-            body.addStatement("            io.github.fludakit.data.metadata.ColumnPlacement placement = $T.INSTANCE.resolve($L)", 
-                ClassName.bestGuess(typeModelFqn),
-                "prop");
-            
-            // String direction = sort.isAscending() ? "ASC" : "DESC";
-            body.addStatement("            String $L = $L.isAscending() ? $S : $S",
-                "direction", "sort", "ASC", "DESC");
-            
-            // Build qualified column reference for ORDER BY
-            body.add("            String $L;\n", "qualifiedColumn");
-            body.add("            if ($L.local()) {\n", "placement");
-            body.addStatement("                $L = $L.leaf().column()", "qualifiedColumn", "placement");
-            body.add("            } else {\n");
-            // For non-local columns (requiring navigation), use aggregate subquery
-            // This avoids the complexity of adding JOINs at runtime
-            body.addStatement("                $L = io.github.fludakit.data.sql.QueryCompiler.aggregateSortTerm($T.INSTANCE, $T.INSTANCE, $L, $L.isAscending())",
-                "qualifiedColumn", 
-                ClassName.bestGuess("io.github.fludakit.data.sql.H2Dialect"),
-                ClassName.bestGuess(typeModelFqn),
-                "placement",
-                "sort");
-            body.add("            }\n");
-            
-            // For local columns, append direction; for aggregate subqueries, direction is already embedded
-            body.add("            if ($L.local()) {\n", "placement");
-            body.addStatement("                $L.add($L + $S + $L)", "orderClauses", "qualifiedColumn", " ", "direction");
-            body.add("            } else {\n");
-            body.addStatement("                $L.add($L)", "orderClauses", "qualifiedColumn");
-            body.add("            }\n");
-            
-            body.add("        } catch (io.github.fludakit.data.metadata.UnknownAttributePathException e) {\n");
-            body.add("            // Skip invalid sort property\n");
+            // Compile-time switch over every resolvable sort path: local paths render their column
+            // plus a runtime direction; relation paths render a pre-computed correlated aggregate
+            // (MIN for ASC, MAX for DESC) whose direction is already embedded.
+            Map<String, ColumnPlacement> orderPaths = collectDynamicOrderPaths(ctx.entity());
+            body.add("        String $L = switch ($L) {\n", "orderTerm", "prop");
+            for (Map.Entry<String, ColumnPlacement> entry : orderPaths.entrySet()) {
+                String path = entry.getKey();
+                ColumnPlacement placement = entry.getValue();
+                if (placement.local()) {
+                    String column = placement.leaf().column();
+                    body.add("            case $S -> $S + ($L.isAscending() ? $S : $S);\n",
+                            path, column, "sort", " ASC", " DESC");
+                } else {
+                    String asc = QueryCompiler.aggregateSortTerm(dialect, ctx.entity(), placement, true);
+                    String desc = QueryCompiler.aggregateSortTerm(dialect, ctx.entity(), placement, false);
+                    body.add("            case $S -> $L.isAscending() ? $S : $S;\n",
+                            path, "sort", asc, desc);
+                }
+            }
+            body.add("            default -> null;\n");
+            body.add("        };\n");
+            body.add("        if ($L != null) {\n", "orderTerm");
+            body.addStatement("            $L.add($L)", "orderClauses", "orderTerm");
             body.add("        }\n");
             body.add("    }\n");
             
@@ -567,6 +511,93 @@ public final class FindEmitter {
         SqlBuilder sqlBuilder = new SqlBuilder(ctx.entity());
         sqlBuilder.dialect(dialect);
         return sqlBuilder.render(new QueryDefinition.Count(method.predicates(), List.of(), false));
+    }
+
+    /**
+     * The sortable paths for a dynamic {@code Order} parameter: the entity's local columns plus the
+     * one-level reference traversals the offset finder can turn into a correlated aggregate sort term.
+     */
+    private Map<String, ColumnPlacement> collectDynamicOrderPaths(TypeDefinition entity) {
+        Map<String, ColumnPlacement> paths = new LinkedHashMap<>();
+
+        Map<String, ColumnRef> localRefs = computeLocalColumnRefs(entity);
+        for (Map.Entry<String, ColumnRef> entry : localRefs.entrySet()) {
+            paths.put(entry.getKey(), new ColumnPlacement(entry.getValue()));
+        }
+
+        for (TypeDefinition.Prop prop : entity.properties()) {
+            if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.definition() != null) {
+                JoinEdge.ToOne edge = buildAssociationEdge(entity, assoc);
+                if (edge == null) continue;
+                for (Map.Entry<String, ColumnRef> targetEntry
+                        : computeLocalColumnRefs(assoc.definition()).entrySet()) {
+                    paths.put(assoc.name() + "." + targetEntry.getKey(),
+                            new ColumnPlacement(targetEntry.getValue(), List.of(edge)));
+                }
+            } else if (prop instanceof TypeDefinition.Prop.EntityCollection ec && ec.definition() != null) {
+                JoinEdge.ToMany edge = buildEntityCollectionEdge(entity, ec);
+                if (edge == null) continue;
+                for (Map.Entry<String, ColumnRef> targetEntry
+                        : computeLocalColumnRefs(ec.definition()).entrySet()) {
+                    paths.put(ec.name() + "." + targetEntry.getKey(),
+                            new ColumnPlacement(targetEntry.getValue(), List.of(edge)));
+                }
+            }
+        }
+        return paths;
+    }
+
+    /** Local column refs keyed by path, mirroring the column refs the removed TypeModel exposed. */
+    private Map<String, ColumnRef> computeLocalColumnRefs(TypeDefinition entity) {
+        Map<String, ColumnRef> refs = new LinkedHashMap<>();
+        addLocalRefs(refs, entity.tableName(), entity, "", "");
+        return refs;
+    }
+
+    private void addLocalRefs(Map<String, ColumnRef> refs, String tableName,
+                               TypeDefinition def, String pathPrefix, String columnPrefix) {
+        for (TypeDefinition.Prop prop : def.properties()) {
+            switch (prop) {
+                case TypeDefinition.Prop.Scalar s -> refs.put(pathPrefix + s.name(),
+                        new ColumnRef.Simple(columnPrefix + s.columnName(), tableName));
+                case TypeDefinition.Prop.Id id -> refs.put(pathPrefix + id.name(),
+                        new ColumnRef.Simple(columnPrefix + id.columnName(), tableName));
+                case TypeDefinition.Prop.Version v -> refs.put(pathPrefix + v.name(),
+                        new ColumnRef.Simple(columnPrefix + v.columnName(), tableName));
+                case TypeDefinition.Prop.Association a -> {
+                    if (a.fkColumn() != null) {
+                        refs.put(pathPrefix + a.name(),
+                                new ColumnRef.ForeignKey(columnPrefix + a.fkColumn(), tableName));
+                    }
+                }
+                case TypeDefinition.Prop.Embedded e -> {
+                    if (e.definition() != null) {
+                        addLocalRefs(refs, tableName, e.definition(),
+                                pathPrefix + e.name() + ".",
+                                columnPrefix + e.name() + "_");
+                    }
+                }
+                default -> {}
+            }
+        }
+    }
+
+    private JoinEdge.ToOne buildAssociationEdge(TypeDefinition owner, TypeDefinition.Prop.Association assoc) {
+        if (assoc.definition() == null || assoc.definition().tableName() == null
+                || assoc.definition().idColumn() == null || assoc.fkColumn() == null) return null;
+        return new JoinEdge.ToOne(
+                new ColumnRef.ForeignKey(assoc.fkColumn(), owner.tableName()),
+                new ColumnRef.Simple(assoc.definition().idColumn(), assoc.definition().tableName()));
+    }
+
+    private JoinEdge.ToMany buildEntityCollectionEdge(TypeDefinition owner, TypeDefinition.Prop.EntityCollection ec) {
+        if (ec.definition() == null || ec.definition().tableName() == null
+                || ec.fkColumn() == null || owner.idColumn() == null) {
+            return null;
+        }
+        return new JoinEdge.ToMany(
+                new ColumnRef.Simple(owner.idColumn(), owner.tableName()),
+                new ColumnRef.ForeignKey(ec.fkColumn(), ec.definition().tableName()));
     }
 
     // ── Cursor-paged finder ──────────────────────────────────────────────
@@ -642,6 +673,13 @@ public final class FindEmitter {
                     String qualifiedCol = rootTable + "." + dialect.quoteIdentifier(assoc.fkColumn());
                     selectColumns.add(qualifiedCol);
                     groupByColumns.add(qualifiedCol);
+                } else if (prop instanceof TypeDefinition.Prop.Embedded emb && emb.definition() != null) {
+                    List<String> embeddedCols = new ArrayList<>();
+                    for (TypeDefinition.Prop childProp : getAllProperties(emb.definition())) {
+                        addColumnsForProperty(childProp, rootTable, emb.name(), embeddedCols);
+                    }
+                    selectColumns.addAll(embeddedCols);
+                    groupByColumns.addAll(embeddedCols);
                 }
             }
 
@@ -1113,7 +1151,8 @@ public final class FindEmitter {
     private MethodSpec emitDeleteBy(RepositoryContext ctx, MethodContext method) {
         MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
 
-        SqlBuilder sqlBuilder = new SqlBuilder(ctx.entity());
+        TypeDefinition entity = ctx.entity();
+        SqlBuilder sqlBuilder = new SqlBuilder(entity);
         sqlBuilder.dialect(dialect);
         ResultKind rk = method.resultKind() == ResultKind.VOID ? ResultKind.VOID : method.resultKind();
         String sql = sqlBuilder.render(new QueryDefinition.DeleteWhere(method.predicates(), List.of(), rk));
@@ -1123,15 +1162,112 @@ public final class FindEmitter {
         List<ParamBinding> bindings = method.paramBindings();
 
         CodeBlock.Builder body = CodeBlock.builder();
+
+        // Determine if this is a deleteById (single predicate on the ID column)
+        // so we can cascade deletes to child collections for aggregate roots
+        boolean isDeleteById = isDeleteByIdPredicate(entity, method);
+        String parentIdParam = isDeleteById ? idParamName(method, entity) : null;
+
+        // Cascade delete child collections before parent delete (aggregate roots only)
+        if (isDeleteById && entity.ownsAggregateLifecycle() && parentIdParam != null) {
+            // Composing to-one associations: load FK before delete, delete child after
+            for (TypeDefinition.Prop prop : entity.properties()) {
+                if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.composition() && assoc.definition() instanceof TypeDefinition.Entity childEntity) {
+                    String parentTable = dialect.quoteIdentifier(entity.tableName());
+                    String fkColumn = dialect.quoteIdentifier(assoc.fkColumn());
+                    String idColumn = dialect.quoteIdentifier(entity.idColumn());
+                    String loadSql = "SELECT " + fkColumn + " FROM " + parentTable + " WHERE " + idColumn + " = :id";
+                    String loadConst = ctx.registerConstant("LOAD_FK_" + assoc.name().toUpperCase(), loadSql);
+                    body.add("Long $L = jdbcClient.sql($L).param($S, $L).query(Long.class).single();\n",
+                            "childId_" + assoc.name(), loadConst, "id", parentIdParam);
+                }
+            }
+            // Element collections
+            for (TypeDefinition.Prop prop : entity.properties()) {
+                if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
+                    emitFindEmitterElementCollectionDelete(body, ctx, parentIdParam, ec);
+                }
+            }
+            // Entity collections
+            for (TypeDefinition.Prop prop : entity.properties()) {
+                if (prop instanceof TypeDefinition.Prop.EntityCollection ec && ec.definition() != null) {
+                    emitFindEmitterEntityCollectionDelete(body, ctx, parentIdParam, ec);
+                }
+            }
+        }
+
         boolean isVoid = method.resultKind() == ResultKind.VOID;
         if (!isVoid) body.add("return ");
         body.add("jdbcClient\n");
         body.add("    .sql($L)\n", constName);
         appendParamBindings(body, bindings, method);
-        body.add("    .update();");
+        body.add("    .update();\n");
+
+        // Post-delete: delete composing to-one associations after parent delete
+        if (isDeleteById && entity.ownsAggregateLifecycle() && parentIdParam != null) {
+            for (TypeDefinition.Prop prop : entity.properties()) {
+                if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.composition() && assoc.definition() instanceof TypeDefinition.Entity childEntity) {
+                    String childTable = dialect.quoteIdentifier(childEntity.tableName());
+                    String childIdColumn = dialect.quoteIdentifier(childEntity.idColumn());
+                    String deleteSql = "DELETE FROM " + childTable + " WHERE " + childIdColumn + " = :childId";
+                    String deleteConst = ctx.registerConstant("CASCADE_DELETE_" + assoc.name().toUpperCase(), deleteSql);
+                    body.add("if ($L != null) {\n", "childId_" + assoc.name());
+                    body.add("    jdbcClient.sql($L).param($S, $L).update();\n",
+                            deleteConst, "childId", "childId_" + assoc.name());
+                    body.add("}\n");
+                }
+            }
+        }
+
         builder.addCode(ExceptionTranslation.wrap(body.build()));
 
         return builder.build();
+    }
+
+    /**
+     * Checks whether the method is a deleteById: a single-predicate DELETE on the entity's ID column.
+     */
+    private static boolean isDeleteByIdPredicate(TypeDefinition entity, MethodContext method) {
+        if (method.operation() != Operation.DELETE) return false;
+        List<Predicate> preds = method.predicates();
+        if (preds.size() != 1) return false;
+        Predicate pred = preds.getFirst();
+        String idPropName = entity instanceof TypeDefinition.Entity e && e.id() != null ? e.id().name()
+                : entity instanceof TypeDefinition.Aggregate a && a.id() != null ? a.id().name()
+                : null;
+        return idPropName != null && pred.property().equals(idPropName);
+    }
+
+    /**
+     * Returns the method parameter name or expression used as the parent ID for cascade deletes.
+     * For deleteById(ID), this is the single method parameter (e.g. "id").
+     * For delete(Entity), this is the entity parameter with .getId() appended (e.g. "entity.getId()").
+     */
+    private static String idParamName(MethodContext method, TypeDefinition entity) {
+        if (method.parameters().isEmpty()) return "id";
+        String paramName = method.parameters().getFirst().getSimpleName().toString();
+        return method.firstParameterIsEntity(entity) ? paramName + ".getId()" : paramName;
+    }
+
+    /** Emits DELETE for an element collection child table by FK = parentIdParam. */
+    private void emitFindEmitterElementCollectionDelete(CodeBlock.Builder body, RepositoryContext ctx,
+                                                        String parentIdParam, TypeDefinition.Prop.ElementCollection ec) {
+        String childTable = dialect.quoteIdentifier(ec.childTable());
+        String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
+        String deleteSql = "DELETE FROM " + childTable + " WHERE " + fkColumn + " = :parentId";
+        String deleteConst = ctx.registerConstant("EC_DELETE_" + ec.name().toUpperCase(), deleteSql);
+        body.add("jdbcClient.sql($L).param($S, $L).update();\n", deleteConst, "parentId", parentIdParam);
+    }
+
+    /** Emits DELETE for an entity collection child table by FK = parentIdParam. */
+    private void emitFindEmitterEntityCollectionDelete(CodeBlock.Builder body, RepositoryContext ctx,
+                                                       String parentIdParam, TypeDefinition.Prop.EntityCollection ec) {
+        if (!(ec.definition() instanceof TypeDefinition.Entity childEntity)) return;
+        String childTable = dialect.quoteIdentifier(childEntity.tableName());
+        String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
+        String deleteSql = "DELETE FROM " + childTable + " WHERE " + fkColumn + " = :parentId";
+        String deleteConst = ctx.registerConstant("EC_COLL_DELETE_" + ec.name().toUpperCase(), deleteSql);
+        body.add("jdbcClient.sql($L).param($S, $L).update();\n", deleteConst, "parentId", parentIdParam);
     }
 
     // ── Custom @Query methods ────────────────────────────────────────────
@@ -1238,10 +1374,10 @@ public final class FindEmitter {
      */
     private boolean hasToManyCollections(io.github.fludakit.data.metadata.TypeDefinition entity) {
         for (TypeDefinition.Prop prop : entity.properties()) {
-            if (prop instanceof TypeDefinition.Prop.EntityCollection ec) {
-                if (ec.loadStrategy() == LoadStrategy.EAGER) return true;
-            } else if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
-                if (ec.loadStrategy() == LoadStrategy.EAGER) return true;
+            if (prop instanceof TypeDefinition.Prop.EntityCollection) {
+                return true;
+            } else if (prop instanceof TypeDefinition.Prop.ElementCollection) {
+                return true;
             }
         }
         return false;
@@ -1290,7 +1426,7 @@ public final class FindEmitter {
      * Converts a method name to a SQL constant name base.
      * E.g. {@code findByName} → {@code FIND_BY_NAME_SQL}.
      */
-    static String toSqlConstantName(String methodName) {
+    private static String toSqlConstantName(String methodName) {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < methodName.length(); i++) {
             char c = methodName.charAt(i);

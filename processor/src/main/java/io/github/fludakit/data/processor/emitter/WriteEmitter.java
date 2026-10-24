@@ -3,14 +3,16 @@ package io.github.fludakit.data.processor.emitter;
 import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.CodeBlock;
 import com.squareup.javapoet.MethodSpec;
+import io.github.fludakit.data.metadata.MutationPlan;
+import io.github.fludakit.data.metadata.MutationPlan.*;
 import io.github.fludakit.data.metadata.TypeDefinition;
+import io.github.fludakit.data.processor.analysis.MutationPlanAnalyzer;
 import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.RepositoryContext;
 import io.github.fludakit.data.processor.support.ExceptionTranslation;
 import io.github.fludakit.data.processor.support.MethodOverrides;
 import io.github.fludakit.data.query.Operation;
 import io.github.fludakit.data.query.ResultKind;
-import io.github.fludakit.data.sql.H2Dialect;
 import io.github.fludakit.data.sql.SqlBuilder;
 import io.github.fludakit.data.sql.SqlDialect;
 import io.github.fludakit.data.sql.UpsertForm;
@@ -48,10 +50,6 @@ public final class WriteEmitter {
         this.elements = elements;
         this.baseRepositoryType = baseRepositoryType;
         this.repositoryOwnType = repositoryOwnType;
-    }
-
-    public WriteEmitter(Types types, Elements elements, DeclaredType baseRepositoryType, DeclaredType repositoryOwnType) {
-        this(H2Dialect.INSTANCE, types, elements, baseRepositoryType, repositoryOwnType);
     }
 
     private DeclaredType resolveTypeFor(ExecutableElement method) {
@@ -115,6 +113,9 @@ public final class WriteEmitter {
         IdStrategy strategy = idStrategy(idTypeFqn);
         boolean hasUpsert = dialect.upsertForm() != UpsertForm.NONE;
 
+        // Compute the mutation plan for cascade-driven code generation
+        MutationPlan plan = MutationPlanAnalyzer.analyze(ctx.entity(), method.operation());
+
         // Register SQL constants
         String upsertSql;
         if (hasUpsert) {
@@ -140,14 +141,11 @@ public final class WriteEmitter {
         CodeBlock.Builder body = CodeBlock.builder();
         boolean returnsEntity = method.resultKind() == ResultKind.SINGLE;
 
-        // For aggregate roots with composing TO_ONE relations, emit pre-insert cascade
-        // to ensure child IDs are generated before binding them as FKs
-        boolean hasComposingAssociation = ctx.entity().ownsAggregateLifecycle() &&
-                ctx.entity().properties().stream()
-                    .anyMatch(prop -> prop instanceof TypeDefinition.Prop.Association assoc && assoc.composition() && assoc.definition() != null);
-
-        if (hasComposingAssociation) {
-            emitPreInsertCascade(body, ctx, entityVar);
+        // Pre-insert cascade: PRE_INSERT specs (compositions that need child IDs before root insert)
+        for (CascadeSpec spec : plan.cascadeSpecs()) {
+            if (spec.mode() == CascadeMode.PRE_INSERT) {
+                emitPreInsertSpec(body, spec, ctx, entityVar);
+            }
         }
 
         if (strategy == IdStrategy.APP_ASSIGNED) {
@@ -168,7 +166,7 @@ public final class WriteEmitter {
                 body.add("}");
             }
         } else {
-            // Generated key strategy: null id → insert, non-null id → upsert
+            // Generated key strategy: null id → insert, non-id → upsert
             body.add("if ($L.getId() == null) {\n", entityVar);
 
             if (strategy == IdStrategy.NUMERIC) {
@@ -201,15 +199,10 @@ public final class WriteEmitter {
 
         builder.addCode(ExceptionTranslation.wrap(body.build()));
 
-        // Post-insert cascade: entity collections (aggregate roots only) and element collections (all entities)
-        if (ctx.entity().ownsAggregateLifecycle()) {
-            emitPostInsertCascade(builder, ctx, entityVar);
-        } else {
-            // For non-aggregate entities, still persist element collections
-            for (TypeDefinition.Prop prop : ctx.entity().properties()) {
-                if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
-                    emitElementCollectionSave(builder, ctx, entityVar, ec);
-                }
+        // Post-insert cascade: non-PRE_INSERT specs (DIFF_SYNC, REPLACE, etc.)
+        for (CascadeSpec spec : plan.cascadeSpecs()) {
+            if (spec.mode() != CascadeMode.PRE_INSERT) {
+                emitPostCascadeSpec(builder, spec, ctx, entityVar);
             }
         }
 
@@ -222,113 +215,16 @@ public final class WriteEmitter {
     }
 
     /**
-     * Emits cascade write logic for aggregate root entities.
-     * - TypeDefinition.Prop.Association with composition=true: save the composed child (backfill FK)
-     * - TypeDefinition.Prop.EntityCollection: save each child with parent FK set
+     * Generates code for a single PRE_INSERT cascade spec (composition association).
+     * Inserts the child before the root so its generated ID can be bound as FK on the root row.
+     * Recurses into the spec's children after the child insert.
      */
-    private void emitCascadeWrites(MethodSpec.Builder builder, RepositoryContext ctx, String entityVar) {
-        TypeDefinition entity = ctx.entity();
+    private void emitPreInsertSpec(CodeBlock.Builder body, CascadeSpec spec, RepositoryContext ctx, String entityVar) {
+        if (!(spec.prop() instanceof TypeDefinition.Prop.Association assoc)) return;
+        if (!(spec.target() instanceof TypeDefinition.Entity childEntity)) return;
 
-        for (TypeDefinition.Prop prop : entity.properties()) {
-            if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.composition() && assoc.definition() != null) {
-                // Composition: cascade save to the composed child
-                emitCompositionSave(builder, ctx, entityVar, assoc);
-            } else if (prop instanceof TypeDefinition.Prop.EntityCollection ec && ec.definition() != null) {
-                // Entity collection: save each child with parent FK
-                emitEntityCollectionSave(builder, ctx, entityVar, ec);
-            }
-        }
-    }
+        String childVar = entityVar + "." + assoc.name();
 
-    /**
-     * Pre-insert cascade for aggregate roots: saves composing ASSOCIATION children BEFORE
-     * the root insert so their generated IDs can be bound as FK columns.
-     */
-    private void emitPreInsertCascade(CodeBlock.Builder body, RepositoryContext ctx, String entityVar) {
-        TypeDefinition entity = ctx.entity();
-
-        for (TypeDefinition.Prop prop : entity.properties()) {
-            if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.composition() && assoc.definition() instanceof TypeDefinition.Entity childEntity) {
-                // Generate cascade save code inline in the body
-                String childVar = entityVar + "." + assoc.name();
-
-                SqlBuilder childSb = new SqlBuilder(childEntity, childEntity);
-                childSb.dialect(dialect);
-                TypeDefinition.Prop.Id childIdProp = idProp(childEntity);
-                String childIdTypeFqn = childIdProp != null ? childIdProp.javaType() : "java.lang.Long";
-                IdStrategy childStrategy = idStrategy(childIdTypeFqn);
-                String childInsertSql = childStrategy == IdStrategy.APP_ASSIGNED
-                        ? childSb.insert(true)
-                        : childSb.insert(false);
-                String childInsertConst = ctx.registerConstant(
-                        "CASCADE_INSERT_" + assoc.name().toUpperCase(), childInsertSql);
-                String childUpdateSql = childSb.update();
-                String childUpdateConst = ctx.registerConstant(
-                        "CASCADE_UPDATE_" + assoc.name().toUpperCase(), childUpdateSql);
-
-                body.add("if ($L != null) {\n", childVar);
-
-                if (childStrategy == IdStrategy.APP_ASSIGNED) {
-                    body.add("    jdbcClient.sql($L)", childUpdateConst);
-                    appendAllBindings(body, childEntity, childVar);
-                    body.add(".update();\n");
-                } else {
-                    body.add("    if ($L.getId() == null) {\n", childVar);
-                    body.add("        $T $L = new $T();\n", GENERATED_KEY_HOLDER,
-                            "childKeys_" + assoc.name(), GENERATED_KEY_HOLDER);
-                    body.add("        jdbcClient.sql($L)", childInsertConst);
-                    appendNonIdBindings(body, childEntity, childVar);
-                    body.add(".update($L);\n", "childKeys_" + assoc.name());
-                    if (childStrategy == IdStrategy.NUMERIC) {
-                        body.add("        if ($L.getKey() != null) {\n", "childKeys_" + assoc.name());
-                        body.add("            $L.setId((($T) $L.getKey()).$L());\n",
-                                childVar, Number.class, "childKeys_" + assoc.name(), numericAccessor(childIdTypeFqn));
-                        body.add("        }\n");
-                    } else {
-                        body.add("        if ($L.getKey() != null) {\n", "childKeys_" + assoc.name());
-                        body.add("            $L.setId(($T) $L.getKey());\n",
-                                childVar, ClassName.bestGuess(childIdTypeFqn), "childKeys_" + assoc.name());
-                        body.add("        }\n");
-                    }
-                    body.add("    } else {\n");
-                    body.add("        jdbcClient.sql($L)", childUpdateConst);
-                    appendAllBindings(body, childEntity, childVar);
-                    body.add(".update();\n");
-                    body.add("    }\n");
-                }
-
-                body.add("}\n");
-            }
-        }
-    }
-
-    /**
-     * Post-insert cascade for aggregate roots: handles entity collections and element collections
-     * AFTER the root has been inserted.
-     */
-    private void emitPostInsertCascade(MethodSpec.Builder builder, RepositoryContext ctx, String entityVar) {
-        TypeDefinition entity = ctx.entity();
-
-        for (TypeDefinition.Prop prop : entity.properties()) {
-            if (prop instanceof TypeDefinition.Prop.EntityCollection ec && ec.definition() != null) {
-                emitEntityCollectionSave(builder, ctx, entityVar, ec);
-            } else if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
-                emitElementCollectionSave(builder, ctx, entityVar, ec);
-            }
-        }
-    }
-
-    /**
-     * Cascade save for a composition: save the child aggregate, then backfill the FK
-     * on the parent if needed.
-     */
-    private void emitCompositionSave(MethodSpec.Builder builder, RepositoryContext ctx,
-                                      String entityVar, TypeDefinition.Prop.Association assoc) {
-        if (!(assoc.definition() instanceof TypeDefinition.Entity childEntity)) return;
-
-        String childVar = entityVar + "." + getter(assoc.name()) + "()";
-
-        // Build insert SQL for the child
         SqlBuilder childSb = new SqlBuilder(childEntity, childEntity);
         childSb.dialect(dialect);
         TypeDefinition.Prop.Id childIdProp = idProp(childEntity);
@@ -339,69 +235,150 @@ public final class WriteEmitter {
                 : childSb.insert(false);
         String childInsertConst = ctx.registerConstant(
                 "CASCADE_INSERT_" + assoc.name().toUpperCase(), childInsertSql);
+        String childUpdateSql = childSb.update();
+        String childUpdateConst = ctx.registerConstant(
+                "CASCADE_UPDATE_" + assoc.name().toUpperCase(), childUpdateSql);
 
-        // Build update SQL for the child
+        body.add("if ($L != null) {\n", childVar);
+
+        // Pre-insert children of this composition (e.g. grandchild compositions)
+        for (CascadeSpec child : spec.children()) {
+            if (child.mode() == CascadeMode.PRE_INSERT) {
+                emitPreInsertSpec(body, child, ctx, childVar);
+            }
+        }
+
+        if (childStrategy == IdStrategy.APP_ASSIGNED) {
+            body.add("    jdbcClient.sql($L)", childUpdateConst);
+            appendAllBindings(body, childEntity, childVar);
+            body.add(".update();\n");
+        } else {
+            body.add("    if ($L.getId() == null) {\n", childVar);
+            body.add("        $T $L = new $T();\n", GENERATED_KEY_HOLDER,
+                    "childKeys_" + assoc.name(), GENERATED_KEY_HOLDER);
+            body.add("        jdbcClient.sql($L)", childInsertConst);
+            appendNonIdBindings(body, childEntity, childVar);
+            body.add(".update($L);\n", "childKeys_" + assoc.name());
+            if (childStrategy == IdStrategy.NUMERIC) {
+                body.add("        if ($L.getKey() != null) {\n", "childKeys_" + assoc.name());
+                body.add("            $L.setId((($T) $L.getKey()).$L());\n",
+                        childVar, Number.class, "childKeys_" + assoc.name(), numericAccessor(childIdTypeFqn));
+                body.add("        }\n");
+            } else {
+                body.add("        if ($L.getKey() != null) {\n", "childKeys_" + assoc.name());
+                body.add("            $L.setId(($T) $L.getKey());\n",
+                        childVar, ClassName.bestGuess(childIdTypeFqn), "childKeys_" + assoc.name());
+                body.add("        }\n");
+            }
+            body.add("    } else {\n");
+            body.add("        jdbcClient.sql($L)", childUpdateConst);
+            appendAllBindings(body, childEntity, childVar);
+            body.add(".update();\n");
+            body.add("    }\n");
+        }
+
+        // Post-insert children of this composition (e.g. grandchild entity/element collections)
+        for (CascadeSpec child : spec.children()) {
+            if (child.mode() != CascadeMode.PRE_INSERT) {
+                emitPostCascadeSpecIntoBody(body, child, ctx, childVar);
+            }
+        }
+
+        body.add("}\n");
+    }
+
+    /**
+     * Dispatches a post-root cascade spec to the appropriate code generator.
+     * Writes to MethodSpec.Builder (outside the try-catch exception translation block).
+     */
+    private void emitPostCascadeSpec(MethodSpec.Builder builder, CascadeSpec spec, RepositoryContext ctx, String entityVar) {
+        CodeBlock code = buildPostCascadeCodeBlock(spec, ctx, entityVar);
+        if (!code.toString().isEmpty()) {
+            builder.addStatement(code);
+        }
+    }
+
+    /**
+     * Dispatches a post-root cascade spec into a CodeBlock.Builder (inside the try-catch block).
+     * Used for children of PRE_INSERT specs that are themselves post-insert (DIFF_SYNC, REPLACE).
+     */
+    private void emitPostCascadeSpecIntoBody(CodeBlock.Builder body, CascadeSpec spec, RepositoryContext ctx, String entityVar) {
+        CodeBlock code = buildPostCascadeCodeBlock(spec, ctx, entityVar);
+        if (!code.toString().isEmpty()) {
+            body.add(code);
+        }
+    }
+
+    /**
+     * Builds a CodeBlock for a post-root cascade spec (DIFF_SYNC, REPLACE, CASCADE_DELETE).
+     */
+    private CodeBlock buildPostCascadeCodeBlock(CascadeSpec spec, RepositoryContext ctx, String entityVar) {
+        return switch (spec.mode()) {
+            case UPDATE -> buildCompositionUpdateCodeBlock(spec, ctx, entityVar);
+            case DIFF_SYNC -> buildDiffSyncCodeBlock(spec, ctx, entityVar);
+            case REPLACE -> {
+                if (spec.prop() instanceof TypeDefinition.Prop.ElementCollection ec) {
+                    yield buildElementCollectionReplaceCodeBlock(ctx, entityVar, ec);
+                }
+                yield CodeBlock.builder().build();
+            }
+            case CASCADE_DELETE -> buildCascadeDeleteCodeBlock(spec, ctx, entityVar);
+            default -> CodeBlock.builder().build();
+        };
+    }
+
+    /**
+     * Builds a CodeBlock for updating a composition child (UPDATE mode).
+     * The child already exists in DB; performs an UPDATE with all column bindings.
+     */
+    private CodeBlock buildCompositionUpdateCodeBlock(CascadeSpec spec, RepositoryContext ctx, String entityVar) {
+        if (!(spec.prop() instanceof TypeDefinition.Prop.Association assoc)) return CodeBlock.builder().build();
+        if (!(spec.target() instanceof TypeDefinition.Entity childEntity)) return CodeBlock.builder().build();
+
+        String childVar = entityVar + "." + assoc.name();
+
+        SqlBuilder childSb = new SqlBuilder(childEntity, childEntity);
+        childSb.dialect(dialect);
         String childUpdateSql = childSb.update();
         String childUpdateConst = ctx.registerConstant(
                 "CASCADE_UPDATE_" + assoc.name().toUpperCase(), childUpdateSql);
 
         CodeBlock.Builder cascade = CodeBlock.builder();
         cascade.add("if ($L != null) {\n", childVar);
+        cascade.add("    jdbcClient.sql($L)", childUpdateConst);
+        appendAllBindings(cascade, childEntity, childVar);
+        cascade.add(".update();\n");
 
-        if (childStrategy == IdStrategy.APP_ASSIGNED) {
-            // Simple upsert
-            cascade.add("    jdbcClient.sql($L)", childUpdateConst);
-            appendAllBindings(cascade, childEntity, childVar);
-            cascade.add(".update();\n");
-        } else {
-            // Generated key: check if child has ID
-            cascade.add("    if ($L.getId() == null) {\n", childVar);
-            cascade.add("        $T $L = new $T();\n", GENERATED_KEY_HOLDER,
-                    "childKeys_" + assoc.name(), GENERATED_KEY_HOLDER);
-            cascade.add("        jdbcClient.sql($L)", childInsertConst);
-            appendNonIdBindings(cascade, childEntity, childVar);
-            cascade.add(".update($L);\n", "childKeys_" + assoc.name());
-            if (childStrategy == IdStrategy.NUMERIC) {
-                cascade.add("        if ($L.getKey() != null) {\n", "childKeys_" + assoc.name());
-                cascade.add("            $L.setId((($T) $L.getKey()).$L());\n",
-                        childVar, Number.class, "childKeys_" + assoc.name(), numericAccessor(childIdTypeFqn));
-                cascade.add("        }\n");
-            } else {
-                // UUID
-                cascade.add("        if ($L.getKey() != null) {\n", "childKeys_" + assoc.name());
-                cascade.add("            $L.setId(($T) $L.getKey());\n",
-                        childVar, ClassName.bestGuess(childIdTypeFqn), "childKeys_" + assoc.name());
-                cascade.add("        }\n");
+        // Recurse into children of this composition (element collections, entity collections)
+        for (CascadeSpec child : spec.children()) {
+            CodeBlock code = buildPostCascadeCodeBlock(child, ctx, childVar);
+            if (!code.toString().isEmpty()) {
+                cascade.add(code);
+                cascade.add("\n");
             }
-            cascade.add("    } else {\n");
-            cascade.add("        jdbcClient.sql($L)", childUpdateConst);
-            appendAllBindings(cascade, childEntity, childVar);
-            cascade.add(".update();\n");
-            cascade.add("    }\n");
         }
 
         cascade.add("}");
-        builder.addStatement(cascade.build());
+        return cascade.build();
     }
 
     /**
-     * Cascade save for an EntityCollection using diff sync:
+     * Builds a CodeBlock for diff-sync of an EntityCollection cascade spec.
      * 1. Load existing child IDs from DB
      * 2. Upsert each in-memory child (insert if null id, update if non-null)
      * 3. Delete children whose IDs are no longer in the collection
+     * Recurses into spec's children inside the per-child loop.
      */
-    private void emitEntityCollectionSave(MethodSpec.Builder builder, RepositoryContext ctx,
-                                           String entityVar, TypeDefinition.Prop.EntityCollection ec) {
-        if (!(ec.definition() instanceof TypeDefinition.Entity childEntity)) return;
+    private CodeBlock buildDiffSyncCodeBlock(CascadeSpec spec, RepositoryContext ctx, String entityVar) {
+        if (!(spec.prop() instanceof TypeDefinition.Prop.EntityCollection ec)) return CodeBlock.builder().build();
+        if (!(spec.target() instanceof TypeDefinition.Entity childEntity)) return CodeBlock.builder().build();
 
         String collectionGetter = entityVar + "." + getter(ec.name()) + "()";
         String childVar = "child_" + ec.name();
         String parentIdExpr = entityVar + ".getId()";
 
-        // Find the inverse relation name on the child (TO_ONE targeting parent type)
         String inverseName = findInverseRelationName(childEntity, ctx.entity().typeName());
 
-        // Build insert SQL for the child
         SqlBuilder childSb = new SqlBuilder(childEntity, childEntity);
         childSb.dialect(dialect);
         TypeDefinition.Prop.Id childIdProp = idProp(childEntity);
@@ -413,25 +390,21 @@ public final class WriteEmitter {
         String childInsertConst = ctx.registerConstant(
                 "EC_INSERT_" + ec.name().toUpperCase(), childInsertSql);
 
-        // Build update SQL for the child
         String childUpdateSql = childSb.update();
         String childUpdateConst = ctx.registerConstant(
                 "EC_UPDATE_" + ec.name().toUpperCase(), childUpdateSql);
 
-        // Build delete SQL: DELETE FROM child_table WHERE id = :id AND fk_column = :parentId
         String childTable = dialect.quoteIdentifier(childEntity.tableName());
         String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
         String idColumn = dialect.quoteIdentifier(childEntity.idColumn());
         String deleteSql = "DELETE FROM " + childTable + " WHERE " + idColumn + " = :childId AND " + fkColumn + " = :parentId";
         String deleteConst = ctx.registerConstant("EC_DELETE_" + ec.name().toUpperCase(), deleteSql);
 
-        // Build select-existing-IDs SQL: SELECT id FROM child_table WHERE fk_column = :parentId
         String selectIdsSql = "SELECT " + idColumn + " FROM " + childTable + " WHERE " + fkColumn + " = :parentId";
         String selectIdsConst = ctx.registerConstant("EC_IDS_" + ec.name().toUpperCase(), selectIdsSql);
 
         CodeBlock.Builder cascade = CodeBlock.builder();
 
-        // Load existing child IDs into a set
         ClassName childIdType = ClassName.bestGuess(childIdTypeFqn);
         cascade.add("$T<$T> $L = new $T<>(jdbcClient\n",
                 java.util.Set.class, childIdType, "existingIds_" + ec.name(), java.util.HashSet.class);
@@ -440,11 +413,9 @@ public final class WriteEmitter {
         cascade.add("    .query($T.class)\n", childIdType);
         cascade.add("    .list());\n");
 
-        // Track which IDs are still in the collection
         cascade.add("$T<$T> $L = new $T<>();\n",
                 java.util.Set.class, childIdType, "currentIds_" + ec.name(), java.util.HashSet.class);
 
-        // Upsert each in-memory child
         cascade.add("if ($L != null) {\n", collectionGetter);
         cascade.add("    for (var $L : $L) {\n", childVar, collectionGetter);
 
@@ -479,87 +450,152 @@ public final class WriteEmitter {
             cascade.add("        $L.add($L.getId());\n", "currentIds_" + ec.name(), childVar);
         }
 
+        for (CascadeSpec child : spec.children()) {
+            emitCascadeSpecIntoLoop(cascade, child, ctx, childVar);
+        }
+
         cascade.add("    }\n");
         cascade.add("}\n");
 
-        // Delete orphans: existing IDs that are not in the current collection
         cascade.add("$L.removeAll($L);\n", "existingIds_" + ec.name(), "currentIds_" + ec.name());
         cascade.add("for ($T $L : $L) {\n", childIdType, "orphanId", "existingIds_" + ec.name());
         cascade.add("    jdbcClient.sql($L).param($S, $L).param($S, $L).update();\n",
                 deleteConst, "childId", "orphanId", "parentId", parentIdExpr);
         cascade.add("}");
 
-        builder.addStatement(cascade.build());
+        return cascade.build();
     }
 
     /**
-     * Cascade save for an ElementCollection: inserts all value objects into the child table
-     * with the parent FK. Unlike EntityCollections, element collections don't have IDs so we
-     * always delete old and insert new (no upsert logic).
+     * Emits cascade code inside a per-child loop (for children of DIFF_SYNC specs).
+     * Dispatches based on the child spec's mode.
      */
-    private void emitElementCollectionSave(MethodSpec.Builder builder, RepositoryContext ctx,
-                                            String entityVar, TypeDefinition.Prop.ElementCollection ec) {
-        String getter = entityVar + ".get" + capitalize(ec.name()) + "()";
+    private void emitCascadeSpecIntoLoop(CodeBlock.Builder body, CascadeSpec spec, RepositoryContext ctx, String entityVar) {
+        if (spec.mode() == CascadeMode.PRE_INSERT) {
+            emitPreInsertSpec(body, spec, ctx, entityVar);
+        } else {
+            CodeBlock code = buildPostCascadeCodeBlock(spec, ctx, entityVar);
+            if (!code.toString().isEmpty()) {
+                body.add(code);
+            }
+        }
+    }
+
+    /**
+     * Builds a CodeBlock for CASCADE_DELETE (DELETE by FK).
+     */
+    private CodeBlock buildCascadeDeleteCodeBlock(CascadeSpec spec, RepositoryContext ctx, String parentIdExpr) {
+        if (spec.prop() instanceof TypeDefinition.Prop.EntityCollection ec
+                && spec.target() instanceof TypeDefinition.Entity childEntity) {
+            String childTable = dialect.quoteIdentifier(childEntity.tableName());
+            String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
+            String deleteSql = "DELETE FROM " + childTable + " WHERE " + fkColumn + " = :parentId";
+            String deleteConst = ctx.registerConstant("EC_COLL_DELETE_" + ec.name().toUpperCase(), deleteSql);
+            return CodeBlock.builder().add("jdbcClient.sql($L).param($S, $L).update()",
+                    deleteConst, "parentId", parentIdExpr).build();
+        }
+        return CodeBlock.builder().build();
+    }
+
+    /**
+     * Builds a CodeBlock for element collection REPLACE (delete-all + re-insert-all).
+     *
+     * <p>The child-table INSERT iterates the element type's flattened leaves so it agrees with the
+     * hydration row mapper: a value object nested inside the element flattens to one column per leaf
+     * ({@code point_lat}/{@code point_lon}), and an {@code @Association} child contributes its
+     * foreign-key column bound through the association's id. Associations are emitted before scalars,
+     * mirroring the child-table classifier's global contract.</p>
+     */
+    private CodeBlock buildElementCollectionReplaceCodeBlock(RepositoryContext ctx,
+                                                            String entityVar, TypeDefinition.Prop.ElementCollection ec) {
+        String getterName = entityVar + ".get" + capitalize(ec.name()) + "()";
         String parentIdExpr = entityVar + ".getId()";
-        
-        // Get the element type definition to build proper INSERT
+
         TypeDefinition elementType = ec.definition();
-        if (elementType == null) return; // Can't proceed without type info
-        
+        if (elementType == null) return CodeBlock.builder().build();
+
         String childTable = dialect.quoteIdentifier(ec.childTable());
         String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
-        
-        // Build column list from element type properties (scalars only)
+
+        java.util.List<Leaf> leaves = new java.util.ArrayList<>();
+        collectLeaves(elementType, leaves, "element", "");
+
         java.util.List<String> columns = new java.util.ArrayList<>();
         columns.add(fkColumn);
-        for (TypeDefinition.Prop prop : elementType.properties()) {
-            if (prop instanceof TypeDefinition.Prop.Scalar s) {
-                columns.add(dialect.quoteIdentifier(s.columnName()));
-            }
-        }
-        
-        // Build param placeholders
         java.util.List<String> params = new java.util.ArrayList<>();
         params.add(":parentId");
-        for (TypeDefinition.Prop prop : elementType.properties()) {
-            if (prop instanceof TypeDefinition.Prop.Scalar s) {
-                params.add(":" + s.name());
-            }
+        for (Leaf leaf : leaves) {
+            columns.add(dialect.quoteIdentifier(leaf.columnName()));
+            params.add(":" + leaf.columnName());
         }
-        
-        String insertSql = "INSERT INTO " + childTable + " (" + String.join(", ", columns) + 
+
+        String insertSql = "INSERT INTO " + childTable + " (" + String.join(", ", columns) +
                           ") VALUES (" + String.join(", ", params) + ")";
         String insertConst = ctx.registerConstant("EC_INSERT_" + ec.name().toUpperCase(), insertSql);
-        
-        // Build DELETE SQL to clear old elements before re-inserting
+
         String deleteSql = "DELETE FROM " + childTable + " WHERE " + fkColumn + " = :parentId";
         String deleteConst = ctx.registerConstant("EC_DELETE_" + ec.name().toUpperCase(), deleteSql);
-        
+
         CodeBlock.Builder cascade = CodeBlock.builder();
-        
-        // Delete existing elements first (simple approach: delete all, re-insert all)
-        cascade.add("jdbcClient.sql($L).param($S, $L).update();\n", 
+        cascade.add("jdbcClient.sql($L).param($S, $L).update();\n",
                 deleteConst, "parentId", parentIdExpr);
-        
-        // Insert each element in the collection
-        cascade.add("if ($L != null) {\n", getter);
-        cascade.add("    for (var element : $L) {\n", getter);
+        cascade.add("if ($L != null) {\n", getterName);
+        cascade.add("    for (var element : $L) {\n", getterName);
         cascade.add("        jdbcClient.sql($L)", insertConst);
         cascade.add(".param($S, $L)", "parentId", parentIdExpr);
-        
-        // Bind element properties
-        for (TypeDefinition.Prop prop : elementType.properties()) {
-            if (prop instanceof TypeDefinition.Prop.Scalar s) {
-                String getterName = "get" + capitalize(s.name());
-                cascade.add(".param($S, element.$L())", s.name(), getterName);
-            }
+        for (Leaf leaf : leaves) {
+            cascade.add(".param($S, $L)", leaf.columnName(), leaf.binding());
         }
-        
         cascade.add(".update();\n");
         cascade.add("    }\n");
         cascade.add("}");
-        
-        builder.addStatement(cascade.build());
+
+        return cascade.build();
+    }
+
+    /** One flattened child-table leaf: its physical column and the Java expression that binds it. */
+    private record Leaf(String columnName, String binding) {
+    }
+
+    /**
+     * Flattens a value object's write leaves: association FK columns first, then scalars, then
+     * recursively flattened embedded value objects. {@code chain} is the Java expression reaching the
+     * current owner (e.g. {@code element} or {@code element.getPoint()}) and {@code prefix} is the
+     * column prefix already accumulated from enclosing embedded objects.
+     */
+    private void collectLeaves(TypeDefinition type, java.util.List<Leaf> leaves, String chain, String prefix) {
+        for (TypeDefinition.Prop prop : type.properties()) {
+            if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.fkColumn() != null) {
+                String columnName = prefix.isEmpty() ? assoc.fkColumn() : prefix + "_" + assoc.fkColumn();
+                String getterCall = chain + "." + getter(assoc.name()) + "()";
+                String binding = prefix.isEmpty()
+                        ? getterCall + " == null ? null : " + getterCall + ".getId()"
+                        : chain + " == null ? null : " + getterCall + " == null ? null : " + getterCall + ".getId()";
+                leaves.add(new Leaf(columnName, binding));
+            }
+        }
+        for (TypeDefinition.Prop prop : type.properties()) {
+            if (prop instanceof TypeDefinition.Prop.Scalar s) {
+                String columnName = prefix.isEmpty() ? s.columnName() : prefix + "_" + s.columnName();
+                String getterCall = chain + "." + getter(s.name()) + "()";
+                String binding;
+                if (isEnum(s.javaType())) {
+                    binding = getterCall + " == null ? null : " + getterCall + ".name()";
+                } else if (prefix.isEmpty()) {
+                    binding = getterCall;
+                } else {
+                    binding = chain + " == null ? null : " + getterCall;
+                }
+                leaves.add(new Leaf(columnName, binding));
+            }
+        }
+        for (TypeDefinition.Prop prop : type.properties()) {
+            if (prop instanceof TypeDefinition.Prop.Embedded emb && emb.definition() != null) {
+                String newPrefix = prefix.isEmpty() ? emb.name() : prefix + "_" + emb.name();
+                String newChain = chain + "." + getter(emb.name()) + "()";
+                collectLeaves(emb.definition(), leaves, newChain, newPrefix);
+            }
+        }
     }
 
     // ── INSERT ───────────────────────────────────────────────────────────
@@ -573,6 +609,9 @@ public final class WriteEmitter {
         String idTypeFqn = idProp != null ? idProp.javaType() : "java.lang.Long";
         IdStrategy strategy = idStrategy(idTypeFqn);
 
+        // Compute the mutation plan for cascade-driven code generation
+        MutationPlan plan = MutationPlanAnalyzer.analyze(ctx.entity(), method.operation());
+
         SqlBuilder sb = new SqlBuilder(entity, entity);
         sb.dialect(dialect);
         String insertSql = strategy == IdStrategy.APP_ASSIGNED
@@ -583,12 +622,18 @@ public final class WriteEmitter {
         CodeBlock.Builder body = CodeBlock.builder();
         boolean returnsEntity = method.resultKind() == ResultKind.SINGLE;
 
+        // Pre-insert cascade: PRE_INSERT specs (compositions that need child IDs before root insert)
+        for (CascadeSpec spec : plan.cascadeSpecs()) {
+            if (spec.mode() == CascadeMode.PRE_INSERT) {
+                emitPreInsertSpec(body, spec, ctx, entityVar);
+            }
+        }
+
         if (strategy == IdStrategy.APP_ASSIGNED) {
             // Bind all columns including id, no keyholder
             body.add("jdbcClient.sql($L)", constName);
             appendAllBindings(body, entity, entityVar);
             body.add(".update();");
-            if (returnsEntity) body.add("\nreturn $L;", entityVar);
         } else {
             // Generated key with keyholder
             body.add("$T $L = new $T();\n", GENERATED_KEY_HOLDER, "keys", GENERATED_KEY_HOLDER);
@@ -606,10 +651,21 @@ public final class WriteEmitter {
                         entityVar, ClassName.bestGuess(idTypeFqn), "keys");
             }
             body.add("}");
-            if (returnsEntity) body.add("\nreturn $L;", entityVar);
         }
 
         builder.addCode(ExceptionTranslation.wrap(body.build()));
+
+        // Post-insert cascade: non-PRE_INSERT specs (DIFF_SYNC, REPLACE, etc.)
+        for (CascadeSpec spec : plan.cascadeSpecs()) {
+            if (spec.mode() != CascadeMode.PRE_INSERT) {
+                emitPostCascadeSpec(builder, spec, ctx, entityVar);
+            }
+        }
+
+        if (returnsEntity) {
+            builder.addStatement("return $L", entityVar);
+        }
+
         return builder.build();
     }
 
@@ -620,6 +676,9 @@ public final class WriteEmitter {
         TypeDefinition entity = ctx.entity();
         String entityVar = method.parameters().isEmpty() ? "entity" 
                 : method.parameters().getFirst().getSimpleName().toString();
+
+        // Compute the mutation plan for cascade-driven code generation
+        MutationPlan plan = MutationPlanAnalyzer.analyze(ctx.entity(), method.operation());
 
         SqlBuilder sb = new SqlBuilder(entity, entity);
         sb.dialect(dialect);
@@ -632,23 +691,21 @@ public final class WriteEmitter {
         // Bind non-id columns (SET clause), then id (WHERE clause)
         body.add("jdbcClient.sql($L)", constName);
         appendNonIdBindings(body, entity, entityVar);
-        body.add(".param($S, $L.getId()).update();", "id", entityVar);
+        body.add(".param($S, $L.getId()).update();\n", "id", entityVar);
 
-        // Cascade writes for aggregate roots (same diff sync as save)
-        if (ctx.entity().ownsAggregateLifecycle()) {
-            emitCascadeWrites(builder, ctx, entityVar);
-        } else {
-            // For non-aggregate entities, still persist element collections on update
-            for (TypeDefinition.Prop prop : ctx.entity().properties()) {
-                if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
-                    emitElementCollectionSave(builder, ctx, entityVar, ec);
-                }
+        // Post-update cascade: iterate over plan's cascade specs
+        for (CascadeSpec spec : plan.cascadeSpecs()) {
+            CodeBlock code = buildPostCascadeCodeBlock(spec, ctx, entityVar);
+            if (!code.toString().isEmpty()) {
+                body.add(code);
+                body.add("\n");
             }
         }
 
-        if (returnsEntity) body.add("\nreturn $L;", entityVar);
+        if (returnsEntity) body.add("return $L;", entityVar);
 
         builder.addCode(ExceptionTranslation.wrap(body.build()));
+
         return builder.build();
     }
 
@@ -658,45 +715,108 @@ public final class WriteEmitter {
         MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
         TypeDefinition entity = ctx.entity();
 
+        // Compute the mutation plan for cascade-driven code generation
+        MutationPlan plan = MutationPlanAnalyzer.analyze(ctx.entity(), method.operation());
+
         SqlBuilder sb = new SqlBuilder(entity, entity);
         sb.dialect(dialect);
         String deleteSql = sb.deleteById();
         String constName = ctx.registerConstant("DELETE", deleteSql);
 
-        // Extract the entity parameter name from the method signature
+        // Determine if this is deleteById(ID) or delete(Entity)
+        // deleteById takes the entity's ID type as parameter, delete takes the entity itself
         String entityVar = method.parameters().isEmpty() ? "entity" 
                 : method.parameters().getFirst().getSimpleName().toString();
+        String parentIdExpr = method.firstParameterIsEntity(entity) ? entityVar + ".getId()" : entityVar;
 
         CodeBlock.Builder body = CodeBlock.builder();
-        
-        // Cascade delete element collections first (before deleting parent row)
-        for (TypeDefinition.Prop prop : entity.properties()) {
-            if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
-                emitElementCollectionDelete(body, ctx, entityVar, ec);
+
+        // Phase 1: Load FK values for composing to-one associations (before parent delete)
+        for (CascadeSpec spec : plan.cascadeSpecs()) {
+            if (spec.mode() == CascadeMode.CASCADE_DELETE && spec.prop() instanceof TypeDefinition.Prop.Association) {
+                emitCompositionLoadFk(body, spec, ctx, parentIdExpr);
             }
         }
-        
-        // Then delete the parent row
-        body.add("jdbcClient.sql($L).param($S, $L.getId()).update();", constName, "id", entityVar);
+
+        // Phase 2: Pre-delete cascade for element collections and entity collections
+        for (CascadeSpec spec : plan.cascadeSpecs()) {
+            if (spec.mode() == CascadeMode.CASCADE_DELETE && !(spec.prop() instanceof TypeDefinition.Prop.Association)) {
+                emitCascadeDelete(body, spec, ctx, parentIdExpr);
+            }
+        }
+
+        // Phase 3: Delete the parent row
+        body.add("jdbcClient.sql($L).param($S, $L).update();\n", constName, "id", parentIdExpr);
+
+        // Phase 4: Delete composing to-one associations (after parent delete, using loaded FK values)
+        for (CascadeSpec spec : plan.cascadeSpecs()) {
+            if (spec.mode() == CascadeMode.CASCADE_DELETE && spec.prop() instanceof TypeDefinition.Prop.Association) {
+                emitCompositionDelete(body, spec, ctx, entityVar);
+            }
+        }
 
         builder.addCode(ExceptionTranslation.wrap(body.build()));
         return builder.build();
     }
-    
+
     /**
-     * Emits code to delete all elements in an element collection when the parent is deleted.
+     * Emits a CASCADE_DELETE step into a CodeBlock.Builder.
+     * Delegates to {@link #buildCascadeDeleteCodeBlock} which handles
+     * EntityCollection, Association (composition), and ElementCollection deletes by FK.
      */
-    private void emitElementCollectionDelete(CodeBlock.Builder body, RepositoryContext ctx,
-                                              String entityVar, TypeDefinition.Prop.ElementCollection ec) {
-        String parentIdExpr = entityVar + ".getId()";
-        String childTable = dialect.quoteIdentifier(ec.childTable());
-        String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
-        
-        String deleteSql = "DELETE FROM " + childTable + " WHERE " + fkColumn + " = :parentId";
-        String deleteConst = ctx.registerConstant("EC_DELETE_" + ec.name().toUpperCase(), deleteSql);
-        
-        body.add("jdbcClient.sql($L).param($S, $L).update();\n", 
-                deleteConst, "parentId", parentIdExpr);
+    private void emitCascadeDelete(CodeBlock.Builder body, CascadeSpec spec, RepositoryContext ctx, String parentIdExpr) {
+        if (spec.prop() instanceof TypeDefinition.Prop.ElementCollection ec) {
+            // Element collection: delete by FK from the element child table
+            String childTable = dialect.quoteIdentifier(ec.childTable());
+            String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
+            String deleteSql = "DELETE FROM " + childTable + " WHERE " + fkColumn + " = :parentId";
+            String deleteConst = ctx.registerConstant("EC_DELETE_" + ec.name().toUpperCase(), deleteSql);
+            body.add("jdbcClient.sql($L).param($S, $L).update();\n", deleteConst, "parentId", parentIdExpr);
+        } else {
+            // Entity collection or composition association: delegate to shared builder
+            CodeBlock code = buildCascadeDeleteCodeBlock(spec, ctx, parentIdExpr);
+            if (!code.toString().isEmpty()) {
+                body.add(code);
+                body.add(";\n");
+            }
+        }
+    }
+
+    /**
+     * Emits code to load the FK value for a composing to-one association before the parent is deleted.
+     */
+    private void emitCompositionLoadFk(CodeBlock.Builder body, CascadeSpec spec, RepositoryContext ctx, String parentIdExpr) {
+        if (!(spec.prop() instanceof TypeDefinition.Prop.Association assoc)) return;
+        if (!(spec.target() instanceof TypeDefinition.Entity)) return;
+
+        String parentTable = dialect.quoteIdentifier(ctx.entity().tableName());
+        String fkColumn = dialect.quoteIdentifier(assoc.fkColumn());
+        String idColumn = dialect.quoteIdentifier(ctx.entity().idColumn());
+
+        String loadSql = "SELECT " + fkColumn + " FROM " + parentTable + " WHERE " + idColumn + " = :id";
+        String loadConst = ctx.registerConstant("LOAD_FK_" + assoc.name().toUpperCase(), loadSql);
+
+        body.add("Long $L = jdbcClient.sql($L).param($S, $L).query(Long.class).single();\n",
+                "childId_" + assoc.name(), loadConst, "id", parentIdExpr);
+    }
+
+    /**
+     * Emits code to delete a composing to-one association after the parent is deleted.
+     */
+    private void emitCompositionDelete(CodeBlock.Builder body, CascadeSpec spec, RepositoryContext ctx, String entityVar) {
+        if (!(spec.prop() instanceof TypeDefinition.Prop.Association assoc)) return;
+        if (!(spec.target() instanceof TypeDefinition.Entity childEntity)) return;
+
+        String childTable = dialect.quoteIdentifier(childEntity.tableName());
+        String childIdColumn = dialect.quoteIdentifier(childEntity.idColumn());
+
+        String deleteSql = "DELETE FROM " + childTable + " WHERE " + childIdColumn + " = :childId";
+        String deleteConst = ctx.registerConstant("CASCADE_DELETE_" + assoc.name().toUpperCase(), deleteSql);
+
+        body.add("if ($L != null) {\n", "childId_" + assoc.name())
+            .add("    jdbcClient.sql($L).param($S, $L).update();\n",
+                    deleteConst, "childId", "childId_" + assoc.name())
+            .add("}\n");
     }
 
     // ── Binding helpers ──────────────────────────────────────────────────
@@ -942,14 +1062,6 @@ public final class WriteEmitter {
 
     private String getter(String propertyName) {
         return "get" + Character.toUpperCase(propertyName.charAt(0)) + propertyName.substring(1);
-    }
-
-    /**
-     * Converts a method name to a SQL constant name base.
-     * Delegates to FindEmitter's shared utility.
-     */
-    static String toSqlConstantName(String methodName) {
-        return FindEmitter.toSqlConstantName(methodName);
     }
 
     private boolean isEnum(String typeFqn) {

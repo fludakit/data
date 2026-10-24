@@ -35,10 +35,6 @@ public final class HydrationEmitter {
         this.dialect = dialect;
     }
 
-    public HydrationEmitter() {
-        this(io.github.fludakit.data.sql.H2Dialect.INSTANCE);
-    }
-
     /**
      * Returns whether the entity has any to-many collections or composing associations that need hydration.
      */

@@ -6,6 +6,7 @@ import io.github.fludakit.data.annotation.Association;
 import io.github.fludakit.data.annotation.Entity;
 import io.github.fludakit.data.annotation.Identity;
 import io.github.fludakit.data.annotation.ValueObject;
+import io.github.fludakit.data.metadata.JoinTable;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.support.Diagnostics;
 
@@ -69,6 +70,7 @@ final class TypeMappingVisitor {
         }
 
         resolveAllReferences();
+        detectManyToMany();
     }
 
     /**
@@ -349,7 +351,7 @@ final class TypeMappingVisitor {
                         TypeDefinition target = get(targetFqn);
                         if (target instanceof TypeDefinition.Entity entityTarget) {
                             entityCollections.add(new TypeDefinition.Prop.EntityCollection(fieldName,
-                                    targetFqn, entityTarget, Names.fkColumn(fieldName), null));
+                                    targetFqn, entityTarget, Names.fkColumn(fieldName), null, null));
                         }
                         return;
                     }
@@ -485,10 +487,13 @@ final class TypeMappingVisitor {
             graph.deferTarget(ownerFqn, fieldName, targetFqn);
             // Still add a placeholder with null target for now
             entityCollections.add(new TypeDefinition.Prop.EntityCollection(fieldName,
-                    targetFqn, null, inverseFkColumn, null));
+                    targetFqn, null, inverseFkColumn, null, null));
         } else if (target instanceof TypeDefinition.Entity entityTarget) {
             entityCollections.add(new TypeDefinition.Prop.EntityCollection(fieldName,
-                    targetFqn, entityTarget, inverseFkColumn, null));
+                    targetFqn, entityTarget, inverseFkColumn, null, null));
+        } else if (target instanceof TypeDefinition.Aggregate aggregateTarget) {
+            entityCollections.add(new TypeDefinition.Prop.EntityCollection(fieldName,
+                    targetFqn, aggregateTarget, inverseFkColumn, null, null));
         }
     }
 
@@ -616,10 +621,118 @@ final class TypeMappingVisitor {
 
         if (target instanceof TypeDefinition.Entity entityTarget) {
             return new TypeDefinition.Prop.EntityCollection(ec.name(), ec.javaType(),
-                    entityTarget, ec.fkColumn(), ec.mappedBy());
+                    entityTarget, ec.fkColumn(), ec.mappedBy(), ec.joinTable());
+        }
+        if (target instanceof TypeDefinition.Aggregate aggregateTarget) {
+            return new TypeDefinition.Prop.EntityCollection(ec.name(), ec.javaType(),
+                    aggregateTarget, ec.fkColumn(), ec.mappedBy(), ec.joinTable());
         }
 
         return ec;
+    }
+
+    // ── Many-to-many detection ───────────────────────────────────────────
+
+    /**
+     * Detects mutual entity collections between two managed types and attaches the SAME canonical
+     * {@code JoinTable} to both sides. Runs after {@link #resolveAllReferences()}, when every
+     * collection's {@code definition} and {@code javaType} are populated.
+     */
+    private void detectManyToMany() {
+        List<String> keys = new ArrayList<>(graph.nodes());
+        for (String fqn : keys) {
+            TypeDefinition a = graph.get(fqn);
+            if (!(a instanceof TypeDefinition.Entity || a instanceof TypeDefinition.Aggregate)) continue;
+
+            for (TypeDefinition.Prop.EntityCollection ecA : entityCollectionsOf(a)) {
+                if (ecA.definition() == null || ecA.joinTable() != null) continue;
+                String bFqn = ecA.javaType();
+                TypeDefinition b = graph.get(bFqn);
+                if (!(b instanceof TypeDefinition.Entity || b instanceof TypeDefinition.Aggregate)) continue;
+
+                for (TypeDefinition.Prop.EntityCollection ecB : entityCollectionsOf(b)) {
+                    if (ecB.definition() == null || ecB.joinTable() != null) continue;
+                    if (!fqn.equals(ecB.javaType())) continue;
+
+                    // Mutual collections: attach one canonical join table to both sides.
+                    JoinTable joinTable = buildJoinTable(a, b);
+                    graph.put(fqn, withEntityCollections(a,
+                            replaceCollection(entityCollectionsOf(a), ecA, withJoinTable(ecA, joinTable))));
+                    graph.put(bFqn, withEntityCollections(b,
+                            replaceCollection(entityCollectionsOf(b), ecB, withJoinTable(ecB, joinTable))));
+                    // The definitions were just rewritten; re-read a so any further collections of a
+                    // see the updated entity collection list.
+                    a = graph.get(fqn);
+                    break;
+                }
+            }
+        }
+    }
+
+    private static JoinTable buildJoinTable(TypeDefinition a, TypeDefinition b) {
+        String aSimple = simpleName(a.typeName());
+        String bSimple = simpleName(b.typeName());
+        boolean aFirst = aSimple.compareTo(bSimple) <= 0;
+        String ownerFqn = aFirst ? a.typeName() : b.typeName();
+        String inverseFqn = aFirst ? b.typeName() : a.typeName();
+        String ownerSimple = aFirst ? aSimple : bSimple;
+        String inverseSimple = aFirst ? bSimple : aSimple;
+        return new JoinTable(
+                Names.joinTable(ownerSimple, inverseSimple),
+                Names.fkColumn(ownerSimple),
+                Names.fkColumn(inverseSimple),
+                ownerFqn,
+                inverseFqn);
+    }
+
+    private static String simpleName(String fqn) {
+        int dot = fqn.lastIndexOf('.');
+        return dot < 0 ? fqn : fqn.substring(dot + 1);
+    }
+
+    private static List<TypeDefinition.Prop.EntityCollection> entityCollectionsOf(TypeDefinition definition) {
+        if (definition instanceof TypeDefinition.Entity entity) return entity.entityCollections();
+        if (definition instanceof TypeDefinition.Aggregate aggregate) return aggregate.entityCollections();
+        if (definition instanceof TypeDefinition.ValueObject vo) return vo.entityCollections();
+        return List.of();
+    }
+
+    private static TypeDefinition withEntityCollections(TypeDefinition definition,
+                                                        List<TypeDefinition.Prop.EntityCollection> collections) {
+        if (definition instanceof TypeDefinition.Entity entity) {
+            return new TypeDefinition.Entity(entity.typeName(), entity.tableName(), entity.id(),
+                    entity.version(), entity.scalars(), entity.embedded(), entity.associations(),
+                    collections, entity.elementCollections());
+        }
+        if (definition instanceof TypeDefinition.Aggregate aggregate) {
+            return new TypeDefinition.Aggregate(aggregate.typeName(), aggregate.tableName(), aggregate.id(),
+                    aggregate.version(), aggregate.scalars(), aggregate.embedded(), aggregate.associations(),
+                    collections, aggregate.elementCollections());
+        }
+        if (definition instanceof TypeDefinition.ValueObject vo) {
+            return new TypeDefinition.ValueObject(vo.typeName(), vo.scalars(), vo.embedded(),
+                    vo.associations(), collections, vo.elementCollections());
+        }
+        return definition;
+    }
+
+    private static List<TypeDefinition.Prop.EntityCollection> replaceCollection(
+            List<TypeDefinition.Prop.EntityCollection> collections,
+            TypeDefinition.Prop.EntityCollection original,
+            TypeDefinition.Prop.EntityCollection replacement) {
+        List<TypeDefinition.Prop.EntityCollection> updated = new ArrayList<>(collections);
+        for (int i = 0; i < updated.size(); i++) {
+            if (updated.get(i) == original) {
+                updated.set(i, replacement);
+            }
+        }
+        return updated;
+    }
+
+    private static TypeDefinition.Prop.EntityCollection withJoinTable(
+            TypeDefinition.Prop.EntityCollection ec, JoinTable joinTable) {
+        return new TypeDefinition.Prop.EntityCollection(ec.name(), ec.javaType(), ec.definition(),
+                ec.fkColumn(), ec.mappedBy(), joinTable);
     }
 
     // ── Annotation collection helper ─────────────────────────────────────

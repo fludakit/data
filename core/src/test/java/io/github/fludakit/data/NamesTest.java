@@ -36,4 +36,11 @@ class NamesTest {
         assertEquals("order_items", Names.childTable("OrderItem"));
         assertEquals("contact_points", Names.childTable("ContactPoint"));
     }
+
+    @Test
+    void joinTableOrdersSimpleNamesAlphabetically() {
+        assertEquals("author_book", Names.joinTable("Book", "Author"));
+        assertEquals("author_book", Names.joinTable("Author", "Book"));
+        assertEquals("book_publisher", Names.joinTable("Publisher", "Book"));
+    }
 }

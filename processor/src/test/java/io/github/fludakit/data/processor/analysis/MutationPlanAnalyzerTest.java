@@ -1,5 +1,6 @@
 package io.github.fludakit.data.processor.analysis;
 
+import io.github.fludakit.data.metadata.JoinTable;
 import io.github.fludakit.data.metadata.MutationPlan;
 import io.github.fludakit.data.metadata.MutationPlan.*;
 import io.github.fludakit.data.metadata.TypeDefinition;
@@ -180,6 +181,25 @@ class MutationPlanAnalyzerTest {
                 "Nested cascade should include element collection REPLACE");
     }
 
+    @Test
+    void manyToManyCollectionUsesLinkSyncAndLinkOnlyDelete() {
+        TypeDefinition.Aggregate aggregate = buildAggregateWithManyToManyCollection();
+
+        for (Operation op : List.of(Operation.INSERT, Operation.SAVE, Operation.UPDATE)) {
+            MutationPlan plan = MutationPlanAnalyzer.analyze(aggregate, op);
+            assertTrue(plan.cascadeSpecs().stream().anyMatch(s ->
+                            s.prop() instanceof TypeDefinition.Prop.EntityCollection
+                                    && s.mode() == CascadeMode.LINK_SYNC),
+                    op + " should sync the join table only (LINK_SYNC)");
+        }
+
+        MutationPlan delete = MutationPlanAnalyzer.analyze(aggregate, Operation.DELETE);
+        assertTrue(delete.cascadeSpecs().stream().anyMatch(s ->
+                s.prop() instanceof TypeDefinition.Prop.EntityCollection
+                        && s.mode() == CascadeMode.CASCADE_DELETE),
+                "DELETE should remove link rows only (CASCADE_DELETE)");
+    }
+
     // Helper methods to build test TypeDefinitions
     private static TypeDefinition.Aggregate buildTestAggregate() {
         TypeDefinition.Prop.Id id = new TypeDefinition.Prop.Id("id", "java.lang.Long", "id",
@@ -205,7 +225,7 @@ class MutationPlanAnalyzerTest {
                 "CollectionChild", "collection_child", ecChildId, null,
                 List.of(ecChildName), List.of(), List.of(), List.of(), List.of());
         TypeDefinition.Prop.EntityCollection entityCollection = new TypeDefinition.Prop.EntityCollection(
-                "items", "java.util.List", ecChildEntity, "parent_id", "parent");
+                "items", "java.util.List", ecChildEntity, "parent_id", "parent", null);
 
         // Element collection (value object)
         TypeDefinition.ValueObject vo = new TypeDefinition.ValueObject(
@@ -250,10 +270,28 @@ class MutationPlanAnalyzerTest {
                 "AggregateChild", "aggregate_child", aggChildId, null,
                 List.of(aggChildName), List.of(), List.of(), List.of(), List.of());
         TypeDefinition.Prop.EntityCollection entityCollection = new TypeDefinition.Prop.EntityCollection(
-                "aggregateItems", "java.util.List", aggChild, "parent_id", "parent");
+                "aggregateItems", "java.util.List", aggChild, "parent_id", "parent", null);
 
         return new TypeDefinition.Aggregate(
                 "TestAggregate", "test_aggregate", id, null,
                 List.of(name), List.of(), List.of(), List.of(entityCollection), List.of());
+    }
+
+    private static TypeDefinition.Aggregate buildAggregateWithManyToManyCollection() {
+        TypeDefinition.Prop.Id id = new TypeDefinition.Prop.Id("id", "java.lang.Long", "id",
+                TypeDefinition.Prop.Id.GeneratedType.IDENTITY);
+        TypeDefinition.Prop.Id targetId = new TypeDefinition.Prop.Id("id", "java.lang.Long", "id",
+                TypeDefinition.Prop.Id.GeneratedType.IDENTITY);
+        TypeDefinition.Aggregate target = new TypeDefinition.Aggregate(
+                "Author", "authors", targetId, null,
+                List.of(), List.of(), List.of(), List.of(), List.of());
+        JoinTable joinTable = new JoinTable("author_book", "author_id", "book_id",
+                "Author", "Book");
+        TypeDefinition.Prop.EntityCollection authors = new TypeDefinition.Prop.EntityCollection(
+                "authors", "java.util.List", target, null, null, joinTable);
+
+        return new TypeDefinition.Aggregate(
+                "Book", "books", id, null,
+                List.of(), List.of(), List.of(), List.of(authors), List.of());
     }
 }

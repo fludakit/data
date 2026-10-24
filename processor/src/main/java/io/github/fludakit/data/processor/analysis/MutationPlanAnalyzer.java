@@ -88,6 +88,16 @@ public final class MutationPlanAnalyzer {
 
         // Entity collections
         for (TypeDefinition.Prop.EntityCollection ec : entityCollections) {
+            if (ec.joinTable() != null) {
+                // Many-to-many: maintain the join table only (link rows); never cascade the
+                // target rows — both sides are aggregate roots managed by their own repositories.
+                if (op == Operation.INSERT || op == Operation.SAVE || op == Operation.UPDATE) {
+                    postSteps.add(new CascadeSpec(ec.definition(), ec, CascadeMode.LINK_SYNC, List.of()));
+                } else if (op == Operation.DELETE) {
+                    postSteps.add(new CascadeSpec(ec.definition(), ec, CascadeMode.CASCADE_DELETE, List.of()));
+                }
+                continue;
+            }
             // Rule 4: skip entity collections of @AggregateRoot targets
             if (ec.definition() instanceof TypeDefinition.Aggregate) continue;
             if (!(ec.definition() instanceof TypeDefinition.Entity child)) continue;

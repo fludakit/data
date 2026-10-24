@@ -13,6 +13,7 @@ import io.github.fludakit.data.annotation.Identity;
 public class Author {
     @Identity Long id;
     String name;
+    java.util.List<Book> books;
 
     public Author() {}
 
@@ -20,4 +21,6 @@ public class Author {
     public void setId(Long id) { this.id = id; }
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }
+    public java.util.List<Book> getBooks() { return books; }
+    public void setBooks(java.util.List<Book> books) { this.books = books; }
 }

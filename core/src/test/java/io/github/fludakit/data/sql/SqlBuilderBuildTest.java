@@ -65,6 +65,13 @@ class SqlBuilderBuildTest {
             new ColumnRef.Simple("product", "line"),
             List.of(new JoinEdge.ToMany(new ColumnRef.Simple("id", "order_table"),
                             new ColumnRef.ForeignKey("order_id", "line"))));
+    /** A many-to-many traversal for {@code authors.name}: root id → join table, join table → target. */
+    private static final ColumnPlacement BOOK_AUTHOR_NAME = new ColumnPlacement(
+            new ColumnRef.Simple("name", "authors"),
+            List.of(new JoinEdge.ToMany(new ColumnRef.Simple("id", "book"),
+                            new ColumnRef.ForeignKey("book_id", "author_book")),
+                    new JoinEdge.ToOne(new ColumnRef.ForeignKey("author_id", "author_book"),
+                            new ColumnRef.Simple("id", "authors"))));
 
     /** The hand-written stand-in for a generated per-entity {@code resolve} switch. */
     private static final ColumnResolver ATTRIBUTES = new ColumnResolver() {
@@ -306,6 +313,17 @@ class SqlBuilderBuildTest {
                 build(Operation.FIND,
                         List.of(pred(Predicate.of("tags.label", Operator.EQ, "label"))),
                         List.of(), PagingMode.NONE, 0));
+    }
+
+    @Test
+    void manyToManyExistentialChainsTheSecondHopAsALeftJoin() {
+        assertEquals("EXISTS (SELECT 1 FROM \"author_book\" \"author_book\""
+                        + " LEFT JOIN \"authors\" AS \"authors\""
+                        + " ON \"author_book\".\"author_id\" = \"authors\".\"id\""
+                        + " WHERE \"author_book\".\"book_id\" = \"book\".\"id\""
+                        + " AND \"authors\".\"name\" = :name)",
+                QueryCompiler.existsConjunct(H2Dialect.INSTANCE,
+                        Predicate.of("name", Operator.EQ, "name"), BOOK_AUTHOR_NAME));
     }
 
     @Test

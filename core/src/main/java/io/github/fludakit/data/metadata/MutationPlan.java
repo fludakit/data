@@ -43,6 +43,8 @@ public record MutationPlan(
         UPSERT,
         /** Diff sync: upsert each child + delete orphans. */
         DIFF_SYNC,
+        /** Many-to-many link sync: maintain join-table rows only, never the target rows. */
+        LINK_SYNC,
         /** Delete all elements + re-insert all. */
         REPLACE,
         /** Delete child row(s). */

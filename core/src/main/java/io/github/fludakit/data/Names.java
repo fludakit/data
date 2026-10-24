@@ -65,4 +65,15 @@ public final class Names {
     }
 
     public static String childTable(String parentTable, String field) { return parentTable + "_" + toSnakeCase(field); }
+
+    /**
+     * The canonical many-to-many join table name for two simple type names: the two snake-cased
+     * singulars joined by an underscore, in alphabetical order, so both directions agree
+     * ({@code Book} + {@code Author} → {@code book_authors}).
+     */
+    public static String joinTable(String aSimple, String bSimple) {
+        String a = toSnakeCase(aSimple);
+        String b = toSnakeCase(bSimple);
+        return a.compareTo(b) <= 0 ? a + "_" + b : b + "_" + a;
+    }
 }

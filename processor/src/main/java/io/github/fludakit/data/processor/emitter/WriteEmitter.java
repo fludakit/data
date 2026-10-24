@@ -316,6 +316,7 @@ public final class WriteEmitter {
         return switch (spec.mode()) {
             case UPDATE -> buildCompositionUpdateCodeBlock(spec, ctx, entityVar);
             case DIFF_SYNC -> buildDiffSyncCodeBlock(spec, ctx, entityVar);
+            case LINK_SYNC -> buildManyToManySyncCodeBlock(spec, ctx, entityVar);
             case REPLACE -> {
                 if (spec.prop() instanceof TypeDefinition.Prop.ElementCollection ec) {
                     yield buildElementCollectionReplaceCodeBlock(ctx, entityVar, ec);
@@ -467,6 +468,75 @@ public final class WriteEmitter {
     }
 
     /**
+     * Builds a CodeBlock for many-to-many LINK_SYNC: insert a join-table row per in-memory child id
+     * (deduplicated) and delete orphan link rows. The target rows themselves are never written —
+     * both sides are aggregate roots managed by their own repositories.
+     */
+    private CodeBlock buildManyToManySyncCodeBlock(CascadeSpec spec, RepositoryContext ctx, String entityVar) {
+        if (!(spec.prop() instanceof TypeDefinition.Prop.EntityCollection ec)) return CodeBlock.builder().build();
+        if (ec.joinTable() == null) return CodeBlock.builder().build();
+        TypeDefinition target = ec.definition();
+        if (target == null || target.idColumn() == null) return CodeBlock.builder().build();
+
+        String joinTable = dialect.quoteIdentifier(ec.joinTable().table());
+        String rootCol = dialect.quoteIdentifier(ec.joinTable().columnFor(ctx.entity().typeName()));
+        String targetCol = dialect.quoteIdentifier(ec.joinTable().columnFor(target.typeName()));
+
+        TypeDefinition.Prop.Id targetIdProp = idProp(target);
+        String targetIdTypeFqn = targetIdProp != null ? targetIdProp.javaType() : "java.lang.Long";
+        ClassName targetIdType = ClassName.bestGuess(targetIdTypeFqn);
+
+        String collectionGetter = entityVar + "." + getter(ec.name()) + "()";
+        String childVar = "child_" + ec.name();
+        String parentIdExpr = entityVar + ".getId()";
+
+        String insertSql = "INSERT INTO " + joinTable + " (" + rootCol + ", " + targetCol
+                + ") VALUES (:parentId, :childId)";
+        String insertConst = ctx.registerConstant("EC_LINK_INSERT_" + ec.name().toUpperCase(), insertSql);
+
+        String selectIdsSql = "SELECT " + targetCol + " FROM " + joinTable + " WHERE " + rootCol + " = :parentId";
+        String selectIdsConst = ctx.registerConstant("EC_LINK_IDS_" + ec.name().toUpperCase(), selectIdsSql);
+
+        String deleteSql = "DELETE FROM " + joinTable + " WHERE " + rootCol
+                + " = :parentId AND " + targetCol + " = :childId";
+        String deleteConst = ctx.registerConstant("EC_LINK_DELETE_" + ec.name().toUpperCase(), deleteSql);
+
+        CodeBlock.Builder cascade = CodeBlock.builder();
+
+        cascade.add("$T<$T> $L = new $T<>(jdbcClient\n",
+                java.util.Set.class, targetIdType, "existingIds_" + ec.name(), java.util.HashSet.class);
+        cascade.add("    .sql($L)\n", selectIdsConst);
+        cascade.add("    .param($S, $L)\n", "parentId", parentIdExpr);
+        cascade.add("    .query($T.class)\n", targetIdType);
+        cascade.add("    .list());\n");
+
+        cascade.add("$T<$T> $L = new $T<>();\n",
+                java.util.Set.class, targetIdType, "currentIds_" + ec.name(), java.util.HashSet.class);
+
+        cascade.add("if ($L != null) {\n", collectionGetter);
+        cascade.add("    for (var $L : $L) {\n", childVar, collectionGetter);
+        cascade.add("        if ($L.getId() != null && $L.add($L.getId())"
+                + " && !$L.contains($L.getId())) {\n",
+                childVar, "currentIds_" + ec.name(), childVar,
+                "existingIds_" + ec.name(), childVar);
+        cascade.add("            jdbcClient.sql($L)", insertConst);
+        cascade.add(".param($S, $L)", "parentId", parentIdExpr);
+        cascade.add(".param($S, $L.getId())", "childId", childVar);
+        cascade.add(".update();\n");
+        cascade.add("        }\n");
+        cascade.add("    }\n");
+        cascade.add("}\n");
+
+        cascade.add("$L.removeAll($L);\n", "existingIds_" + ec.name(), "currentIds_" + ec.name());
+        cascade.add("for ($T $L : $L) {\n", targetIdType, "orphanId", "existingIds_" + ec.name());
+        cascade.add("    jdbcClient.sql($L).param($S, $L).param($S, $L).update();\n",
+                deleteConst, "parentId", parentIdExpr, "childId", "orphanId");
+        cascade.add("}");
+
+        return cascade.build();
+    }
+
+    /**
      * Emits cascade code inside a per-child loop (for children of DIFF_SYNC specs).
      * Dispatches based on the child spec's mode.
      */
@@ -485,6 +555,15 @@ public final class WriteEmitter {
      * Builds a CodeBlock for CASCADE_DELETE (DELETE by FK).
      */
     private CodeBlock buildCascadeDeleteCodeBlock(CascadeSpec spec, RepositoryContext ctx, String parentIdExpr) {
+        if (spec.prop() instanceof TypeDefinition.Prop.EntityCollection ec && ec.joinTable() != null) {
+            // Many-to-many delete: remove the link rows only, never the target rows.
+            String joinTable = dialect.quoteIdentifier(ec.joinTable().table());
+            String rootCol = dialect.quoteIdentifier(ec.joinTable().columnFor(ctx.entity().typeName()));
+            String deleteSql = "DELETE FROM " + joinTable + " WHERE " + rootCol + " = :parentId";
+            String deleteConst = ctx.registerConstant("EC_LINK_DELETE_ALL_" + ec.name().toUpperCase(), deleteSql);
+            return CodeBlock.builder().add("jdbcClient.sql($L).param($S, $L).update()",
+                    deleteConst, "parentId", parentIdExpr).build();
+        }
         if (spec.prop() instanceof TypeDefinition.Prop.EntityCollection ec
                 && spec.target() instanceof TypeDefinition.Entity childEntity) {
             String childTable = dialect.quoteIdentifier(childEntity.tableName());

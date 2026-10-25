@@ -71,6 +71,7 @@ class ValidationDiagnosticsTest {
 
         Files.writeString(sourceDir.resolve("Note.java"), """
                 package lifecyclefreename;
+                @io.github.fludakit.data.annotation.Entity
                 public class Note {
                     public Long id;
                     public String title;
@@ -114,6 +115,7 @@ class ValidationDiagnosticsTest {
 
         Files.writeString(sourceDir.resolve("Note.java"), """
                 package builtinfindall;
+                @io.github.fludakit.data.annotation.Entity
                 public class Note {
                     public Long id;
                     public String title;
@@ -154,6 +156,7 @@ class ValidationDiagnosticsTest {
 
         Files.writeString(sourceDir.resolve("Note.java"), """
                 package lifecycleshape;
+                @io.github.fludakit.data.annotation.Entity
                 public class Note {
                     public Long id;
                     public String title;
@@ -190,6 +193,7 @@ class ValidationDiagnosticsTest {
 
         Files.writeString(sourceDir.resolve("Customer.java"), """
                 package freestyleinvalid;
+                @io.github.fludakit.data.annotation.Entity
                 public class Customer {
                     public Long id;
                     public Long getId() { return id; }
@@ -226,6 +230,7 @@ class ValidationDiagnosticsTest {
 
         Files.writeString(sourceDir.resolve("Customer.java"), """
                 package combinedannotations;
+                @io.github.fludakit.data.annotation.Entity
                 public class Customer {
                     public Long id;
                     public Long getId() { return id; }
@@ -267,6 +272,7 @@ class ValidationDiagnosticsTest {
         Files.writeString(sourceDir.resolve("Album.java"), """
                 package nestedec;
                 import java.util.List;
+                @io.github.fludakit.data.annotation.Entity
                 public class Album {
                     Long id;
                     String title;
@@ -313,6 +319,7 @@ class ValidationDiagnosticsTest {
         // The second repository is the point of the pin: the round must survive the rejection.
         Files.writeString(sourceDir.resolve("Note.java"), """
                 package nestedec;
+                @io.github.fludakit.data.annotation.Entity
                 public class Note {
                     Long id;
                     String text;
@@ -358,6 +365,7 @@ class ValidationDiagnosticsTest {
 
         Files.writeString(sourceDir.resolve("Customer.java"), """
                 package wrongreturn;
+                @io.github.fludakit.data.annotation.Entity
                 public class Customer {
                     public Long id;
                     public String name;

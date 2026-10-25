@@ -20,6 +20,7 @@ import io.github.fludakit.data.qbn.QueryByMethodNameParser;
 import io.github.fludakit.data.query.Operation;
 import io.github.fludakit.data.query.LikePattern;
 import io.github.fludakit.data.query.ParamBinding;
+import io.github.fludakit.data.sql.SqlDialect;
 import io.github.fludakit.data.query.PagingMode;
 import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.Predicate;
@@ -82,27 +83,30 @@ final class RepositoryVisitor {
     private static final Pattern NAMED_PARAM_PATTERN = Pattern.compile(":([a-zA-Z_]\\w*)");
 
     private final TypeElement repository;
-    private final RepositoryProcessor host;
     private final Types types;
     private final Elements elements;
     private final Diagnostics diagnostics;
     private final Filer filer;
-    private final TypeMappingVisitor typeMappingVisitor;
+    private final SqlDialect dialect;
+
+    /** The populated type graph, built by the processor's early scan — read-only here. */
+    private final TypeGraph typeGraph;
 
     /** Method contexts built during visit — consumed by later emitter tasks. */
     private final List<MethodContext> methods = new ArrayList<>();
 
-    /** JdbcClient accessor methods that need a pass-through override. */
-    private final List<ExecutableElement> jdbcClientAccessors = new ArrayList<>();
+    /** The optional {@code JdbcClient getJdbcClient()} escape hatch — at most one method. */
+    private ExecutableElement jdbcClientAccessor;
 
-    RepositoryVisitor(TypeElement repository, RepositoryProcessor host) {
+    RepositoryVisitor(TypeElement repository, Types types, Elements elements, Diagnostics diagnostics,
+                      Filer filer, TypeGraph typeGraph, SqlDialect dialect) {
         this.repository = repository;
-        this.host = host;
-        this.types = host.types();
-        this.elements = host.elements();
-        this.diagnostics = host.diagnostics();
-        this.filer = host.filer();
-        this.typeMappingVisitor = host.typeMappingVisitor();
+        this.types = types;
+        this.elements = elements;
+        this.diagnostics = diagnostics;
+        this.filer = filer;
+        this.typeGraph = typeGraph;
+        this.dialect = dialect;
     }
 
     void visit() {
@@ -121,8 +125,10 @@ final class RepositoryVisitor {
             return;
         }
 
-        // 2. Fetch TypeDefinition from TypeMappingVisitor
-        TypeDefinition entityMapping = typeMappingVisitor.get(entityFqn);
+        // 2. Read the entity mapping from the type graph — every repository entity type must be
+        // annotated (@Entity/@AggregateRoot) so the processor's scan has already cached it;
+        // a miss is a specification violation and fails the compilation below
+        TypeDefinition entityMapping = typeGraph.get(entityFqn);
         if (entityMapping == null) {
             diagnostics.error("No @Entity/@AggregateRoot/@ValueObject mapping found for " + entityFqn,
                     repository);
@@ -161,9 +167,9 @@ final class RepositoryVisitor {
             // Skip methods declared on java.lang.Object
             if (isObjectMethod(method)) continue;
 
-            // Handle JdbcClient accessor methods
+            // Handle the optional JdbcClient escape hatch: JdbcClient getJdbcClient()
             if (isJdbcClientAccessor(method)) {
-                jdbcClientAccessors.add(method);
+                jdbcClientAccessor = method;
                 continue;
             }
 
@@ -213,7 +219,7 @@ final class RepositoryVisitor {
         }
 
         // 6d. Emit write methods (save, insert, update, deleteById)
-        WriteEmitter writeEmitter = new WriteEmitter(host.dialect(), types, elements, repositoryDeclaredType, repositoryOwnType);
+        WriteEmitter writeEmitter = new WriteEmitter(dialect, types, elements, repositoryDeclaredType, repositoryOwnType);
         for (MethodContext mc : methods) {
             MethodSpec emitted = writeEmitter.emit(ctx, mc);
             if (emitted != null) {
@@ -535,7 +541,7 @@ final class RepositoryVisitor {
                     
                     // Special handling for ElementCollection - can't use resolve() directly
                     if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
-                        TypeDefinition elementType = typeMappingVisitor.get(ec.javaType());
+                        TypeDefinition elementType = typeGraph.get(ec.javaType());
                         if (elementType != null && elementType.findProperty(tail) != null) {
                             return fullPath;
                         }
@@ -572,8 +578,8 @@ final class RepositoryVisitor {
         if (prop instanceof TypeDefinition.Prop.EntityCollection ec) return ec.definition();
         if (prop instanceof TypeDefinition.Prop.Embedded emb) return emb.definition();
         if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
-            // For element collections, look up the element type definition from cache
-            return typeMappingVisitor.get(ec.javaType());
+            // For element collections, look up the element type definition from the type graph
+            return typeGraph.get(ec.javaType());
         }
         return null;
     }
@@ -756,12 +762,11 @@ final class RepositoryVisitor {
 
     // ── JdbcClient accessor detection ────────────────────────────────────
 
+    /** The one supported escape hatch: {@code JdbcClient getJdbcClient()} — optional, at most one. */
     private boolean isJdbcClientAccessor(ExecutableElement method) {
-        String returnFqn = erasureFqn(method.getReturnType());
-        if (!JDBC_CLIENT.equals(returnFqn)) return false;
-        if (!method.getParameters().isEmpty()) return false;
-        String name = method.getSimpleName().toString();
-        return name.startsWith("get") || name.startsWith("jdbcClient");
+        return method.getSimpleName().contentEquals("getJdbcClient")
+                && JDBC_CLIENT.equals(erasureFqn(method.getReturnType()))
+                && method.getParameters().isEmpty();
     }
 
     // ── @Query method resolution ─────────────────────────────────────────
@@ -884,9 +889,9 @@ final class RepositoryVisitor {
             shell.addMethod(auxMethod);
         }
 
-        // Add JdbcClient accessor overrides
-        for (ExecutableElement accessor : jdbcClientAccessors) {
-            shell.addMethod(MethodSpec.overriding(accessor)
+        // Add the JdbcClient accessor override, when the repository declares one
+        if (jdbcClientAccessor != null) {
+            shell.addMethod(MethodSpec.overriding(jdbcClientAccessor)
                     .addStatement("return this.$L", "jdbcClient")
                     .build());
         }

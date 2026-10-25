@@ -34,6 +34,7 @@ class StaticMetamodelTest {
         Files.writeString(sourceDir.resolve("Book.java"), """
                 package mmbook;
 
+                @io.github.fludakit.data.annotation.Entity
                 public class Book {
                     public Long id;
                     public String title;

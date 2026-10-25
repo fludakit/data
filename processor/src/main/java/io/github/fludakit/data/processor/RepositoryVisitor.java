@@ -201,7 +201,7 @@ final class RepositoryVisitor {
         // 6b. Emit plain finder methods
         DeclaredType repositoryDeclaredType = resolveRepositoryDeclaredType();
         DeclaredType repositoryOwnType = (DeclaredType) repository.asType();
-        FindEmitter findEmitter = new FindEmitter(host.dialect(), types, repositoryDeclaredType, repositoryOwnType);
+        FindEmitter findEmitter = new FindEmitter(dialect, types, repositoryDeclaredType, repositoryOwnType);
         for (MethodContext mc : methods) {
             MethodSpec emitted = findEmitter.emit(ctx, mc);
             if (emitted != null) {
@@ -228,7 +228,7 @@ final class RepositoryVisitor {
         }
 
         // 6e. Emit hydration methods for entities with to-many collections
-        HydrationEmitter hydrationEmitter = new HydrationEmitter(host.dialect());
+        HydrationEmitter hydrationEmitter = new HydrationEmitter(dialect);
         if (hydrationEmitter.hasCollectionsToHydrate(entityMapping)) {
             MethodSpec hydrateMethod = hydrationEmitter.emitHydrate(ctx);
             if (hydrateMethod != null) {

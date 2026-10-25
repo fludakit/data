@@ -49,21 +49,31 @@ public final class LifecycleEmitter {
      *
      * @return the method spec, or {@code null} if the method is not a batch lifecycle method
      */
+    /** The batch lifecycle names - the one list both emitters must agree on. */
+    private static final List<String> BATCH_NAMES =
+            List.of("saveAll", "insertAll", "updateAll", "deleteAll", "deleteByIds");
+
+    /**
+     * Whether a method is one of the batch lifecycle operations, by name or by a first
+     * List/Collection parameter. WriteEmitter skips on it, LifecycleEmitter claims on it -
+     * one predicate so the two cannot drift.
+     */
+    static boolean isBatchLifecycleMethod(MethodContext method) {
+        if (BATCH_NAMES.contains(method.name())) {
+            return true;
+        }
+        if (!method.parameters().isEmpty()) {
+            String paramType = method.parameters().getFirst().asType().toString();
+            return paramType.startsWith("java.util.List") || paramType.startsWith("java.util.Collection");
+        }
+        return false;
+    }
+
     public MethodSpec emit(RepositoryContext ctx, MethodContext method) {
         Operation op = method.operation();
         String name = method.name();
 
-        // Detect batch methods by name or by parameter type (List/Collection)
-        boolean isBatch = false;
-        if ("saveAll".equals(name) || "insertAll".equals(name) || "updateAll".equals(name)
-                || "deleteAll".equals(name) || "deleteByIds".equals(name)) {
-            isBatch = true;
-        } else if (!method.parameters().isEmpty()) {
-            String paramType = method.parameters().getFirst().asType().toString();
-            if (paramType.startsWith("java.util.List") || paramType.startsWith("java.util.Collection")) {
-                isBatch = true;
-            }
-        }
+        boolean isBatch = isBatchLifecycleMethod(method);
 
         if (!isBatch) {
             return null;

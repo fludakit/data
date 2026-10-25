@@ -75,19 +75,9 @@ public final class WriteEmitter {
     public MethodSpec emit(RepositoryContext ctx, MethodContext method) {
         Operation op = method.operation();
 
-        // Skip batch lifecycle methods — handled by LifecycleEmitter
-        // Detect by name or by parameter type (List/Collection)
-        String name = method.name();
-        if ("saveAll".equals(name) || "deleteAll".equals(name) || "deleteByIds".equals(name)
-                || "insertAll".equals(name) || "updateAll".equals(name)) {
+        // Skip batch lifecycle methods - handled by LifecycleEmitter (same predicate)
+        if (LifecycleEmitter.isBatchLifecycleMethod(method)) {
             return null;
-        }
-        // Also skip if the first parameter is a collection type (batch operation)
-        if (!method.parameters().isEmpty()) {
-            String paramType = method.parameters().getFirst().asType().toString();
-            if (paramType.startsWith("java.util.List") || paramType.startsWith("java.util.Collection")) {
-                return null;
-            }
         }
 
         if (op == Operation.SAVE) {

@@ -43,3 +43,6 @@ tck-runner/
 # The agent workspace: session-scoped project data (memory, notes). Not a build cache —
 # deleting it loses written history — but it is not a repository artifact either.
 .workbuddy/
+
+# ZCode local workspace state
+/.zcode/

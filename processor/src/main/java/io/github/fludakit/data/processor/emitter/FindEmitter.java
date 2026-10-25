@@ -20,7 +20,6 @@ import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
 import io.github.fludakit.data.query.SortSpec;
-import io.github.fludakit.data.sql.H2Dialect;
 import io.github.fludakit.data.sql.QueryCompiler;
 import io.github.fludakit.data.sql.SqlBuilder;
 import io.github.fludakit.data.sql.SqlDialect;
@@ -61,9 +60,8 @@ public final class FindEmitter {
     private final DeclaredType baseRepositoryType;
     private final DeclaredType repositoryOwnType;
 
-    /** Default constructor using H2 dialect. */
-    public FindEmitter(Types types, DeclaredType baseRepositoryType, DeclaredType repositoryOwnType) {
-        this.dialect = H2Dialect.INSTANCE;
+    public FindEmitter(SqlDialect dialect, Types types, DeclaredType baseRepositoryType, DeclaredType repositoryOwnType) {
+        this.dialect = dialect;
         this.types = types;
         this.baseRepositoryType = baseRepositoryType;
         this.repositoryOwnType = repositoryOwnType;

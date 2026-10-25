@@ -116,6 +116,8 @@ public final class QueryCompiler {
             case QueryDefinition.Upsert ignored -> upsert(dialect, schema, requireResolver(resolver));
             case QueryDefinition.Update ignored -> update(dialect, schema, requireResolver(resolver));
             case QueryDefinition.DeleteById ignored -> deleteById(dialect, schema);
+            case QueryDefinition.DeleteByFk byFk -> deleteByFk(dialect, byFk.table(), byFk.fkColumn());
+            case QueryDefinition.SelectForeignKey selectFk -> selectForeignKey(dialect, schema, selectFk.fkColumn());
             case QueryDefinition.Native nativeQuery -> nativeQuery.sql();
             case QueryDefinition.Criteria criteria -> {
                 Objects.requireNonNull(resolver, "resolver");
@@ -138,6 +140,8 @@ public final class QueryCompiler {
             case QueryDefinition.Upsert ignored -> upsert(dialect, schema, requireResolver(resolver));
             case QueryDefinition.Update ignored -> update(dialect, schema, requireResolver(resolver));
             case QueryDefinition.DeleteById ignored -> deleteById(dialect, schema);
+            case QueryDefinition.DeleteByFk byFk -> deleteByFk(dialect, byFk.table(), byFk.fkColumn());
+            case QueryDefinition.SelectForeignKey selectFk -> selectForeignKey(dialect, schema, selectFk.fkColumn());
             case QueryDefinition.Native nativeQuery -> nativeQuery.sql();
             case QueryDefinition.Criteria criteria -> {
                 Objects.requireNonNull(resolver, "resolver");
@@ -398,6 +402,19 @@ public final class QueryCompiler {
     public static String deleteById(SqlDialect dialect, TableSchema schema) {
         return "DELETE FROM " + dialect.quoteIdentifier(schema.tableName()) + " WHERE "
                 + dialect.quoteIdentifier(schema.idColumn()) + " = :id";
+    }
+
+    /** Renders a cascade {@code DELETE} of one child table's rows by the parent's foreign key. */
+    private static String deleteByFk(SqlDialect dialect, String table, String fkColumn) {
+        return "DELETE FROM " + dialect.quoteIdentifier(table)
+                + " WHERE " + dialect.quoteIdentifier(fkColumn) + " = :parentId";
+    }
+
+    /** Renders the context table's foreign-key column read for one identifier. */
+    private static String selectForeignKey(SqlDialect dialect, TableSchema schema, String fkColumn) {
+        return "SELECT " + dialect.quoteIdentifier(fkColumn)
+                + " FROM " + dialect.quoteIdentifier(schema.tableName())
+                + " WHERE " + dialect.quoteIdentifier(schema.idColumn()) + " = :id";
     }
 
     // ------------------------------------------------------------------- splice primitives

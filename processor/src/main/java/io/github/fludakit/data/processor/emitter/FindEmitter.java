@@ -118,11 +118,6 @@ public final class FindEmitter {
             return emitExists(ctx, method);
         }
 
-        // DeleteBy (DELETE with predicates, no paging)
-        if (op == Operation.DELETE && pm == PagingMode.NONE && !method.predicates().isEmpty()) {
-            return emitDeleteBy(ctx, method);
-        }
-
         return null;
     }
 
@@ -1144,130 +1139,6 @@ public final class FindEmitter {
         return sqlBuilder.render(new QueryDefinition.Exists(method.predicates(), List.of()));
     }
 
-    // ── DeleteBy ─────────────────────────────────────────────────────────
-
-    private MethodSpec emitDeleteBy(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
-
-        TypeDefinition entity = ctx.entity();
-        SqlBuilder sqlBuilder = new SqlBuilder(entity);
-        sqlBuilder.dialect(dialect);
-        ResultKind rk = method.resultKind() == ResultKind.VOID ? ResultKind.VOID : method.resultKind();
-        String sql = sqlBuilder.render(new QueryDefinition.DeleteWhere(method.predicates(), List.of(), rk));
-        String constBase = toSqlConstantName(method.name());
-        String constName = ctx.registerConstant(constBase, sql);
-
-        List<ParamBinding> bindings = method.paramBindings();
-
-        CodeBlock.Builder body = CodeBlock.builder();
-
-        // Determine if this is a deleteById (single predicate on the ID column)
-        // so we can cascade deletes to child collections for aggregate roots
-        boolean isDeleteById = isDeleteByIdPredicate(entity, method);
-        String parentIdParam = isDeleteById ? idParamName(method, entity) : null;
-
-        // Cascade delete child collections before parent delete (aggregate roots only)
-        if (isDeleteById && entity.ownsAggregateLifecycle() && parentIdParam != null) {
-            // Composing to-one associations: load FK before delete, delete child after
-            for (TypeDefinition.Prop prop : entity.properties()) {
-                if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.composition() && assoc.definition() instanceof TypeDefinition.Entity childEntity) {
-                    String parentTable = dialect.quoteIdentifier(entity.tableName());
-                    String fkColumn = dialect.quoteIdentifier(assoc.fkColumn());
-                    String idColumn = dialect.quoteIdentifier(entity.idColumn());
-                    String loadSql = "SELECT " + fkColumn + " FROM " + parentTable + " WHERE " + idColumn + " = :id";
-                    String loadConst = ctx.registerConstant("LOAD_FK_" + assoc.name().toUpperCase(), loadSql);
-                    body.add("Long $L = jdbcClient.sql($L).param($S, $L).query(Long.class).single();\n",
-                            "childId_" + assoc.name(), loadConst, "id", parentIdParam);
-                }
-            }
-            // Element collections
-            for (TypeDefinition.Prop prop : entity.properties()) {
-                if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
-                    emitFindEmitterElementCollectionDelete(body, ctx, parentIdParam, ec);
-                }
-            }
-            // Entity collections
-            for (TypeDefinition.Prop prop : entity.properties()) {
-                if (prop instanceof TypeDefinition.Prop.EntityCollection ec && ec.definition() != null) {
-                    emitFindEmitterEntityCollectionDelete(body, ctx, parentIdParam, ec);
-                }
-            }
-        }
-
-        boolean isVoid = method.resultKind() == ResultKind.VOID;
-        if (!isVoid) body.add("return ");
-        body.add("jdbcClient\n");
-        body.add("    .sql($L)\n", constName);
-        appendParamBindings(body, bindings, method);
-        body.add("    .update();\n");
-
-        // Post-delete: delete composing to-one associations after parent delete
-        if (isDeleteById && entity.ownsAggregateLifecycle() && parentIdParam != null) {
-            for (TypeDefinition.Prop prop : entity.properties()) {
-                if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.composition() && assoc.definition() instanceof TypeDefinition.Entity childEntity) {
-                    String childTable = dialect.quoteIdentifier(childEntity.tableName());
-                    String childIdColumn = dialect.quoteIdentifier(childEntity.idColumn());
-                    String deleteSql = "DELETE FROM " + childTable + " WHERE " + childIdColumn + " = :childId";
-                    String deleteConst = ctx.registerConstant("CASCADE_DELETE_" + assoc.name().toUpperCase(), deleteSql);
-                    body.add("if ($L != null) {\n", "childId_" + assoc.name());
-                    body.add("    jdbcClient.sql($L).param($S, $L).update();\n",
-                            deleteConst, "childId", "childId_" + assoc.name());
-                    body.add("}\n");
-                }
-            }
-        }
-
-        builder.addCode(ExceptionTranslation.wrap(body.build()));
-
-        return builder.build();
-    }
-
-    /**
-     * Checks whether the method is a deleteById: a single-predicate DELETE on the entity's ID column.
-     */
-    private static boolean isDeleteByIdPredicate(TypeDefinition entity, MethodContext method) {
-        if (method.operation() != Operation.DELETE) return false;
-        List<Predicate> preds = method.predicates();
-        if (preds.size() != 1) return false;
-        Predicate pred = preds.getFirst();
-        String idPropName = entity instanceof TypeDefinition.Entity e && e.id() != null ? e.id().name()
-                : entity instanceof TypeDefinition.Aggregate a && a.id() != null ? a.id().name()
-                : null;
-        return idPropName != null && pred.property().equals(idPropName);
-    }
-
-    /**
-     * Returns the method parameter name or expression used as the parent ID for cascade deletes.
-     * For deleteById(ID), this is the single method parameter (e.g. "id").
-     * For delete(Entity), this is the entity parameter with .getId() appended (e.g. "entity.getId()").
-     */
-    private static String idParamName(MethodContext method, TypeDefinition entity) {
-        if (method.parameters().isEmpty()) return "id";
-        String paramName = method.parameters().getFirst().getSimpleName().toString();
-        return method.firstParameterIsEntity(entity) ? paramName + ".getId()" : paramName;
-    }
-
-    /** Emits DELETE for an element collection child table by FK = parentIdParam. */
-    private void emitFindEmitterElementCollectionDelete(CodeBlock.Builder body, RepositoryContext ctx,
-                                                        String parentIdParam, TypeDefinition.Prop.ElementCollection ec) {
-        String childTable = dialect.quoteIdentifier(ec.childTable());
-        String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
-        String deleteSql = "DELETE FROM " + childTable + " WHERE " + fkColumn + " = :parentId";
-        String deleteConst = ctx.registerConstant("EC_DELETE_" + ec.name().toUpperCase(), deleteSql);
-        body.add("jdbcClient.sql($L).param($S, $L).update();\n", deleteConst, "parentId", parentIdParam);
-    }
-
-    /** Emits DELETE for an entity collection child table by FK = parentIdParam. */
-    private void emitFindEmitterEntityCollectionDelete(CodeBlock.Builder body, RepositoryContext ctx,
-                                                       String parentIdParam, TypeDefinition.Prop.EntityCollection ec) {
-        if (!(ec.definition() instanceof TypeDefinition.Entity childEntity)) return;
-        String childTable = dialect.quoteIdentifier(childEntity.tableName());
-        String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
-        String deleteSql = "DELETE FROM " + childTable + " WHERE " + fkColumn + " = :parentId";
-        String deleteConst = ctx.registerConstant("EC_COLL_DELETE_" + ec.name().toUpperCase(), deleteSql);
-        body.add("jdbcClient.sql($L).param($S, $L).update();\n", deleteConst, "parentId", parentIdParam);
-    }
-
     // ── Custom @Query methods ────────────────────────────────────────────
 
     /**
@@ -1322,8 +1193,9 @@ public final class FindEmitter {
         return "pageRequest";
     }
 
-    private void appendParamBindings(CodeBlock.Builder body, List<ParamBinding> bindings,
-                                      MethodContext method) {
+    /** Shared with the other emitters: appends the {@code .param(...)} chain for a method's bindings. */
+    static void appendParamBindings(CodeBlock.Builder body, List<ParamBinding> bindings,
+                                    MethodContext method) {
         for (ParamBinding binding : bindings) {
             VariableElement param = method.parameters().get(binding.argIndex());
             String paramName = param.getSimpleName().toString();
@@ -1424,7 +1296,8 @@ public final class FindEmitter {
      * Converts a method name to a SQL constant name base.
      * E.g. {@code findByName} → {@code FIND_BY_NAME_SQL}.
      */
-    private static String toSqlConstantName(String methodName) {
+    /** Shared with the other emitters: the generated constant name for a method's SQL. */
+    static String toSqlConstantName(String methodName) {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < methodName.length(); i++) {
             char c = methodName.charAt(i);

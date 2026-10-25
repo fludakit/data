@@ -95,8 +95,8 @@ final class RepositoryVisitor {
     /** Method contexts built during visit — consumed by later emitter tasks. */
     private final List<MethodContext> methods = new ArrayList<>();
 
-    /** JdbcClient accessor methods that need a pass-through override. */
-    private final List<ExecutableElement> jdbcClientAccessors = new ArrayList<>();
+    /** The optional {@code JdbcClient getJdbcClient()} escape hatch — at most one method. */
+    private ExecutableElement jdbcClientAccessor;
 
     RepositoryVisitor(TypeElement repository, Types types, Elements elements, Diagnostics diagnostics,
                       Filer filer, TypeGraph typeGraph, SqlDialect dialect) {
@@ -167,9 +167,9 @@ final class RepositoryVisitor {
             // Skip methods declared on java.lang.Object
             if (isObjectMethod(method)) continue;
 
-            // Handle JdbcClient accessor methods
+            // Handle the optional JdbcClient escape hatch: JdbcClient getJdbcClient()
             if (isJdbcClientAccessor(method)) {
-                jdbcClientAccessors.add(method);
+                jdbcClientAccessor = method;
                 continue;
             }
 
@@ -762,12 +762,11 @@ final class RepositoryVisitor {
 
     // ── JdbcClient accessor detection ────────────────────────────────────
 
+    /** The one supported escape hatch: {@code JdbcClient getJdbcClient()} — optional, at most one. */
     private boolean isJdbcClientAccessor(ExecutableElement method) {
-        String returnFqn = erasureFqn(method.getReturnType());
-        if (!JDBC_CLIENT.equals(returnFqn)) return false;
-        if (!method.getParameters().isEmpty()) return false;
-        String name = method.getSimpleName().toString();
-        return name.startsWith("get") || name.startsWith("jdbcClient");
+        return method.getSimpleName().contentEquals("getJdbcClient")
+                && JDBC_CLIENT.equals(erasureFqn(method.getReturnType()))
+                && method.getParameters().isEmpty();
     }
 
     // ── @Query method resolution ─────────────────────────────────────────
@@ -890,9 +889,9 @@ final class RepositoryVisitor {
             shell.addMethod(auxMethod);
         }
 
-        // Add JdbcClient accessor overrides
-        for (ExecutableElement accessor : jdbcClientAccessors) {
-            shell.addMethod(MethodSpec.overriding(accessor)
+        // Add the JdbcClient accessor override, when the repository declares one
+        if (jdbcClientAccessor != null) {
+            shell.addMethod(MethodSpec.overriding(jdbcClientAccessor)
                     .addStatement("return this.$L", "jdbcClient")
                     .build());
         }

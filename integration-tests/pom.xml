@@ -23,7 +23,7 @@
         </dependency>
         <dependency>
             <groupId>io.github.fludakit</groupId>
-            <artifactId>fluda-jdbc-client-cdi</artifactId>
+            <artifactId>fluda-jdbc-cdi</artifactId>
         </dependency>
         <dependency>
             <groupId>jakarta.data</groupId>

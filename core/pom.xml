@@ -20,7 +20,7 @@
     <dependencies>
         <dependency>
             <groupId>io.github.fludakit</groupId>
-            <artifactId>fluda-jdbc-client-core</artifactId>
+            <artifactId>fluda-jdbc-core</artifactId>
         </dependency>
         <dependency>
             <groupId>jakarta.data</groupId>

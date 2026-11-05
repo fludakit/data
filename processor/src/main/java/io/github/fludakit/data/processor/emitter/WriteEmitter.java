@@ -517,7 +517,7 @@ public final class WriteEmitter {
         String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
 
         java.util.List<Leaf> leaves = new java.util.ArrayList<>();
-        collectLeaves(elementType, leaves, "element", "");
+        collectLeaves(elementType, leaves, "element", PropPath.ROOT);
 
         java.util.List<String> columns = new java.util.ArrayList<>();
         columns.add(fkColumn);
@@ -559,15 +559,15 @@ public final class WriteEmitter {
     /**
      * Flattens a value object's write leaves: association FK columns first, then scalars, then
      * recursively flattened embedded value objects. {@code chain} is the Java expression reaching the
-     * current owner (e.g. {@code element} or {@code element.getPoint()}) and {@code prefix} is the
-     * column prefix already accumulated from enclosing embedded objects.
+     * current owner (e.g. {@code element} or {@code element.getPoint()}) and {@code path} is the
+     * column path already accumulated from enclosing embedded objects.
      */
-    private void collectLeaves(TypeDefinition type, java.util.List<Leaf> leaves, String chain, String prefix) {
+    private void collectLeaves(TypeDefinition type, java.util.List<Leaf> leaves, String chain, PropPath path) {
         for (TypeDefinition.Prop prop : type.properties()) {
             if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.fkColumn() != null) {
-                String columnName = prefix.isEmpty() ? assoc.fkColumn() : prefix + "_" + assoc.fkColumn();
+                String columnName = path.nameOf(assoc.fkColumn());
                 String getterCall = chain + "." + getter(assoc.name()) + "()";
-                String binding = prefix.isEmpty()
+                String binding = path.isEmpty()
                         ? getterCall + " == null ? null : " + getterCall + ".getId()"
                         : chain + " == null ? null : " + getterCall + " == null ? null : " + getterCall + ".getId()";
                 leaves.add(new Leaf(columnName, binding));
@@ -575,12 +575,12 @@ public final class WriteEmitter {
         }
         for (TypeDefinition.Prop prop : type.properties()) {
             if (prop instanceof TypeDefinition.Prop.Scalar s) {
-                String columnName = prefix.isEmpty() ? s.columnName() : prefix + "_" + s.columnName();
+                String columnName = path.nameOf(s.columnName());
                 String getterCall = chain + "." + getter(s.name()) + "()";
                 String binding;
                 if (isEnum(s.javaType())) {
                     binding = getterCall + " == null ? null : " + getterCall + ".name()";
-                } else if (prefix.isEmpty()) {
+                } else if (path.isEmpty()) {
                     binding = getterCall;
                 } else {
                     binding = chain + " == null ? null : " + getterCall;
@@ -590,9 +590,8 @@ public final class WriteEmitter {
         }
         for (TypeDefinition.Prop prop : type.properties()) {
             if (prop instanceof TypeDefinition.Prop.Embedded emb && emb.definition() != null) {
-                String newPrefix = prefix.isEmpty() ? emb.name() : prefix + "_" + emb.name();
                 String newChain = chain + "." + getter(emb.name()) + "()";
-                collectLeaves(emb.definition(), leaves, newChain, newPrefix);
+                collectLeaves(emb.definition(), leaves, newChain, path.child(emb.name()));
             }
         }
     }
@@ -911,7 +910,7 @@ public final class WriteEmitter {
             body.add(".param($S, $L.getId())", idProp.name(), childVar);
         }
         for (TypeDefinition.Prop prop : childEntity.properties()) {
-            appendChildPropBinding(body, prop, childVar, "", parentIdExpr, inverseName, fkColumn);
+            appendChildPropBinding(body, prop, childVar, PropPath.ROOT, parentIdExpr, inverseName, fkColumn);
         }
     }
 
@@ -923,7 +922,7 @@ public final class WriteEmitter {
                                            String childVar, String parentIdExpr,
                                            String inverseName, String fkColumn) {
         for (TypeDefinition.Prop prop : childEntity.properties()) {
-            appendChildPropBinding(body, prop, childVar, "", parentIdExpr, inverseName, fkColumn);
+            appendChildPropBinding(body, prop, childVar, PropPath.ROOT, parentIdExpr, inverseName, fkColumn);
         }
     }
 
@@ -931,20 +930,19 @@ public final class WriteEmitter {
      * Appends one .param() call for a child property. The inverse FK uses the parent ID expression.
      */
     private void appendChildPropBinding(CodeBlock.Builder body, TypeDefinition.Prop prop,
-                                         String varName, String prefix, String parentIdExpr,
+                                         String varName, PropPath path, String parentIdExpr,
                                          String inverseName, String fkColumn) {
         // Scalar props — just bind normally
         if (prop instanceof TypeDefinition.Prop.Scalar s) {
-            appendColumnBinding(body, s, varName, prefix);
+            appendColumnBinding(body, s, varName, path);
         } else if (prop instanceof TypeDefinition.Prop.Association assoc && 
                    (assoc.name().equals(inverseName) || (fkColumn != null && fkColumn.equals(assoc.fkColumn())))) {
             // This is the inverse FK — bind parent ID directly
-            String paramName = prefix.isEmpty() ? assoc.name() : prefix + assoc.name();
-            body.add(".param($S, $L)", paramName, parentIdExpr);
+            body.add(".param($S, $L)", path.nameOf(assoc.name()), parentIdExpr);
         } else if (prop instanceof TypeDefinition.Prop.Association assoc) {
-            appendRelationBinding(body, assoc, varName, prefix);
+            appendRelationBinding(body, assoc, varName, path);
         } else if (prop instanceof TypeDefinition.Prop.Embedded embedded) {
-            appendRelationBinding(body, embedded, varName, prefix);
+            appendRelationBinding(body, embedded, varName, path);
         }
     }
 
@@ -952,11 +950,11 @@ public final class WriteEmitter {
     private void appendPropBindings(CodeBlock.Builder body, TypeDefinition entity, String varName) {
         for (TypeDefinition.Prop prop : entity.properties()) {
             if (prop instanceof TypeDefinition.Prop.Scalar s) {
-                appendColumnBinding(body, s, varName, "");
+                appendColumnBinding(body, s, varName, PropPath.ROOT);
             } else if (prop instanceof TypeDefinition.Prop.Association assoc) {
-                appendRelationBinding(body, assoc, varName, "");
+                appendRelationBinding(body, assoc, varName, PropPath.ROOT);
             } else if (prop instanceof TypeDefinition.Prop.Embedded embedded) {
-                appendRelationBinding(body, embedded, varName, "");
+                appendRelationBinding(body, embedded, varName, PropPath.ROOT);
             }
         }
     }
@@ -965,9 +963,9 @@ public final class WriteEmitter {
      * Appends .param() call for a scalar column mapping.
      */
     private void appendColumnBinding(CodeBlock.Builder body, TypeDefinition.Prop.Scalar col,
-                                      String varName, String prefix) {
-        String paramName = prefix.isEmpty() ? col.name() : prefix + col.name();
-        if (prefix.isEmpty()) {
+                                      String varName, PropPath path) {
+        String paramName = path.nameOf(col.name());
+        if (path.isEmpty()) {
             // Top-level scalar: direct getter, with enum conversion
             if (isEnum(col.javaType())) {
                 body.add(".param($S, $L.$L() == null ? null : $L.$L().name())",
@@ -978,10 +976,10 @@ public final class WriteEmitter {
         } else {
             // Nested scalar (inside embedded): null-guard the embedded chain
             if (isEnum(col.javaType())) {
-                String nullGuarded = buildNullGuardedGetter(varName, prefix, col.name());
+                String nullGuarded = buildNullGuardedGetter(varName, path, col.name());
                 body.add(".param($S, $L == null ? null : $L.name())", paramName, nullGuarded, nullGuarded);
             } else {
-                String nullGuarded = buildNullGuardedGetter(varName, prefix, col.name());
+                String nullGuarded = buildNullGuardedGetter(varName, path, col.name());
                 body.add(".param($S, $L)", paramName, nullGuarded);
             }
         }
@@ -991,23 +989,21 @@ public final class WriteEmitter {
      * Appends .param() calls for a relation mapping (ASSOCIATION FK or EMBEDDED flattened columns).
      */
     private void appendRelationBinding(CodeBlock.Builder body, TypeDefinition.Prop rel,
-                                        String varName, String prefix) {
+                                        String varName, PropPath path) {
         if (rel instanceof TypeDefinition.Prop.Association assoc && assoc.fkColumn() != null) {
-            String paramName = prefix.isEmpty() ? assoc.name() : prefix + assoc.name();
-            String getterChain = buildGetterChain(varName, prefix, assoc.name());
+            String paramName = path.nameOf(assoc.name());
+            String getterChain = buildGetterChain(varName, path, assoc.name());
             body.add(".param($S, $L == null ? null : $L.getId())",
                     paramName, getterChain, getterChain);
         } else if (rel instanceof TypeDefinition.Prop.Embedded embedded && embedded.definition() != null) {
-            String newPrefix = prefix.isEmpty()
-                    ? embedded.name() + "_"
-                    : prefix + embedded.name() + "_";
+            PropPath childPath = path.child(embedded.name());
             for (TypeDefinition.Prop childProp : embedded.definition().properties()) {
                 if (childProp instanceof TypeDefinition.Prop.Scalar s) {
-                    appendColumnBinding(body, s, varName, newPrefix);
+                    appendColumnBinding(body, s, varName, childPath);
                 } else if (childProp instanceof TypeDefinition.Prop.Association childAssoc) {
-                    appendRelationBinding(body, childAssoc, varName, newPrefix);
+                    appendRelationBinding(body, childAssoc, varName, childPath);
                 } else if (childProp instanceof TypeDefinition.Prop.Embedded childEmbedded) {
-                    appendRelationBinding(body, childEmbedded, varName, newPrefix);
+                    appendRelationBinding(body, childEmbedded, varName, childPath);
                 }
             }
         }
@@ -1016,24 +1012,20 @@ public final class WriteEmitter {
 
     /**
      * Builds a null-guarded getter chain for nested embedded paths.
-     * E.g., for prefix="address_point_" and name="lat", produces:
+     * E.g., for path {@code [address, point]} and name="lat", produces:
      * {@code entity.getAddress() == null || entity.getAddress().getPoint() == null ? null : entity.getAddress().getPoint().getLat()}
      */
-    private String buildNullGuardedGetter(String varName, String prefix, String simpleName) {
-        String[] segments = prefix.split("_");
-        int segCount = segments.length;
-        if (segCount > 0 && segments[segCount - 1].isEmpty()) segCount--;
-
-        if (segCount == 0) {
+    private String buildNullGuardedGetter(String varName, PropPath path, String simpleName) {
+        if (path.isEmpty()) {
             return varName + "." + getter(simpleName) + "()";
         }
 
         // Build null check: check each intermediate level
         StringBuilder nullCheck = new StringBuilder();
         StringBuilder chain = new StringBuilder(varName);
-        for (int i = 0; i < segCount; i++) {
-            if (i > 0) nullCheck.append(" || ");
-            chain.append(".").append(getter(segments[i])).append("()");
+        for (String segment : path.segments()) {
+            if (!nullCheck.isEmpty()) nullCheck.append(" || ");
+            chain.append(".").append(getter(segment)).append("()");
             nullCheck.append(chain).append(" == null");
         }
 
@@ -1044,15 +1036,10 @@ public final class WriteEmitter {
     }
 
     /** Builds a getter chain like "entity.getAddress().getStreet()" for embedded paths. */
-    private String buildGetterChain(String varName, String prefix, String simpleName) {
-        if (prefix.isEmpty()) {
-            return varName + "." + getter(simpleName) + "()";
-        }
-        // prefix is like "address_" — split by _ to get path segments
-        String[] segments = prefix.split("_");
+    private String buildGetterChain(String varName, PropPath path, String simpleName) {
         StringBuilder sb = new StringBuilder(varName);
-        for (String seg : segments) {
-            sb.append(".").append(getter(seg)).append("()");
+        for (String segment : path.segments()) {
+            sb.append(".").append(getter(segment)).append("()");
         }
         sb.append(".").append(getter(simpleName)).append("()");
         return sb.toString();

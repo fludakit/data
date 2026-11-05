@@ -224,6 +224,93 @@ class WriteEmissionTest {
     }
 
     @Test
+    void anEmbeddedPropertyNameWithAnUnderscoreKeepsItsGetterChain() throws Exception {
+        // The flattened path used to be carried as property names joined with '_' and the getter
+        // chain was recovered by splitting that string again, so `home_address` re-parsed as the two
+        // properties `home` and `address`. The generated repository then called
+        // entity.getHome().getAddress().getCity(), which does not type-check — the fixture could not
+        // be compiled at all. Keeping the path as segments means the chain is never parsed back, so
+        // compile() succeeding is the core assertion here; the pins below say why it succeeds.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/underscored-embed"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-underscored-embed"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-underscored-embed"));
+        Files.writeString(sourceDir.resolve("Resident.java"), """
+                package undname;
+                import io.github.fludakit.data.annotation.AggregateRoot;
+                import io.github.fludakit.data.annotation.Identity;
+                @AggregateRoot
+                public class Resident {
+                    @Identity Long id;
+                    String fullName;
+                    HomeAddress home_address;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getFullName() { return fullName; }
+                    public void setFullName(String fullName) { this.fullName = fullName; }
+                    public HomeAddress getHome_address() { return home_address; }
+                    public void setHome_address(HomeAddress home_address) { this.home_address = home_address; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("HomeAddress.java"), """
+                package undname;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class HomeAddress {
+                    String city;
+                    String zip_code;
+                    GeoPoint geo_point;
+                    public String getCity() { return city; }
+                    public void setCity(String city) { this.city = city; }
+                    public String getZip_code() { return zip_code; }
+                    public void setZip_code(String zip_code) { this.zip_code = zip_code; }
+                    public GeoPoint getGeo_point() { return geo_point; }
+                    public void setGeo_point(GeoPoint geo_point) { this.geo_point = geo_point; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("GeoPoint.java"), """
+                package undname;
+                import io.github.fludakit.data.annotation.ValueObject;
+                @ValueObject
+                public class GeoPoint {
+                    double lat;
+                    double lng;
+                    public double getLat() { return lat; }
+                    public void setLat(double lat) { this.lat = lat; }
+                    public double getLng() { return lng; }
+                    public void setLng(double lng) { this.lng = lng; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Residents.java"), """
+                package undname;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Residents extends CrudRepository<Resident, Long> { }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir,
+                "Resident.java", "HomeAddress.java", "GeoPoint.java", "Residents.java");
+
+        String impl = sqlFlat(generatedDir.resolve("undname/Residents_.java"));
+        // Column and parameter names keep the historical a_b flattening: one segment per embedded
+        // property, then the leaf. Only the getter chain changed, and it walks the real names.
+        assertTrue(impl.contains("(\"full_name\", \"home_address_city\", \"home_address_zip_code\","
+                        + " \"home_address_geo_point_lat\", \"home_address_geo_point_lng\")"),
+                "every flattened underscore leaf must keep its column:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains(".param(\"home_address_geo_point_lat\","),
+                "the bind parameter must be the flattened path:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("getHome_address()"),
+                "the getter chain must use the declared property name:"
+                        + System.lineSeparator() + impl);
+        assertTrue(impl.contains("getGeo_point()"),
+                "a nested embedded property with an underscore must stay one segment:"
+                        + System.lineSeparator() + impl);
+        assertFalse(impl.contains("getHome()"),
+                "the path must never be re-split into getHome().getAddress():"
+                        + System.lineSeparator() + impl);
+    }
+
+    @Test
     void valueObjectAssociationChildBindsFkIdInElementCollectionInsert() throws Exception {
         Path sourceDir = Files.createDirectories(workspace.resolve("src/voca"));
         Path classesDir = Files.createDirectories(workspace.resolve("classes-voca"));

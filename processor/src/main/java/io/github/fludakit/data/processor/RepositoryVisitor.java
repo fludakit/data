@@ -1,8 +1,6 @@
 package io.github.fludakit.data.processor;
 
 import com.squareup.javapoet.ClassName;
-import com.squareup.javapoet.FieldSpec;
-import com.squareup.javapoet.JavaFile;
 import com.squareup.javapoet.MethodSpec;
 import com.squareup.javapoet.TypeSpec;
 import io.github.fludakit.data.metadata.TypeDefinition;
@@ -17,15 +15,16 @@ import io.github.fludakit.data.processor.emitter.WriteEmitter;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.qbn.ParsedMethodName;
 import io.github.fludakit.data.qbn.QueryByMethodNameParser;
-import io.github.fludakit.data.query.Operation;
 import io.github.fludakit.data.query.LikePattern;
-import io.github.fludakit.data.query.ParamBinding;
-import io.github.fludakit.data.sql.SqlDialect;
-import io.github.fludakit.data.query.PagingMode;
 import io.github.fludakit.data.query.Operator;
+import io.github.fludakit.data.query.Operation;
+import io.github.fludakit.data.query.ParamBinding;
+import io.github.fludakit.data.query.PagingMode;
 import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.ResultKind;
 import io.github.fludakit.data.query.SortSpec;
+import io.github.fludakit.data.sql.SqlDialect;
+
 import jakarta.data.repository.By;
 import jakarta.data.repository.Delete;
 import jakarta.data.repository.Find;
@@ -37,6 +36,7 @@ import jakarta.data.repository.Save;
 import jakarta.data.repository.Update;
 
 import javax.annotation.processing.Filer;
+import javax.lang.model.element.ElementKind;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.Modifier;
 import javax.lang.model.element.TypeElement;
@@ -70,33 +70,24 @@ final class RepositoryVisitor {
     // QBN module is optional — check if it's on the classpath
     private static final boolean QBN_AVAILABLE = isQbnAvailable();
 
-    private static boolean isQbnAvailable() {
-        try {
-            Class.forName("io.github.fludakit.data.qbn.QueryByMethodNameParser");
-            return true;
-        } catch (ClassNotFoundException e) {
-            return false;
-        }
-    }
-
     /** Pattern matching named parameters in @Query SQL (e.g. {@code :name}). */
     private static final Pattern NAMED_PARAM_PATTERN = Pattern.compile(":([a-zA-Z_]\\w*)");
-
     private final TypeElement repository;
     private final Types types;
     private final Elements elements;
     private final Diagnostics diagnostics;
     private final Filer filer;
-    private final SqlDialect dialect;
-
-    /** The populated type graph, built by the processor's early scan — read-only here. */
     private final TypeGraph typeGraph;
+    private final SqlDialect dialect;
 
     /** Method contexts built during visit — consumed by later emitter tasks. */
     private final List<MethodContext> methods = new ArrayList<>();
 
     /** The optional {@code JdbcClient getJdbcClient()} escape hatch — at most one method. */
     private ExecutableElement jdbcClientAccessor;
+
+    /** Emission state shared by the generated-member emitters. */
+    private RepositoryContext ctx;
 
     RepositoryVisitor(TypeElement repository, Types types, Elements elements, Diagnostics diagnostics,
                       Filer filer, TypeGraph typeGraph, SqlDialect dialect) {
@@ -109,8 +100,17 @@ final class RepositoryVisitor {
         this.dialect = dialect;
     }
 
+    private static boolean isQbnAvailable() {
+        try {
+            Class.forName("io.github.fludakit.data.qbn.QueryByMethodNameParser");
+            return true;
+        } catch (ClassNotFoundException e) {
+            return false;
+        }
+    }
+
     void visit() {
-        // 1. Resolve entity type from generic superclass
+        // 1. Resolve the entity type from the repository's generic superclass and interfaces
         TypeMirror entityTypeMirror = resolveEntityType();
         if (entityTypeMirror == null) {
             diagnostics.error("Cannot resolve entity type for repository " + repository.getQualifiedName(),
@@ -126,7 +126,7 @@ final class RepositoryVisitor {
         }
 
         // 2. Read the entity mapping from the type graph — every repository entity type must be
-        // annotated (@Entity/@AggregateRoot) so the processor's scan has already cached it;
+        // annotated (@Entity/@AggregateRoot/@ValueObject) so the processor's scan has already cached it;
         // a miss is a specification violation and fails the compilation below
         TypeDefinition entityMapping = typeGraph.get(entityFqn);
         if (entityMapping == null) {
@@ -151,99 +151,26 @@ final class RepositoryVisitor {
         new MetamodelEmitter(filer, diagnostics).emit(entityMapping);
 
         // 4. Create RepositoryContext
-        RepositoryContext ctx = new RepositoryContext(entityMapping, rowMapperType);
+        ctx = new RepositoryContext(entityMapping, rowMapperType);
 
-        // 6. Iterate abstract methods
-        for (javax.lang.model.element.Element member : elements.getAllMembers(repository)) {
-            if (member.getKind() != javax.lang.model.element.ElementKind.METHOD) continue;
-            ExecutableElement method = (ExecutableElement) member;
+        // 5. Iterate abstract methods and resolve them into method contexts
+        scanMethods(entityMapping);
 
-            // Skip default methods
-            if (method.isDefault()) continue;
-
-            // Skip non-abstract methods (concrete inherited from interfaces)
-            if (!method.getModifiers().contains(Modifier.ABSTRACT)) continue;
-
-            // Skip methods declared on java.lang.Object
-            if (isObjectMethod(method)) continue;
-
-            // Handle the optional JdbcClient escape hatch: JdbcClient getJdbcClient()
-            if (isJdbcClientAccessor(method)) {
-                jdbcClientAccessor = method;
-                continue;
-            }
-
-            // Handle @Query-annotated methods
-            if (method.getAnnotation(Query.class) != null) {
-                MethodContext queryCtx = resolveQueryMethod(method);
-                if (queryCtx != null) {
-                    methods.add(queryCtx);
-                }
-                continue;
-            }
-
-            MethodContext methodCtx = resolveMethod(method, entityMapping);
-            if (methodCtx != null) {
-                methods.add(methodCtx);
-            } else {
-                // Method could not be resolved — throw error suggesting @Query
-                String methodName = method.getSimpleName().toString();
-                String repoName = repository.getQualifiedName().toString();
-                throw new IllegalStateException(
-                    "Cannot resolve method '" + methodName + "' in repository " +
-                    repoName + ". Either add a lifecycle annotation " +
-                    "(@Find, @Save, @Insert, @Update, @Delete), use a recognized CRUD method name " +
-                    "(findById, save, etc.), use Query By Name (findByXxx), or add a custom @Query annotation."
-                );
-            }
-        }
-
-        // 6b. Emit plain finder methods
+        // 6. Emit the generated member methods: finders, batch lifecycle, writes, hydration
         DeclaredType repositoryDeclaredType = resolveRepositoryDeclaredType();
         DeclaredType repositoryOwnType = (DeclaredType) repository.asType();
-        FindEmitter findEmitter = new FindEmitter(dialect, types, repositoryDeclaredType, repositoryOwnType);
-        for (MethodContext mc : methods) {
-            MethodSpec emitted = findEmitter.emit(ctx, mc);
-            if (emitted != null) {
-                ctx.auxMethods().add(emitted);
-            }
-        }
+        emitFinders(ctx, repositoryDeclaredType, repositoryOwnType);
+        emitLifecycleMethods(ctx, repositoryDeclaredType, repositoryOwnType);
+        emitWriteMethods(ctx, repositoryDeclaredType, repositoryOwnType);
+        emitHydrationMethods(ctx, entityMapping);
+    }
 
-        // 6c. Emit batch lifecycle methods (saveAll, deleteAll, deleteByIds)
-        LifecycleEmitter lifecycleEmitter = new LifecycleEmitter(types, repositoryDeclaredType, repositoryOwnType);
-        for (MethodContext mc : methods) {
-            MethodSpec emitted = lifecycleEmitter.emit(ctx, mc);
-            if (emitted != null) {
-                ctx.auxMethods().add(emitted);
-            }
-        }
+    RepositoryContext context() {
+        return ctx;
+    }
 
-        // 6d. Emit write methods (save, insert, update, deleteById)
-        WriteEmitter writeEmitter = new WriteEmitter(dialect, types, elements, repositoryDeclaredType, repositoryOwnType);
-        for (MethodContext mc : methods) {
-            MethodSpec emitted = writeEmitter.emit(ctx, mc);
-            if (emitted != null) {
-                ctx.auxMethods().add(emitted);
-            }
-        }
-
-        // 6e. Emit hydration methods for entities with to-many collections
-        HydrationEmitter hydrationEmitter = new HydrationEmitter(dialect);
-        if (hydrationEmitter.hasCollectionsToHydrate(entityMapping)) {
-            MethodSpec hydrateMethod = hydrationEmitter.emitHydrate(ctx);
-            if (hydrateMethod != null) {
-                ctx.auxMethods().add(hydrateMethod);
-            }
-            MethodSpec hydrateListMethod = hydrationEmitter.emitHydrateList(ctx);
-            if (hydrateListMethod != null) {
-                ctx.auxMethods().add(hydrateListMethod);
-            }
-            List<MethodSpec> loaders = hydrationEmitter.emitCollectionLoaders(ctx);
-            ctx.auxMethods().addAll(loaders);
-        }
-
-        // 7. Generate skeleton Repository_ class
-        emitSkeleton(ctx);
+    ExecutableElement jdbcClientAccessor() {
+        return jdbcClientAccessor;
     }
 
     // ── Entity type resolution ───────────────────────────────────────────
@@ -310,7 +237,99 @@ final class RepositoryVisitor {
         return result;
     }
 
+    private TypeElement asTypeElement(TypeMirror type) {
+        if (type == null || type.getKind() != TypeKind.DECLARED) return null;
+        javax.lang.model.element.Element element = ((DeclaredType) type).asElement();
+        return element instanceof TypeElement te ? te : null;
+    }
+
+    /**
+     * Resolves the parameterized CrudRepository/BasicRepository/DataRepository type
+     * from the repository's type hierarchy. This is needed for proper type variable
+     * resolution when overriding methods like save(T entity) — we need the concrete
+     * type arguments (e.g., CrudRepository<Customer, Long>) not just the repository
+     * interface itself.
+     */
+    private DeclaredType resolveRepositoryDeclaredType() {
+        // Check superclass first (e.g. TaskRepository extends CrudRepository<Task, Long>)
+        TypeMirror superclass = repository.getSuperclass();
+        DeclaredType found = matchBaseRepositoryType(superclass);
+        if (found != null) return found;
+
+        // Check direct interfaces
+        for (TypeMirror iface : repository.getInterfaces()) {
+            found = matchBaseRepositoryType(iface);
+            if (found != null) return found;
+        }
+
+        // Walk transitive interfaces
+        for (TypeMirror iface : getAllInterfaces(repository)) {
+            found = matchBaseRepositoryType(iface);
+            if (found != null) return found;
+        }
+
+        // Fallback to the repository's own type if no base repository found
+        return (DeclaredType) repository.asType();
+    }
+
+    private DeclaredType matchBaseRepositoryType(TypeMirror type) {
+        if (type == null || type.getKind() != TypeKind.DECLARED) return null;
+        DeclaredType dt = (DeclaredType) type;
+        TypeElement te = (TypeElement) dt.asElement();
+        String fqn = te.getQualifiedName().toString();
+        if (fqn.equals(CRUD_REPOSITORY) || fqn.equals(BASIC_REPOSITORY) || fqn.equals(DATA_REPOSITORY)) {
+            return dt;
+        }
+        return null;
+    }
+
     // ── Method resolution ────────────────────────────────────────────────
+
+    private void scanMethods(TypeDefinition entityMapping) {
+        for (javax.lang.model.element.Element member : elements.getAllMembers(repository)) {
+            if (member.getKind() != ElementKind.METHOD) continue;
+            ExecutableElement method = (ExecutableElement) member;
+
+            // Skip default methods
+            if (method.isDefault()) continue;
+
+            // Skip non-abstract methods (concrete inherited from interfaces)
+            if (!method.getModifiers().contains(Modifier.ABSTRACT)) continue;
+
+            // Skip methods declared on java.lang.Object
+            if (isObjectMethod(method)) continue;
+
+            // Handle the optional JdbcClient escape hatch: JdbcClient getJdbcClient()
+            if (isJdbcClientAccessor(method)) {
+                jdbcClientAccessor = method;
+                continue;
+            }
+
+            // Handle @Query-annotated methods
+            if (method.getAnnotation(Query.class) != null) {
+                MethodContext queryCtx = resolveQueryMethod(method);
+                if (queryCtx != null) {
+                    methods.add(queryCtx);
+                }
+                continue;
+            }
+
+            MethodContext methodCtx = resolveMethod(method, entityMapping);
+            if (methodCtx != null) {
+                methods.add(methodCtx);
+            } else {
+                // Method could not be resolved — throw error suggesting @Query
+                String methodName = method.getSimpleName().toString();
+                String repoName = repository.getQualifiedName().toString();
+                throw new IllegalStateException(
+                    "Cannot resolve method '" + methodName + "' in repository " +
+                    repoName + ". Either add a lifecycle annotation " +
+                    "(@Find, @Save, @Insert, @Update, @Delete), use a recognized CRUD method name " +
+                    "(findById, save, etc.), use Query By Name (findByXxx), or add a custom @Query annotation."
+                );
+            }
+        }
+    }
 
     private MethodContext resolveMethod(ExecutableElement method, TypeDefinition entityMapping) {
         String methodName = method.getSimpleName().toString();
@@ -669,7 +688,7 @@ final class RepositoryVisitor {
             if (byAnnotation != null) {
                 String propertyPath = byAnnotation.value();
                 String paramName = param.getSimpleName().toString();
-                predicates.add(Predicate.of(propertyPath, io.github.fludakit.data.query.Operator.EQ, paramName));
+                predicates.add(Predicate.of(propertyPath, Operator.EQ, paramName));
             }
         }
         return predicates;
@@ -850,114 +869,67 @@ final class RepositoryVisitor {
         return bindings;
     }
 
-    // ── Skeleton emission ────────────────────────────────────────────────
+    // ── Generated-member emission ────────────────────────────────────────
 
-    private void emitSkeleton(RepositoryContext ctx) {
-        String repoSimpleName = repository.getSimpleName().toString();
-        ClassName repoClassName = ClassName.get(repository);
-        ClassName generatedName = ClassName.get(
-                repoClassName.packageName(),
-                repoSimpleName + "_");
-
-        ClassName jdbcClientClass = ClassName.bestGuess(JDBC_CLIENT);
-        ClassName applicationScoped = ClassName.bestGuess("jakarta.enterprise.context.ApplicationScoped");
-        ClassName inject = ClassName.bestGuess("jakarta.inject.Inject");
-
-        TypeSpec.Builder shell = TypeSpec.classBuilder(generatedName)
-                .addModifiers(Modifier.PUBLIC)
-                .addAnnotation(applicationScoped)
-                .addSuperinterface(repoClassName)
-                .addField(FieldSpec.builder(jdbcClientClass, "jdbcClient",
-                                Modifier.PRIVATE, Modifier.FINAL)
-                        .build())
-                .addMethod(MethodSpec.constructorBuilder()
-                        .addAnnotation(inject)
-                        .addParameter(jdbcClientClass, "jdbcClient")
-                        .addStatement("this.jdbcClient = jdbcClient")
-                        .build());
-
-        // Add SQL constants as public static final fields
-        for (Map.Entry<String, String> entry : ctx.constants().entrySet()) {
-            shell.addField(FieldSpec.builder(String.class, entry.getKey(),
-                            Modifier.PUBLIC, Modifier.STATIC, Modifier.FINAL)
-                    .initializer("$S", entry.getValue())
-                    .build());
-        }
-
-        // Add generated method overrides
-        for (MethodSpec auxMethod : ctx.auxMethods()) {
-            shell.addMethod(auxMethod);
-        }
-
-        // Add the JdbcClient accessor override, when the repository declares one
-        if (jdbcClientAccessor != null) {
-            shell.addMethod(MethodSpec.overriding(jdbcClientAccessor)
-                    .addStatement("return this.$L", "jdbcClient")
-                    .build());
-        }
-
-        try {
-            JavaFile.builder(repoClassName.packageName(), shell.build())
-                    .build()
-                    .writeTo(filer);
-        } catch (IOException e) {
-            diagnostics.error("Failed to write " + generatedName + ": " + e.getMessage(), repository);
+    private void emitFinders(RepositoryContext ctx, DeclaredType repositoryDeclaredType, DeclaredType repositoryOwnType) {
+        FindEmitter findEmitter = new FindEmitter(dialect, types, repositoryDeclaredType, repositoryOwnType);
+        for (MethodContext mc : methods) {
+            MethodSpec emitted = findEmitter.emit(ctx, mc);
+            if (emitted != null) {
+                ctx.auxMethods().add(emitted);
+            }
         }
     }
 
-    /**
-     * Resolves the parameterized CrudRepository/BasicRepository/DataRepository type
-     * from the repository's type hierarchy. This is needed for proper type variable
-     * resolution when overriding methods like save(T entity) — we need the concrete
-     * type arguments (e.g., CrudRepository<Customer, Long>) not just the repository
-     * interface itself.
-     */
-    private DeclaredType resolveRepositoryDeclaredType() {
-        // Check superclass first (e.g. TaskRepository extends CrudRepository<Task, Long>)
-        TypeMirror superclass = repository.getSuperclass();
-        DeclaredType found = matchBaseRepositoryType(superclass);
-        if (found != null) return found;
-
-        // Check direct interfaces
-        for (TypeMirror iface : repository.getInterfaces()) {
-            found = matchBaseRepositoryType(iface);
-            if (found != null) return found;
+    private void emitLifecycleMethods(RepositoryContext ctx, DeclaredType repositoryDeclaredType, DeclaredType repositoryOwnType) {
+        LifecycleEmitter lifecycleEmitter = new LifecycleEmitter(types, repositoryDeclaredType, repositoryOwnType);
+        for (MethodContext mc : methods) {
+            MethodSpec emitted = lifecycleEmitter.emit(ctx, mc);
+            if (emitted != null) {
+                ctx.auxMethods().add(emitted);
+            }
         }
-
-        // Walk transitive interfaces
-        for (TypeMirror iface : getAllInterfaces(repository)) {
-            found = matchBaseRepositoryType(iface);
-            if (found != null) return found;
-        }
-
-        // Fallback to the repository's own type if no base repository found
-        return (DeclaredType) repository.asType();
     }
 
-    private DeclaredType matchBaseRepositoryType(TypeMirror type) {
-        if (type == null || type.getKind() != TypeKind.DECLARED) return null;
-        DeclaredType dt = (DeclaredType) type;
-        TypeElement te = (TypeElement) dt.asElement();
-        String fqn = te.getQualifiedName().toString();
-        if (fqn.equals(CRUD_REPOSITORY) || fqn.equals(BASIC_REPOSITORY) || fqn.equals(DATA_REPOSITORY)) {
-            return dt;
+    private void emitWriteMethods(RepositoryContext ctx, DeclaredType repositoryDeclaredType, DeclaredType repositoryOwnType) {
+        WriteEmitter writeEmitter = new WriteEmitter(dialect, types, elements, repositoryDeclaredType, repositoryOwnType);
+        for (MethodContext mc : methods) {
+            MethodSpec emitted = writeEmitter.emit(ctx, mc);
+            if (emitted != null) {
+                ctx.auxMethods().add(emitted);
+            }
         }
-        return null;
+    }
+
+    private void emitHydrationMethods(RepositoryContext ctx, TypeDefinition entityMapping) {
+        HydrationEmitter hydrationEmitter = new HydrationEmitter(dialect);
+        if (hydrationEmitter.hasCollectionsToHydrate(entityMapping)) {
+            MethodSpec hydrateMethod = hydrationEmitter.emitHydrate(ctx);
+            if (hydrateMethod != null) {
+                ctx.auxMethods().add(hydrateMethod);
+            }
+            MethodSpec hydrateListMethod = hydrationEmitter.emitHydrateList(ctx);
+            if (hydrateListMethod != null) {
+                ctx.auxMethods().add(hydrateListMethod);
+            }
+            List<MethodSpec> loaders = hydrationEmitter.emitCollectionLoaders(ctx);
+            ctx.auxMethods().addAll(loaders);
+        }
     }
 
     // ── Utility methods ──────────────────────────────────────────────────
-
-    private TypeElement asTypeElement(TypeMirror type) {
-        if (type == null || type.getKind() != TypeKind.DECLARED) return null;
-        javax.lang.model.element.Element element = ((DeclaredType) type).asElement();
-        return element instanceof TypeElement te ? te : null;
-    }
 
     private String erasureFqn(TypeMirror type) {
         if (type == null) return "";
         if (type.getKind().isPrimitive()) return type.toString();
         if (type.getKind() == TypeKind.ARRAY) return "array";
         return types.erasure(type).toString();
+    }
+
+    private static String idPropertyName(TypeDefinition type) {
+        if (type instanceof TypeDefinition.Entity e) return e.id().name();
+        if (type instanceof TypeDefinition.Aggregate a) return a.id().name();
+        return null;
     }
 
     private boolean isObjectMethod(ExecutableElement method) {
@@ -968,14 +940,5 @@ final class RepositoryVisitor {
         if ("hashCode".equals(name) && params.isEmpty()) return true;
         if ("toString".equals(name) && params.isEmpty()) return true;
         return false;
-    }
-
-    /**
-     * Returns the Java property name of the primary key column from a TypeDefinition.
-     */
-    private static String idPropertyName(TypeDefinition type) {
-        if (type instanceof TypeDefinition.Entity e) return e.id().name();
-        if (type instanceof TypeDefinition.Aggregate a) return a.id().name();
-        return null;
     }
 }

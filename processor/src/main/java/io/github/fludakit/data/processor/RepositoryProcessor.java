@@ -71,7 +71,10 @@ public class RepositoryProcessor extends AbstractProcessor {
             if (element.getKind() != javax.lang.model.element.ElementKind.INTERFACE) continue;
             TypeElement repository = (TypeElement) element;
             try {
-                new RepositoryVisitor(repository, types, elements, diagnostics, filer, typeGraph, dialect).visit();
+                RepositoryVisitor visitor = new RepositoryVisitor(repository, types, elements, diagnostics, filer, typeGraph, dialect);
+                visitor.visit();
+                // The repository is resolved — start the emission of the generated Repository_ skeleton
+                new RepositoryEmitter(repository, visitor.context(), visitor.jdbcClientAccessor(), filer, diagnostics).emit();
             } catch (RuntimeException e) {
                 String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getName();
                 diagnostics.error(

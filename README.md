@@ -39,6 +39,10 @@ The processor generates a CDI bean `CustomerRepositoryImpl` with static SQL cons
 
 For annotations, repository patterns, query-by-method-name conformance, relation traversal, paging, and aggregate composition, see the [Data documentation](https://fludakit.github.io/documentation/data/getting-started/).
 
+## Scope
+
+Associations are supported as to-one references, element collections, and aggregate-owned entity collections. Many-to-many relations stored in a join table are **not** supported and are not planned; model the join table as an entity with two to-one references instead.
+
 ## Building
 
 ```bash

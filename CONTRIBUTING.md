@@ -9,6 +9,10 @@ This document describes how to set up the project, make changes, and submit them
 - **Report bugs** or **request features** by opening a [GitHub issue](https://github.com/fludakit/data/issues).
 - **Fix bugs or add features** by opening a pull request (see below).
 
+## Scope
+
+Associations are supported as to-one references, element collections, and aggregate-owned entity collections. Many-to-many relations stored in a join table are deliberately out of scope — model the join table as an entity with two to-one references instead. Please open an issue to discuss before sending a patch that adds join-table support.
+
 ## Prerequisites
 
 - JDK 21 or later (JDK 25 is required to publish a release to Maven Central).

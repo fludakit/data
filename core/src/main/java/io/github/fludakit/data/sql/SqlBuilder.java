@@ -289,28 +289,72 @@ public final class SqlBuilder {
     }
 
     /**
-     * Assembles a keyset-seek read statement on a pre-rendered {@code shell}: the shell, the seek
-     * predicate joined to it by {@code WHERE}/{@code AND} (whichever the shell still needs), and the
-     * shared {@code orderBy}. This is the composition the paged emitter used to do with {@code +} in
-     * the processor; it lives here so the clause order and connector are core's decision.
+     * Assembles the full keyset-seek statement for a cursor-paged read: the pre-rendered shell, the
+     * null-guarded seek predicate joined to it by {@code WHERE}/{@code AND} (whichever the shell still
+     * needs), and the shared {@code orderBy} — wrapped in a derived table when the seek terms carry
+     * aggregate subqueries, the shape a to-many sort produces.
+     *
+     * <p>Simple seeks render their predicate from {@code terms} via {@link #seekClause} and wrap it in
+     * the cursor protocol's {@code (:cursor0 IS NULL OR <seek>)} — the head of the keyset on the first
+     * page, the continuation beyond the last cursor key afterwards.
      *
      * <p>The LIMIT is deliberately NOT part of it. The fetch-one-extra row count is a RUNTIME value, so
      * the caller splices {@code limitClause} onto the finished statement; baking the clause here would
      * leave a trailing-space fragment that cannot be a formatted text block. The returned statement ends
      * on {@code orderBy} — no boundary whitespace — so it is one clean, formable constant.</p>
      *
-     * @param shell         the pre-rendered base SELECT shell (projection, FROM, any base predicates)
-     * @param shellHasWhere whether {@code shell} already carries a WHERE the seek must AND onto
-     * @param terms         the rendered sort terms, in cursor-key order
-     * @param ascending     the sort direction of each key
-     * @param forward       {@code true} for {@code CURSOR_NEXT}, {@code false} for {@code CURSOR_PREVIOUS}
-     * @param orderBy       the rendered ORDER BY clause (leading space, no trailing space)
+     * @param shell              the pre-rendered base SELECT shell (projection, FROM, any base predicates)
+     * @param shellHasWhere      whether {@code shell} already carries a WHERE the seek must AND onto
+     * @param terms              the rendered sort terms, in cursor-key order; empty seeks no statement
+     * @param ascending          the sort direction of each key
+     * @param forward            {@code true} for {@code CURSOR_NEXT}, {@code false} for {@code CURSOR_PREVIOUS}
+     * @param orderBy            the rendered ORDER BY clause (leading space, no trailing space)
+     * @param aggregateExpressions the aggregate subqueries backing the to-many seek terms, in sort
+     *                            order; empty or null for a plain local-key seek (no wrap)
+     * @param rootTable          the quoted root table name the qualified terms are relative to, for
+     *                            re-pointing them at the inner alias
      * @return the seek statement, ending at {@code orderBy} with no boundary whitespace
      */
     public String pagedSeekStatement(String shell, boolean shellHasWhere, List<String> terms,
-                                     List<Boolean> ascending, boolean forward, String orderBy) {
-        return shell + (shellHasWhere ? " AND " : " WHERE ")
-                + seekClause(terms, ascending, forward) + orderBy;
+                                     List<Boolean> ascending, boolean forward, String orderBy,
+                                     List<String> aggregateExpressions, String rootTable) {
+        if (terms.isEmpty()) {
+            return shell + orderBy;
+        }
+        String seekPredicate = SeekClause.render(terms, ascending, forward);
+        if (aggregateExpressions == null || aggregateExpressions.isEmpty()) {
+            return shell + (shellHasWhere ? " AND " : " WHERE ")
+                    + "(:cursor0 IS NULL OR " + seekPredicate + ")" + orderBy;
+        }
+        String innerAlias = "inner_";
+        StringBuilder wrappedSql = new StringBuilder();
+        wrappedSql.append("SELECT ").append(innerAlias).append(".* FROM (");
+        wrappedSql.append(shell);
+        wrappedSql.append(") AS ").append(innerAlias);
+        wrappedSql.append(shellHasWhere ? " AND " : " WHERE ");
+        wrappedSql.append("(:cursor0 IS NULL OR ");
+        String aliasedSeekPredicate = seekPredicate;
+        int aggIndex = 0;
+        for (String aggregate : aggregateExpressions) {
+            aliasedSeekPredicate = aliasedSeekPredicate.replace(
+                    aggregate, innerAlias + "." + dialect.quoteIdentifier("agg_" + aggIndex));
+            aggIndex++;
+        }
+        aliasedSeekPredicate = aliasedSeekPredicate.replace(rootTable + ".", innerAlias + ".");
+        wrappedSql.append(aliasedSeekPredicate);
+        wrappedSql.append(")");
+
+        String aliasedOrderBy = orderBy;
+        aggIndex = 0;
+        for (String aggregate : aggregateExpressions) {
+            aliasedOrderBy = aliasedOrderBy.replace(
+                    dialect.quoteIdentifier("agg_" + aggIndex),
+                    innerAlias + "." + dialect.quoteIdentifier("agg_" + aggIndex));
+            aggIndex++;
+        }
+        aliasedOrderBy = aliasedOrderBy.replace(rootTable + ".", innerAlias + ".");
+        wrappedSql.append(aliasedOrderBy);
+        return wrappedSql.toString();
     }
 
     /** Whether the first segment of an entity-rooted path is a to-many relation or collection. */

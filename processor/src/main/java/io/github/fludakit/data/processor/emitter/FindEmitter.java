@@ -835,66 +835,36 @@ public final class FindEmitter {
             orderByClause = ob.toString();
         }
 
-        // Build seek predicate - wrap in subquery if we have aggregate expressions
-        String seekStmt;
-        if (!seekTerms.isEmpty()) {
-            // Check if any seek term contains an aggregate function
-            boolean hasAggregatesInSeek = seekTerms.stream()
+        // Build the seek statement: the shell, the null-guarded keyset seek, the shared ORDER BY —
+        // wrapped in a derived table when a to-many sort drove the seek through an aggregate.
+        boolean hasAggregatesInSeek = !seekTerms.isEmpty() && seekTerms.stream()
                 .anyMatch(term -> term.contains("MIN(") || term.contains("MAX("));
 
-            String seekPredicate = sqlBuilder.seekClause(seekTerms, ascendingList, true);
-            String whereOrAnd = shellHasWhere ? " AND " : " WHERE ";
-
-            if (hasAggregatesInSeek && hasToManySort && toManyPropForHydration != null) {
-                // Wrap in subquery to allow WHERE on aggregate aliases
-                // Inner query produces the aggregates with aliases
-                // Outer query applies WHERE clause on those aliases
-                String innerAlias = "inner_";
-                StringBuilder wrappedSql = new StringBuilder();
-                wrappedSql.append("SELECT ").append(innerAlias).append(".* FROM (");
-                wrappedSql.append(baseSql);
-                wrappedSql.append(") AS ").append(innerAlias);
-                wrappedSql.append(whereOrAnd);
-                wrappedSql.append("(:cursor0 IS NULL OR ");
-
-                // Replace aggregate expressions and qualified columns with inner alias references
-                String aliasedSeekPredicate = seekPredicate;
-                int replaceAggIndex = 0;
-                for (int i = 0; i < sorts.size(); i++) {
-                    SortSpec sort = sorts.get(i);
-                    String prop = sort.property();
-                    if (prop.contains(".")) {
-                        String firstSegment = prop.substring(0, prop.indexOf('.'));
-                        if (firstSegment.equals(toManyPropForHydration)) {
-                            String colPart = prop.substring(prop.indexOf('.') + 1).replace('.', '_');
-                            String aggFunc = sort.ascending() ? "MIN" : "MAX";
-                            String fullExpr = aggFunc + "(" + joinAlias + "." + dialect.quoteIdentifier(colPart) + ")";
-                            String alias = dialect.quoteIdentifier("agg_" + replaceAggIndex);
-                            aliasedSeekPredicate = aliasedSeekPredicate.replace(fullExpr, innerAlias + "." + alias);
-                            replaceAggIndex++;
-                        }
+        List<String> aggregateExpressions = null;
+        if (hasAggregatesInSeek && hasToManySort && toManyPropForHydration != null) {
+            // The aggregates a to-many sort seek compares on, in sort order — the aliases they are
+            // rendered under are derived from the same enumeration.
+            List<String> expressions = new ArrayList<>();
+            for (SortSpec sort : sorts) {
+                String prop = sort.property();
+                if (prop.contains(".")) {
+                    String firstSegment = prop.substring(0, prop.indexOf('.'));
+                    if (firstSegment.equals(toManyPropForHydration)) {
+                        String colPart = prop.substring(prop.indexOf('.') + 1).replace('.', '_');
+                        String aggFunc = sort.ascending() ? "MIN" : "MAX";
+                        expressions.add(aggFunc + "(" + joinAlias + "." + dialect.quoteIdentifier(colPart) + ")");
                     }
                 }
-
-                // Also replace qualified table.column references with inner alias
-                String rootTableQuoted = dialect.quoteIdentifier(ctx.entity().tableName());
-                aliasedSeekPredicate = aliasedSeekPredicate.replace(rootTableQuoted + ".", innerAlias + ".");
-
-                wrappedSql.append(aliasedSeekPredicate);
-                wrappedSql.append(")");
-
-                // Update ORDER BY to use inner alias for all columns
-                String aliasedOrderBy = orderByClause.replace("\"agg_", innerAlias + ".\"agg_");
-                aliasedOrderBy = aliasedOrderBy.replace(rootTableQuoted + ".", innerAlias + ".");
-                wrappedSql.append(aliasedOrderBy);
-
-                seekStmt = wrappedSql.toString();
-            } else {
-                seekStmt = baseSql + whereOrAnd
-                        + "(:cursor0 IS NULL OR " + seekPredicate + ")" + orderByClause;
             }
-        } else {
+            aggregateExpressions = expressions;
+        }
+
+        String seekStmt;
+        if (seekTerms.isEmpty()) {
             seekStmt = baseSql + orderByClause;
+        } else {
+            seekStmt = sqlBuilder.pagedSeekStatement(baseSql, shellHasWhere, seekTerms, ascendingList,
+                    true, orderByClause, aggregateExpressions, dialect.quoteIdentifier(ctx.entity().tableName()));
         }
 
         // Register the seek SQL constant

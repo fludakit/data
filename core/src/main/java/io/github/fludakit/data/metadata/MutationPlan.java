@@ -10,7 +10,7 @@ import java.util.Objects;
  * {@code Operation}. Consumed by {@code WriteEmitter} (processor) for cascade-aware code generation.</p>
  *
  * <p>Carries everything the emitter needs to decide what to mutate, in what order, and with what
- * mode — analogous to {@link NavigationPlan} for read queries.</p>
+ * mode.</p>
  *
  * @param mutationType  the operation to perform on the root entity
  * @param cascadeSpecs  ordered list of cascade specs (children of root)

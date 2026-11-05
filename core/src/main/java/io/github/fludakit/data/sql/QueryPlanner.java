@@ -3,7 +3,6 @@ package io.github.fludakit.data.sql;
 import io.github.fludakit.data.metadata.ColumnPlacement;
 import io.github.fludakit.data.metadata.ColumnResolver;
 import io.github.fludakit.data.metadata.JoinEdge;
-import io.github.fludakit.data.metadata.NavigationPlan;
 import io.github.fludakit.data.metadata.TableSchema;
 import io.github.fludakit.data.query.Connector;
 import io.github.fludakit.data.query.PagingMode;
@@ -30,7 +29,6 @@ final class QueryPlanner {
     private final List<Predicate> predicates;
     private final List<SortSpec> sorts;
     private final int limit;
-    private final NavigationPlan navPlan;
 
     private final List<JoinEdge> joinEdges = new ArrayList<>();
     private final List<Integer> existentialIndices = new ArrayList<>();
@@ -40,11 +38,6 @@ final class QueryPlanner {
 
     QueryPlanner(TableSchema schema, ColumnResolver attributes, SqlDialect dialect,
                  QueryDefinition.Criteria model, List<JoinEdge> extraEdges) {
-        this(schema, attributes, dialect, model, extraEdges, null);
-    }
-
-    QueryPlanner(TableSchema schema, ColumnResolver attributes, SqlDialect dialect,
-                 QueryDefinition.Criteria model, List<JoinEdge> extraEdges, NavigationPlan navPlan) {
         this.schema = schema;
         this.attributes = attributes;
         this.dialect = dialect;
@@ -57,7 +50,6 @@ final class QueryPlanner {
         boolean windowless = read == null || read.paging() != PagingMode.NONE;
         this.sorts = windowless ? List.of() : read.sorts();
         this.limit = windowless ? 0 : read.limit().limit();
-        this.navPlan = navPlan;
     }
 
     QueryCompiler.Plan plan() {

@@ -51,7 +51,6 @@ public final class SqlFragment {
     private boolean distinct;
     private String table;
     private final Map<String, JoinEdge> joins = new LinkedHashMap<>();
-    private Map<String, String> aliasMap;
     private final List<Conjunct> where = new ArrayList<>();
     private final List<String> orderBy = new ArrayList<>();
     private Integer limit;
@@ -84,12 +83,6 @@ public final class SqlFragment {
     /** Sets the root table; quoted by the dialect at render time. */
     public SqlFragment table(String table) {
         this.table = Objects.requireNonNull(table, "table");
-        return this;
-    }
-
-    /** Sets the alias map for join rendering; keys are child tables, values are aliases. */
-    public SqlFragment aliases(Map<String, String> aliasMap) {
-        this.aliasMap = aliasMap == null ? Map.of() : Map.copyOf(aliasMap);
         return this;
     }
 

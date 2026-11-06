@@ -684,12 +684,8 @@ public final class FindEmitter {
         // If we have TO_MANY sorts, we need to ensure the id is the last sort key for uniqueness
         if (hasToManySort && !sorts.isEmpty()) {
             SortSpec lastSort = sorts.getLast();
-            String idPropName = null;
-            if (ctx.entity() instanceof TypeDefinition.Entity e) {
-                idPropName = e.id().name();
-            } else if (ctx.entity() instanceof TypeDefinition.Aggregate a) {
-                idPropName = a.id().name();
-            }
+            TypeDefinition.Prop.Id id = ctx.entity().id();
+            String idPropName = id != null ? id.name() : null;
             if (idPropName != null && !(lastSort.property().equals(idPropName) && lastSort.ascending())) {
                 // Add id as the last sort key
                 properties.add(idPropName);

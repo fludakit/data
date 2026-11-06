@@ -61,7 +61,7 @@ public class RepositoryProcessor extends AbstractProcessor {
 
         // Phase 1: Scan types into the shared graph
         try {
-            new TypeMappingVisitor(types, elements, diagnostics, typeGraph).scanRound(roundEnv);
+            new TypeDefinitionScanner(types, elements, diagnostics, typeGraph).scanRound(roundEnv);
         } catch (RuntimeException e) {
             String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getName();
             diagnostics.error("fluda-data: " + msg, null);
@@ -102,7 +102,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         // Generate row mappers for entities and aggregates
         for (String fqn : typeGraph.managedEntities()) {
             TypeDefinition def = typeGraph.get(fqn);
-            if (def != null && (def instanceof TypeDefinition.Entity || def instanceof TypeDefinition.Aggregate)) {
+            if (def != null && def.hasId()) {
                 emitter.emit(def);
             }
         }
@@ -110,7 +110,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         // Generate row mappers for value objects used in element collections
         for (String fqn : typeGraph.elementCollectionValueObjects()) {
             TypeDefinition def = typeGraph.get(fqn);
-            if (def != null && def instanceof TypeDefinition.ValueObject) {
+            if (def != null && !def.hasId()) {
                 emitter.emit(def);
             }
         }

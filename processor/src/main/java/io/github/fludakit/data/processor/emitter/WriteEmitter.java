@@ -108,7 +108,7 @@ public final class WriteEmitter {
         // Extract the entity parameter name from the method signature
         String entityVar = method.parameters().isEmpty() ? "entity" 
                 : method.parameters().getFirst().getSimpleName().toString();
-        TypeDefinition.Prop.Id idProp = idProp(entity);
+        TypeDefinition.Prop.Id idProp = entity.id();
         String idTypeFqn = idProp != null ? idProp.javaType() : "java.lang.Long";
         IdStrategy strategy = idStrategy(idTypeFqn);
         boolean hasUpsert = dialect.upsertForm() != UpsertForm.NONE;
@@ -227,7 +227,7 @@ public final class WriteEmitter {
 
         SqlBuilder childSb = new SqlBuilder(childEntity, childEntity);
         childSb.dialect(dialect);
-        TypeDefinition.Prop.Id childIdProp = idProp(childEntity);
+        TypeDefinition.Prop.Id childIdProp = childEntity.id();
         String childIdTypeFqn = childIdProp != null ? childIdProp.javaType() : "java.lang.Long";
         IdStrategy childStrategy = idStrategy(childIdTypeFqn);
         String childInsertSql = childStrategy == IdStrategy.APP_ASSIGNED
@@ -381,7 +381,7 @@ public final class WriteEmitter {
 
         SqlBuilder childSb = new SqlBuilder(childEntity, childEntity);
         childSb.dialect(dialect);
-        TypeDefinition.Prop.Id childIdProp = idProp(childEntity);
+        TypeDefinition.Prop.Id childIdProp = childEntity.id();
         String childIdTypeFqn = childIdProp != null ? childIdProp.javaType() : "java.lang.Long";
         IdStrategy childStrategy = idStrategy(childIdTypeFqn);
         String childInsertSql = childStrategy == IdStrategy.APP_ASSIGNED
@@ -604,7 +604,7 @@ public final class WriteEmitter {
         TypeDefinition entity = ctx.entity();
         String entityVar = method.parameters().isEmpty() ? "entity" 
                 : method.parameters().getFirst().getSimpleName().toString();
-        TypeDefinition.Prop.Id idProp = idProp(entity);
+        TypeDefinition.Prop.Id idProp = entity.id();
         String idTypeFqn = idProp != null ? idProp.javaType() : "java.lang.Long";
         IdStrategy strategy = idStrategy(idTypeFqn);
 
@@ -787,9 +787,8 @@ public final class WriteEmitter {
         List<Predicate> preds = method.predicates();
         if (preds.size() != 1) return false;
         Predicate pred = preds.getFirst();
-        String idPropName = entity instanceof TypeDefinition.Entity e && e.id() != null ? e.id().name()
-                : entity instanceof TypeDefinition.Aggregate a && a.id() != null ? a.id().name()
-                : null;
+        TypeDefinition.Prop.Id id = entity.id();
+        String idPropName = id != null ? id.name() : null;
         return idPropName != null && pred.property().equals(idPropName);
     }
 
@@ -886,7 +885,7 @@ public final class WriteEmitter {
     /** Appends .param() calls for ALL columns (id + non-id props). */
     private void appendAllBindings(CodeBlock.Builder body, TypeDefinition entity, String varName) {
         // Id binding
-        TypeDefinition.Prop.Id idProp = idProp(entity);
+        TypeDefinition.Prop.Id idProp = entity.id();
         if (idProp != null) {
             body.add(".param($S, $L.getId())", idProp.name(), varName);
         }
@@ -906,7 +905,7 @@ public final class WriteEmitter {
     private void appendChildPropBindings(CodeBlock.Builder body, TypeDefinition.Entity childEntity,
                                           String childVar, String parentIdExpr,
                                           String inverseName, String fkColumn) {
-        TypeDefinition.Prop.Id idProp = idProp(childEntity);
+        TypeDefinition.Prop.Id idProp = childEntity.id();
         if (idProp != null) {
             body.add(".param($S, $L.getId())", idProp.name(), childVar);
         }
@@ -1047,15 +1046,6 @@ public final class WriteEmitter {
     }
 
     // ── ID strategy ──────────────────────────────────────────────────────
-
-    /** Returns the id Prop from a TypeDefinition, or null if none. */
-    private static TypeDefinition.Prop.Id idProp(TypeDefinition def) {
-        return switch (def) {
-            case TypeDefinition.Entity e -> e.id();
-            case TypeDefinition.Aggregate a -> a.id();
-            default -> null;
-        };
-    }
 
     /**
      * Finds the name of the TO_ONE relation on the child that targets the parent type.

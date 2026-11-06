@@ -34,8 +34,7 @@ final class TypeGraph {
     /** Registers (or replaces) a node and records whether it is a managed entity. */
     void put(String fqn, TypeDefinition definition) {
         nodes.put(fqn, definition);
-        if (definition instanceof TypeDefinition.Entity
-                || definition instanceof TypeDefinition.Aggregate) {
+        if (definition.hasId()) {
             managedEntities.add(fqn);
         }
     }
@@ -85,7 +84,7 @@ final class TypeGraph {
     Set<String> valueObjects() {
         Set<String> vos = new LinkedHashSet<>();
         for (Map.Entry<String, TypeDefinition> entry : nodes.entrySet()) {
-            if (entry.getValue() instanceof TypeDefinition.ValueObject) {
+            if (!entry.getValue().hasId()) {
                 vos.add(entry.getKey());
             }
         }

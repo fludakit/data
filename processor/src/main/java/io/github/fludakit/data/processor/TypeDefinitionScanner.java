@@ -35,7 +35,7 @@ import java.util.Set;
  * <p>Two-pass approach: the first pass builds all definitions with {@code definition=null} for unresolved
  * cross-references; the second pass fills in targets from the cache.
  */
-final class TypeMappingVisitor {
+final class TypeDefinitionScanner {
 
     private final Types types;
     private final Elements elements;
@@ -47,7 +47,7 @@ final class TypeMappingVisitor {
     /** FQNs currently being built — cycle detection. */
     private final Set<String> inProgress = new HashSet<>();
 
-    TypeMappingVisitor(Types types, Elements elements, Diagnostics diagnostics, TypeGraph graph) {
+    TypeDefinitionScanner(Types types, Elements elements, Diagnostics diagnostics, TypeGraph graph) {
         this.types = types;
         this.elements = elements;
         this.diagnostics = diagnostics;
@@ -231,25 +231,10 @@ final class TypeMappingVisitor {
             if (field.getAnnotation(Association.class) != null) {
                 String targetFqn = fieldTypeElement.getQualifiedName().toString();
                 TypeDefinition target = get(targetFqn);
-                if (target instanceof TypeDefinition.Entity entityTarget) {
+                TypeDefinition.Entity entityTarget = target != null ? target.asEntity() : null;
+                if (entityTarget != null) {
                     associations.add(new TypeDefinition.Prop.Association(fieldName,
                             targetFqn, entityTarget, Names.fkColumn(fieldName), false, false, null));
-                } else if (target instanceof TypeDefinition.Aggregate aggregateTarget) {
-                    // @Association may point at an aggregate root: the FK reference is to the
-                    // target's table/id, viewed as a plain entity (never cascade-written).
-                    TypeDefinition.Entity entityView = new TypeDefinition.Entity(
-                        aggregateTarget.typeName(),
-                        aggregateTarget.tableName(),
-                        aggregateTarget.id(),
-                        aggregateTarget.version(),
-                        aggregateTarget.scalars(),
-                        aggregateTarget.embedded(),
-                        List.of(),
-                        List.of(),
-                        List.of()
-                    );
-                    associations.add(new TypeDefinition.Prop.Association(fieldName,
-                            targetFqn, entityView, Names.fkColumn(fieldName), false, false, null));
                 }
                 return;
             }
@@ -257,24 +242,10 @@ final class TypeMappingVisitor {
                 String targetFqn = fieldTypeElement.getQualifiedName().toString();
                 TypeDefinition target = get(targetFqn);
                 // Aggregate-to-aggregate/entity reference: treat as COMPOSITION by default
-                if (target instanceof TypeDefinition.Entity entityTarget) {
+                TypeDefinition.Entity entityTarget = target != null ? target.asEntity() : null;
+                if (entityTarget != null) {
                     associations.add(new TypeDefinition.Prop.Association(fieldName,
                             targetFqn, entityTarget, Names.fkColumn(fieldName), false, true, null));
-                } else if (target instanceof TypeDefinition.Aggregate aggregateTarget) {
-                    // Create a synthetic Entity view of the Aggregate for the FK reference
-                    TypeDefinition.Entity entityView = new TypeDefinition.Entity(
-                        aggregateTarget.typeName(),
-                        aggregateTarget.tableName(),
-                        aggregateTarget.id(),
-                        aggregateTarget.version(),
-                        aggregateTarget.scalars(),
-                        aggregateTarget.embedded(),
-                        List.of(),
-                        List.of(),
-                        List.of()
-                    );
-                    associations.add(new TypeDefinition.Prop.Association(fieldName,
-                            targetFqn, entityView, Names.fkColumn(fieldName), false, true, null));
                 }
                 return;
             }
@@ -292,17 +263,7 @@ final class TypeMappingVisitor {
                     
                     // Treat aggregate target as entity for FK purposes
                     // Create a synthetic Entity view of the Aggregate for the association
-                    TypeDefinition.Entity entityView = new TypeDefinition.Entity(
-                        aggregateTarget.typeName(),
-                        aggregateTarget.tableName(),
-                        aggregateTarget.id(),
-                        aggregateTarget.version(),
-                        aggregateTarget.scalars(),
-                        aggregateTarget.embedded(),
-                        List.of(), // No nested associations in the FK reference
-                        List.of(), // No collections in the FK reference
-                        List.of()  // No element collections in the FK reference
-                    );
+                    TypeDefinition.Entity entityView = aggregateTarget.asEntity();
                     associations.add(new TypeDefinition.Prop.Association(fieldName,
                             targetFqn, entityView, Names.fkColumn(fieldName), isBackRef, false, null));
                 } else if (target == null) {
@@ -379,24 +340,10 @@ final class TypeMappingVisitor {
         if (fieldTypeElement != null && isEntityOrAggregate(fieldTypeElement)) {
             String targetFqn = fieldTypeElement.getQualifiedName().toString();
             TypeDefinition target = get(targetFqn);
-            if (target instanceof TypeDefinition.Entity entityTarget) {
+            TypeDefinition.Entity entityTarget = target != null ? target.asEntity() : null;
+            if (entityTarget != null) {
                 associations.add(new TypeDefinition.Prop.Association(fieldName,
                         targetFqn, entityTarget, Names.fkColumn(fieldName), false, false, null));
-            } else if (target instanceof TypeDefinition.Aggregate aggregateTarget) {
-                // Create synthetic Entity view for association
-                TypeDefinition.Entity entityView = new TypeDefinition.Entity(
-                    aggregateTarget.typeName(),
-                    aggregateTarget.tableName(),
-                    aggregateTarget.id(),
-                    aggregateTarget.version(),
-                    aggregateTarget.scalars(),
-                    aggregateTarget.embedded(),
-                    List.of(),
-                    List.of(),
-                    List.of()
-                );
-                associations.add(new TypeDefinition.Prop.Association(fieldName,
-                        targetFqn, entityView, Names.fkColumn(fieldName), false, false, null));
             }
             return;
         }
@@ -507,54 +454,51 @@ final class TypeMappingVisitor {
     }
 
     private TypeDefinition resolveDefinition(TypeDefinition definition, String ownerFqn) {
+        if (!(definition instanceof TypeDefinition.IdentityAware entityLike)) {
+            return definition;
+        }
+
+        List<TypeDefinition.Prop.Association> resolvedAssociations = new ArrayList<>();
         boolean changed = false;
+        for (TypeDefinition.Prop.Association assoc : entityLike.associations()) {
+            TypeDefinition.Prop.Association resolved = resolveAssociation(assoc, ownerFqn);
+            resolvedAssociations.add(resolved);
+            if (resolved != assoc) changed = true;
+        }
 
-        // Resolve Association targets
-        if (definition instanceof TypeDefinition.Entity entity) {
-            List<TypeDefinition.Prop.Association> resolvedAssociations = new ArrayList<>();
-            for (TypeDefinition.Prop.Association assoc : entity.associations()) {
-                TypeDefinition.Prop.Association resolved = resolveAssociation(assoc, ownerFqn);
-                resolvedAssociations.add(resolved);
-                if (resolved != assoc) changed = true;
-            }
+        List<TypeDefinition.Prop.EntityCollection> resolvedEntityCollections = new ArrayList<>();
+        for (TypeDefinition.Prop.EntityCollection ec : entityLike.entityCollections()) {
+            TypeDefinition.Prop.EntityCollection resolved = resolveEntityCollection(ec, ownerFqn);
+            resolvedEntityCollections.add(resolved);
+            if (resolved != ec) changed = true;
+        }
 
-            List<TypeDefinition.Prop.EntityCollection> resolvedEntityCollections = new ArrayList<>();
-            for (TypeDefinition.Prop.EntityCollection ec : entity.entityCollections()) {
-                TypeDefinition.Prop.EntityCollection resolved = resolveEntityCollection(ec, ownerFqn);
-                resolvedEntityCollections.add(resolved);
-                if (resolved != ec) changed = true;
-            }
+        if (!changed) {
+            return definition;
+        }
 
-            if (changed) {
+        return definition.accept(new TypeDefinition.Visitor<>() {
+            @Override
+            public TypeDefinition visitEntity(TypeDefinition.Entity entity) {
                 return new TypeDefinition.Entity(
                         entity.typeName(), entity.tableName(), entity.id(), entity.version(),
                         entity.scalars(), entity.embedded(), resolvedAssociations, resolvedEntityCollections,
                         entity.elementCollections());
             }
-        } else if (definition instanceof TypeDefinition.Aggregate aggregate) {
-            List<TypeDefinition.Prop.Association> resolvedAssociations = new ArrayList<>();
-            for (TypeDefinition.Prop.Association assoc : aggregate.associations()) {
-                TypeDefinition.Prop.Association resolved = resolveAssociation(assoc, ownerFqn);
-                resolvedAssociations.add(resolved);
-                if (resolved != assoc) changed = true;
-            }
 
-            List<TypeDefinition.Prop.EntityCollection> resolvedEntityCollections = new ArrayList<>();
-            for (TypeDefinition.Prop.EntityCollection ec : aggregate.entityCollections()) {
-                TypeDefinition.Prop.EntityCollection resolved = resolveEntityCollection(ec, ownerFqn);
-                resolvedEntityCollections.add(resolved);
-                if (resolved != ec) changed = true;
-            }
-
-            if (changed) {
+            @Override
+            public TypeDefinition visitAggregate(TypeDefinition.Aggregate aggregate) {
                 return new TypeDefinition.Aggregate(
                         aggregate.typeName(), aggregate.tableName(), aggregate.id(),
                         aggregate.version(), aggregate.scalars(), aggregate.embedded(),
                         resolvedAssociations, resolvedEntityCollections, aggregate.elementCollections());
             }
-        }
 
-        return definition;
+            @Override
+            public TypeDefinition visitValueObject(TypeDefinition.ValueObject valueObject) {
+                return valueObject;
+            }
+        });
     }
 
     private TypeDefinition.Prop.Association resolveAssociation(TypeDefinition.Prop.Association assoc, String ownerFqn) {
@@ -584,17 +528,7 @@ final class TypeMappingVisitor {
             if (assoc.definition() != null) {
                 entityView = assoc.definition();
             } else {
-                entityView = new TypeDefinition.Entity(
-                    aggregateTarget.typeName(),
-                    aggregateTarget.tableName(),
-                    aggregateTarget.id(),
-                    aggregateTarget.version(),
-                    aggregateTarget.scalars(),
-                    aggregateTarget.embedded(),
-                    List.of(),
-                    List.of(),
-                    List.of()
-                );
+                entityView = aggregateTarget.asEntity();
             }
             return new TypeDefinition.Prop.Association(assoc.name(), assoc.javaType(),
                     entityView, assoc.fkColumn(), isBackRef, assoc.composition(), assoc.cascade());

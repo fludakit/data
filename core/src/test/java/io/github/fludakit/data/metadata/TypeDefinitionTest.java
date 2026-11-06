@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
@@ -234,6 +235,14 @@ class TypeDefinitionTest {
     }
 
     @Test
+    void idReturnsTheIdentifierForEntitiesAndAggregatesAndNullForValueObjects() {
+        assertEquals("id", BOOK.id().name());
+        assertEquals("id", AUTHOR.id().name());
+        assertNull(ADDRESS.id());
+        assertNull(TAG.id());
+    }
+
+    @Test
     void findPropertyLooksAcrossCategories() {
         assertEquals("id", BOOK.findProperty("id").name());
         assertEquals("title", BOOK.findProperty("title").name());
@@ -241,5 +250,60 @@ class TypeDefinitionTest {
         assertEquals("lines", BOOK.findProperty("lines").name());
         assertNull(BOOK.findProperty("nope"));
         assertEquals("label", TAG.findProperty("label").name());
+    }
+
+    @Test
+    void propVisitorDispatchesEveryKindInDeclarationOrder() {
+        List<String> visited = new ArrayList<>();
+        TypeDefinition.Prop.Visitor<Void> recorder = new TypeDefinition.Prop.Visitor<>() {
+            @Override public Void visitScalar(TypeDefinition.Prop.Scalar p) { visited.add("Scalar"); return null; }
+            @Override public Void visitId(TypeDefinition.Prop.Id p) { visited.add("Id"); return null; }
+            @Override public Void visitVersion(TypeDefinition.Prop.Version p) { visited.add("Version"); return null; }
+            @Override public Void visitAssociation(TypeDefinition.Prop.Association p) { visited.add("Association"); return null; }
+            @Override public Void visitEmbedded(TypeDefinition.Prop.Embedded p) { visited.add("Embedded"); return null; }
+            @Override public Void visitEntityCollection(TypeDefinition.Prop.EntityCollection p) { visited.add("EntityCollection"); return null; }
+            @Override public Void visitElementCollection(TypeDefinition.Prop.ElementCollection p) { visited.add("ElementCollection"); return null; }
+        };
+
+        for (TypeDefinition.Prop prop : BOOK.properties()) {
+            prop.accept(recorder);
+        }
+        assertEquals(List.of("Id", "Version", "Scalar", "Association", "EntityCollection"), visited);
+
+        visited.clear();
+        for (TypeDefinition.Prop prop : CUSTOMER.properties()) {
+            prop.accept(recorder);
+        }
+        assertEquals(List.of("Id", "Scalar", "Embedded", "ElementCollection"), visited);
+    }
+
+    @Test
+    void typeDefinitionVisitorDispatchesByKind() {
+        TypeDefinition.Visitor<String> visitor = new TypeDefinition.Visitor<>() {
+            @Override public String visitEntity(TypeDefinition.Entity e) { return "Entity:" + e.typeName(); }
+            @Override public String visitAggregate(TypeDefinition.Aggregate a) { return "Aggregate:" + a.typeName(); }
+            @Override public String visitValueObject(TypeDefinition.ValueObject v) { return "ValueObject:" + v.typeName(); }
+        };
+        assertEquals("Aggregate:demo.Book", BOOK.accept(visitor));
+        assertEquals("Entity:demo.Author", AUTHOR.accept(visitor));
+        assertEquals("ValueObject:demo.Address", ADDRESS.accept(visitor));
+    }
+
+    @Test
+    void asEntityReturnsTheEntityView() {
+        assertEquals(AUTHOR, AUTHOR.asEntity());
+
+        TypeDefinition.Entity view = BOOK.asEntity();
+        assertEquals("demo.Book", view.typeName());
+        assertEquals("book", view.tableName());
+        assertEquals(BOOK.id(), view.id());
+        assertEquals(BOOK.version(), view.version());
+        assertEquals(BOOK.scalars(), view.scalars());
+        assertEquals(BOOK.embedded(), view.embedded());
+        assertTrue(view.associations().isEmpty());
+        assertTrue(view.entityCollections().isEmpty());
+        assertTrue(view.elementCollections().isEmpty());
+
+        assertNull(ADDRESS.asEntity());
     }
 }

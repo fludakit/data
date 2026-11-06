@@ -53,7 +53,7 @@ public final class FindEmitter {
     private static final ClassName SIMPLE_CURSORED_PAGE = ClassName.get("io.github.fludakit.data.page", "SimpleCursoredPage");
     private static final ClassName CURSOR = ClassName.get("jakarta.data.page", "PageRequest", "Cursor");
     private static final ClassName CURSOR_KEYS = ClassName.get("io.github.fludakit.data.sql", "CursorKeys");
-    private static final ClassName VALUE_ACCESS = ClassName.get("io.github.fludakit.data.metadata", "ValueAccess");
+    private static final ClassName VALUE_ACCESS = ClassName.get("io.github.fludakit.data.metadata", "ValueReader");
 
     private final SqlDialect dialect;
     private final Types types;
@@ -938,7 +938,7 @@ public final class FindEmitter {
             }
             body.add(");\n");
 
-            // Build a simple ValueAccess using a switch on path
+            // Build a simple ValueReader using a switch on path
             body.add("$T<$T> $L = (path, entity) -> {\n", VALUE_ACCESS, entityType, "access");
             body.add("    return switch (path) {\n");
             for (String prop : properties) {

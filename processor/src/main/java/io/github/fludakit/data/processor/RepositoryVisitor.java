@@ -86,9 +86,6 @@ final class RepositoryVisitor {
     /** The optional {@code JdbcClient getJdbcClient()} escape hatch — at most one method. */
     private ExecutableElement jdbcClientAccessor;
 
-    /** Emission state shared by the generated-member emitters. */
-    private RepositoryContext ctx;
-
     RepositoryVisitor(TypeElement repository, Types types, Elements elements, Diagnostics diagnostics,
                       Filer filer, TypeGraph typeGraph, SqlDialect dialect) {
         this.repository = repository;
@@ -109,20 +106,28 @@ final class RepositoryVisitor {
         }
     }
 
-    void visit() {
+    /**
+     * Resolves one repository into its {@link RepositoryContext}: the entity mapping, the generated
+     * row mapper / metamodel for it, and the method contexts for every resolvable repository method.
+     *
+     * <p>This is the resolution phase — it reads the type graph and the repository interface, and
+     * produces the context. It owns no emission: {@link #emitRepositoryMembers} turns the context into
+     * generated member methods.</p>
+     */
+    RepositoryContext resolveContext() {
         // 1. Resolve the entity type from the repository's generic superclass and interfaces
         TypeMirror entityTypeMirror = resolveEntityType();
         if (entityTypeMirror == null) {
             diagnostics.error("Cannot resolve entity type for repository " + repository.getQualifiedName(),
                     repository);
-            return;
+            return null;
         }
 
         String entityFqn = types.erasure(entityTypeMirror).toString();
         TypeElement entityElement = asTypeElement(entityTypeMirror);
         if (entityElement == null) {
             diagnostics.error("Entity type is not a declared type: " + entityFqn, repository);
-            return;
+            return null;
         }
 
         // 2. Read the entity mapping from the type graph — every repository entity type must be
@@ -132,7 +137,7 @@ final class RepositoryVisitor {
         if (entityMapping == null) {
             diagnostics.error("No @Entity/@AggregateRoot/@ValueObject mapping found for " + entityFqn,
                     repository);
-            return;
+            return null;
         }
 
         // 3. Generate row mapper (or null if not eligible)
@@ -150,23 +155,28 @@ final class RepositoryVisitor {
         // 4b. Generate static metamodel (_Entity interface)
         new MetamodelEmitter(filer, diagnostics).emit(entityMapping);
 
-        // 4. Create RepositoryContext
-        ctx = new RepositoryContext(entityMapping, rowMapperType);
-
-        // 5. Iterate abstract methods and resolve them into method contexts
+        // 5. Create the RepositoryContext and iterate abstract methods, resolving them into method contexts
+        RepositoryContext resolvedContext = new RepositoryContext(entityMapping, rowMapperType);
         scanMethods(entityMapping);
 
-        // 6. Emit the generated member methods: finders, batch lifecycle, writes, hydration
+        // 6. Hand the resolved context to the emission phase — see emitRepositoryMembers.
+        return resolvedContext;
+    }
+
+    /**
+     * Emits the generated member methods for a resolved {@link RepositoryContext}: the finders, the
+     * batch lifecycle methods, the writes, and the hydration helpers. The context owns the resolved
+     * data; this is where the emitting computation turns it into {@link MethodSpec}s.
+     */
+    void emitRepositoryMembers(RepositoryContext ctx) {
+        // The emission phase: turn the context resolved by {@link #resolveContext} into generated
+        // member methods — finders, batch lifecycle, writes, hydration.
         DeclaredType repositoryDeclaredType = resolveRepositoryDeclaredType();
         DeclaredType repositoryOwnType = (DeclaredType) repository.asType();
         emitFinders(ctx, repositoryDeclaredType, repositoryOwnType);
         emitLifecycleMethods(ctx, repositoryDeclaredType, repositoryOwnType);
         emitWriteMethods(ctx, repositoryDeclaredType, repositoryOwnType);
-        emitHydrationMethods(ctx, entityMapping);
-    }
-
-    RepositoryContext context() {
-        return ctx;
+        emitHydrationMethods(ctx, ctx.entity());
     }
 
     ExecutableElement jdbcClientAccessor() {

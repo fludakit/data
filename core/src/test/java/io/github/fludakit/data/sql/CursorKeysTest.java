@@ -1,7 +1,7 @@
 package io.github.fludakit.data.sql;
 
 import io.github.fludakit.data.metadata.UnknownAttributePathException;
-import io.github.fludakit.data.metadata.ValueAccess;
+import io.github.fludakit.data.metadata.ValueReader;
 import jakarta.data.page.PageRequest;
 import org.junit.jupiter.api.Test;
 
@@ -19,7 +19,7 @@ class CursorKeysTest {
     static class Node { }
 
     /** Overrides navigation for one to-many and one single-valued path, mirroring generated code. */
-    static class WithValues<T> implements ValueAccess<T> {
+    static class WithValues<T> implements ValueReader<T> {
         private final List<Object> itemsName;
         private final Object name;
 
@@ -29,7 +29,7 @@ class CursorKeysTest {
         }
 
         @Override
-        public Object value(String path, T root) {
+        public Object read(String path, T root) {
             switch (path) {
                 case "items.name": {
                     return itemsName;
@@ -44,13 +44,13 @@ class CursorKeysTest {
         }
     }
 
-    private static ValueAccess<Node> withValues(List<Object> itemsName) {
+    private static ValueReader<Node> withValues(List<Object> itemsName) {
         return new WithValues<Node>(itemsName, "z");
     }
 
     @Test
     void reducesToManyListByDirection() {
-        ValueAccess<Node> md = withValues(List.of("b", "a", "c"));
+        ValueReader<Node> md = withValues(List.of("b", "a", "c"));
         Node node = new Node();
 
         PageRequest.Cursor asc = CursorKeys.forEntity(List.of("items.name"), List.of(true), md, node);
@@ -62,7 +62,7 @@ class CursorKeysTest {
 
     @Test
     void reducesEmptyToManyListToNullKey() {
-        ValueAccess<Node> md = withValues(List.of());
+        ValueReader<Node> md = withValues(List.of());
 
         PageRequest.Cursor cursor =
                 CursorKeys.forEntity(List.of("items.name"), List.of(true), md, new Node());
@@ -72,7 +72,7 @@ class CursorKeysTest {
 
     @Test
     void passesSingleValuesThroughAndComposesMultiKeyCursors() {
-        ValueAccess<Node> md = withValues(List.of("b", "a", "c"));
+        ValueReader<Node> md = withValues(List.of("b", "a", "c"));
 
         PageRequest.Cursor cursor = CursorKeys.forEntity(
                 List.of("name", "items.name"), List.of(false, true), md, new Node());
@@ -87,7 +87,7 @@ class CursorKeysTest {
         // A cursor sort through e.g. "workHistory.profile" yields a List<Profile> from metadata path
         // navigation; Profile is not Comparable, and silently ClassCastException-ing at page-two seek
         // time is worse than a named, immediate failure.
-        ValueAccess<Node> md = withValues(List.of(new Node(), new Node()));
+        ValueReader<Node> md = withValues(List.of(new Node(), new Node()));
 
         assertThatThrownBy(() -> CursorKeys.forEntity(
                 List.of("items.name"), List.of(true), md, new Node()))
@@ -97,7 +97,7 @@ class CursorKeysTest {
 
     @Test
     void rejectsMismatchedDirections() {
-        ValueAccess<Node> md = withValues(List.of("b"));
+        ValueReader<Node> md = withValues(List.of("b"));
 
         assertThatThrownBy(() -> CursorKeys.forEntity(
                 List.of("name", "items.name"), List.of(true), md, new Node()))

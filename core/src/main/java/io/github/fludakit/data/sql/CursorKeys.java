@@ -1,6 +1,6 @@
 package io.github.fludakit.data.sql;
 
-import io.github.fludakit.data.metadata.ValueAccess;
+import io.github.fludakit.data.metadata.ValueReader;
 import jakarta.data.page.PageRequest;
 
 import java.util.List;
@@ -19,25 +19,25 @@ public final class CursorKeys {
 
     /**
      * Builds the cursor key for {@code entity} from its sorted property paths, reading every value
-     * through the query's reflection-free {@link ValueAccess} — so a to-many sort key collapses to
+     * through the query's reflection-free {@link ValueReader} — so a to-many sort key collapses to
      * the same edge the joined SQL aggregate produces: the minimum for an ascending key, the maximum
      * for a descending one (nulls ignored, as SQL {@code MIN}/{@code MAX} ignore them; an empty or
      * all-null list yields a {@code null} key).
      *
      * @param properties the dot paths, in cursor-key order
      * @param ascending  the sort direction of each key
-     * @param access     the generated per-query value accessor
+     * @param access     the generated per-query value reader
      * @param entity     the root object the cursor continues from
      */
     public static <T> PageRequest.Cursor forEntity(List<String> properties, List<Boolean> ascending,
-                                                    ValueAccess<T> access, T entity) {
+                                                    ValueReader<T> access, T entity) {
         if (properties.size() != ascending.size()) {
             throw new IllegalArgumentException("cursor key requires one direction per property: "
                     + properties.size() + " properties, " + ascending.size() + " directions");
         }
         Object[] key = new Object[properties.size()];
         for (int i = 0; i < properties.size(); i++) {
-            Object value = access.value(properties.get(i), entity);
+            Object value = access.read(properties.get(i), entity);
             key[i] = value instanceof List<?> values ? edgeOf(values, ascending.get(i)) : value;
         }
         return PageRequest.Cursor.forKey(key);

@@ -162,14 +162,151 @@ public sealed interface TypeDefinition extends TableSchema
      *                                  or would walk a cycle
      */
     default ColumnPlacement resolve(String path) {
-        return new PathResolver().resolve(this, path);
+        return new PathResolver(this).resolve(path);
     }
 
     /**
      * Whether this entity-rooted path starts with a to-many relation or element collection.
      */
     default boolean isToManyPath(String path) {
-        return new PathResolver().isToManyPath(this, path);
+        return new PathResolver(this).isToManyPath(path);
+    }
+
+    // ── Nested PathResolver ───────────────────────────────────────────────
+
+    /**
+     * The path-resolution walker, nested in {@code TypeDefinition} so the resolved root is the
+     * instance itself rather than a parameter: {@link #resolve(String)} and {@link #isToManyPath(String)}
+     * are the entry points and this holds the single implementation.
+     */
+    static final class PathResolver {
+
+        private final TypeDefinition root;
+
+        PathResolver(TypeDefinition root) {
+            this.root = root;
+        }
+
+        ColumnPlacement resolve(String path) {
+            String[] segments = path.split("\\.");
+            List<JoinEdge> edges = new ArrayList<>();
+            TypeDefinition current = root;
+            StringBuilder columnPrefix = new StringBuilder();
+            String elementCollectionTable = null; // Track the child table when navigating through ElementCollection
+
+            // Walk through all segments except the last to build edges and track embedded prefix
+            for (int i = 0; i < segments.length - 1; i++) {
+                String segment = segments[i];
+                Prop prop = current.findProperty(segment);
+
+                if (prop == null) {
+                    throw new UnknownAttributePathException(path,
+                            "Cannot navigate through non-relation property: " + segment);
+                }
+
+                if (prop instanceof Prop.Association assoc) {
+                    // To-one: owner table has FK pointing to child table's ID
+                    ColumnRef.ForeignKey ownerFk = new ColumnRef.ForeignKey(
+                            assoc.fkColumn(), current.tableName());
+                    ColumnRef.Simple childId = new ColumnRef.Simple(
+                            assoc.definition().id().columnName(), assoc.definition().tableName());
+                    edges.add(new JoinEdge.ToOne(ownerFk, childId));
+                    current = assoc.definition();
+                } else if (prop instanceof Prop.EntityCollection ec) {
+                    // To-many: child table has FK pointing back to owner table's ID
+                    ColumnRef.Simple ownerId = new ColumnRef.Simple(
+                            current.idColumn(), current.tableName());
+                    ColumnRef.ForeignKey childFk = new ColumnRef.ForeignKey(
+                            ec.fkColumn(), ec.definition().tableName());
+                    edges.add(new JoinEdge.ToMany(ownerId, childFk));
+                    current = ec.definition();
+                } else if (prop instanceof Prop.ElementCollection ec) {
+                    // Element collection: child table has FK pointing back to owner table's ID
+                    ColumnRef.Simple ownerId = new ColumnRef.Simple(
+                            current.idColumn(), current.tableName());
+                    ColumnRef.ForeignKey childFk = new ColumnRef.ForeignKey(
+                            ec.fkColumn(), ec.childTable());
+                    edges.add(new JoinEdge.ToMany(ownerId, childFk));
+                    // Track the element collection's child table for leaf qualification
+                    elementCollectionTable = ec.childTable();
+                    // Continue navigation into the element type (ValueObject)
+                    if (ec.definition() == null) {
+                        throw new UnknownAttributePathException(path,
+                                "Element collection target type not resolved: " + segment);
+                    }
+                    current = ec.definition();
+                } else if (prop instanceof Prop.Embedded emb) {
+                    // Embedded relations don't create join edges - they're flattened into the same table
+                    if (columnPrefix.length() > 0) {
+                        columnPrefix.append('_');
+                    }
+                    columnPrefix.append(segment);
+                    current = emb.definition();
+                } else {
+                    // Scalar, Id, Version cannot be navigated through
+                    throw new UnknownAttributePathException(path,
+                            "Cannot navigate through scalar property: " + segment);
+                }
+            }
+
+            // Resolve the final segment
+            String lastSegment = segments[segments.length - 1];
+            Prop lastProp = current.findProperty(lastSegment);
+
+            if (lastProp == null) {
+                throw new UnknownAttributePathException(path,
+                        "Property not found: " + lastSegment);
+            }
+
+            // Build the column ref
+            ColumnRef leaf = leafColumn(lastProp, columnPrefix.toString(), resolveTable(current, elementCollectionTable), path, lastSegment);
+
+            return new ColumnPlacement(leaf, edges);
+        }
+
+        private String resolveTable(TypeDefinition current, String elementCollectionTable) {
+            if (elementCollectionTable != null) {
+                return elementCollectionTable;
+            }
+            return current.tableName() != null ? current.tableName() : root.tableName();
+        }
+
+        private ColumnRef leafColumn(Prop prop, String columnPrefix, String tableName, String path, String terminalName) {
+            String columnName;
+            switch (prop) {
+                case Prop.Scalar s -> columnName = columnPrefix.isEmpty()
+                        ? s.columnName()
+                        : columnPrefix + "_" + s.columnName();
+                case Prop.Id id -> columnName = columnPrefix.isEmpty()
+                        ? id.columnName()
+                        : columnPrefix + "_" + id.columnName();
+                case Prop.Version v -> columnName = columnPrefix.isEmpty()
+                        ? v.columnName()
+                        : columnPrefix + "_" + v.columnName();
+                case Prop.Association assoc -> columnName = columnPrefix.isEmpty()
+                        ? assoc.fkColumn()
+                        : columnPrefix + "_" + assoc.fkColumn();
+                default -> throw new UnknownAttributePathException(path,
+                        "Terminal property is not a column: " + terminalName);
+            }
+
+            return switch (prop) {
+                case Prop.Scalar s -> new ColumnRef.Simple(columnName, tableName);
+                case Prop.Id id -> new ColumnRef.Simple(columnName, tableName);
+                case Prop.Version v -> new ColumnRef.Simple(columnName, tableName);
+                case Prop.Association assoc -> new ColumnRef.ForeignKey(columnName, tableName);
+                default -> throw new UnknownAttributePathException(path,
+                        "Terminal property is not a column: " + terminalName);
+            };
+        }
+
+        private boolean isToManyPath(String path) {
+            int dot = path.indexOf('.');
+            String pathHead = dot < 0 ? path : path.substring(0, dot);
+            Prop prop = root.findProperty(pathHead);
+            return prop instanceof Prop.EntityCollection
+                    || prop instanceof Prop.ElementCollection;
+        }
     }
 
     // ── Nested Entity record ─────────────────────────────────────────────

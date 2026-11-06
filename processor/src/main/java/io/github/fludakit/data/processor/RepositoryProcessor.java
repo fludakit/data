@@ -1,6 +1,7 @@
 package io.github.fludakit.data.processor;
 
 import io.github.fludakit.data.metadata.TypeDefinition;
+import io.github.fludakit.data.processor.context.RepositoryContext;
 import io.github.fludakit.data.processor.emitter.MetamodelEmitter;
 import io.github.fludakit.data.processor.emitter.RowMapperEmitter;
 import io.github.fludakit.data.processor.support.Diagnostics;
@@ -66,15 +67,18 @@ public class RepositoryProcessor extends AbstractProcessor {
             diagnostics.error("fluda-data: " + msg, null);
         }
 
-        // Phase 2: Visit repositories
+        // Phase 2: Visit repositories — resolve each context, then emit its members
         for (Element element : roundEnv.getElementsAnnotatedWith(jakarta.data.repository.Repository.class)) {
             if (element.getKind() != javax.lang.model.element.ElementKind.INTERFACE) continue;
             TypeElement repository = (TypeElement) element;
             try {
                 RepositoryVisitor visitor = new RepositoryVisitor(repository, types, elements, diagnostics, filer, typeGraph, dialect);
-                visitor.visit();
-                // The repository is resolved — start the emission of the generated Repository_ skeleton
-                new RepositoryEmitter(repository, visitor.context(), visitor.jdbcClientAccessor(), filer, diagnostics).emit();
+                // Phase 2a: resolve the repository into its context (entity, methods, generated helpers)
+                RepositoryContext ctx = visitor.resolveContext();
+                if (ctx == null) continue;
+                // Phase 2b: resolve the context into generated member methods, then write the artifact
+                visitor.emitRepositoryMembers(ctx);
+                new RepositoryEmitter(repository, ctx, visitor.jdbcClientAccessor(), filer, diagnostics).emit();
             } catch (RuntimeException e) {
                 String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getName();
                 diagnostics.error(

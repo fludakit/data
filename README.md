@@ -2,17 +2,9 @@
 
 [![Build](https://github.com/fludakit/data/actions/workflows/build.yml/badge.svg)](https://github.com/fludakit/data/actions/workflows/build.yml)
 
-A fluent data-access toolkit for Jakarta EE / CDI applications, providing compile-time repository generation over JDBC.
-
-## Modules
-
-- `fluda-data-core`: the core API, annotations, and supporting types.
-- `fluda-data-qbn`: optional query-by-method-name parser for derived finders.
-- `fluda-data-processor`: the annotation processor that generates repository implementations.
+A fluent data-access toolkit for Jakarta EE / CDI applications, providing compile-time repository generation over JDBC. It implements a subset of Jakarta Data 1.0 and embraces Domain-Driven Design modeling concepts through its own entity model annotations.
 
 ## Usage
-
-Define a repository interface and let the processor generate the implementation:
 
 ```java
 import io.github.fludakit.data.annotation.Entity;
@@ -35,13 +27,7 @@ public interface CustomerRepository extends CrudRepository<Customer, Long> {
 }
 ```
 
-The processor generates a CDI bean `CustomerRepositoryImpl` with static SQL constants, a reflection-free row mapper, and a Jakarta Data static metamodel. Add `fluda-data-qbn` to the annotation processor path to enable query-by-method-name finders like `findByName` and `countByEmail`.
-
-For annotations, repository patterns, query-by-method-name conformance, relation traversal, paging, and aggregate composition, see the [Data documentation](https://fludakit.github.io/documentation/data/getting-started/).
-
-## Scope
-
-Associations are supported as to-one references, element collections, and aggregate-owned entity collections. Many-to-many relations stored in a join table are **not** supported and are not planned; model the join table as an entity with two to-one references instead.
+The processor generates a CDI bean `CustomerRepository_` with static SQL constants, a code-generated row mapper, and a Jakarta Data static metamodel. Add `fluda-data-qbn` to the annotation processor path to enable query-by-method-name finders like `findByName` and `countByEmail`.
 
 ## Building
 
@@ -51,9 +37,7 @@ Associations are supported as to-one references, element collections, and aggreg
 
 ## Documentation
 
-See the [reference documentation site](https://fludakit.github.io/documentation/data/getting-started/) for getting started, repository patterns, query-by-method-name, and full API reference.
-
-## Contributing
-
-Contributions are welcome — issues, pull requests, and feature suggestions are all encouraged. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build the project and submit changes.
-
+- [Product specification](docs/PRODUCT-SPEC.md) — the v1 Jakarta Data scope and DDD entity model.
+- [Technical specification](docs/TECH-SPEC.md) — processor architecture and refactoring roadmap.
+- [Reference documentation](https://fludakit.github.io/documentation/data/getting-started/) — getting started, repository patterns, query-by-method-name, and full API reference.
+- [CONTRIBUTING.md](CONTRIBUTING.md) — how to build the project and submit changes.

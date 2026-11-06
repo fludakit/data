@@ -118,10 +118,9 @@ public final class RowMapperEmitter {
         method.addStatement("$T $L = new $T()", entityType, entityVar, entityType);
 
         // Read ID column first (if present)
-        if (mapping instanceof TypeDefinition.Entity entity && entity.id() != null) {
-            addScalarRead(method, entityVar, "id", entity.id().columnName(), entity.id().javaType(), "rs");
-        } else if (mapping instanceof TypeDefinition.Aggregate aggregate && aggregate.id() != null) {
-            addScalarRead(method, entityVar, "id", aggregate.id().columnName(), aggregate.id().javaType(), "rs");
+        TypeDefinition.Prop.Id id = mapping.id();
+        if (id != null) {
+            addScalarRead(method, entityVar, "id", id.columnName(), id.javaType(), "rs");
         }
 
         // Read scalar columns
@@ -361,7 +360,7 @@ public final class RowMapperEmitter {
         String joinPrefix = assoc.name() + "_join_";
 
         // Read the joined ID column to check if the join produced data
-        TypeDefinition.Prop.Id targetIdProp = idProp(targetEntity);
+        TypeDefinition.Prop.Id targetIdProp = targetEntity.id();
         String idTypeFqn = targetIdProp != null ? targetIdProp.javaType() : "java.lang.Long";
         String joinedIdVar = assoc.name() + "_joined_id";
         String joinIdColumn = joinPrefix + (targetIdProp != null ? targetIdProp.columnName() : "id");
@@ -432,15 +431,6 @@ public final class RowMapperEmitter {
         method.endControlFlow();
         method.endControlFlow();
         method.endControlFlow();
-    }
-
-    /** Returns the id Prop from a TypeDefinition, or null if none. */
-    private static TypeDefinition.Prop.Id idProp(TypeDefinition def) {
-        return switch (def) {
-            case TypeDefinition.Entity e -> e.id();
-            case TypeDefinition.Aggregate a -> a.id();
-            default -> null;
-        };
     }
 
     /**

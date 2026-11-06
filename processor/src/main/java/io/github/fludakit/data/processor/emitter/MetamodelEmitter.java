@@ -106,7 +106,7 @@ public final class MetamodelEmitter {
                         .addMember("value", "$S", PROCESSOR_FQN)
                         .build());
 
-        TypeDefinition.Prop.Id idProp = idProp(entity);
+        TypeDefinition.Prop.Id idProp = entity.id();
         if (idProp != null) {
             String constName = toScreamingSnakeCase(idProp.name());
             addStringConstant(interfaceBuilder, constName, idProp.name());
@@ -261,14 +261,6 @@ public final class MetamodelEmitter {
             sb.append(Character.toUpperCase(c));
         }
         return sb.toString();
-    }
-
-    private static TypeDefinition.Prop.Id idProp(TypeDefinition def) {
-        return switch (def) {
-            case TypeDefinition.Entity e -> e.id();
-            case TypeDefinition.Aggregate a -> a.id();
-            default -> null;
-        };
     }
 
     private static String packageNameOf(String fqn) {

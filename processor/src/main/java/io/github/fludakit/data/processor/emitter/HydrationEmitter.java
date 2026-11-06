@@ -163,7 +163,7 @@ public final class HydrationEmitter {
         // Build column list from child mapping - include scalar columns AND ASSOCIATION FK columns
         // ASSOCIATION relations on entity collection elements are materialized as id-only partials
         List<String> columns = new ArrayList<>();
-        TypeDefinition.Prop.Id childIdProp = idProp(childEntity);
+        TypeDefinition.Prop.Id childIdProp = childEntity.id();
         if (childIdProp != null) {
             columns.add(dialect.quoteIdentifier(childIdProp.columnName()) + " AS "
                     + dialect.quoteIdentifier(childIdProp.name()));
@@ -287,7 +287,7 @@ public final class HydrationEmitter {
 
         // Build column list from child mapping
         java.util.List<String> columns = new java.util.ArrayList<>();
-        TypeDefinition.Prop.Id childIdProp = idProp(childEntity);
+        TypeDefinition.Prop.Id childIdProp = childEntity.id();
         if (childIdProp != null) {
             columns.add(dialect.quoteIdentifier(childIdProp.columnName()) + " AS "
                     + dialect.quoteIdentifier(childIdProp.name()));
@@ -338,15 +338,6 @@ public final class HydrationEmitter {
     private String capitalize(String s) {
         if (s == null || s.isEmpty()) return s;
         return Character.toUpperCase(s.charAt(0)) + s.substring(1);
-    }
-
-    /** Returns the id Prop from a TypeDefinition, or null if none. */
-    private static TypeDefinition.Prop.Id idProp(TypeDefinition def) {
-        return switch (def) {
-            case TypeDefinition.Entity e -> e.id();
-            case TypeDefinition.Aggregate a -> a.id();
-            default -> null;
-        };
     }
 
     /**

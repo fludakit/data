@@ -33,14 +33,22 @@ public final class MutationPlanAnalyzer {
      */
     public static MutationPlan analyze(TypeDefinition root, Operation operation) {
         MutationType rootOp = mapOperation(operation);
-        List<CascadeSpec> steps;
-        if (root instanceof TypeDefinition.Aggregate aggregate) {
-            steps = buildAggregateCascade(aggregate, operation);
-        } else if (root instanceof TypeDefinition.Entity entity) {
-            steps = buildEntityCascade(entity, operation);
-        } else {
-            steps = List.of();
-        }
+        List<CascadeSpec> steps = root.accept(new TypeDefinition.TypeDefinitionVisitor<>() {
+            @Override
+            public List<CascadeSpec> visitAggregate(TypeDefinition.Aggregate aggregate) {
+                return buildAggregateCascade(aggregate, operation);
+            }
+
+            @Override
+            public List<CascadeSpec> visitEntity(TypeDefinition.Entity entity) {
+                return buildEntityCascade(entity, operation);
+            }
+
+            @Override
+            public List<CascadeSpec> visitValueObject(TypeDefinition.ValueObject valueObject) {
+                return List.of();
+            }
+        });
         return new MutationPlan(rootOp, steps);
     }
 

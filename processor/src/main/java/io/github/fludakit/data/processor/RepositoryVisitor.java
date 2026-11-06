@@ -486,7 +486,7 @@ final class RepositoryVisitor {
                 if (entityMapping.idColumn() == null) {
                     yield List.of();
                 }
-                String idProp = idPropertyName(entityMapping);
+                String idProp = entityMapping.id().name();
                 yield List.of(Predicate.of(idProp, io.github.fludakit.data.query.Operator.EQ, "id"));
             }
             default -> List.of();
@@ -712,7 +712,7 @@ final class RepositoryVisitor {
         if (predicates.isEmpty() || entityMapping.idColumn() == null) {
             return predicates;
         }
-        String idPropName = idPropertyName(entityMapping);
+        String idPropName = entityMapping.id().name();
         List<Predicate> result = new ArrayList<>(predicates.size());
         for (Predicate p : predicates) {
             if ("id(this)".equals(p.property())) {
@@ -934,12 +934,6 @@ final class RepositoryVisitor {
         if (type.getKind().isPrimitive()) return type.toString();
         if (type.getKind() == TypeKind.ARRAY) return "array";
         return types.erasure(type).toString();
-    }
-
-    private static String idPropertyName(TypeDefinition type) {
-        if (type instanceof TypeDefinition.Entity e) return e.id().name();
-        if (type instanceof TypeDefinition.Aggregate a) return a.id().name();
-        return null;
     }
 
     private boolean isObjectMethod(ExecutableElement method) {

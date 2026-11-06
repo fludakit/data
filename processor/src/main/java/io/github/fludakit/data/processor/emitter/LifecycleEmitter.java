@@ -188,7 +188,7 @@ public final class LifecycleEmitter {
 
     private MethodSpec emitDeleteByIds(RepositoryContext ctx, MethodContext method) {
         MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
-        String idTypeFqn = idProp(ctx.entity()).javaType();
+        String idTypeFqn = ctx.entity().id().javaType();
         ClassName idClass = ClassName.bestGuess(idTypeFqn);
 
         CodeBlock.Builder body = CodeBlock.builder();
@@ -201,15 +201,6 @@ public final class LifecycleEmitter {
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────
-
-    /** Returns the id Prop from a TypeDefinition, or null if none. */
-    private static TypeDefinition.Prop.Id idProp(TypeDefinition def) {
-        return switch (def) {
-            case TypeDefinition.Entity e -> e.id();
-            case TypeDefinition.Aggregate a -> a.id();
-            default -> null;
-        };
-    }
 
     /**
      * Resolves the type argument for the ArrayList in saveAll.

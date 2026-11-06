@@ -219,33 +219,9 @@ public final class FindEmitter {
      * Returns all properties from a TypeDefinition (Entity, Aggregate, or ValueObject).
      */
     private java.util.List<TypeDefinition.Prop> getAllProperties(TypeDefinition entity) {
-        java.util.List<TypeDefinition.Prop> props = new ArrayList<>();
-        
-        if (entity instanceof TypeDefinition.Entity e) {
-            if (e.id() != null) props.add(e.id());
-            if (e.version() != null) props.add(e.version());
-            props.addAll(e.scalars());
-            props.addAll(e.embedded());
-            props.addAll(e.associations());
-            props.addAll(e.entityCollections());
-            props.addAll(e.elementCollections());
-        } else if (entity instanceof TypeDefinition.Aggregate a) {
-            if (a.id() != null) props.add(a.id());
-            if (a.version() != null) props.add(a.version());
-            props.addAll(a.scalars());
-            props.addAll(a.embedded());
-            props.addAll(a.associations());
-            props.addAll(a.entityCollections());
-            props.addAll(a.elementCollections());
-        } else if (entity instanceof TypeDefinition.ValueObject vo) {
-            props.addAll(vo.scalars());
-            props.addAll(vo.embedded());
-            props.addAll(vo.associations());
-            props.addAll(vo.entityCollections());
-            props.addAll(vo.elementCollections());
-        }
-        
-        return props;
+        // The canonical property list lives on TypeDefinition (Entity/Aggregate/ValueObject all
+        // build it from the same declaration order) — this emitter must not re-implement it.
+        return entity.properties();
     }
 
     /**
@@ -542,37 +518,9 @@ public final class FindEmitter {
 
     /** Local column refs keyed by path, mirroring the column refs the removed TypeModel exposed. */
     private Map<String, ColumnRef> computeLocalColumnRefs(TypeDefinition entity) {
-        Map<String, ColumnRef> refs = new LinkedHashMap<>();
-        addLocalRefs(refs, entity.tableName(), entity, "", "");
-        return refs;
-    }
-
-    private void addLocalRefs(Map<String, ColumnRef> refs, String tableName,
-                               TypeDefinition def, String pathPrefix, String columnPrefix) {
-        for (TypeDefinition.Prop prop : def.properties()) {
-            switch (prop) {
-                case TypeDefinition.Prop.Scalar s -> refs.put(pathPrefix + s.name(),
-                        new ColumnRef.Simple(columnPrefix + s.columnName(), tableName));
-                case TypeDefinition.Prop.Id id -> refs.put(pathPrefix + id.name(),
-                        new ColumnRef.Simple(columnPrefix + id.columnName(), tableName));
-                case TypeDefinition.Prop.Version v -> refs.put(pathPrefix + v.name(),
-                        new ColumnRef.Simple(columnPrefix + v.columnName(), tableName));
-                case TypeDefinition.Prop.Association a -> {
-                    if (a.fkColumn() != null) {
-                        refs.put(pathPrefix + a.name(),
-                                new ColumnRef.ForeignKey(columnPrefix + a.fkColumn(), tableName));
-                    }
-                }
-                case TypeDefinition.Prop.Embedded e -> {
-                    if (e.definition() != null) {
-                        addLocalRefs(refs, tableName, e.definition(),
-                                pathPrefix + e.name() + ".",
-                                columnPrefix + e.name() + "_");
-                    }
-                }
-                default -> {}
-            }
-        }
+        // The canonical path-keyed column index lives on TypeDefinition; this emitter must not
+        // re-implement the walk (the classic processor/runtime column-name drift).
+        return entity.columnRefs();
     }
 
     private JoinEdge.ToOne buildAssociationEdge(TypeDefinition owner, TypeDefinition.Prop.Association assoc) {

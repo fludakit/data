@@ -143,6 +143,11 @@ public sealed interface TypeDefinition extends TableSchema
                 String columnPrefix = prefix.replace('.', '_');
                 String columnName = prefix.isEmpty() ? assoc.fkColumn() : columnPrefix + "_" + assoc.fkColumn();
                 refs.put(propName, new ColumnRef.ForeignKey(columnName, tableName()));
+            } else if (prop instanceof Prop.Version v) {
+                // The version is a root-level column; key it by property name like the id.
+                if (prefix.isEmpty()) {
+                    refs.put(v.name(), new ColumnRef.Simple(v.columnName(), tableName()));
+                }
             } else if (prop instanceof Prop.EntityCollection ec) {
                 // EntityCollections in VOs don't contribute to column refs - they're separate tables
             } else if (prop instanceof Prop.ElementCollection ec) {

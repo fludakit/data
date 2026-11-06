@@ -242,7 +242,7 @@ public sealed interface TypeDefinition extends TableSchema
                     current = ec.definition();
                 } else if (prop instanceof Prop.Embedded emb) {
                     // Embedded relations don't create join edges - they're flattened into the same table
-                    if (columnPrefix.length() > 0) {
+                    if (!columnPrefix.isEmpty()) {
                         columnPrefix.append('_');
                     }
                     columnPrefix.append(segment);

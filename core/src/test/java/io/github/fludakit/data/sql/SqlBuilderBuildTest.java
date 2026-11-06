@@ -1,11 +1,8 @@
 package io.github.fludakit.data.sql;
 
-import io.github.fludakit.data.metadata.ColumnPlacement;
 import io.github.fludakit.data.metadata.ColumnRef;
-import io.github.fludakit.data.metadata.ColumnResolver;
-import io.github.fludakit.data.metadata.JoinEdge;
 import io.github.fludakit.data.metadata.TableSchema;
-import io.github.fludakit.data.metadata.UnknownAttributePathException;
+import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.query.Connector;
 import io.github.fludakit.data.query.LimitSpec;
 import io.github.fludakit.data.query.Operation;
@@ -18,7 +15,6 @@ import io.github.fludakit.data.query.SortSpec;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
-import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -44,53 +40,44 @@ class SqlBuilderBuildTest {
         @Override public List<ColumnRef> columns() { return columns; }
     };
 
-    /** The identifier — needed by the lifecycle statements, which name every column by its path. */
-    private static final ColumnPlacement ID =
-            new ColumnPlacement(new ColumnRef.Simple("id", "order_table"));
-    /** A local (unjoined, non-existential) placement for {@code status}. */
-    private static final ColumnPlacement STATUS =
-            new ColumnPlacement(new ColumnRef.Simple("status", "order_table"));
-    /** A to-one traversal for {@code customer.name}: joins through the owner's FK. */
-    private static final ColumnPlacement CUSTOMER_NAME = new ColumnPlacement(
-            new ColumnRef.Simple("name", "customer"),
-            List.of(new JoinEdge.ToOne(new ColumnRef.ForeignKey("customer_id", "order_table"),
-                            new ColumnRef.Simple("id", "customer"))));
-    /** An existential element-collection traversal for {@code tags.label}. */
-    private static final ColumnPlacement TAG_LABEL = new ColumnPlacement(
-            new ColumnRef.Simple("label", "order_tags"),
-            List.of(new JoinEdge.ToMany(new ColumnRef.Simple("id", "order_table"),
-                            new ColumnRef.ForeignKey("order_id", "order_tags"))));
-    /** An existential one-to-many traversal for {@code lines.product}. */
-    private static final ColumnPlacement LINE_PRODUCT = new ColumnPlacement(
-            new ColumnRef.Simple("product", "line"),
-            List.of(new JoinEdge.ToMany(new ColumnRef.Simple("id", "order_table"),
-                            new ColumnRef.ForeignKey("order_id", "line"))));
+    /** The customer entity the to-one association points at. */
+    private static final TypeDefinition.Entity CUSTOMER = new TypeDefinition.Entity(
+            "demo.Customer", "customer",
+            new TypeDefinition.Prop.Id("id", "Long", "id", TypeDefinition.Prop.Id.GeneratedType.IDENTITY),
+            null,
+            List.of(new TypeDefinition.Prop.Scalar("name", "String", "name", true)),
+            List.of(), List.of(), List.of(), List.of());
 
-    /** The hand-written stand-in for a generated per-entity {@code resolve} switch. */
-    private static final ColumnResolver ATTRIBUTES = new ColumnResolver() {
-        @Override public Map<String, ColumnRef> columnRefs() {
-            return Map.of("id", ID.leaf(), "status", STATUS.leaf(),
-                    "customer_id", new ColumnRef.Simple("customer_id", "order_table"),
-                    "customer.name", CUSTOMER_NAME.leaf(),
-                    "tags.label", TAG_LABEL.leaf(), "lines.product", LINE_PRODUCT.leaf());
-        }
+    /** The line entity the one-to-many collection points at. */
+    private static final TypeDefinition.Entity LINE = new TypeDefinition.Entity(
+            "demo.Line", "line",
+            new TypeDefinition.Prop.Id("id", "Long", "id", TypeDefinition.Prop.Id.GeneratedType.IDENTITY),
+            null,
+            List.of(new TypeDefinition.Prop.Scalar("product", "java.lang.Long", "product", true)),
+            List.of(), List.of(), List.of(), List.of());
 
-        @Override public ColumnPlacement resolve(String path) {
-            return switch (path) {
-                case "status" -> STATUS;
-                case "customer.name" -> CUSTOMER_NAME;
-                case "tags.label" -> TAG_LABEL;
-                case "lines.product" -> LINE_PRODUCT;
-                default -> throw new UnknownAttributePathException(path, "Order");
-            };
-        }
+    /** The tag value object stored in the element-collection child table. */
+    private static final TypeDefinition.ValueObject TAG = new TypeDefinition.ValueObject(
+            "demo.Tag",
+            List.of(new TypeDefinition.Prop.Scalar("label", "String", "label", true)),
+            List.of(), List.of(), List.of(), List.of());
 
-        @Override public boolean isToManyPath(String attributePath) {
-            int dot = attributePath.indexOf('.');
-            String head = dot < 0 ? attributePath : attributePath.substring(0, dot);
-            return head.equals("lines") || head.equals("tags");
-        }
-    };
+    /**
+     * The stand-in entity the structured queries resolve paths against: one root table, a to-one
+     * association, and the to-many / element collections the existential and sort cases ride.
+     */
+    private static final TypeDefinition.Entity ATTRIBUTES = new TypeDefinition.Entity(
+            "demo.Order", "order_table",
+            new TypeDefinition.Prop.Id("id", "Long", "id", TypeDefinition.Prop.Id.GeneratedType.IDENTITY),
+            null,
+            List.of(new TypeDefinition.Prop.Scalar("status", "String", "status", false)),
+            List.of(),
+            List.of(new TypeDefinition.Prop.Association(
+                    "customer", "demo.Customer", CUSTOMER, "customer_id", false, false, null)),
+            List.of(new TypeDefinition.Prop.EntityCollection(
+                    "lines", "java.util.List", LINE, "order_id", null)),
+            List.of(new TypeDefinition.Prop.ElementCollection(
+                    "tags", "java.util.List", TAG, "order_tags", "order_id")));
 
     /** The rendering-under-test: the variant the operation names, carrying only what it can use. */
     private static QueryDefinition.Criteria model(Operation operation, List<Predicate> predicates,
@@ -138,11 +125,11 @@ class SqlBuilderBuildTest {
         // Insert / update / delete-by-id are QueryDefinition variants too, so one render maps them —
         // but they carry no criteria, so they never reach the planner or the resolver.
         assertEquals("INSERT INTO \"order_table\" (\"id\", \"status\", \"customer_id\")"
-                        + " VALUES (:id, :status, :customer_id)",
+                        + " VALUES (:id, :status, :customer)",
                 new SqlBuilder(ORDER, ATTRIBUTES).render(new QueryDefinition.Insert()));
-        assertEquals("INSERT INTO \"order_table\" (\"status\", \"customer_id\") VALUES (:status, :customer_id)",
+        assertEquals("INSERT INTO \"order_table\" (\"status\", \"customer_id\") VALUES (:status, :customer)",
                 new SqlBuilder(ORDER, ATTRIBUTES).render(new QueryDefinition.Insert(false)));
-        assertEquals("UPDATE \"order_table\" SET \"status\" = :status, \"customer_id\" = :customer_id"
+        assertEquals("UPDATE \"order_table\" SET \"status\" = :status, \"customer_id\" = :customer"
                         + " WHERE \"id\" = :id",
                 new SqlBuilder(ORDER, ATTRIBUTES).render(new QueryDefinition.Update()));
         assertEquals("DELETE FROM \"order_table\" WHERE \"id\" = :id",

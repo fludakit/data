@@ -3,7 +3,6 @@ package io.github.fludakit.data.sql;
 import io.github.fludakit.data.Names;
 import io.github.fludakit.data.metadata.ColumnPlacement;
 import io.github.fludakit.data.metadata.ColumnRef;
-import io.github.fludakit.data.metadata.ColumnResolver;
 import io.github.fludakit.data.metadata.JoinEdge;
 import io.github.fludakit.data.metadata.TableSchema;
 import io.github.fludakit.data.metadata.TypeDefinition;
@@ -89,7 +88,7 @@ public final class QueryCompiler {
      * @param model       the statement
      * @param extraProjection the joined full-materialisation payload, or {@code null}
      */
-    public static String render(TableSchema schema, ColumnResolver resolver, SqlDialect dialect,
+    public static String render(TableSchema schema, TypeDefinition resolver, SqlDialect dialect,
                                 QueryDefinition model, String extraProjection) {
         return render(schema, resolver, dialect, model, List.of(), extraProjection);
     }
@@ -103,7 +102,7 @@ public final class QueryCompiler {
      * every leaf — a WHERE term left bare while the projection is qualified is ambiguous the moment
      * the joined table shares a column name.</p>
      */
-    public static String render(TableSchema schema, ColumnResolver resolver, SqlDialect dialect,
+    public static String render(TableSchema schema, TypeDefinition resolver, SqlDialect dialect,
                                 QueryDefinition model, List<JoinEdge> extraEdges, String extraProjection) {
         Objects.requireNonNull(schema, "schema");
         Objects.requireNonNull(dialect, "dialect");
@@ -127,21 +126,21 @@ public final class QueryCompiler {
     }
 
     /** Resolves and classifies one criteria statement without rendering it. */
-    public static Plan plan(TableSchema schema, ColumnResolver resolver, SqlDialect dialect,
+    public static Plan plan(TableSchema schema, TypeDefinition resolver, SqlDialect dialect,
                             QueryDefinition.Criteria model) {
         return plan(schema, resolver, dialect, model, List.of());
     }
 
     /** As {@link #plan}, seeding the join chain with {@code extraEdges}. */
-    public static Plan plan(TableSchema schema, ColumnResolver resolver, SqlDialect dialect,
+    public static Plan plan(TableSchema schema, TypeDefinition resolver, SqlDialect dialect,
                             QueryDefinition.Criteria model, List<JoinEdge> extraEdges) {
         return new QueryPlanner(schema, resolver, dialect, model, extraEdges).plan();
     }
 
-    private static ColumnResolver requireResolver(ColumnResolver resolver) {
+    private static TypeDefinition requireResolver(TypeDefinition resolver) {
         if (resolver == null) {
             throw new IllegalStateException("this statement binds logical attribute paths and needs a"
-                    + " column resolver — construct it with SqlBuilder(TableSchema, ColumnResolver)");
+                    + " column resolver — construct it with SqlBuilder(TableSchema, TypeDefinition)");
         }
         return resolver;
     }
@@ -258,7 +257,7 @@ public final class QueryCompiler {
     }
 
     /** Renders an INSERT; {@code includeId=false} omits a database-generated identity column. */
-    public static String insert(SqlDialect dialect, TableSchema schema, ColumnResolver attributes,
+    public static String insert(SqlDialect dialect, TableSchema schema, TypeDefinition attributes,
                                 boolean includeId) {
         List<ColumnRef> cols = schema.columns();
         if (!includeId) {
@@ -293,7 +292,7 @@ public final class QueryCompiler {
      *         must honour the contract there issues an {@link #update} and, if it matched nothing, an
      *         {@link #insert} carrying the identifier
      */
-    public static String upsert(SqlDialect dialect, TableSchema schema, ColumnResolver attributes) {
+    public static String upsert(SqlDialect dialect, TableSchema schema, TypeDefinition attributes) {
         List<ColumnRef> cols = schema.columns();
         List<String> names = cols.stream().map(ColumnRef::column).toList();
         List<String> params = cols.stream().map(c -> ":" + paramName(attributePath(attributes, c)))
@@ -302,7 +301,7 @@ public final class QueryCompiler {
     }
 
     /** Renders an UPDATE by identifier. */
-    public static String update(SqlDialect dialect, TableSchema schema, ColumnResolver attributes) {
+    public static String update(SqlDialect dialect, TableSchema schema, TypeDefinition attributes) {
         String idCol = dialect.quoteIdentifier(schema.idColumn());
         String sets = schema.columns().stream()
                 .filter(c -> !c.column().equals(schema.idColumn()))
@@ -523,7 +522,7 @@ public final class QueryCompiler {
      * a cursor key with mismatched directions — into a silently wrong column. A resolver that throws
      * anything else is a bug, and now it propagates instead of rendering.</p>
      */
-    public static ColumnPlacement resolveColumn(TableSchema schema, ColumnResolver attributes, String path) {
+    public static ColumnPlacement resolveColumn(TableSchema schema, TypeDefinition attributes, String path) {
         try {
             return attributes.resolve(path);
         } catch (UnknownAttributePathException unknownPath) {
@@ -537,7 +536,7 @@ public final class QueryCompiler {
     }
 
     /** Whether the head of {@code path} is a to-many relation or collection. */
-    public static boolean isExistential(ColumnResolver attributes, String path) {
+    public static boolean isExistential(TypeDefinition attributes, String path) {
         return pathHead(path) != null && attributes.isToManyPath(path);
     }
 
@@ -582,7 +581,7 @@ public final class QueryCompiler {
     }
 
     /** The logical attribute path that owns {@code column}, taken from the WRITE view when available. */
-    public static String attributePath(ColumnResolver attributes, ColumnRef column) {
+    public static String attributePath(TypeDefinition attributes, ColumnRef column) {
         Map<String, ColumnRef> refs = attributes instanceof TypeDefinition td
                 ? td.columnRefs() : attributes.columnRefs();
         return refs.entrySet().stream()

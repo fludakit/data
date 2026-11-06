@@ -1,7 +1,7 @@
 package io.github.fludakit.data.sql;
 
 import io.github.fludakit.data.metadata.ColumnPlacement;
-import io.github.fludakit.data.metadata.ColumnResolver;
+import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.metadata.JoinEdge;
 import io.github.fludakit.data.metadata.TableSchema;
 import io.github.fludakit.data.query.Connector;
@@ -22,7 +22,7 @@ import java.util.List;
 final class QueryPlanner {
 
     private final TableSchema schema;
-    private final ColumnResolver attributes;
+    private final TypeDefinition attributes;
     private final SqlDialect dialect;
     private final boolean deleteMode;
     private final List<JoinEdge> extraEdges;
@@ -36,7 +36,7 @@ final class QueryPlanner {
     private final List<ColumnPlacement> sortRefs = new ArrayList<>();
     private final List<Boolean> existentialSorts = new ArrayList<>();
 
-    QueryPlanner(TableSchema schema, ColumnResolver attributes, SqlDialect dialect,
+    QueryPlanner(TableSchema schema, TypeDefinition attributes, SqlDialect dialect,
                  QueryDefinition.Criteria model, List<JoinEdge> extraEdges) {
         this.schema = schema;
         this.attributes = attributes;

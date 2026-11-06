@@ -12,7 +12,7 @@ import java.util.Map;
  * Each variant carries exactly the properties it needs: Entity and Aggregate have IDs and tables,
  * ValueObject does not. Properties are categorized into typed records for compile-time safety.</p>
  */
-public sealed interface TypeDefinition extends TableSchema, ColumnResolver
+public sealed interface TypeDefinition extends TableSchema
         permits TypeDefinition.Entity,
                 TypeDefinition.Aggregate,
                 TypeDefinition.ValueObject {
@@ -106,7 +106,7 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
         }
     }
 
-    // ── ColumnResolver implementation ────────────────────────────────────
+    // ── Entity-rooted path resolution ─────────────────────────────────────
 
     /**
      * Resolves entity-rooted attribute paths to their column placements.
@@ -157,126 +157,19 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
 
     /**
      * Resolves an entity-rooted dot path to its placement.
+     *
+     * @throws IllegalArgumentException when the path is unknown, names a write-only back-reference,
+     *                                  or would walk a cycle
      */
     default ColumnPlacement resolve(String path) {
-        String[] segments = path.split("\\.");
-        List<JoinEdge> edges = new ArrayList<>();
-        TypeDefinition current = this;
-        StringBuilder columnPrefix = new StringBuilder();
-        String elementCollectionTable = null; // Track the child table when navigating through ElementCollection
-
-        // Walk through all segments except the last to build edges and track embedded prefix
-        for (int i = 0; i < segments.length - 1; i++) {
-            String segment = segments[i];
-            Prop prop = current.findProperty(segment);
-
-            if (prop == null) {
-                throw new UnknownAttributePathException(path,
-                        "Cannot navigate through non-relation property: " + segment);
-            }
-
-            if (prop instanceof Prop.Association assoc) {
-                // To-one: owner table has FK pointing to child table's ID
-                ColumnRef.ForeignKey ownerFk = new ColumnRef.ForeignKey(
-                        assoc.fkColumn(), current.tableName());
-                ColumnRef.Simple childId = new ColumnRef.Simple(
-                        assoc.definition().id().columnName(), assoc.definition().tableName());
-                edges.add(new JoinEdge.ToOne(ownerFk, childId));
-                current = assoc.definition();
-            } else if (prop instanceof Prop.EntityCollection ec) {
-                // To-many: child table has FK pointing back to owner table's ID
-                ColumnRef.Simple ownerId = new ColumnRef.Simple(
-                        current.idColumn(), current.tableName());
-                ColumnRef.ForeignKey childFk = new ColumnRef.ForeignKey(
-                        ec.fkColumn(), ec.definition().tableName());
-                edges.add(new JoinEdge.ToMany(ownerId, childFk));
-                current = ec.definition();
-            } else if (prop instanceof Prop.ElementCollection ec) {
-                // Element collection: child table has FK pointing back to owner table's ID
-                ColumnRef.Simple ownerId = new ColumnRef.Simple(
-                        current.idColumn(), current.tableName());
-                ColumnRef.ForeignKey childFk = new ColumnRef.ForeignKey(
-                        ec.fkColumn(), ec.childTable());
-                edges.add(new JoinEdge.ToMany(ownerId, childFk));
-                // Track the element collection's child table for leaf qualification
-                elementCollectionTable = ec.childTable();
-                // Continue navigation into the element type (ValueObject)
-                if (ec.definition() == null) {
-                    throw new UnknownAttributePathException(path,
-                            "Element collection target type not resolved: " + segment);
-                }
-                current = ec.definition();
-            } else if (prop instanceof Prop.Embedded emb) {
-                // Embedded relations don't create join edges - they're flattened into the same table
-                if (columnPrefix.length() > 0) {
-                    columnPrefix.append('_');
-                }
-                columnPrefix.append(segment);
-                current = emb.definition();
-            } else {
-                // Scalar, Id, Version cannot be navigated through
-                throw new UnknownAttributePathException(path,
-                        "Cannot navigate through scalar property: " + segment);
-            }
-        }
-
-        // Resolve the final segment
-        String lastSegment = segments[segments.length - 1];
-        Prop lastProp = current.findProperty(lastSegment);
-
-        if (lastProp == null) {
-            throw new UnknownAttributePathException(path,
-                    "Property not found: " + lastSegment);
-        }
-
-        // Build the column ref
-        ColumnRef leaf;
-        if (lastProp instanceof Prop.Scalar s) {
-            String columnName = columnPrefix.length() > 0
-                    ? columnPrefix.toString() + "_" + s.columnName()
-                    : s.columnName();
-            // Use elementCollectionTable if we navigated through an ElementCollection
-            String tableName = elementCollectionTable != null ? elementCollectionTable
-                    : (current.tableName() != null ? current.tableName() : this.tableName());
-            leaf = new ColumnRef.Simple(columnName, tableName);
-        } else if (lastProp instanceof Prop.Id id) {
-            String columnName = columnPrefix.length() > 0
-                    ? columnPrefix.toString() + "_" + id.columnName()
-                    : id.columnName();
-            String tableName = elementCollectionTable != null ? elementCollectionTable
-                    : (current.tableName() != null ? current.tableName() : this.tableName());
-            leaf = new ColumnRef.Simple(columnName, tableName);
-        } else if (lastProp instanceof Prop.Version v) {
-            String columnName = columnPrefix.length() > 0
-                    ? columnPrefix.toString() + "_" + v.columnName()
-                    : v.columnName();
-            String tableName = elementCollectionTable != null ? elementCollectionTable
-                    : (current.tableName() != null ? current.tableName() : this.tableName());
-            leaf = new ColumnRef.Simple(columnName, tableName);
-        } else if (lastProp instanceof Prop.Association assoc) {
-            String columnName = columnPrefix.length() > 0
-                    ? columnPrefix.toString() + "_" + assoc.fkColumn()
-                    : assoc.fkColumn();
-            String tableName = elementCollectionTable != null ? elementCollectionTable
-                    : (current.tableName() != null ? current.tableName() : this.tableName());
-            leaf = new ColumnRef.ForeignKey(columnName, tableName);
-        } else {
-            throw new UnknownAttributePathException(path,
-                    "Terminal property is not a column: " + lastSegment);
-        }
-
-        return new ColumnPlacement(leaf, edges);
+        return new PathResolver().resolve(this, path);
     }
 
     /**
      * Whether this entity-rooted path starts with a to-many relation or element collection.
      */
     default boolean isToManyPath(String path) {
-        int dot = path.indexOf('.');
-        String pathHead = dot < 0 ? path : path.substring(0, dot);
-        Prop prop = findProperty(pathHead);
-        return prop instanceof Prop.EntityCollection
-                || prop instanceof Prop.ElementCollection;
+        return new PathResolver().isToManyPath(this, path);
     }
 
     // ── Nested Entity record ─────────────────────────────────────────────
@@ -306,15 +199,7 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
 
         @Override
         public List<Prop> properties() {
-            List<Prop> all = new ArrayList<>();
-            all.add(id);
-            if (version != null) all.add(version);
-            all.addAll(scalars);
-            all.addAll(embedded);
-            all.addAll(associations);
-            all.addAll(entityCollections);
-            all.addAll(elementCollections);
-            return all;
+            return entityProperties(id, version, scalars, embedded, associations, entityCollections, elementCollections);
         }
     }
 
@@ -345,15 +230,7 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
 
         @Override
         public List<Prop> properties() {
-            List<Prop> all = new ArrayList<>();
-            all.add(id);
-            if (version != null) all.add(version);
-            all.addAll(scalars);
-            all.addAll(embedded);
-            all.addAll(associations);
-            all.addAll(entityCollections);
-            all.addAll(elementCollections);
-            return all;
+            return entityProperties(id, version, scalars, embedded, associations, entityCollections, elementCollections);
         }
     }
 
@@ -397,14 +274,36 @@ public sealed interface TypeDefinition extends TableSchema, ColumnResolver
         }
     }
 
+    // ── Shared entity properties helper ───────────────────────────────────
+
+    /**
+     * The declaration-order property list of an entity-shaped type (Entity or Aggregate): the id,
+     * the optional version, then scalars, embedded VOs, associations, and collections.
+     */
+    private static List<Prop> entityProperties(Prop.Id id, Prop.Version version,
+                                                List<Prop.Scalar> scalars, List<Prop.Embedded> embedded,
+                                                List<Prop.Association> associations,
+                                                List<Prop.EntityCollection> entityCollections,
+                                                List<Prop.ElementCollection> elementCollections) {
+        List<Prop> all = new ArrayList<>();
+        all.add(id);
+        if (version != null) all.add(version);
+        all.addAll(scalars);
+        all.addAll(embedded);
+        all.addAll(associations);
+        all.addAll(entityCollections);
+        all.addAll(elementCollections);
+        return all;
+    }
+
     // ── Nested Prop sealed interface ─────────────────────────────────────
 
     /**
      * Sealed interface for all property kinds.
      */
     sealed interface Prop permits Prop.Scalar, Prop.Embedded, Prop.Association,
-                                      Prop.EntityCollection, Prop.ElementCollection,
-                                      Prop.Id, Prop.Version {
+                                  Prop.EntityCollection, Prop.ElementCollection,
+                                  Prop.Id, Prop.Version {
 
         /** The Java property name. */
         String name();

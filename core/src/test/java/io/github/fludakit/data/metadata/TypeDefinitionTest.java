@@ -111,7 +111,7 @@ class TypeDefinitionTest {
                 new ColumnRef.Simple("zipcode", null)), ADDRESS.columns());
     }
 
-    // ── ColumnResolver: the path-keyed index of OWN columns ───────────────
+    // ── Path resolution: the path-keyed index of OWN columns ──────────────
 
     @Test
     void columnRefsKeyOwnColumnsByLogicalPath() {
@@ -141,7 +141,7 @@ class TypeDefinitionTest {
         assertFalse(BOOK.columnRefs().containsKey("lines.qty"));
     }
 
-    // ── ColumnResolver: resolve(path) ─────────────────────────────────────
+    // ── Path resolution: resolve(path) ─────────────────────────────────────
 
     @Test
     void resolveScalarOnTheRootTable() {

@@ -2,7 +2,6 @@ package io.github.fludakit.data.sql;
 
 import io.github.fludakit.data.metadata.ColumnPlacement;
 import io.github.fludakit.data.metadata.ColumnRef;
-import io.github.fludakit.data.metadata.ColumnResolver;
 import io.github.fludakit.data.metadata.JoinEdge;
 import io.github.fludakit.data.metadata.NonLocalAttributePathException;
 import io.github.fludakit.data.metadata.TableSchema;
@@ -35,7 +34,7 @@ import java.util.stream.Collectors;
  * code and cannot drift.</p>
  *
  * <p>Physical lifecycle statements use a {@link TableSchema} for one table; structured queries also
- * use an {@link ColumnResolver} for entity-rooted paths. {@link #select()} / {@link #count()} /
+ * use a {@link TypeDefinition} for entity-rooted paths. {@link #select()} / {@link #count()} /
  * {@link #delete()} render a whole query method from its {@link QueryDefinition}; the splice
  * primitives ({@link #qualify(ColumnRef)}, {@link #joinClause(List)},
  * {@link #aggregateSortTerm(ColumnRef, List, boolean)}, ...) are the same rendering pieces exposed
@@ -47,7 +46,7 @@ import java.util.stream.Collectors;
 public final class SqlBuilder {
 
     private final TableSchema schema;
-    private final ColumnResolver resolver;
+    private final TypeDefinition resolver;
     private final QueryDefinition.Criteria model;
     private SqlDialect dialect;
 
@@ -62,7 +61,7 @@ public final class SqlBuilder {
     }
 
     /** A schema + resolver builder for lifecycle statements that bind logical paths. */
-    public SqlBuilder(TableSchema schema, ColumnResolver resolver) {
+    public SqlBuilder(TableSchema schema, TypeDefinition resolver) {
         this(schema, resolver, null);
     }
 
@@ -72,7 +71,7 @@ public final class SqlBuilder {
      * and plan joins. Lifecycle statements need no model: {@link #insert(boolean)}, {@link #update()}
      * and {@link #deleteById()} build theirs on the spot.
      */
-    public SqlBuilder(TableSchema schema, ColumnResolver resolver, QueryDefinition.Criteria model) {
+    public SqlBuilder(TableSchema schema, TypeDefinition resolver, QueryDefinition.Criteria model) {
         this.schema = Objects.requireNonNull(schema, "schema");
         this.resolver = resolver;
         this.model = model;
@@ -434,15 +433,15 @@ public final class SqlBuilder {
     private QueryDefinition.Criteria requireModel() {
         if (model == null) {
             throw new IllegalStateException("this SqlBuilder has no query model — construct it with "
-                    + "SqlBuilder(TableSchema, ColumnResolver, QueryDefinition)");
+                    + "SqlBuilder(TableSchema, TypeDefinition, QueryDefinition)");
         }
         return model;
     }
 
-    private ColumnResolver requireResolver() {
+    private TypeDefinition requireResolver() {
         if (resolver == null) {
             throw new IllegalStateException("this SqlBuilder has no attribute resolver — construct it with "
-                    + "SqlBuilder(TableSchema, ColumnResolver[, QueryDefinition])");
+                    + "SqlBuilder(TableSchema, TypeDefinition[, QueryDefinition])");
         }
         return resolver;
     }

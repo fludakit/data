@@ -33,7 +33,7 @@ public final class MutationPlanAnalyzer {
      */
     public static MutationPlan analyze(TypeDefinition root, Operation operation) {
         MutationType rootOp = mapOperation(operation);
-        List<CascadeSpec> steps = root.accept(new TypeDefinition.TypeDefinitionVisitor<>() {
+        List<CascadeSpec> steps = root.accept(new TypeDefinition.Visitor<>() {
             @Override
             public List<CascadeSpec> visitAggregate(TypeDefinition.Aggregate aggregate) {
                 return buildAggregateCascade(aggregate, operation);

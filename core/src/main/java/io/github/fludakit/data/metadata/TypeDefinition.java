@@ -28,8 +28,8 @@ public sealed interface TypeDefinition extends TableSchema
     /** The identifier property, or {@code null} for value objects. */
     Prop.Id id();
 
-    /** Dispatches this type to a {@link TypeDefinitionVisitor}. */
-    <R> R accept(TypeDefinitionVisitor<R> visitor);
+    /** Dispatches this type to a {@link Visitor}. */
+    <R> R accept(Visitor<R> visitor);
 
     /** Returns an {@link Entity} view of this type, or {@code null} for value objects. */
     TypeDefinition.Entity asEntity();
@@ -77,7 +77,7 @@ public sealed interface TypeDefinition extends TableSchema
         return refs;
     }
 
-    static final class ColumnsCollector implements PropVisitor<Void> {
+    static final class ColumnsCollector implements Prop.Visitor<Void> {
         private final List<ColumnRef> refs;
         private final String prefix;
         private final String table;
@@ -161,7 +161,7 @@ public sealed interface TypeDefinition extends TableSchema
         return refs;
     }
 
-    static final class ColumnRefCollector implements PropVisitor<Void> {
+    static final class ColumnRefCollector implements Prop.Visitor<Void> {
         private final Map<String, ColumnRef> refs;
         private final String table;
         private final String prefix;
@@ -318,7 +318,7 @@ public sealed interface TypeDefinition extends TableSchema
      * Dispatches a non-terminal path segment to its navigation outcome: the next type to walk,
      * the join edge to record (associations and collections), and any embedded prefix to append.
      */
-    static final class NavigationVisitor implements PropVisitor<NavigationStep> {
+    static final class NavigationVisitor implements Prop.Visitor<NavigationStep> {
         private final TypeDefinition current;
         private final List<JoinEdge> edges;
         private final StringBuilder columnPrefix;
@@ -391,7 +391,7 @@ public sealed interface TypeDefinition extends TableSchema
         }
     }
 
-    static final class LeafColumnVisitor implements PropVisitor<ColumnRef> {
+    static final class LeafColumnVisitor implements Prop.Visitor<ColumnRef> {
         private final String columnPrefix;
         private final String tableName;
         private final String path;
@@ -513,7 +513,7 @@ public sealed interface TypeDefinition extends TableSchema
         }
 
         @Override
-        public <R> R accept(TypeDefinitionVisitor<R> visitor) {
+        public <R> R accept(Visitor<R> visitor) {
             return visitor.visitEntity(this);
         }
 
@@ -569,7 +569,7 @@ public sealed interface TypeDefinition extends TableSchema
         }
 
         @Override
-        public <R> R accept(TypeDefinitionVisitor<R> visitor) {
+        public <R> R accept(Visitor<R> visitor) {
             return visitor.visitAggregate(this);
         }
 
@@ -634,7 +634,7 @@ public sealed interface TypeDefinition extends TableSchema
         }
 
         @Override
-        public <R> R accept(TypeDefinitionVisitor<R> visitor) {
+        public <R> R accept(Visitor<R> visitor) {
             return visitor.visitValueObject(this);
         }
 
@@ -692,8 +692,8 @@ public sealed interface TypeDefinition extends TableSchema
         /** The fully-qualified Java type name. */
         String javaType();
 
-        /** Dispatches this property to a {@link PropVisitor}. */
-        <R> R accept(PropVisitor<R> visitor);
+        /** Dispatches this property to a {@link Visitor}. */
+        <R> R accept(Visitor<R> visitor);
 
         // ── Scalar property ──────────────────────────────────────────────
 
@@ -702,7 +702,7 @@ public sealed interface TypeDefinition extends TableSchema
          */
         record Scalar(String name, String javaType, String columnName, boolean nullable) implements Prop {
             @Override
-            public <R> R accept(PropVisitor<R> visitor) {
+            public <R> R accept(Visitor<R> visitor) {
                 return visitor.visitScalar(this);
             }
         }
@@ -714,7 +714,7 @@ public sealed interface TypeDefinition extends TableSchema
          */
         record Embedded(String name, String javaType, ValueObject definition, String prefix) implements Prop {
             @Override
-            public <R> R accept(PropVisitor<R> visitor) {
+            public <R> R accept(Visitor<R> visitor) {
                 return visitor.visitEmbedded(this);
             }
         }
@@ -728,7 +728,7 @@ public sealed interface TypeDefinition extends TableSchema
                            boolean backReference, boolean composition, Cascade cascade) implements Prop {
 
             @Override
-            public <R> R accept(PropVisitor<R> visitor) {
+            public <R> R accept(Visitor<R> visitor) {
                 return visitor.visitAssociation(this);
             }
 
@@ -745,7 +745,7 @@ public sealed interface TypeDefinition extends TableSchema
          */
         record EntityCollection(String name, String javaType, TypeDefinition definition, String fkColumn, String mappedBy) implements Prop {
             @Override
-            public <R> R accept(PropVisitor<R> visitor) {
+            public <R> R accept(Visitor<R> visitor) {
                 return visitor.visitEntityCollection(this);
             }
         }
@@ -757,7 +757,7 @@ public sealed interface TypeDefinition extends TableSchema
          */
         record ElementCollection(String name, String javaType, ValueObject definition, String childTable, String fkColumn) implements Prop {
             @Override
-            public <R> R accept(PropVisitor<R> visitor) {
+            public <R> R accept(Visitor<R> visitor) {
                 return visitor.visitElementCollection(this);
             }
         }
@@ -770,7 +770,7 @@ public sealed interface TypeDefinition extends TableSchema
         record Id(String name, String javaType, String columnName, GeneratedType generated) implements Prop {
 
             @Override
-            public <R> R accept(PropVisitor<R> visitor) {
+            public <R> R accept(Visitor<R> visitor) {
                 return visitor.visitId(this);
             }
 
@@ -786,30 +786,30 @@ public sealed interface TypeDefinition extends TableSchema
          */
         record Version(String name, String javaType, String columnName) implements Prop {
             @Override
-            public <R> R accept(PropVisitor<R> visitor) {
+            public <R> R accept(Visitor<R> visitor) {
                 return visitor.visitVersion(this);
             }
+        }
+
+        /**
+         * Visitor over the {@link Prop} kinds, dispatched via {@link Prop#accept(Visitor)}.
+         */
+        interface Visitor<R> {
+            R visitScalar(Scalar prop);
+            R visitId(Id prop);
+            R visitVersion(Version prop);
+            R visitAssociation(Association prop);
+            R visitEmbedded(Embedded prop);
+            R visitEntityCollection(EntityCollection prop);
+            R visitElementCollection(ElementCollection prop);
         }
     }
 
     /**
-     * Visitor over {@link Prop} kinds, dispatched via {@link Prop#accept(PropVisitor)}.
-     */
-    interface PropVisitor<R> {
-        R visitScalar(Prop.Scalar prop);
-        R visitId(Prop.Id prop);
-        R visitVersion(Prop.Version prop);
-        R visitAssociation(Prop.Association prop);
-        R visitEmbedded(Prop.Embedded prop);
-        R visitEntityCollection(Prop.EntityCollection prop);
-        R visitElementCollection(Prop.ElementCollection prop);
-    }
-
-    /**
      * Visitor over the {@link TypeDefinition} kinds (entity, aggregate root, value object),
-     * dispatched via {@link TypeDefinition#accept(TypeDefinitionVisitor)}.
+     * dispatched via {@link TypeDefinition#accept(Visitor)}.
      */
-    interface TypeDefinitionVisitor<R> {
+    interface Visitor<R> {
         R visitEntity(Entity entity);
         R visitAggregate(Aggregate aggregate);
         R visitValueObject(ValueObject valueObject);

@@ -477,7 +477,7 @@ final class TypeDefinitionScanner {
             return definition;
         }
 
-        return definition.accept(new TypeDefinition.TypeDefinitionVisitor<>() {
+        return definition.accept(new TypeDefinition.Visitor<>() {
             @Override
             public TypeDefinition visitEntity(TypeDefinition.Entity entity) {
                 return new TypeDefinition.Entity(

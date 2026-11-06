@@ -255,7 +255,7 @@ class TypeDefinitionTest {
     @Test
     void propVisitorDispatchesEveryKindInDeclarationOrder() {
         List<String> visited = new ArrayList<>();
-        TypeDefinition.PropVisitor<Void> recorder = new TypeDefinition.PropVisitor<>() {
+        TypeDefinition.Prop.Visitor<Void> recorder = new TypeDefinition.Prop.Visitor<>() {
             @Override public Void visitScalar(TypeDefinition.Prop.Scalar p) { visited.add("Scalar"); return null; }
             @Override public Void visitId(TypeDefinition.Prop.Id p) { visited.add("Id"); return null; }
             @Override public Void visitVersion(TypeDefinition.Prop.Version p) { visited.add("Version"); return null; }
@@ -279,7 +279,7 @@ class TypeDefinitionTest {
 
     @Test
     void typeDefinitionVisitorDispatchesByKind() {
-        TypeDefinition.TypeDefinitionVisitor<String> visitor = new TypeDefinition.TypeDefinitionVisitor<>() {
+        TypeDefinition.Visitor<String> visitor = new TypeDefinition.Visitor<>() {
             @Override public String visitEntity(TypeDefinition.Entity e) { return "Entity:" + e.typeName(); }
             @Override public String visitAggregate(TypeDefinition.Aggregate a) { return "Aggregate:" + a.typeName(); }
             @Override public String visitValueObject(TypeDefinition.ValueObject v) { return "ValueObject:" + v.typeName(); }

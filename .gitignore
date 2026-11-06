@@ -45,3 +45,6 @@ tck-runner/
 
 # ZCode local workspace state
 /.zcode/
+
+.claude
+/.claude

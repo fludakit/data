@@ -405,17 +405,69 @@ public final class QueryCompiler {
      */
     public static String rowMapperProjection(SqlDialect dialect, TypeDefinition type, boolean associationAliasIsName) {
         List<String> cols = new ArrayList<>();
+        ProjectionColumnCollector collector = new ProjectionColumnCollector(cols, dialect, associationAliasIsName);
         for (TypeDefinition.Prop prop : type.properties()) {
-            if (prop instanceof TypeDefinition.Prop.Id id) {
-                cols.add(dialect.quoteIdentifier(id.columnName()) + " AS " + dialect.quoteIdentifier(id.name()));
-            } else if (prop instanceof TypeDefinition.Prop.Scalar s) {
-                cols.add(dialect.quoteIdentifier(s.columnName()) + " AS " + dialect.quoteIdentifier(s.name()));
-            } else if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.fkColumn() != null) {
+            prop.accept(collector);
+        }
+        return String.join(", ", cols);
+    }
+
+    /**
+     * Accumulates the row-mapper projection ({@code column AS alias}) for the mapped property kinds:
+     * id and scalar map by name, an association maps by its FK column unless
+     * {@code associationAliasIsName}; version, embedded and collection properties project nothing.
+     */
+    private static final class ProjectionColumnCollector implements TypeDefinition.Prop.Visitor<Void> {
+        private final List<String> cols;
+        private final SqlDialect dialect;
+        private final boolean associationAliasIsName;
+
+        ProjectionColumnCollector(List<String> cols, SqlDialect dialect, boolean associationAliasIsName) {
+            this.cols = cols;
+            this.dialect = dialect;
+            this.associationAliasIsName = associationAliasIsName;
+        }
+
+        @Override
+        public Void visitId(TypeDefinition.Prop.Id id) {
+            cols.add(dialect.quoteIdentifier(id.columnName()) + " AS " + dialect.quoteIdentifier(id.name()));
+            return null;
+        }
+
+        @Override
+        public Void visitScalar(TypeDefinition.Prop.Scalar scalar) {
+            cols.add(dialect.quoteIdentifier(scalar.columnName()) + " AS " + dialect.quoteIdentifier(scalar.name()));
+            return null;
+        }
+
+        @Override
+        public Void visitAssociation(TypeDefinition.Prop.Association assoc) {
+            if (assoc.fkColumn() != null) {
                 String alias = associationAliasIsName ? assoc.name() : assoc.fkColumn();
                 cols.add(dialect.quoteIdentifier(assoc.fkColumn()) + " AS " + dialect.quoteIdentifier(alias));
             }
+            return null;
         }
-        return String.join(", ", cols);
+
+        @Override
+        public Void visitVersion(TypeDefinition.Prop.Version version) {
+            return null;
+        }
+
+        @Override
+        public Void visitEmbedded(TypeDefinition.Prop.Embedded embedded) {
+            return null;
+        }
+
+        @Override
+        public Void visitEntityCollection(TypeDefinition.Prop.EntityCollection entityCollection) {
+            return null;
+        }
+
+        @Override
+        public Void visitElementCollection(TypeDefinition.Prop.ElementCollection elementCollection) {
+            return null;
+        }
     }
 
     // ------------------------------------------------------------------- splice primitives

@@ -71,6 +71,17 @@ public final class QueryCompiler {
     public record Plan(List<JoinEdge> joins, List<Conjunct> where, List<String> orderBy, int limit) {
     }
 
+    /**
+     * The rendered shape of a cursor-paged to-many sort/projection: the base SELECT shell, the ORDER BY
+     * aliases, and the keyset seek terms.
+     */
+    public record RenderedCursorSortProjection(String shell, List<String> orderByTerms, List<String> seekTerms) {
+        public RenderedCursorSortProjection {
+            orderByTerms = List.copyOf(orderByTerms);
+            seekTerms = List.copyOf(seekTerms);
+        }
+    }
+
     // ------------------------------------------------------------------- entry points
 
     /**
@@ -119,6 +130,7 @@ public final class QueryCompiler {
             case QueryDefinition.DeleteChildByIdAndFk d -> deleteChildByIdAndFk(dialect, d.table(), d.idColumn(), d.fkColumn());
             case QueryDefinition.SelectChildIds s -> selectChildIds(dialect, s.table(), s.idColumn(), s.fkColumn());
             case QueryDefinition.InsertColumns i -> insertColumns(dialect, i.table(), i.columns(), i.paramNames());
+            case QueryDefinition.CorrelatedSort cs -> correlatedSort(dialect, cs.childTable(), cs.leafColumn(), cs.fkColumn(), cs.ownerTable(), cs.ownerIdColumn(), cs.ascending());
             case QueryDefinition.Native nativeQuery -> nativeQuery.sql();
             case QueryDefinition.Criteria criteria -> {
                 Objects.requireNonNull(resolver, "resolver");
@@ -361,6 +373,16 @@ public final class QueryCompiler {
         return "INSERT INTO " + dialect.quoteIdentifier(table) + " (" + names + ") VALUES (" + params + ")";
     }
 
+    /** Renders a correlated aggregate sort term for a non-hydrated to-many cursor sort. */
+    private static String correlatedSort(SqlDialect dialect, String childTable, String leafColumn, String fkColumn,
+                                         String ownerTable, String ownerIdColumn, boolean ascending) {
+        return "(SELECT " + (ascending ? "MIN" : "MAX")
+                + "(" + dialect.quoteIdentifier(childTable) + "." + dialect.quoteIdentifier(leafColumn) + ")"
+                + " FROM " + dialect.quoteIdentifier(childTable)
+                + " WHERE " + dialect.quoteIdentifier(childTable) + "." + dialect.quoteIdentifier(fkColumn)
+                + " = " + dialect.quoteIdentifier(ownerTable) + "." + dialect.quoteIdentifier(ownerIdColumn) + ")";
+    }
+
     // ------------------------------------------------------------------- splice primitives
 
     /** Qualifies a table-local column by its owner table, or the supplied root. */
@@ -471,6 +493,49 @@ public final class QueryCompiler {
                 .append(dialect.quoteIdentifier(head.ownerColumn()))
                 .append(')');
         return sb.toString();
+    }
+
+    /**
+     * Renders the base SELECT shell of a cursor-paged to-many sort/projection: the root projection
+     * columns (from {@link TableSchema#columns()}) plus one MIN/MAX aggregate per to-many sort, then
+     * {@code FROM} + {@code LEFT JOIN} + {@code GROUP BY}. Also returns the ORDER BY aliases and the
+     * keyset seek terms so the caller never assembles them.
+     */
+    public static RenderedCursorSortProjection renderCursorSortProjection(
+            SqlDialect dialect, TableSchema schema, QueryDefinition.CursorSortProjection projection) {
+        String rootTable = dialect.quoteIdentifier(schema.tableName());
+        String childTable = dialect.quoteIdentifier(projection.childTable());
+        String fkColumn = dialect.quoteIdentifier(projection.fkColumn());
+        String ownerIdColumn = dialect.quoteIdentifier(schema.idColumn());
+        String joinAlias = projection.joinAlias();
+
+        List<String> selectColumns = new ArrayList<>();
+        List<String> groupByColumns = new ArrayList<>();
+        for (ColumnRef col : schema.columns()) {
+            String qualified = rootTable + "." + dialect.quoteIdentifier(col.column());
+            selectColumns.add(qualified);
+            groupByColumns.add(qualified);
+        }
+
+        List<String> orderByTerms = new ArrayList<>();
+        List<String> seekTerms = new ArrayList<>();
+        int aggIndex = 0;
+        for (QueryDefinition.CursorSortProjection.SortColumn sort : projection.sortColumns()) {
+            String aggFunc = sort.ascending() ? "MIN" : "MAX";
+            String expr = aggFunc + "(" + joinAlias + "." + dialect.quoteIdentifier(sort.columnSuffix()) + ")";
+            selectColumns.add(expr + " AS " + dialect.quoteIdentifier("agg_" + aggIndex));
+            orderByTerms.add(dialect.quoteIdentifier("agg_" + aggIndex));
+            seekTerms.add(expr);
+            aggIndex++;
+        }
+
+        String shell = "SELECT " + String.join(", ", selectColumns)
+                + " FROM " + rootTable
+                + " LEFT JOIN " + childTable + " AS " + joinAlias
+                + " ON " + joinAlias + "." + fkColumn + " = " + rootTable + "." + ownerIdColumn
+                + " GROUP BY " + String.join(", ", groupByColumns);
+
+        return new RenderedCursorSortProjection(shell, orderByTerms, seekTerms);
     }
 
     /** Renders a predicate with its column qualified by the resolved leaf. */

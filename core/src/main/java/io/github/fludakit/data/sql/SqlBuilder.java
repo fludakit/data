@@ -221,6 +221,21 @@ public final class SqlBuilder {
         return render(new QueryDefinition.SelectForeignKey(fkColumn));
     }
 
+    /** Renders a child-row DELETE by both its id and the parent's foreign key (diff-sync orphan). */
+    public String deleteChildByIdAndFk(String table, String idColumn, String fkColumn) {
+        return render(new QueryDefinition.DeleteChildByIdAndFk(table, idColumn, fkColumn));
+    }
+
+    /** Renders a child table's identifier read by the parent's foreign key (diff-sync existing IDs). */
+    public String selectChildIds(String table, String idColumn, String fkColumn) {
+        return render(new QueryDefinition.SelectChildIds(table, idColumn, fkColumn));
+    }
+
+    /** Renders an INSERT into a child table with an explicit column and parameter list. */
+    public String insertColumns(String table, List<String> columns, List<String> paramNames) {
+        return render(new QueryDefinition.InsertColumns(table, columns, paramNames));
+    }
+
     // --------------------------------------------------------------- splice primitives
 
     /** Qualifies a table-local column by its owner table, or the schema's root table. */

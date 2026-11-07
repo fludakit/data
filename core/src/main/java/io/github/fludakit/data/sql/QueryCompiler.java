@@ -116,6 +116,9 @@ public final class QueryCompiler {
             case QueryDefinition.DeleteById ignored -> deleteById(dialect, schema);
             case QueryDefinition.DeleteByFk byFk -> deleteByFk(dialect, byFk.table(), byFk.fkColumn());
             case QueryDefinition.SelectForeignKey selectFk -> selectForeignKey(dialect, schema, selectFk.fkColumn());
+            case QueryDefinition.DeleteChildByIdAndFk d -> deleteChildByIdAndFk(dialect, d.table(), d.idColumn(), d.fkColumn());
+            case QueryDefinition.SelectChildIds s -> selectChildIds(dialect, s.table(), s.idColumn(), s.fkColumn());
+            case QueryDefinition.InsertColumns i -> insertColumns(dialect, i.table(), i.columns(), i.paramNames());
             case QueryDefinition.Native nativeQuery -> nativeQuery.sql();
             case QueryDefinition.Criteria criteria -> {
                 Objects.requireNonNull(resolver, "resolver");
@@ -335,6 +338,27 @@ public final class QueryCompiler {
         return "SELECT " + dialect.quoteIdentifier(fkColumn)
                 + " FROM " + dialect.quoteIdentifier(schema.tableName())
                 + " WHERE " + dialect.quoteIdentifier(schema.idColumn()) + " = :id";
+    }
+
+    /** Renders a child-row DELETE by both its id and the parent's foreign key (diff-sync orphan). */
+    private static String deleteChildByIdAndFk(SqlDialect dialect, String table, String idColumn, String fkColumn) {
+        return "DELETE FROM " + dialect.quoteIdentifier(table)
+                + " WHERE " + dialect.quoteIdentifier(idColumn) + " = :childId"
+                + " AND " + dialect.quoteIdentifier(fkColumn) + " = :parentId";
+    }
+
+    /** Renders a child table's identifier read by the parent's foreign key (diff-sync existing IDs). */
+    private static String selectChildIds(SqlDialect dialect, String table, String idColumn, String fkColumn) {
+        return "SELECT " + dialect.quoteIdentifier(idColumn)
+                + " FROM " + dialect.quoteIdentifier(table)
+                + " WHERE " + dialect.quoteIdentifier(fkColumn) + " = :parentId";
+    }
+
+    /** Renders an INSERT into a child table with an explicit column and parameter list. */
+    private static String insertColumns(SqlDialect dialect, String table, List<String> columns, List<String> paramNames) {
+        String names = columns.stream().map(dialect::quoteIdentifier).collect(Collectors.joining(", "));
+        String params = paramNames.stream().map(n -> ":" + paramName(n)).collect(Collectors.joining(", "));
+        return "INSERT INTO " + dialect.quoteIdentifier(table) + " (" + names + ") VALUES (" + params + ")";
     }
 
     // ------------------------------------------------------------------- splice primitives

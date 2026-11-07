@@ -1,4 +1,4 @@
-# Implementation Plan: TypeDefinition Cleanup (polymorphic id + PropVisitor)
+# Implementation Plan: TypeDefinition Cleanup (polymorphic id + Prop.Visitor)
 
 **Branch**: `001-typedefinition-cleanup` | **Date**: 2026-11-06 | **Spec**: [spec.md](./spec.md)
 
@@ -8,7 +8,7 @@
 
 Refactor `core/.../metadata/TypeDefinition.java` (issues #24 + #25) so that (a) an
 entity/aggregate's identifier is exposed through a single polymorphic `TypeDefinition.id()`,
-and (b) property traversal is consolidated behind one `PropVisitor`, eliminating all
+and (b) property traversal is consolidated behind one `Prop.Visitor`, eliminating all
 `instanceof Entity/Aggregate` dispatch and the duplicated `Prop` walks. Behavior is preserved:
 generated repository code stays byte-identical and all existing tests pass unchanged.
 
@@ -52,7 +52,7 @@ emitters and `RepositoryVisitor`.
 - **IV. Test-First (NON-NEGOTIABLE)** — PASS. Work is driven by the existing
   unit/emission/integration suites plus direct `TypeDefinition` unit tests (per issue #18 precedent).
 - **V. Resolve-Plan-Emit Pipeline & Single Source of SQL** — PASS. This feature *implements*
-  Principle V's "polymorphic dispatch, no instanceof, polymorphic id(), PropVisitor" clause.
+  Principle V's "polymorphic dispatch, no instanceof, polymorphic id(), Prop.Visitor" clause.
 
 **Verdict**: No violations; no complexity justification required.
 
@@ -74,7 +74,7 @@ specs/001-typedefinition-cleanup/
 
 ```text
 core/src/main/java/io/github/fludakit/data/metadata/
-├── TypeDefinition.java      # primary target: add id(), PropVisitor, collapse walks
+├── TypeDefinition.java      # primary target: add id(), Prop.Visitor, collapse walks
 ├── ColumnRef.java           # unchanged (semantics preserved)
 ├── ColumnPlacement.java     # unchanged
 └── JoinEdge.java            # unchanged

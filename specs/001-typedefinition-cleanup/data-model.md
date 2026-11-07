@@ -30,8 +30,8 @@ reference.
 | `TypeDefinition.hasId()` | From `instanceof Entity/Aggregate` → polymorphic (`Entity`/`Aggregate` true, `ValueObject` false). |
 | `TypeDefinition.idColumn()` | From `instanceof` → polymorphic. |
 | `TypeDefinition.ownsAggregateLifecycle()` | From `instanceof Aggregate` → polymorphic. |
-| `PropVisitor<R>` | New abstraction: one visit method per `Prop` kind. |
-| `TypeDefinition.columns()`/`columnRefs()` | Implemented via the single `PropVisitor` traversal. |
+| `Prop.Visitor<R>` | New abstraction: one visit method per `Prop` kind. |
+| `TypeDefinition.columns()`/`columnRefs()` | Implemented via the single `Prop.Visitor` traversal. |
 | `TypeDefinition.PathResolver` | Delegates property dispatch to the visitor; retains join/cycle decisions only. |
 
 ## Invariants (must hold)

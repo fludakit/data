@@ -34,7 +34,7 @@
 - This is a behavior-preserving internal refactor (GitHub #24 + #25), not a user-facing
   feature. The two unchecked items ("written for non-technical stakeholders", "no
   implementation details leak") are inapplicable by nature: the subject of the change *is*
-  internal code structure (`TypeDefinition`, `Prop`, `PropVisitor`). The spec therefore names
+  internal code structure (`TypeDefinition`, `Prop`, `Prop.Visitor`). The spec therefore names
   these internal abstractions as required end-state outcomes rather than prescribing
   line-level code, and keeps the focus on the observable result (duplication removed, single
   dispatch, byte-identical output).

@@ -1,4 +1,4 @@
-# Feature Specification: TypeDefinition Cleanup (polymorphic id + PropVisitor)
+# Feature Specification: TypeDefinition Cleanup (polymorphic id + Prop.Visitor)
 
 **Feature Branch**: `001-typedefinition-cleanup`
 
@@ -6,7 +6,7 @@
 
 **Status**: Draft
 
-**Input**: User description: "Refactor `TypeDefinition` to a single polymorphic identifier accessor and a single `PropVisitor` traversal, removing `instanceof` dispatch and duplicated helper code (GitHub issues #24 and #25)."
+**Input**: User description: "Refactor `TypeDefinition` to a single polymorphic identifier accessor and a single `Prop.Visitor` traversal, removing `instanceof` dispatch and duplicated helper code (GitHub issues #24 and #25)."
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -20,7 +20,7 @@ property through a single `TypeDefinition.id()` method, so I no longer copy the 
 `idProp` helper into every emitter and no longer branch on `instanceof Entity/Aggregate`.
 
 **Why this priority**: It removes seven duplicated implementations that drift independently,
-and it is the natural prerequisite for the broader `PropVisitor` cleanup.
+and it is the natural prerequisite for the broader `Prop.Visitor` cleanup.
 
 **Independent Test**: Build the project and run the core unit, processor emission, and
 integration test suites; confirm every former `idProp` call site now calls
@@ -43,7 +43,7 @@ integration test suites; confirm every former `idProp` call site now calls
 
 ### User Story 2 - Single property traversal (Priority: P2)
 
-As a maintainer, I want to traverse `TypeDefinition` properties through one `PropVisitor`,
+As a maintainer, I want to traverse `TypeDefinition` properties through one `Prop.Visitor`,
 so column walking and path resolution no longer duplicate `instanceof` dispatch or
 near-identical recursive walks.
 
@@ -57,7 +57,7 @@ are unchanged.
 
 **Acceptance Scenarios**:
 
-1. **Given** any `TypeDefinition`, **When** a `PropVisitor<R>` visits it, **Then** each
+1. **Given** any `TypeDefinition`, **When** a `Prop.Visitor<R>` visits it, **Then** each
    property (Scalar, Id, Version, Association, Embedded, EntityCollection, ElementCollection)
    is dispatched polymorphically with no `instanceof` chain.
 2. **Given** the column walkers (`addColumnsRecursive`/`addColumnRefsRecursive`), **When**
@@ -88,7 +88,7 @@ are unchanged.
   `RepositoryVisitor` MUST be deleted; all call sites MUST use `TypeDefinition.id()`.
 - **FR-003**: No `instanceof Entity/Aggregate` identifier extraction MAY remain outside
   `TypeDefinition`.
-- **FR-004**: A single `PropVisitor<R>` (or `Prop.visit(visitor)`) MUST cover every `Prop` kind.
+- **FR-004**: A single `Prop.Visitor<R>` (or `Prop.visit(visitor)`) MUST cover every `Prop` kind.
 - **FR-005**: `TypeDefinition`'s column walkers and `PathResolver` MUST use the single visitor
   traversal; `PathResolver` MUST retain only join/cycle decisions.
 - **FR-006**: `hasId`/`idColumn`/`ownsAggregateLifecycle` MUST be polymorphic methods, not
@@ -102,8 +102,8 @@ are unchanged.
 - **TypeDefinition** — the sealed model of an entity or value object and its properties; the
   target of the polymorphic `id()` and the visitor.
 - **Prop** — the sealed property hierarchy (Scalar, Id, Version, Association, Embedded,
-  EntityCollection, ElementCollection); the target of `PropVisitor`.
-- **PropVisitor** — the single traversal abstraction to be introduced.
+  EntityCollection, ElementCollection); the target of `Prop.Visitor`.
+- **Prop.Visitor** — the single traversal abstraction to be introduced.
 - **ColumnRef / ColumnPlacement** — the column-projection results whose semantics must be preserved.
 - **PathResolver** — attribute-path resolution to be reduced to join/cycle decisions.
 
@@ -124,5 +124,24 @@ are unchanged.
 - This is a behavior-preserving internal refactor; no public API or generated-code change is intended.
 - The sealed `Entity`/`Aggregate` hierarchy shape is retained; only the dispatch mechanism changes.
 - The existing test suites are the authoritative definition of "behavior preserved."
-- GitHub issues #24 (polymorphic id) and #25 (PropVisitor) are delivered together; #24 is the P1
+- GitHub issues #24 (polymorphic id) and #25 (Prop.Visitor) are delivered together; #24 is the P1
   slice and #25 the P2 slice.
+
+## Scope Extensions (added during implementation)
+
+The implementation extended the scope above with follow-ups not covered by the
+original requirements/tasks:
+
+- **`TypeDefinition.Visitor`** — a visitor over the `TypeDefinition` kinds
+  (entity, aggregate, value object), used by `TypeDefinitionScanner` and
+  `MutationPlanAnalyzer`.
+- **`IdentityAware`** — a sealed interface for the shared Entity/Aggregate shape
+  (`version`, `scalars`, `embedded`, `associations`, `entityCollections`,
+  `elementCollections`).
+- **`asEntity()`** — a polymorphic "entity view" accessor (`Entity` → itself,
+  `Aggregate` → a collection-free view, `ValueObject` → `null`).
+- **`TypeDefinitionScanner`** — the scan phase (formerly `TypeMappingVisitor`) renamed.
+- **`hasId()`-based classification** — `TypeGraph`/`RepositoryProcessor` classify
+  managed entities / value objects via `hasId()` instead of `instanceof`.
+
+These map to GitHub issue #30 (partial — Entity/Aggregate dedup).

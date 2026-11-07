@@ -579,74 +579,36 @@ public final class FindEmitter {
             }
         }
 
-        // Build the base SELECT SQL shell (with LEFT JOIN for TO_MANY hydration)
-        SqlBuilder sqlBuilder = new SqlBuilder(ctx.entity());
-        sqlBuilder.dialect(dialect);
-        String baseSql;
-        String joinAlias = null; // Declare here so it's available for seek term generation
-
+        // Build the CursorSortProjection for the hydration case (the to-many sort/projection).
+        QueryDefinition.CursorSortProjection cursorProjection = null;
         if (hasToManySort && ecRelForHydration != null && ecRelForHydration.definition() != null) {
-            // For ENTITY_COLLECTION sorts, add a LEFT JOIN to hydrate the relation for cursor extraction.
-            // Also add aggregate expressions to SELECT for ORDER BY compatibility with DISTINCT.
-            String rootTable = dialect.quoteIdentifier(ctx.entity().tableName());
-            String childTable = dialect.quoteIdentifier(ecRelForHydration.definition().tableName());
-            String fkColumn = dialect.quoteIdentifier(ecRelForHydration.fkColumn());
-            String ownerIdColumn = dialect.quoteIdentifier(ctx.entity().idColumn());
-            joinAlias = toManyPropForHydration + "_";
-
-            // Build SELECT with root columns AND aggregate expressions for TO_MANY sort terms
-            List<String> selectColumns = new ArrayList<>();
-            List<String> groupByColumns = new ArrayList<>();
-            for (TypeDefinition.Prop prop : ctx.entity().properties()) {
-                if (prop instanceof TypeDefinition.Prop.Scalar s) {
-                    String qualifiedCol = rootTable + "." + dialect.quoteIdentifier(s.columnName());
-                    selectColumns.add(qualifiedCol);
-                    groupByColumns.add(qualifiedCol);
-                } else if (prop instanceof TypeDefinition.Prop.Id id) {
-                    String qualifiedCol = rootTable + "." + dialect.quoteIdentifier(id.columnName());
-                    selectColumns.add(qualifiedCol);
-                    groupByColumns.add(qualifiedCol);
-                } else if (prop instanceof TypeDefinition.Prop.Version v) {
-                    String qualifiedCol = rootTable + "." + dialect.quoteIdentifier(v.columnName());
-                    selectColumns.add(qualifiedCol);
-                    groupByColumns.add(qualifiedCol);
-                } else if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.fkColumn() != null) {
-                    String qualifiedCol = rootTable + "." + dialect.quoteIdentifier(assoc.fkColumn());
-                    selectColumns.add(qualifiedCol);
-                    groupByColumns.add(qualifiedCol);
-                } else if (prop instanceof TypeDefinition.Prop.Embedded emb && emb.definition() != null) {
-                    List<String> embeddedCols = new ArrayList<>();
-                    for (TypeDefinition.Prop childProp : getAllProperties(emb.definition())) {
-                        addColumnsForProperty(childProp, rootTable, emb.name(), embeddedCols);
-                    }
-                    selectColumns.addAll(embeddedCols);
-                    groupByColumns.addAll(embeddedCols);
-                }
-            }
-
-            // Add aggregate expressions for each TO_MANY sort term
-            int aggIndex = 0;
+            List<QueryDefinition.CursorSortProjection.SortColumn> sortColumns = new ArrayList<>();
             for (SortSpec sort : sorts) {
                 String prop = sort.property();
                 if (prop.contains(".")) {
                     String firstSegment = prop.substring(0, prop.indexOf('.'));
                     if (firstSegment.equals(toManyPropForHydration)) {
                         String colPart = prop.substring(prop.indexOf('.') + 1).replace('.', '_');
-                        String aggFunc = sort.ascending() ? "MIN" : "MAX";
-                        String aggExpr = aggFunc + "(" + joinAlias + "." + dialect.quoteIdentifier(colPart) + ") AS " + dialect.quoteIdentifier("agg_" + aggIndex);
-                        selectColumns.add(aggExpr);
-                        aggIndex++;
+                        sortColumns.add(new QueryDefinition.CursorSortProjection.SortColumn(colPart, sort.ascending()));
                     }
                 }
             }
+            cursorProjection = new QueryDefinition.CursorSortProjection(
+                    ecRelForHydration.definition().tableName(),
+                    ecRelForHydration.fkColumn(),
+                    toManyPropForHydration + "_",
+                    sortColumns);
+        }
 
-            String selectClause = "SELECT " + String.join(", ", selectColumns);
-            String fromClause = "FROM " + rootTable;
-            String joinClause = "LEFT JOIN " + childTable + " AS " + joinAlias
-                    + " ON " + joinAlias + "." + fkColumn + " = " + rootTable + "." + ownerIdColumn;
-            String groupByClause = " GROUP BY " + String.join(", ", groupByColumns);
+        // Build the base SELECT SQL shell (with LEFT JOIN for TO_MANY hydration)
+        SqlBuilder sqlBuilder = new SqlBuilder(ctx.entity());
+        sqlBuilder.dialect(dialect);
+        QueryCompiler.RenderedCursorSortProjection rendered = null;
+        String baseSql;
 
-            baseSql = selectClause + " " + fromClause + " " + joinClause + groupByClause;
+        if (cursorProjection != null) {
+            rendered = sqlBuilder.cursorSortProjection(cursorProjection);
+            baseSql = rendered.shell();
         } else {
             // No TO_MANY sort, use standard rendering
             baseSql = sqlBuilder.render(new QueryDefinition.Read(
@@ -721,26 +683,19 @@ public final class FindEmitter {
 
                 if (isToManyPath && ((ecRel != null && ecRel.definition() != null) || elemColRel != null)) {
                     String colPart = prop.substring(prop.indexOf('.') + 1).replace('.', '_');
-                    String childTable = ecRel != null && ecRel.definition() != null
-                        ? dialect.quoteIdentifier(ecRel.definition().tableName())
-                        : dialect.quoteIdentifier(elemColRel.childTable());
-                    String fkColumn = ecRel != null
-                        ? dialect.quoteIdentifier(ecRel.fkColumn())
-                        : dialect.quoteIdentifier(elemColRel.fkColumn());
-                    String rootTable = dialect.quoteIdentifier(ctx.entity().tableName());
-                    String ownerIdColumn = dialect.quoteIdentifier(ctx.entity().idColumn());
-                    String aggFunc = sort.ascending() ? "MIN" : "MAX";
 
                     if (hasToManySort && toManyPropForHydration != null && firstSegment.equals(toManyPropForHydration)) {
-                        // Hydrating with LEFT JOIN: use alias for ORDER BY, full expression for WHERE
-                        orderByTerm = dialect.quoteIdentifier("agg_" + aggIndex);
-                        seekTerm = aggFunc + "(" + joinAlias + "." + dialect.quoteIdentifier(colPart) + ")";
+                        // Hydrating with LEFT JOIN: use the rendered alias for ORDER BY, full expression for WHERE
+                        orderByTerm = rendered.orderByTerms().get(aggIndex);
+                        seekTerm = rendered.seekTerms().get(aggIndex);
                         aggIndex++;
                     } else {
-                        // No hydration: use correlated subquery for both
-                        String subquery = "(SELECT " + aggFunc + "(" + childTable + "." + dialect.quoteIdentifier(colPart)
-                                        + ") FROM " + childTable + " WHERE " + childTable + "." + fkColumn
-                                        + " = " + rootTable + "." + ownerIdColumn + ")";
+                        // No hydration: correlated subquery for both
+                        String childTableRaw = ecRel != null && ecRel.definition() != null
+                                ? ecRel.definition().tableName() : elemColRel.childTable();
+                        String fkColumnRaw = ecRel != null ? ecRel.fkColumn() : elemColRel.fkColumn();
+                        String subquery = sqlBuilder.correlatedSort(childTableRaw, colPart, fkColumnRaw,
+                                ctx.entity().tableName(), ctx.entity().idColumn(), sort.ascending());
                         orderByTerm = subquery;
                         seekTerm = subquery;
                     }
@@ -785,22 +740,9 @@ public final class FindEmitter {
                 .anyMatch(term -> term.contains("MIN(") || term.contains("MAX("));
 
         List<String> aggregateExpressions = null;
-        if (hasAggregatesInSeek && hasToManySort && toManyPropForHydration != null) {
-            // The aggregates a to-many sort seek compares on, in sort order — the aliases they are
-            // rendered under are derived from the same enumeration.
-            List<String> expressions = new ArrayList<>();
-            for (SortSpec sort : sorts) {
-                String prop = sort.property();
-                if (prop.contains(".")) {
-                    String firstSegment = prop.substring(0, prop.indexOf('.'));
-                    if (firstSegment.equals(toManyPropForHydration)) {
-                        String colPart = prop.substring(prop.indexOf('.') + 1).replace('.', '_');
-                        String aggFunc = sort.ascending() ? "MIN" : "MAX";
-                        expressions.add(aggFunc + "(" + joinAlias + "." + dialect.quoteIdentifier(colPart) + ")");
-                    }
-                }
-            }
-            aggregateExpressions = expressions;
+        if (hasAggregatesInSeek && rendered != null) {
+            // The aggregates a to-many sort seek compares on, in sort order — the rendered seek terms.
+            aggregateExpressions = rendered.seekTerms();
         }
 
         String seekStmt;

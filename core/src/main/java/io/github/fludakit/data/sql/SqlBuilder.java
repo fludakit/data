@@ -236,6 +236,17 @@ public final class SqlBuilder {
         return render(new QueryDefinition.InsertColumns(table, columns, paramNames));
     }
 
+    /** Renders a cursor-paged to-many sort/projection. */
+    public QueryCompiler.RenderedCursorSortProjection cursorSortProjection(QueryDefinition.CursorSortProjection projection) {
+        return QueryCompiler.renderCursorSortProjection(dialect, schema, projection);
+    }
+
+    /** Renders a correlated aggregate sort term for a non-hydrated to-many cursor sort. */
+    public String correlatedSort(String childTable, String leafColumn, String fkColumn,
+                                 String ownerTable, String ownerIdColumn, boolean ascending) {
+        return render(new QueryDefinition.CorrelatedSort(childTable, leafColumn, fkColumn, ownerTable, ownerIdColumn, ascending));
+    }
+
     // --------------------------------------------------------------- splice primitives
 
     /** Qualifies a table-local column by its owner table, or the schema's root table. */

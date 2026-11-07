@@ -401,6 +401,55 @@ public sealed interface QueryDefinition {
      * @param resultKind the declared result shape — {@link ResultKind#VOID} for a fire-and-forget
      *                   statement, otherwise the shape the caller asked for
      */
+    /**
+     * A cursor-paged to-many sort/projection: the LEFT JOIN + GROUP BY + MIN/MAX aggregate shape a
+     * keyset query uses to sort by a to-many relation and hydrate it for cursor extraction.
+     *
+     * @param childTable  the to-many child table's physical name
+     * @param fkColumn    the child table's foreign-key column pointing at the parent
+     * @param joinAlias   the LEFT JOIN alias
+     * @param sortColumns the to-many sort columns, in sort order
+     */
+    record CursorSortProjection(
+            String childTable,
+            String fkColumn,
+            String joinAlias,
+            List<SortColumn> sortColumns
+    ) {
+
+        public CursorSortProjection {
+            sortColumns = List.copyOf(sortColumns);
+        }
+
+        /** One to-many sort: the flattened leaf column suffix and its direction. */
+        public record SortColumn(String columnSuffix, boolean ascending) {
+        }
+    }
+
+    /**
+     * A correlated aggregate sort term: the {@code (SELECT MIN/MAX(child.leaf) FROM child WHERE
+     * child.fk = owner.id)} subquery a non-hydrated to-many cursor sort orders by.
+     */
+    record CorrelatedSort(
+            String childTable,
+            String leafColumn,
+            String fkColumn,
+            String ownerTable,
+            String ownerIdColumn,
+            boolean ascending
+    ) implements QueryDefinition {
+
+        @Override
+        public Operation operation() {
+            return Operation.FIND;
+        }
+
+        @Override
+        public ResultKind resultKind() {
+            return ResultKind.VOID;
+        }
+    }
+
     record Native(String sql, ResultKind resultKind) implements QueryDefinition {
 
         public Native {

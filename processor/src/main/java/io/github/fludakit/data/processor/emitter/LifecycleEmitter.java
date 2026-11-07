@@ -80,13 +80,13 @@ public final class LifecycleEmitter {
         }
 
         if (op == Operation.SAVE) {
-            return emitSaveAll(ctx, method);
+            return emitBatch(ctx, method, BatchOp.SAVE);
         }
         if (op == Operation.INSERT) {
-            return emitInsertAll(ctx, method);
+            return emitBatch(ctx, method, BatchOp.INSERT);
         }
         if (op == Operation.UPDATE) {
-            return emitUpdateAll(ctx, method);
+            return emitBatch(ctx, method, BatchOp.UPDATE);
         }
         if (op == Operation.DELETE) {
             if ("deleteByIds".equals(name)) {
@@ -97,24 +97,23 @@ public final class LifecycleEmitter {
         return null;
     }
 
-    // ── saveAll ──────────────────────────────────────────────────────────
+    // ── batch lifecycle (saveAll/insertAll/updateAll) ────────────────────
 
-    private MethodSpec emitSaveAll(RepositoryContext ctx, MethodContext method) {
+    private MethodSpec emitBatch(RepositoryContext ctx, MethodContext method, BatchOp op) {
         MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
         ClassName entityClass = ClassName.bestGuess(ctx.entity().typeName());
         // Extract the collection parameter name from the method signature
-        String collectionVar = method.parameters().isEmpty() ? "entities" 
+        String collectionVar = method.parameters().isEmpty() ? "entities"
                 : method.parameters().getFirst().getSimpleName().toString();
 
         // Determine the ArrayList type parameter from the method's return type
         TypeName listTypeArg = resolveListTypeArg(method, entityClass);
-        TypeName arrayListType = ParameterizedTypeName.get(
-                ClassName.get(ArrayList.class), listTypeArg);
+        TypeName arrayListType = ParameterizedTypeName.get(ClassName.get(ArrayList.class), listTypeArg);
 
         CodeBlock.Builder body = CodeBlock.builder();
         body.add("$T result = new $T();\n", List.class, arrayListType);
         body.add("for ($T entity : $L) {\n", listTypeArg, collectionVar);
-        body.add("    save(entity);\n");
+        body.add("    $L(entity);\n", op.methodName());
         body.add("    result.add(entity);\n");
         body.add("}\n");
         body.add("return result;");
@@ -123,48 +122,18 @@ public final class LifecycleEmitter {
         return builder.build();
     }
 
-    // ── insertAll ────────────────────────────────────────────────────────
+    private enum BatchOp {
+        SAVE("save"), INSERT("insert"), UPDATE("update");
 
-    private MethodSpec emitInsertAll(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
-        ClassName entityClass = ClassName.bestGuess(ctx.entity().typeName());
-        String collectionVar = method.parameters().isEmpty() ? "entities" 
-                : method.parameters().getFirst().getSimpleName().toString();
-        TypeName listTypeArg = resolveListTypeArg(method, entityClass);
-        TypeName arrayListType = ParameterizedTypeName.get(ClassName.get(ArrayList.class), listTypeArg);
+        private final String methodName;
 
-        CodeBlock.Builder body = CodeBlock.builder();
-        body.add("$T result = new $T();\n", List.class, arrayListType);
-        body.add("for ($T entity : $L) {\n", listTypeArg, collectionVar);
-        body.add("    insert(entity);\n");
-        body.add("    result.add(entity);\n");
-        body.add("}\n");
-        body.add("return result;");
+        BatchOp(String methodName) {
+            this.methodName = methodName;
+        }
 
-        builder.addCode(ExceptionTranslation.wrap(body.build()));
-        return builder.build();
-    }
-
-    // ── updateAll ────────────────────────────────────────────────────────
-
-    private MethodSpec emitUpdateAll(RepositoryContext ctx, MethodContext method) {
-        MethodSpec.Builder builder = MethodOverrides.resolveOverride(method.method(), resolveTypeFor(method.method()), types, ClassName.bestGuess(ctx.entity().typeName()));
-        ClassName entityClass = ClassName.bestGuess(ctx.entity().typeName());
-        String collectionVar = method.parameters().isEmpty() ? "entities" 
-                : method.parameters().getFirst().getSimpleName().toString();
-        TypeName listTypeArg = resolveListTypeArg(method, entityClass);
-        TypeName arrayListType = ParameterizedTypeName.get(ClassName.get(ArrayList.class), listTypeArg);
-
-        CodeBlock.Builder body = CodeBlock.builder();
-        body.add("$T result = new $T();\n", List.class, arrayListType);
-        body.add("for ($T entity : $L) {\n", listTypeArg, collectionVar);
-        body.add("    update(entity);\n");
-        body.add("    result.add(entity);\n");
-        body.add("}\n");
-        body.add("return result;");
-
-        builder.addCode(ExceptionTranslation.wrap(body.build()));
-        return builder.build();
+        String methodName() {
+            return methodName;
+        }
     }
 
     // ── deleteAll(Iterable<E>) ───────────────────────────────────────────

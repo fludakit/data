@@ -42,16 +42,13 @@ import java.util.Set;
  */
 public final class SqlFragment {
 
-    /** One WHERE conjunct plus the connector that joins it to the preceding one. */
-    private record Conjunct(String sql, boolean orJoined) {
-    }
-
     private String keyword = "SELECT";
     private String projection = "";
     private boolean distinct;
     private String table;
+    private String tableAlias;
     private final Map<String, JoinEdge> joins = new LinkedHashMap<>();
-    private final List<Conjunct> where = new ArrayList<>();
+    private final List<QueryCompiler.Conjunct> where = new ArrayList<>();
     private final List<String> orderBy = new ArrayList<>();
     private Integer limit;
     private Integer offset;
@@ -86,6 +83,13 @@ public final class SqlFragment {
         return this;
     }
 
+    /** As {@link #table(String)}, also aliasing the table in the rendered {@code FROM} clause. */
+    public SqlFragment table(String table, String alias) {
+        this.table = Objects.requireNonNull(table, "table");
+        this.tableAlias = Objects.requireNonNull(alias, "alias");
+        return this;
+    }
+
     /** Adds one relation edge; a second edge reaching the same child table is dropped. */
     public SqlFragment join(JoinEdge edge) {
         return join(edge, edge.childTable());
@@ -116,7 +120,7 @@ public final class SqlFragment {
     /** Appends a WHERE conjunct; {@code or} joins it with {@code OR} instead of {@code AND}. */
     public SqlFragment where(String sql, boolean orJoined) {
         Objects.requireNonNull(sql, "sql");
-        where.add(new Conjunct(sql, orJoined));
+        where.add(new QueryCompiler.Conjunct(sql, orJoined));
         return this;
     }
 
@@ -172,7 +176,7 @@ public final class SqlFragment {
         if (!projection.isEmpty()) {
             sb.append(' ').append(projection);
         }
-        sb.append(" FROM ").append(dialect.quoteIdentifier(table));
+        appendFrom(sb, dialect);
         renderJoins(sb, dialect);
         renderWhere(sb);
         renderOrderBy(sb);
@@ -244,9 +248,16 @@ public final class SqlFragment {
         if (!projection.isEmpty()) {
             sb.append(' ').append(projection);
         }
-        sb.append(" FROM ").append(dialect.quoteIdentifier(table));
+        appendFrom(sb, dialect);
         renderJoins(sb, dialect);
         return sb.toString();
+    }
+
+    private void appendFrom(StringBuilder sql, SqlDialect dialect) {
+        sql.append(" FROM ").append(dialect.quoteIdentifier(table));
+        if (tableAlias != null) {
+            sql.append(" AS ").append(dialect.quoteIdentifier(tableAlias));
+        }
     }
 
     private void renderJoins(StringBuilder sql, SqlDialect dialect) {

@@ -241,15 +241,19 @@ public final class QueryCompiler {
         String cols = schema.columns().stream()
                 .map(c -> dialect.quoteIdentifier(mainAlias) + "." + dialect.quoteIdentifier(c.column()))
                 .collect(Collectors.joining(", "));
-        StringBuilder sb = new StringBuilder(distinct ? "SELECT DISTINCT " : "SELECT ").append(cols)
-                .append(" FROM ").append(dialect.quoteIdentifier(schema.tableName()))
-                .append(" AS ").append(dialect.quoteIdentifier(mainAlias));
-        appendWhere(dialect, sb, predicates, cursorClause);
-        sb.append(classicOrderBy(dialect, schema, sorts, mainAlias));
-        if (limit > 0) {
-            sb.append(dialect.limitClause(Integer.toString(limit)));
+        SqlFragment fragment = new SqlFragment()
+                .keyword("SELECT")
+                .projection(cols)
+                .distinct(distinct)
+                .table(schema.tableName(), mainAlias);
+        appendWhere(fragment, dialect, predicates, cursorClause);
+        for (String term : classicOrderByTerms(dialect, schema, sorts, mainAlias)) {
+            fragment.orderBy(term);
         }
-        return sb.toString();
+        if (limit > 0) {
+            fragment.limit(limit);
+        }
+        return fragment.render(dialect);
     }
 
     /** Renders a classic no-join COUNT; a distinct count collapses to {@code COUNT(DISTINCT id)}. */
@@ -259,17 +263,21 @@ public final class QueryCompiler {
         String projection = distinct && schema.idColumn() != null
                 ? "COUNT(DISTINCT " + dialect.quoteIdentifier(schema.idColumn()) + ")"
                 : "COUNT(*)";
-        StringBuilder sb = new StringBuilder("SELECT ").append(projection).append(" FROM ")
-                .append(dialect.quoteIdentifier(schema.tableName()));
-        appendWhere(dialect, sb, predicates, null);
-        return sb.toString();
+        SqlFragment fragment = new SqlFragment()
+                .keyword("SELECT")
+                .projection(projection)
+                .table(schema.tableName());
+        appendWhere(fragment, dialect, predicates, null);
+        return fragment.render(dialect);
     }
 
     /** Renders a classic no-join DELETE. */
     public static String deleteBy(SqlDialect dialect, TableSchema schema, List<Predicate> predicates) {
-        StringBuilder sb = new StringBuilder("DELETE FROM ").append(dialect.quoteIdentifier(schema.tableName()));
-        appendWhere(dialect, sb, predicates, null);
-        return sb.toString();
+        SqlFragment fragment = new SqlFragment()
+                .keyword("DELETE")
+                .table(schema.tableName());
+        appendWhere(fragment, dialect, predicates, null);
+        return fragment.render(dialect);
     }
 
     /** Renders an INSERT; {@code includeId=false} omits a database-generated identity column. */
@@ -505,15 +513,7 @@ public final class QueryCompiler {
                 .append(qualify(dialect, placement.leaf(), schema.tableName()))
                 .append(") FROM ").append(dialect.quoteIdentifier(head.childTable()))
                 .append(' ').append(dialect.quoteIdentifier(head.childTable()));
-        for (int i = 1; i < edges.size(); i++) {
-            JoinEdge join = edges.get(i);
-            sb.append(" LEFT JOIN ").append(dialect.quoteIdentifier(join.childTable()))
-                    .append(" AS ").append(dialect.quoteIdentifier(join.childTable()))
-                    .append(" ON ").append(dialect.quoteIdentifier(join.ownerTable())).append('.')
-                    .append(dialect.quoteIdentifier(join.ownerColumn()))
-                    .append(" = ").append(dialect.quoteIdentifier(join.childTable())).append('.')
-                    .append(dialect.quoteIdentifier(join.childColumn()));
-        }
+        sb.append(SqlFragment.joins(dialect, edges.subList(1, edges.size())));
         sb.append(" WHERE ").append(dialect.quoteIdentifier(head.childTable())).append('.')
                 .append(dialect.quoteIdentifier(head.childColumn()))
                 .append(" = ").append(dialect.quoteIdentifier(owner)).append('.')
@@ -609,18 +609,22 @@ public final class QueryCompiler {
 
     /** Renders an ORDER BY clause for a simple (no-join) query. */
     public static String classicOrderBy(SqlDialect dialect, TableSchema schema, List<SortSpec> sorts, String mainAlias) {
-        if (sorts.isEmpty()) {
-            return "";
+        List<String> terms = classicOrderByTerms(dialect, schema, sorts, mainAlias);
+        return terms.isEmpty() ? "" : " ORDER BY " + String.join(", ", terms);
+    }
+
+    /** The rendered ORDER BY terms of a classic no-join statement, in declared sort order. */
+    private static List<String> classicOrderByTerms(SqlDialect dialect, TableSchema schema,
+                                                    List<SortSpec> sorts, String mainAlias) {
+        List<String> terms = new ArrayList<>(sorts.size());
+        for (SortSpec s : sorts) {
+            String column = s.property().replace('.', '_');
+            String qualifiedColumn = mainAlias != null
+                    ? dialect.quoteIdentifier(mainAlias) + "." + dialect.quoteIdentifier(column)
+                    : dialect.quoteIdentifier(column);
+            terms.add(orderTerm(qualifiedColumn, s, false));
         }
-        return " ORDER BY " + sorts.stream()
-                .map(s -> {
-                    String column = s.property().replace('.', '_');
-                    String qualifiedColumn = mainAlias != null 
-                        ? dialect.quoteIdentifier(mainAlias) + "." + dialect.quoteIdentifier(column)
-                        : dialect.quoteIdentifier(column);
-                    return orderTerm(qualifiedColumn, s, false);
-                })
-                .collect(Collectors.joining(", "));
+        return terms;
     }
 
     // ------------------------------------------------------------------- helpers
@@ -708,11 +712,10 @@ public final class QueryCompiler {
                         "No logical attribute path maps to column '" + column.column() + "'"));
     }
 
-    private static void appendWhere(SqlDialect dialect, StringBuilder sql, List<Predicate> predicates,
+    private static void appendWhere(SqlFragment fragment, SqlDialect dialect, List<Predicate> predicates,
                                     String cursorClause) {
         boolean hasOr = predicates.stream().anyMatch(p -> Connector.isOr(p.connector()));
         boolean hasCursor = cursorClause != null && !cursorClause.isBlank();
-        StringBuilder where = new StringBuilder();
         if (!predicates.isEmpty()) {
             List<String> conjuncts = new ArrayList<>(predicates.size());
             List<Boolean> ors = new ArrayList<>(predicates.size());
@@ -722,19 +725,18 @@ public final class QueryCompiler {
                         dialect.quoteIdentifier(Names.columnBase(p.property())), p.param(), p.ignoreCase()));
                 ors.add(i > 0 && Connector.isOr(p.connector()));
             }
-            String userExpression = joinConjuncts(conjuncts, ors);
-            // The cursor conjunct is joined with AND and must not bind to the caller's last OR term,
-            // so an OR-bearing user expression is grouped before the cursor clause is appended.
-            where.append(hasOr && hasCursor ? "(" + userExpression + ")" : userExpression);
+            if (hasOr && hasCursor) {
+                // The cursor conjunct joins with AND and must not bind to the caller's last OR term,
+                // so an OR-bearing user expression is grouped as one conjunct before the cursor clause.
+                fragment.where("(" + joinConjuncts(conjuncts, ors) + ")", false);
+            } else {
+                for (int i = 0; i < conjuncts.size(); i++) {
+                    fragment.where(conjuncts.get(i), ors.get(i));
+                }
+            }
         }
         if (hasCursor) {
-            if (where.length() > 0) {
-                where.append(" AND ");
-            }
-            where.append(cursorClause);
-        }
-        if (where.length() > 0) {
-            sql.append(" WHERE ").append(where);
+            fragment.where(cursorClause, false);
         }
     }
 

@@ -42,14 +42,30 @@ final class QueryPlanner {
         this.attributes = attributes;
         this.dialect = dialect;
         this.extraEdges = List.copyOf(extraEdges);
-        this.deleteMode = model instanceof QueryDefinition.DeleteWhere;
         this.predicates = model.predicates();
         // Only a read orders and caps its rows: a count, an exists and a delete have neither, and
         // a paged read renders the base constant and leaves the window to the runtime.
-        QueryDefinition.Read read = model instanceof QueryDefinition.Read r ? r : null;
-        boolean windowless = read == null || read.paging() != PagingMode.NONE;
-        this.sorts = windowless ? List.of() : read.sorts();
-        this.limit = windowless ? 0 : read.limit().limit();
+        Window window = window(model);
+        this.deleteMode = window.deleteMode();
+        this.sorts = window.sorts();
+        this.limit = window.limit();
+    }
+
+    /** The delete flag, sort keys and row cap a criteria statement contributes. */
+    private static Window window(QueryDefinition.Criteria model) {
+        return switch (model) {
+            case QueryDefinition.Read read -> {
+                boolean windowless = read.paging() != PagingMode.NONE;
+                yield new Window(false, windowless ? List.of() : read.sorts(),
+                        windowless ? 0 : read.limit().limit());
+            }
+            case QueryDefinition.DeleteWhere ignored -> new Window(true, List.of(), 0);
+            case QueryDefinition.Count ignored -> new Window(false, List.of(), 0);
+            case QueryDefinition.Exists ignored -> new Window(false, List.of(), 0);
+        };
+    }
+
+    private record Window(boolean deleteMode, List<SortSpec> sorts, int limit) {
     }
 
     QueryCompiler.Plan plan() {

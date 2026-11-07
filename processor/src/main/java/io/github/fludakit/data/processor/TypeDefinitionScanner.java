@@ -230,23 +230,13 @@ final class TypeDefinitionScanner {
             }
             if (field.getAnnotation(Association.class) != null) {
                 String targetFqn = fieldTypeElement.getQualifiedName().toString();
-                TypeDefinition target = get(targetFqn);
-                TypeDefinition.Entity entityTarget = target != null ? target.asEntity() : null;
-                if (entityTarget != null) {
-                    associations.add(new TypeDefinition.Prop.Association(fieldName,
-                            targetFqn, entityTarget, Names.fkColumn(fieldName), false, false, null));
-                }
+                addAssociation(associations, fieldName, targetFqn, get(targetFqn), false, false);
                 return;
             }
             if (isAggregate && isEntityOrAggregate(fieldTypeElement)) {
                 String targetFqn = fieldTypeElement.getQualifiedName().toString();
-                TypeDefinition target = get(targetFqn);
                 // Aggregate-to-aggregate/entity reference: treat as COMPOSITION by default
-                TypeDefinition.Entity entityTarget = target != null ? target.asEntity() : null;
-                if (entityTarget != null) {
-                    associations.add(new TypeDefinition.Prop.Association(fieldName,
-                            targetFqn, entityTarget, Names.fkColumn(fieldName), false, true, null));
-                }
+                addAssociation(associations, fieldName, targetFqn, get(targetFqn), false, true);
                 return;
             }
             // Bare entity/aggregate reference on non-aggregate owner - treat as association
@@ -339,18 +329,26 @@ final class TypeDefinitionScanner {
         // Handle single-valued entity/aggregate references in VOs
         if (fieldTypeElement != null && isEntityOrAggregate(fieldTypeElement)) {
             String targetFqn = fieldTypeElement.getQualifiedName().toString();
-            TypeDefinition target = get(targetFqn);
-            TypeDefinition.Entity entityTarget = target != null ? target.asEntity() : null;
-            if (entityTarget != null) {
-                associations.add(new TypeDefinition.Prop.Association(fieldName,
-                        targetFqn, entityTarget, Names.fkColumn(fieldName), false, false, null));
-            }
+            addAssociation(associations, fieldName, targetFqn, get(targetFqn), false, false);
             return;
         }
         
         // Default: scalar
         scalars.add(new TypeDefinition.Prop.Scalar(fieldName, typeFqn(fieldType),
                 Names.toSnakeCase(fieldName), true));
+    }
+
+    /**
+     * Adds a to-one association for a resolved target, viewed as an entity (an aggregate target is
+     * flattened to its FK-only entity view). No-op when the target is unresolved.
+     */
+    private void addAssociation(List<TypeDefinition.Prop.Association> associations, String fieldName,
+                                String targetFqn, TypeDefinition target, boolean backReference, boolean composition) {
+        TypeDefinition.Entity entityTarget = target != null ? target.asEntity() : null;
+        if (entityTarget != null) {
+            associations.add(new TypeDefinition.Prop.Association(fieldName, targetFqn, entityTarget,
+                    Names.fkColumn(fieldName), backReference, composition, null));
+        }
     }
 
     // ── VO builders ──────────────────────────────────────────────────────

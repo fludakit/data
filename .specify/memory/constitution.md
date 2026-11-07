@@ -103,6 +103,10 @@ consistent across emitters and dialects, preventing drift and duplicated logic.
   imports. Reformat before committing to keep formatting out of functional diffs.
 - **No runtime reflection or bytecode generation:** all generation happens at compile
   time (see Principle I).
+- **Module separation:** `core` (`fluda-data-core`) is the developer-facing API and the
+  single SQL renderer; it MUST NOT depend on `javax.lang.model`. Annotation processing
+  (the `javax.lang.model` API) belongs in `processor` (`fluda-data-processor`), whose
+  `RepositoryProcessor` is the single orchestration entry point.
 
 ## Development Workflow
 
@@ -123,4 +127,4 @@ redefined. The constitution version follows Semantic Versioning: MAJOR for
 backward-incompatible principle removals or redefinitions, MINOR for a new principle
 or materially expanded guidance, and PATCH for clarifications and wording fixes.
 
-**Version**: 1.1.0 | **Ratified**: 2026-11-06 | **Last Amended**: 2026-11-07
+**Version**: 1.2.0 | **Ratified**: 2026-11-06 | **Last Amended**: 2026-11-07

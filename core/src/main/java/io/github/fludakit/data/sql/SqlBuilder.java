@@ -343,53 +343,74 @@ public final class SqlBuilder {
      * @param terms              the rendered sort terms, in cursor-key order; empty seeks no statement
      * @param ascending          the sort direction of each key
      * @param forward            {@code true} for {@code CURSOR_NEXT}, {@code false} for {@code CURSOR_PREVIOUS}
-     * @param orderBy            the rendered ORDER BY clause (leading space, no trailing space)
+     * @param orderByTerms       the rendered ORDER BY terms, parallel to {@code terms}; the entry for an
+     *                            aggregate seek term is its {@code agg_N} alias, any other entry the
+     *                            rendered column (no direction — direction comes from {@code ascending})
      * @param aggregateExpressions the aggregate subqueries backing the to-many seek terms, in sort
      *                            order; empty or null for a plain local-key seek (no wrap)
      * @param rootTable          the quoted root table name the qualified terms are relative to, for
      *                            re-pointing them at the inner alias
-     * @return the seek statement, ending at {@code orderBy} with no boundary whitespace
+     * @return the seek statement, ending at {@code ORDER BY} with no boundary whitespace
      */
     public String pagedSeekStatement(String shell, boolean shellHasWhere, List<String> terms,
-                                     List<Boolean> ascending, boolean forward, String orderBy,
+                                     List<Boolean> ascending, boolean forward, List<String> orderByTerms,
                                      List<String> aggregateExpressions, String rootTable) {
         if (terms.isEmpty()) {
-            return shell + orderBy;
+            return shell + renderOrderBy(orderByTerms, ascending);
         }
-        String seekPredicate = SeekClause.render(terms, ascending, forward);
         if (aggregateExpressions == null || aggregateExpressions.isEmpty()) {
             return shell + (shellHasWhere ? " AND " : " WHERE ")
-                    + "(:cursor0 IS NULL OR " + seekPredicate + ")" + orderBy;
+                    + "(:cursor0 IS NULL OR " + SeekClause.render(terms, ascending, forward) + ")"
+                    + renderOrderBy(orderByTerms, ascending);
         }
         String innerAlias = "inner_";
-        StringBuilder wrappedSql = new StringBuilder();
-        wrappedSql.append("SELECT ").append(innerAlias).append(".* FROM (");
-        wrappedSql.append(shell);
-        wrappedSql.append(") AS ").append(innerAlias);
-        wrappedSql.append(shellHasWhere ? " AND " : " WHERE ");
-        wrappedSql.append("(:cursor0 IS NULL OR ");
-        String aliasedSeekPredicate = seekPredicate;
+        List<String> aliasedSeek = new java.util.ArrayList<>(terms.size());
+        List<String> aliasedOrderBy = new java.util.ArrayList<>(orderByTerms.size());
         int aggIndex = 0;
-        for (String aggregate : aggregateExpressions) {
-            aliasedSeekPredicate = aliasedSeekPredicate.replace(
-                    aggregate, innerAlias + "." + dialect.quoteIdentifier("agg_" + aggIndex));
-            aggIndex++;
+        for (int i = 0; i < terms.size(); i++) {
+            if (aggregateExpressions.contains(terms.get(i))) {
+                String aggAlias = innerAlias + "." + dialect.quoteIdentifier("agg_" + aggIndex);
+                aliasedSeek.add(aggAlias);
+                aliasedOrderBy.add(aggAlias);
+                aggIndex++;
+            } else {
+                aliasedSeek.add(repoint(terms.get(i), rootTable, innerAlias));
+                aliasedOrderBy.add(repoint(orderByTerms.get(i), rootTable, innerAlias));
+            }
         }
-        aliasedSeekPredicate = aliasedSeekPredicate.replace(rootTable + ".", innerAlias + ".");
-        wrappedSql.append(aliasedSeekPredicate);
-        wrappedSql.append(")");
+        return "SELECT " + innerAlias + ".* FROM (" + shell + ") AS " + innerAlias
+                + (shellHasWhere ? " AND " : " WHERE ")
+                + "(:cursor0 IS NULL OR " + SeekClause.render(aliasedSeek, ascending, forward) + ")"
+                + renderOrderBy(aliasedOrderBy, ascending);
+    }
 
-        String aliasedOrderBy = orderBy;
-        aggIndex = 0;
-        for (String aggregate : aggregateExpressions) {
-            aliasedOrderBy = aliasedOrderBy.replace(
-                    dialect.quoteIdentifier("agg_" + aggIndex),
-                    innerAlias + "." + dialect.quoteIdentifier("agg_" + aggIndex));
-            aggIndex++;
+    /**
+     * Renders the ORDER BY clause from pre-rendered terms and their directions. Direction comes from
+     * {@code ascending} — never baked into a term — so a caller that must re-point the terms at a
+     * derived-table alias aliases the term text alone. Empty terms render nothing.
+     */
+    private static String renderOrderBy(List<String> terms, List<Boolean> ascending) {
+        if (terms.isEmpty()) {
+            return "";
         }
-        aliasedOrderBy = aliasedOrderBy.replace(rootTable + ".", innerAlias + ".");
-        wrappedSql.append(aliasedOrderBy);
-        return wrappedSql.toString();
+        StringBuilder sb = new StringBuilder(" ORDER BY ");
+        for (int i = 0; i < terms.size(); i++) {
+            if (i > 0) {
+                sb.append(", ");
+            }
+            sb.append(terms.get(i)).append(Boolean.TRUE.equals(ascending.get(i)) ? " ASC" : " DESC");
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Re-points one rendered term at the derived-table alias by swapping its LEADING
+     * {@code rootTable + "."} qualifier for the alias — an exact prefix swap, never a global
+     * {@link String#replace}, so a term that merely contains the qualifier (or has none) is untouched.
+     */
+    private static String repoint(String term, String rootTable, String innerAlias) {
+        String prefix = rootTable + ".";
+        return term.startsWith(prefix) ? innerAlias + "." + term.substring(prefix.length()) : term;
     }
 
     /** Whether the first segment of an entity-rooted path is a to-many relation or collection. */

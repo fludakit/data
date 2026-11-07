@@ -723,19 +723,10 @@ public final class FindEmitter {
             seekTerms.add(qualifiedId);
         }
 
-        // Build ORDER BY clause using aliases
-        String orderByClause = "";
-        if (!orderByTerms.isEmpty()) {
-            StringBuilder ob = new StringBuilder(" ORDER BY ");
-            for (int i = 0; i < orderByTerms.size(); i++) {
-                if (i > 0) ob.append(", ");
-                ob.append(orderByTerms.get(i)).append(ascendingList.get(i) ? " ASC" : " DESC");
-            }
-            orderByClause = ob.toString();
-        }
-
         // Build the seek statement: the shell, the null-guarded keyset seek, the shared ORDER BY —
-        // wrapped in a derived table when a to-many sort drove the seek through an aggregate.
+        // wrapped in a derived table when a to-many sort drove the seek through an aggregate. The
+        // ORDER BY terms are passed structured so core renders (and re-aliases) them — the emitter no
+        // longer hand-assembles the cursor ORDER BY.
         boolean hasAggregatesInSeek = !seekTerms.isEmpty() && seekTerms.stream()
                 .anyMatch(term -> term.contains("MIN(") || term.contains("MAX("));
 
@@ -745,13 +736,8 @@ public final class FindEmitter {
             aggregateExpressions = rendered.seekTerms();
         }
 
-        String seekStmt;
-        if (seekTerms.isEmpty()) {
-            seekStmt = baseSql + orderByClause;
-        } else {
-            seekStmt = sqlBuilder.pagedSeekStatement(baseSql, shellHasWhere, seekTerms, ascendingList,
-                    true, orderByClause, aggregateExpressions, dialect.quoteIdentifier(ctx.entity().tableName()));
-        }
+        String seekStmt = sqlBuilder.pagedSeekStatement(baseSql, shellHasWhere, seekTerms, ascendingList,
+                true, orderByTerms, aggregateExpressions, dialect.quoteIdentifier(ctx.entity().tableName()));
 
         // Register the seek SQL constant
         String seekConstBase = toSqlConstantName("CURSOR_" + method.name());

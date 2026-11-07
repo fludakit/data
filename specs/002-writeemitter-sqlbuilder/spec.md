@@ -71,8 +71,8 @@ passes unchanged with no `INSERT INTO` string literal in `WriteEmitter`.
 ### Functional Requirements
 
 - **FR-001**: `WriteEmitter` MUST NOT build raw SQL text (no `DELETE FROM` / `INSERT INTO` string literals).
-- **FR-002**: Child-table DELETE MUST be routed through `SqlBuilder.deleteByFk` / `QueryDefinition.DeleteByFk`.
-- **FR-003**: Child-table INSERT MUST be routed through `SqlBuilder.insert` / `QueryDefinition.Insert`.
+- **FR-002**: Child-table DELETE MUST be routed through `SqlBuilder.deleteByFk` / `QueryDefinition.DeleteByFk` (single-column) or `SqlBuilder.deleteChildByIdAndFk` / `QueryDefinition.DeleteChildByIdAndFk` (two-column diff-sync); the diff-sync existing-IDs SELECT MUST route through `SqlBuilder.selectChildIds` / `QueryDefinition.SelectChildIds`.
+- **FR-003**: Child-table INSERT MUST be routed through `SqlBuilder.insertColumns` / `QueryDefinition.InsertColumns`.
 - **FR-004**: Child bindings MUST keep using the existing `.param(...)` helpers.
 - **FR-005**: Quoting and parameter naming MUST match the core renderer's conventions.
 - **FR-006**: Generated SQL MUST be byte-identical; `WriteEmissionTest` and integration tests pass unchanged.

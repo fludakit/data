@@ -43,7 +43,7 @@ class SqlBuilderSeekClauseTest {
         // ending at ORDER BY with NO limit clause (the runtime splices the literal LIMIT for the extra row).
         SqlBuilder builder = new SqlBuilder(SCHEMA).dialect(H2Dialect.INSTANCE);
         String next = builder.pagedSeekStatement("SELECT \"id\", \"name\" FROM \"widget\"", false,
-                List.of("\"name\""), List.of(true), true, " ORDER BY \"name\" ASC", null, null);
+                List.of("\"name\""), List.of(true), true, List.of("\"name\""), null, null);
         assertThat(next).isEqualTo(
                 "SELECT \"id\", \"name\" FROM \"widget\" WHERE (:cursor0 IS NULL OR ((\"name\" > :cursor0)))"
                         + " ORDER BY \"name\" ASC");
@@ -56,7 +56,7 @@ class SqlBuilderSeekClauseTest {
     void pagedSeekStatementAndsTheSeekOntoAShellThatAlreadyHasWhere() {
         SqlBuilder builder = new SqlBuilder(SCHEMA).dialect(H2Dialect.INSTANCE);
         String prev = builder.pagedSeekStatement("SELECT \"id\" FROM \"widget\" WHERE \"id\" > 0", true,
-                List.of("\"name\""), List.of(true), false, " ORDER BY \"name\" ASC", null, null);
+                List.of("\"name\""), List.of(true), false, List.of("\"name\""), null, null);
         assertThat(prev).isEqualTo("SELECT \"id\" FROM \"widget\" WHERE \"id\" > 0"
                 + " AND (:cursor0 IS NULL OR ((\"name\" < :cursor0))) ORDER BY \"name\" ASC");
     }
@@ -65,8 +65,8 @@ class SqlBuilderSeekClauseTest {
     void pagedSeekStatementSeeksNothingWithoutTerms() {
         SqlBuilder builder = new SqlBuilder(SCHEMA).dialect(H2Dialect.INSTANCE);
         assertThat(builder.pagedSeekStatement("SELECT \"id\", \"name\" FROM \"widget\"", false,
-                List.of(), List.of(), true, " ORDER BY \"name\" ASC", null, null))
-                .isEqualTo("SELECT \"id\", \"name\" FROM \"widget\" ORDER BY \"name\" ASC");
+                List.of(), List.of(), true, List.of(), null, null))
+                .isEqualTo("SELECT \"id\", \"name\" FROM \"widget\"");
     }
 
     @Test
@@ -152,10 +152,12 @@ class SqlBuilderSeekClauseTest {
         String aggregate = "(SELECT MIN(\"lines_.\"product\") FROM \"lines\" \"lines\""
                 + " WHERE \"lines\".\"order_id\" = \"orders\".\"id\")";
         String stmt = builder.pagedSeekStatement(shell, false,
-                List.of(aggregate), List.of(true), true,
-                " ORDER BY \"agg_0\" ASC, \"orders\".\"id\" ASC", List.of(aggregate), "\"orders\"");
+                List.of(aggregate, "\"orders\".\"id\""), List.of(true, true), true,
+                List.of("\"agg_0\"", "\"orders\".\"id\""), List.of(aggregate), "\"orders\"");
         assertThat(stmt).isEqualTo("SELECT inner_.* FROM (" + shell + ") AS inner_"
-                + " WHERE (:cursor0 IS NULL OR ((inner_.\"agg_0\" > :cursor0)))"
+                + " WHERE (:cursor0 IS NULL OR ((inner_.\"agg_0\" > :cursor0)"
+                + " OR ((inner_.\"agg_0\" = :cursor0 OR (inner_.\"agg_0\" IS NULL AND :cursor0 IS NULL))"
+                + " AND inner_.\"id\" > :cursor1)))"
                 + " ORDER BY inner_.\"agg_0\" ASC, inner_.\"id\" ASC");
     }
 
@@ -163,8 +165,26 @@ class SqlBuilderSeekClauseTest {
     void pagedSeekStatementSkipsTheWrapForLocalKeySeeks() {
         SqlBuilder builder = new SqlBuilder(SCHEMA).dialect(H2Dialect.INSTANCE);
         String stmt = builder.pagedSeekStatement("SELECT \"id\", \"name\" FROM \"widget\"", false,
-                List.of("\"name\""), List.of(true), true, " ORDER BY \"name\" ASC", null, null);
+                List.of("\"name\""), List.of(true), true, List.of("\"name\""), null, null);
         assertThat(stmt).doesNotContain("inner_");
         assertThat(stmt).doesNotContain("FROM (");
+    }
+
+    @Test
+    void pagedSeekStatementAliasesAggregatesByContentNotPosition() {
+        // A simple local key sorting BEFORE a to-many aggregate must not be mistaken for the aggregate:
+        // the aggregate still aliases to inner_.agg_0 (its seek term matches the aggregate expression),
+        // not by position; the bare local key stays unqualified in the outer derived table.
+        SqlBuilder builder = new SqlBuilder(SCHEMA).dialect(H2Dialect.INSTANCE);
+        String shell = "SELECT \"orders\".\"status\", MIN(lines_.\"product\") AS \"agg_0\""
+                + " FROM \"orders\" LEFT JOIN \"lines\" AS lines_ ON lines_.\"order_id\" = \"orders\".\"id\""
+                + " GROUP BY \"orders\".\"status\"";
+        String aggregate = "MIN(lines_.\"product\")";
+        String stmt = builder.pagedSeekStatement(shell, false,
+                List.of("\"status\"", aggregate, "\"orders\".\"id\""), List.of(true, true, true), true,
+                List.of("\"status\"", "\"agg_0\"", "\"orders\".\"id\""), List.of(aggregate), "\"orders\"");
+        assertThat(stmt)
+                .contains("inner_.\"agg_0\" > :cursor1")
+                .contains(" ORDER BY \"status\" ASC, inner_.\"agg_0\" ASC, inner_.\"id\" ASC");
     }
 }

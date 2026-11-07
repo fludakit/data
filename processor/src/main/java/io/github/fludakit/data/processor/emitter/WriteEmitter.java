@@ -394,13 +394,10 @@ public final class WriteEmitter {
         String childUpdateConst = ctx.registerConstant(
                 "EC_UPDATE_" + ec.name().toUpperCase(), childUpdateSql);
 
-        String childTable = dialect.quoteIdentifier(childEntity.tableName());
-        String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
-        String idColumn = dialect.quoteIdentifier(childEntity.idColumn());
-        String deleteSql = "DELETE FROM " + childTable + " WHERE " + idColumn + " = :childId AND " + fkColumn + " = :parentId";
+        String deleteSql = childSb.deleteChildByIdAndFk(childEntity.tableName(), childEntity.idColumn(), ec.fkColumn());
         String deleteConst = ctx.registerConstant("EC_DELETE_" + ec.name().toUpperCase(), deleteSql);
 
-        String selectIdsSql = "SELECT " + idColumn + " FROM " + childTable + " WHERE " + fkColumn + " = :parentId";
+        String selectIdsSql = childSb.selectChildIds(childEntity.tableName(), childEntity.idColumn(), ec.fkColumn());
         String selectIdsConst = ctx.registerConstant("EC_IDS_" + ec.name().toUpperCase(), selectIdsSql);
 
         CodeBlock.Builder cascade = CodeBlock.builder();
@@ -487,9 +484,9 @@ public final class WriteEmitter {
     private CodeBlock buildCascadeDeleteCodeBlock(CascadeSpec spec, RepositoryContext ctx, String parentIdExpr) {
         if (spec.prop() instanceof TypeDefinition.Prop.EntityCollection ec
                 && spec.target() instanceof TypeDefinition.Entity childEntity) {
-            String childTable = dialect.quoteIdentifier(childEntity.tableName());
-            String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
-            String deleteSql = "DELETE FROM " + childTable + " WHERE " + fkColumn + " = :parentId";
+            SqlBuilder childSb = new SqlBuilder(childEntity);
+            childSb.dialect(dialect);
+            String deleteSql = childSb.deleteByFk(childEntity.tableName(), ec.fkColumn());
             String deleteConst = ctx.registerConstant("EC_COLL_DELETE_" + ec.name().toUpperCase(), deleteSql);
             return CodeBlock.builder().add("jdbcClient.sql($L).param($S, $L).update()",
                     deleteConst, "parentId", parentIdExpr).build();
@@ -514,26 +511,24 @@ public final class WriteEmitter {
         TypeDefinition elementType = ec.definition();
         if (elementType == null) return CodeBlock.builder().build();
 
-        String childTable = dialect.quoteIdentifier(ec.childTable());
-        String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
-
         java.util.List<Leaf> leaves = new java.util.ArrayList<>();
         collectLeaves(elementType, leaves, "element", PropPath.ROOT);
 
         java.util.List<String> columns = new java.util.ArrayList<>();
-        columns.add(fkColumn);
+        columns.add(ec.fkColumn());
         java.util.List<String> params = new java.util.ArrayList<>();
-        params.add(":parentId");
+        params.add("parentId");
         for (Leaf leaf : leaves) {
-            columns.add(dialect.quoteIdentifier(leaf.columnName()));
-            params.add(":" + leaf.columnName());
+            columns.add(leaf.columnName());
+            params.add(leaf.columnName());
         }
 
-        String insertSql = "INSERT INTO " + childTable + " (" + String.join(", ", columns) +
-                          ") VALUES (" + String.join(", ", params) + ")";
+        SqlBuilder childSb = new SqlBuilder(ctx.entity());
+        childSb.dialect(dialect);
+        String insertSql = childSb.insertColumns(ec.childTable(), columns, params);
         String insertConst = ctx.registerConstant("EC_INSERT_" + ec.name().toUpperCase(), insertSql);
 
-        String deleteSql = "DELETE FROM " + childTable + " WHERE " + fkColumn + " = :parentId";
+        String deleteSql = childSb.deleteByFk(ec.childTable(), ec.fkColumn());
         String deleteConst = ctx.registerConstant("EC_DELETE_" + ec.name().toUpperCase(), deleteSql);
 
         CodeBlock.Builder cascade = CodeBlock.builder();

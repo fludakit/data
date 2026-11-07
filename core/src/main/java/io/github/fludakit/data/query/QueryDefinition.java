@@ -315,6 +315,82 @@ public sealed interface QueryDefinition {
     }
 
     /**
+     * A cascade {@code DELETE} of one child row by BOTH its identifier and the parent's foreign key —
+     * the orphan delete in a diff-sync, which must not remove another parent's rows that share the
+     * child.
+     *
+     * <p>Renders {@code DELETE FROM <table> WHERE <id> = :childId AND <fk> = :parentId}.</p>
+     *
+     * @param table    the child table's physical name
+     * @param idColumn the child table's identifier column
+     * @param fkColumn the child table's foreign-key column pointing at the parent
+     */
+    record DeleteChildByIdAndFk(String table, String idColumn, String fkColumn) implements QueryDefinition {
+
+        @Override
+        public Operation operation() {
+            return Operation.DELETE;
+        }
+
+        @Override
+        public ResultKind resultKind() {
+            return ResultKind.VOID;
+        }
+    }
+
+    /**
+     * Reads one child table's identifier column for every row owned by a parent — the "existing IDs"
+     * set a diff-sync computes to decide which children to orphan-delete.
+     *
+     * <p>Renders {@code SELECT <id> FROM <table> WHERE <fk> = :parentId}.</p>
+     *
+     * @param table    the child table's physical name
+     * @param idColumn the child table's identifier column
+     * @param fkColumn the child table's foreign-key column pointing at the parent
+     */
+    record SelectChildIds(String table, String idColumn, String fkColumn) implements QueryDefinition {
+
+        @Override
+        public Operation operation() {
+            return Operation.FIND;
+        }
+
+        @Override
+        public ResultKind resultKind() {
+            return ResultKind.VOID;
+        }
+    }
+
+    /**
+     * An {@code INSERT} into a child table with an explicit column and parameter list — the
+     * element-collection replace, whose columns are the flattened value-object leaves, not the
+     * context table's schema.
+     *
+     * <p>Renders {@code INSERT INTO <table> (<columns>) VALUES (<:params>)}.</p>
+     *
+     * @param table      the child table's physical name
+     * @param columns    the physical column names, in bind order
+     * @param paramNames the named-parameter tokens, in bind order
+     */
+    record InsertColumns(String table, List<String> columns, List<String> paramNames) implements QueryDefinition {
+
+        public InsertColumns {
+            columns = List.copyOf(columns);
+            paramNames = List.copyOf(paramNames);
+        }
+
+        @Override
+        public Operation operation() {
+            return Operation.INSERT;
+        }
+
+        @Override
+        public ResultKind resultKind() {
+            return ResultKind.VOID;
+        }
+    }
+
+    /**
      * A user-supplied native SQL statement declared with {@code @Query}. It has no logical attribute
      * paths — the statement text is the whole query — so it publishes only the SQL and the declared
      * result shape. {@link #operation()} returns {@link Operation#FIND} as a placeholder: a native

@@ -450,6 +450,23 @@ public sealed interface QueryDefinition {
         }
     }
 
+    /**
+     * A child-table hydration SELECT: the row-mapper projection keyed by a parent foreign key (or the
+     * child identifier for a composing association).
+     */
+    record SelectByFk(String table, String whereColumn, String paramName, String projection) implements QueryDefinition {
+
+        @Override
+        public Operation operation() {
+            return Operation.FIND;
+        }
+
+        @Override
+        public ResultKind resultKind() {
+            return ResultKind.LIST;
+        }
+    }
+
     record Native(String sql, ResultKind resultKind) implements QueryDefinition {
 
         public Native {

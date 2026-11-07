@@ -7,6 +7,7 @@ import com.squareup.javapoet.ParameterizedTypeName;
 import io.github.fludakit.data.processor.support.ExceptionTranslation;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.context.RepositoryContext;
+import io.github.fludakit.data.sql.SqlBuilder;
 import io.github.fludakit.data.sql.SqlDialect;
 
 import javax.lang.model.element.Modifier;
@@ -157,35 +158,10 @@ public final class HydrationEmitter {
         String methodName = "load" + capitalize(ec.name());
 
         // Build SELECT SQL for children by parent FK
-        String childTable = dialect.quoteIdentifier(childEntity.tableName());
-        String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
-
-        // Build column list from child mapping - include scalar columns AND ASSOCIATION FK columns
-        // ASSOCIATION relations on entity collection elements are materialized as id-only partials
-        List<String> columns = new ArrayList<>();
-        TypeDefinition.Prop.Id childIdProp = childEntity.id();
-        if (childIdProp != null) {
-            columns.add(dialect.quoteIdentifier(childIdProp.columnName()) + " AS "
-                    + dialect.quoteIdentifier(childIdProp.name()));
-        }
-        for (TypeDefinition.Prop prop : childEntity.properties()) {
-            if (prop instanceof TypeDefinition.Prop.Scalar s) {
-                columns.add(dialect.quoteIdentifier(s.columnName()) + " AS "
-                        + dialect.quoteIdentifier(s.name()));
-            }
-        }
-        // Include ASSOCIATION FK columns so row mapper can create id-only partials for back-references
-        for (TypeDefinition.Prop prop : childEntity.properties()) {
-            if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.fkColumn() != null) {
-                // Use column name as alias (not property name) so RowMapper can find it
-                columns.add(dialect.quoteIdentifier(assoc.fkColumn()) + " AS "
-                        + dialect.quoteIdentifier(assoc.fkColumn()));
-            }
-        }
-
-        String selectSql = "SELECT " + String.join(", ", columns)
-                + " FROM " + childTable
-                + " WHERE " + fkColumn + " = :parentId";
+        SqlBuilder sb = new SqlBuilder(childEntity);
+        sb.dialect(dialect);
+        String selectSql = sb.selectByFk(childEntity.tableName(), ec.fkColumn(), "parentId",
+                sb.rowMapperProjection(childEntity, false));
         String constName = ctx.registerConstant("HYDRATE_" + ec.name().toUpperCase(), selectSql);
 
         MethodSpec.Builder builder = MethodSpec.methodBuilder(methodName)
@@ -221,12 +197,9 @@ public final class HydrationEmitter {
         String methodName = "load" + capitalize(ec.name());
 
         // Build SELECT SQL for elements by parent FK
-        String childTable = dialect.quoteIdentifier(ec.childTable());
-        String fkColumn = dialect.quoteIdentifier(ec.fkColumn());
-
-        // Select all columns from the element collection table
-        String selectSql = "SELECT * FROM " + childTable
-                + " WHERE " + fkColumn + " = :parentId";
+        SqlBuilder sb = new SqlBuilder(ctx.entity());
+        sb.dialect(dialect);
+        String selectSql = sb.selectByFk(ec.childTable(), ec.fkColumn(), "parentId", "");
         String constName = ctx.registerConstant("HYDRATE_" + ec.name().toUpperCase(), selectSql);
 
         // Determine element type
@@ -281,33 +254,10 @@ public final class HydrationEmitter {
         String methodName = "load" + capitalize(assoc.name());
 
         // Build SELECT SQL for the child by ID
-        String childTable = dialect.quoteIdentifier(childEntity.tableName());
-        String idCol = childEntity.idColumn();
-        String idColumn = dialect.quoteIdentifier(idCol);
-
-        // Build column list from child mapping
-        java.util.List<String> columns = new java.util.ArrayList<>();
-        TypeDefinition.Prop.Id childIdProp = childEntity.id();
-        if (childIdProp != null) {
-            columns.add(dialect.quoteIdentifier(childIdProp.columnName()) + " AS "
-                    + dialect.quoteIdentifier(childIdProp.name()));
-        }
-        for (TypeDefinition.Prop prop : childEntity.properties()) {
-            if (prop instanceof TypeDefinition.Prop.Scalar s) {
-                columns.add(dialect.quoteIdentifier(s.columnName()) + " AS "
-                        + dialect.quoteIdentifier(s.name()));
-            }
-        }
-        for (TypeDefinition.Prop prop : childEntity.properties()) {
-            if (prop instanceof TypeDefinition.Prop.Association childAssoc && childAssoc.fkColumn() != null) {
-                columns.add(dialect.quoteIdentifier(childAssoc.fkColumn()) + " AS "
-                        + dialect.quoteIdentifier(childAssoc.name()));
-            }
-        }
-
-        String selectSql = "SELECT " + String.join(", ", columns)
-                + " FROM " + childTable
-                + " WHERE " + idColumn + " = :childId";
+        SqlBuilder sb = new SqlBuilder(childEntity);
+        sb.dialect(dialect);
+        String selectSql = sb.selectByFk(childEntity.tableName(), childEntity.idColumn(), "childId",
+                sb.rowMapperProjection(childEntity, true));
         String constName = ctx.registerConstant("HYDRATE_" + assoc.name().toUpperCase(), selectSql);
 
         // Derive child row mapper class name

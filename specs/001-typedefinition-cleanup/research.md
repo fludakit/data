@@ -4,7 +4,7 @@
 
 This is an internal, behavior-preserving refactor. No external libraries or unfamiliar
 technologies are introduced. "Research" here means resolving the design decisions for the
-polymorphic `id()` accessor and the `PropVisitor` traversal against the current code.
+polymorphic `id()` accessor and the `Prop.Visitor` traversal against the current code.
 
 ## Decision 1: How to expose `id()` polymorphically
 
@@ -20,9 +20,9 @@ polymorphic `id()` accessor and the `PropVisitor` traversal against the current 
   - A separate `idOrThrow()` that throws on value objects — deferred; call sites all tolerate
     null today, so `id()` returning null matches existing behavior.
 
-## Decision 2: Prop traversal via `PropVisitor<R>`
+## Decision 2: Prop traversal via `Prop.Visitor<R>`
 
-- **Decision**: Add a `PropVisitor<R>` (or a `Prop.visit(PropVisitor<R>)`) with one method per
+- **Decision**: Add a `Prop.Visitor<R>` (or a `Prop.visit(Prop.Visitor<R>)`) with one method per
   `Prop` kind, and a single `accept` dispatch on `Prop`. The two column walkers
   (`addColumnsRecursive`/`addColumnRefsRecursive`) become one visitor; `PathResolver` delegates
   property dispatch to the visitor and keeps only join/cycle decisions.

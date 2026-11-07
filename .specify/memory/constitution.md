@@ -80,7 +80,7 @@ interface and entity model into plans) → Plan (reify methods into structured p
 once in `fluda-data-core` (`SqlBuilder`/`QueryCompiler`), dialects MUST be pluggable,
 and emitters MUST NOT re-derive SQL per emitter. Dispatch MUST be polymorphic (no
 `instanceof` dispatch): `TypeDefinition` exposes a polymorphic `id()` and a
-`PropVisitor`.
+`Prop.Visitor`.
 
 Rationale: A single SQL source and polymorphic dispatch keep generated output
 consistent across emitters and dialects, preventing drift and duplicated logic.

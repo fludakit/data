@@ -40,5 +40,5 @@ grep -rn "instanceof Entity\|instanceof Aggregate\|instanceof TypeDefinition.Ent
 ## Definition of done
 
 - `TypeDefinition.id()` is the single identifier accessor; no `idProp`/`idPropertyName` helpers remain.
-- A single `PropVisitor` covers all `Prop` kinds and backs `columns()`, `columnRefs()`, and `PathResolver`.
+- A single `Prop.Visitor` covers all `Prop` kinds and backs `columns()`, `columnRefs()`, and `PathResolver`.
 - Generated output byte-identical; all suites green.

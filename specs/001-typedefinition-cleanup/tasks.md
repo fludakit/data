@@ -1,10 +1,10 @@
-# Tasks: TypeDefinition Cleanup (polymorphic id + PropVisitor)
+# Tasks: TypeDefinition Cleanup (polymorphic id + Prop.Visitor)
 
 **Input**: Design documents from `/specs/001-typedefinition-cleanup/`
 
 **Prerequisites**: plan.md, spec.md, research.md, data-model.md, contracts/
 
-**Tests**: Included for the two *new* public surfaces (`TypeDefinition.id()`, `PropVisitor`) per the
+**Tests**: Included for the two *new* public surfaces (`TypeDefinition.id()`, `Prop.Visitor`) per the
 Test-First constitution principle. The pre-existing unit/emission/integration suites are the
 authoritative "behavior preserved" gate for the rest.
 
@@ -56,20 +56,20 @@ authoritative "behavior preserved" gate for the rest.
 
 ## Phase 4: User Story 2 — Single property traversal (Priority: P2)
 
-**Goal**: Property traversal is consolidated behind one `PropVisitor<R>`; the two column walkers and `PathResolver` stop duplicating `instanceof` dispatch, and `hasId`/`idColumn`/`ownsAggregateLifecycle` become polymorphic.
+**Goal**: Property traversal is consolidated behind one `Prop.Visitor<R>`; the two column walkers and `PathResolver` stop duplicating `instanceof` dispatch, and `hasId`/`idColumn`/`ownsAggregateLifecycle` become polymorphic.
 
 **Independent Test**: `./mvnw -pl core test` plus `./mvnw -pl processor test` — `ColumnRef`/`ColumnPlacement` semantics and generated output are unchanged.
 
 ### Implementation for User Story 2
 
 - [X] T013 [US2] Write a direct unit test in `core/src/test/java/io/github/fludakit/data/metadata/TypeDefinitionTest.java` asserting the visitor dispatches over all 7 `Prop` kinds (Scalar, Id, Version, Association, Embedded, EntityCollection, ElementCollection) in declaration order. Run it and confirm it FAILS (no visitor yet).
-- [X] T014 [US2] Introduce `PropVisitor<R>` (one method per `Prop` kind) and an `accept`/`visit` dispatch on `Prop` in `core/src/main/java/io/github/fludakit/data/metadata/TypeDefinition.java`. Confirm T013 passes.
+- [X] T014 [US2] Introduce `Prop.Visitor<R>` (one method per `Prop` kind) and an `accept`/`visit` dispatch on `Prop` in `core/src/main/java/io/github/fludakit/data/metadata/TypeDefinition.java`. Confirm T013 passes.
 - [X] T015 [US2] Push down `hasId()`, `idColumn()`, and `ownsAggregateLifecycle()` to `Entity`/`Aggregate`/`ValueObject`, deleting the three `instanceof`-based default methods in `core/src/main/java/io/github/fludakit/data/metadata/TypeDefinition.java`.
 - [X] T016 [US2] Replace `addColumnsRecursive`/`addColumnRefsRecursive` with a single visitor-based traversal; make `columns()` and `columnRefs()` delegate to it in `core/src/main/java/io/github/fludakit/data/metadata/TypeDefinition.java`.
 - [X] T017 [US2] Refactor the nested `PathResolver` to delegate property dispatch to the visitor, keeping only join/cycle decisions, and remove the duplicate `leafColumn` switch in `core/src/main/java/io/github/fludakit/data/metadata/TypeDefinition.java`.
 - [X] T018 [US2] Run `./mvnw -pl core test` and `./mvnw -pl processor test` and confirm `ColumnRef`/`ColumnPlacement` semantics and generated output are unchanged.
 
-**Checkpoint**: User Story 2 is complete — one `PropVisitor` traversal, no `instanceof` dispatch in `TypeDefinition`.
+**Checkpoint**: User Story 2 is complete — one `Prop.Visitor` traversal, no `instanceof` dispatch in `TypeDefinition`.
 
 ---
 
@@ -140,7 +140,7 @@ Task: "T011 RepositoryVisitor.java — replace idPropertyName with def.id().name
 
 1. Setup + Foundational → `TypeDefinition.id()` available.
 2. US1 → single id accessor (issue #24) → validate.
-3. US2 → single `PropVisitor` traversal (issue #25) → validate.
+3. US2 → single `Prop.Visitor` traversal (issue #25) → validate.
 4. Polish → full `./mvnw clean install` + grep check.
 
 ### Parallel Team Strategy

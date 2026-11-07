@@ -247,6 +247,16 @@ public final class SqlBuilder {
         return render(new QueryDefinition.CorrelatedSort(childTable, leafColumn, fkColumn, ownerTable, ownerIdColumn, ascending));
     }
 
+    /** Renders a child-table hydration SELECT. */
+    public String selectByFk(String table, String whereColumn, String paramName, String projection) {
+        return render(new QueryDefinition.SelectByFk(table, whereColumn, paramName, projection));
+    }
+
+    /** Renders the row-mapper projection (column AS alias) of a type. */
+    public String rowMapperProjection(TypeDefinition type, boolean associationAliasIsName) {
+        return QueryCompiler.rowMapperProjection(dialect, type, associationAliasIsName);
+    }
+
     // --------------------------------------------------------------- splice primitives
 
     /** Qualifies a table-local column by its owner table, or the schema's root table. */

@@ -131,6 +131,7 @@ public final class QueryCompiler {
             case QueryDefinition.SelectChildIds s -> selectChildIds(dialect, s.table(), s.idColumn(), s.fkColumn());
             case QueryDefinition.InsertColumns i -> insertColumns(dialect, i.table(), i.columns(), i.paramNames());
             case QueryDefinition.CorrelatedSort cs -> correlatedSort(dialect, cs.childTable(), cs.leafColumn(), cs.fkColumn(), cs.ownerTable(), cs.ownerIdColumn(), cs.ascending());
+            case QueryDefinition.SelectByFk s -> selectByFk(dialect, s.table(), s.whereColumn(), s.paramName(), s.projection());
             case QueryDefinition.Native nativeQuery -> nativeQuery.sql();
             case QueryDefinition.Criteria criteria -> {
                 Objects.requireNonNull(resolver, "resolver");
@@ -381,6 +382,32 @@ public final class QueryCompiler {
                 + " FROM " + dialect.quoteIdentifier(childTable)
                 + " WHERE " + dialect.quoteIdentifier(childTable) + "." + dialect.quoteIdentifier(fkColumn)
                 + " = " + dialect.quoteIdentifier(ownerTable) + "." + dialect.quoteIdentifier(ownerIdColumn) + ")";
+    }
+
+    /** Renders a child-table hydration SELECT. */
+    private static String selectByFk(SqlDialect dialect, String table, String whereColumn, String paramName, String projection) {
+        String proj = projection.isEmpty() ? "*" : projection;
+        return "SELECT " + proj + " FROM " + dialect.quoteIdentifier(table)
+                + " WHERE " + dialect.quoteIdentifier(whereColumn) + " = :" + paramName;
+    }
+
+    /**
+     * Renders the row-mapper projection of a type: each mapped column aliased to its property name
+     * (id/scalar) or, for an association, to its FK column name unless {@code associationAliasIsName}.
+     */
+    public static String rowMapperProjection(SqlDialect dialect, TypeDefinition type, boolean associationAliasIsName) {
+        List<String> cols = new ArrayList<>();
+        for (TypeDefinition.Prop prop : type.properties()) {
+            if (prop instanceof TypeDefinition.Prop.Id id) {
+                cols.add(dialect.quoteIdentifier(id.columnName()) + " AS " + dialect.quoteIdentifier(id.name()));
+            } else if (prop instanceof TypeDefinition.Prop.Scalar s) {
+                cols.add(dialect.quoteIdentifier(s.columnName()) + " AS " + dialect.quoteIdentifier(s.name()));
+            } else if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.fkColumn() != null) {
+                String alias = associationAliasIsName ? assoc.name() : assoc.fkColumn();
+                cols.add(dialect.quoteIdentifier(assoc.fkColumn()) + " AS " + dialect.quoteIdentifier(alias));
+            }
+        }
+        return String.join(", ", cols);
     }
 
     // ------------------------------------------------------------------- splice primitives

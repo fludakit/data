@@ -170,25 +170,26 @@ public final class QueryCompiler {
     public static SqlFragment fragment(TableSchema schema, SqlDialect dialect, QueryDefinition.Criteria model,
                                        Plan plan, String extraProjection) {
         boolean spliceJoins = !plan.joins().isEmpty();
-        boolean countMode = model instanceof QueryDefinition.Count || model instanceof QueryDefinition.Exists;
-        boolean deleteMode = model instanceof QueryDefinition.DeleteWhere;
         SqlFragment fragment = new SqlFragment().table(schema.tableName()).join(plan.joins());
-        if (countMode) {
-            // COUNT collapses to COUNT(*), or to COUNT(DISTINCT <id>) when the query asks for
-            // distinct rows: a root row is identified by its id, and COUNT(DISTINCT *) is not SQL.
-            fragment.keyword("SELECT").projection(distinct(model) && schema.idColumn() != null
-                    ? "COUNT(DISTINCT " + dialect.quoteIdentifier(schema.idColumn()) + ")"
-                    : "COUNT(*)");
-        } else if (deleteMode) {
-            fragment.keyword("DELETE");
-        } else {
-            // Joined find: every root column is qualified by the root table. Unqualified bare names
-            // become ambiguous the moment a join adds a table sharing a column name (e.g. the definition's
-            // own "id"), and a full-materialisation read joins exactly such a table. Qualifying keeps
-            // each label = its physical column, so the generated row mapper still reads it by name.
-            fragment.keyword("SELECT")
-                    .projection(rootProjection(dialect, schema, spliceJoins, extraProjection))
-                    .distinct(distinct(model));
+        switch (model) {
+            case QueryDefinition.Count count -> {
+                // COUNT collapses to COUNT(*), or to COUNT(DISTINCT <id>) when the query asks for
+                // distinct rows: a root row is identified by its id, and COUNT(DISTINCT *) is not SQL.
+                fragment.keyword("SELECT").projection(count.distinct() && schema.idColumn() != null
+                        ? "COUNT(DISTINCT " + dialect.quoteIdentifier(schema.idColumn()) + ")"
+                        : "COUNT(*)");
+            }
+            case QueryDefinition.Exists ignored -> fragment.keyword("SELECT").projection("COUNT(*)");
+            case QueryDefinition.DeleteWhere ignored -> fragment.keyword("DELETE");
+            case QueryDefinition.Read read -> {
+                // Joined find: every root column is qualified by the root table. Unqualified bare names
+                // become ambiguous the moment a join adds a table sharing a column name (e.g. the definition's
+                // own "id"), and a full-materialisation read joins exactly such a table. Qualifying keeps
+                // each label = its physical column, so the generated row mapper still reads it by name.
+                fragment.keyword("SELECT")
+                        .projection(rootProjection(dialect, schema, spliceJoins, extraProjection))
+                        .distinct(read.distinct());
+            }
         }
         for (Conjunct conjunct : plan.where()) {
             fragment.where(conjunct.sql(), conjunct.orJoined());
@@ -214,16 +215,6 @@ public final class QueryCompiler {
         return extraProjection == null || extraProjection.isEmpty()
                 ? columns
                 : columns + ", " + extraProjection;
-    }
-
-    /** {@code DISTINCT} is a fact only a read and a count carry; every other statement ignores it. */
-    private static boolean distinct(QueryDefinition.Criteria model) {
-        return switch (model) {
-            case QueryDefinition.Read read -> read.distinct();
-            case QueryDefinition.Count count -> count.distinct();
-            case QueryDefinition.Exists ignored -> false;
-            case QueryDefinition.DeleteWhere ignored -> false;
-        };
     }
 
     // ------------------------------------------------------------------- classic statements

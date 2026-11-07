@@ -36,16 +36,19 @@ that fails fast at build time rather than silently misbehaving at runtime.
 ### II. Domain-Driven Design Entity Model
 
 The entity programming model is defined by the project's own DDD annotations,
-not by arbitrary conventions: `@Entity` marks an object defined by identity;
-`@AggregateRoot` is the single entry point for modifying the objects it owns;
-`@ValueObject` is immutable and embedded into its parent table; `@Identity` marks
-the identifier field; `@Association` is a reference to an entity outside the
-aggregate, persisted as a foreign key only and MUST never cascade. These
-contracts (e.g. `@ValueObject` immutability, `@Association` rules) are enforced at
-compile time, not left to runtime.
+not by arbitrary conventions. `@AggregateRoot` is the aggregate boundary: it
+owns the full lifecycle of its to-one and to-many children (cascade save,
+update, and delete) and is the only type that manages domain events. `@Entity`
+owns only its own row plus its embedded value objects and element collections —
+it MUST NOT manage a to-many entity collection's or a to-one target's lifecycle;
+those are foreign-key-only. `@ValueObject` is immutable and embedded into its
+parent table; `@Identity` marks the identifier field; `@Association` is a
+foreign-key-only reference to an entity outside the aggregate and MUST never
+cascade. These contracts (immutability, association rules, lifecycle ownership)
+are enforced at compile time, not left to runtime.
 
-Rationale: The aggregate is the consistency boundary; cascading writes outside it
-would corrupt the ownership invariant.
+Rationale: The aggregate is the consistency and lifecycle boundary; an entity or
+association that cascades outside it would corrupt the ownership invariant.
 
 ### III. Jakarta Data Subset Conformance & Explicit Scope
 
@@ -79,8 +82,8 @@ interface and entity model into plans) → Plan (reify methods into structured p
 → Emit (render the generated CDI bean from those plans). SQL MUST be rendered exactly
 once in `fluda-data-core` (`SqlBuilder`/`QueryCompiler`), dialects MUST be pluggable,
 and emitters MUST NOT re-derive SQL per emitter. Dispatch MUST be polymorphic (no
-`instanceof` dispatch): `TypeDefinition` exposes a polymorphic `id()` and a
-`Prop.Visitor`.
+`instanceof` dispatch): `TypeDefinition` exposes a polymorphic `id()` and `asEntity()`,
+a sealed `IdentityAware` shape, and `Prop.Visitor` / `TypeDefinition.Visitor` visitors.
 
 Rationale: A single SQL source and polymorphic dispatch keep generated output
 consistent across emitters and dialects, preventing drift and duplicated logic.
@@ -120,4 +123,4 @@ redefined. The constitution version follows Semantic Versioning: MAJOR for
 backward-incompatible principle removals or redefinitions, MINOR for a new principle
 or materially expanded guidance, and PATCH for clarifications and wording fixes.
 
-**Version**: 1.0.0 | **Ratified**: 2026-11-06 | **Last Amended**: 2026-11-06
+**Version**: 1.1.0 | **Ratified**: 2026-11-06 | **Last Amended**: 2026-11-07

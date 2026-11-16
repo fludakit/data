@@ -4,11 +4,13 @@ import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.query.Connector;
 import io.github.fludakit.data.query.LimitSpec;
 import io.github.fludakit.data.query.Operator;
+import io.github.fludakit.data.query.Order;
 import io.github.fludakit.data.query.PagingMode;
 import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
 import io.github.fludakit.data.query.SortSpec;
+import io.github.fludakit.data.query.Window;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -67,8 +69,15 @@ class SqlBuilderBuildTest {
             case COUNT -> new QueryDefinition.Count(predicates, List.of(), distinct);
             case EXISTS -> new QueryDefinition.Exists(predicates, List.of());
             case DELETE -> new QueryDefinition.DeleteWhere(predicates, List.of());
-            default -> SqlBuilder.read(ResultKind.LIST, predicates, sorts, paging,
-                    new LimitSpec(limit, 0), distinct);
+            default -> {
+                Order order = sorts == null || sorts.isEmpty() ? Order.None.INSTANCE : Order.Static.of(sorts);
+                Window window = switch (paging == null ? PagingMode.NONE : paging) {
+                    case NONE -> new Window.None(new LimitSpec(limit, 0));
+                    case OFFSET -> new Window.Offset(0);
+                    case CURSOR -> new Window.Cursor(0);
+                };
+                yield new QueryDefinition.Read(ResultKind.LIST, predicates, List.of(), distinct, order, window);
+            }
         };
     }
 

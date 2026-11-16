@@ -6,12 +6,10 @@ import io.github.fludakit.data.metadata.JoinEdge;
 import io.github.fludakit.data.metadata.NonLocalAttributePathException;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.query.Operator;
-import io.github.fludakit.data.query.Order;
 import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
 import io.github.fludakit.data.query.SortSpec;
-import io.github.fludakit.data.query.Window;
 
 import java.util.Collection;
 import java.util.List;
@@ -360,19 +358,6 @@ public final class SqlBuilder {
 
     public static List<String> paramNames(Operator operator, String param) {
         return QueryCompiler.paramNames(operator, param);
-    }
-
-    /** Builds a {@link QueryDefinition.Read} from legacy paging/sorts for tests and emitters. */
-    public static QueryDefinition.Read read(ResultKind resultKind, List<Predicate> predicates,
-                                            List<SortSpec> sorts, io.github.fludakit.data.query.PagingMode paging,
-                                            io.github.fludakit.data.query.LimitSpec limit, boolean distinct) {
-        Order order = sorts == null || sorts.isEmpty() ? Order.None.INSTANCE : Order.Static.of(sorts);
-        Window window = switch (paging == null ? io.github.fludakit.data.query.PagingMode.NONE : paging) {
-            case NONE -> new Window.None(limit == null ? io.github.fludakit.data.query.LimitSpec.none() : limit);
-            case OFFSET -> new Window.Offset(0);
-            case CURSOR -> new Window.Cursor(0);
-        };
-        return new QueryDefinition.Read(resultKind, predicates, List.of(), distinct, order, window);
     }
 
     private TypeDefinition requireTypeModel() {

@@ -12,7 +12,6 @@ import io.github.fludakit.data.processor.context.RepositoryContext;
 import io.github.fludakit.data.processor.support.ExceptionTranslation;
 import io.github.fludakit.data.processor.support.MethodOverrides;
 import io.github.fludakit.data.processor.context.MethodContext.Operation;
-import io.github.fludakit.data.query.PagingMode;
 import io.github.fludakit.data.query.ParamBinding;
 import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.QueryDefinition;
@@ -90,11 +89,10 @@ public final class WriteEmitter {
         if (op == Operation.UPDATE) {
             return emitUpdate(ctx, method);
         }
-        if (op == Operation.DELETE && method.predicates().isEmpty()) {
+        if (op == Operation.DELETE && method.query() instanceof QueryDefinition.DeleteById) {
             return emitDeleteById(ctx, method);
         }
-        if (op == Operation.DELETE && !method.predicates().isEmpty()
-                && method.pagingMode() == PagingMode.NONE) {
+        if (op == Operation.DELETE && method.query() instanceof QueryDefinition.DeleteWhere) {
             return emitDeleteBy(ctx, method);
         }
         return null;
@@ -745,8 +743,7 @@ public final class WriteEmitter {
         TypeDefinition entity = ctx.entity();
         SqlBuilder sqlBuilder = new SqlBuilder(entity);
         sqlBuilder.dialect(dialect);
-        String sql = sqlBuilder.sql(new QueryDefinition.DeleteWhere(
-                method.predicates(), List.of(), method.resultKind()));
+        String sql = sqlBuilder.sql(method.query());
         String constName = ctx.registerConstant(FindEmitter.toSqlConstantName(method.name()), sql);
 
         CodeBlock.Builder body = CodeBlock.builder();

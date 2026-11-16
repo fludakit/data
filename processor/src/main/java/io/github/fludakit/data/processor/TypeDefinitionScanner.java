@@ -452,20 +452,28 @@ final class TypeDefinitionScanner {
     }
 
     private TypeDefinition resolveDefinition(TypeDefinition definition, String ownerFqn) {
-        if (!(definition instanceof TypeDefinition.IdentityAware entityLike)) {
+        List<TypeDefinition.Prop.Association> associations;
+        List<TypeDefinition.Prop.EntityCollection> entityCollections;
+        if (definition instanceof TypeDefinition.Entity entity) {
+            associations = entity.associations();
+            entityCollections = entity.entityCollections();
+        } else if (definition instanceof TypeDefinition.Aggregate aggregate) {
+            associations = aggregate.associations();
+            entityCollections = aggregate.entityCollections();
+        } else {
             return definition;
         }
 
         List<TypeDefinition.Prop.Association> resolvedAssociations = new ArrayList<>();
         boolean changed = false;
-        for (TypeDefinition.Prop.Association assoc : entityLike.associations()) {
+        for (TypeDefinition.Prop.Association assoc : associations) {
             TypeDefinition.Prop.Association resolved = resolveAssociation(assoc, ownerFqn);
             resolvedAssociations.add(resolved);
             if (resolved != assoc) changed = true;
         }
 
         List<TypeDefinition.Prop.EntityCollection> resolvedEntityCollections = new ArrayList<>();
-        for (TypeDefinition.Prop.EntityCollection ec : entityLike.entityCollections()) {
+        for (TypeDefinition.Prop.EntityCollection ec : entityCollections) {
             TypeDefinition.Prop.EntityCollection resolved = resolveEntityCollection(ec, ownerFqn);
             resolvedEntityCollections.add(resolved);
             if (resolved != ec) changed = true;

@@ -2,6 +2,7 @@ package io.github.fludakit.data.metadata;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -222,14 +223,14 @@ class TypeDefinitionTest {
 
     @Test
     void identityAndLifecycleHelpers() {
-        assertTrue(BOOK.hasId());
+        assertInstanceOf(TypeDefinition.Aggregate.class, BOOK);
         assertTrue(BOOK.ownsAggregateLifecycle());
         assertEquals("id", BOOK.idColumn());
 
-        assertTrue(AUTHOR.hasId());
+        assertInstanceOf(TypeDefinition.Entity.class, AUTHOR);
         assertFalse(AUTHOR.ownsAggregateLifecycle());
 
-        assertFalse(ADDRESS.hasId());
+        assertInstanceOf(TypeDefinition.ValueObject.class, ADDRESS);
         assertFalse(ADDRESS.ownsAggregateLifecycle());
         assertNull(ADDRESS.idColumn());
     }

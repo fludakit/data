@@ -102,7 +102,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         // Generate row mappers for entities and aggregates
         for (String fqn : typeGraph.managedEntities()) {
             TypeDefinition def = typeGraph.get(fqn);
-            if (def != null && def.hasId()) {
+            if (def instanceof TypeDefinition.Entity || def instanceof TypeDefinition.Aggregate) {
                 emitter.emit(def);
             }
         }
@@ -110,7 +110,7 @@ public class RepositoryProcessor extends AbstractProcessor {
         // Generate row mappers for value objects used in element collections
         for (String fqn : typeGraph.elementCollectionValueObjects()) {
             TypeDefinition def = typeGraph.get(fqn);
-            if (def != null && !def.hasId()) {
+            if (def instanceof TypeDefinition.ValueObject) {
                 emitter.emit(def);
             }
         }

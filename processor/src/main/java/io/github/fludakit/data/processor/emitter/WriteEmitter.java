@@ -11,7 +11,7 @@ import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.RepositoryContext;
 import io.github.fludakit.data.processor.support.ExceptionTranslation;
 import io.github.fludakit.data.processor.support.MethodOverrides;
-import io.github.fludakit.data.query.Operation;
+import io.github.fludakit.data.processor.context.MethodContext.Operation;
 import io.github.fludakit.data.query.PagingMode;
 import io.github.fludakit.data.query.ParamBinding;
 import io.github.fludakit.data.query.Predicate;
@@ -114,7 +114,7 @@ public final class WriteEmitter {
         boolean hasUpsert = dialect.upsertForm() != UpsertForm.NONE;
 
         // Compute the mutation plan for cascade-driven code generation
-        MutationPlan plan = MutationPlanAnalyzer.analyze(ctx.entity(), method.operation());
+        MutationPlan plan = MutationPlanAnalyzer.analyze(ctx.entity(), method.mutationType());
 
         // Register SQL constants
         String upsertSql;
@@ -604,7 +604,7 @@ public final class WriteEmitter {
         IdStrategy strategy = idStrategy(idTypeFqn);
 
         // Compute the mutation plan for cascade-driven code generation
-        MutationPlan plan = MutationPlanAnalyzer.analyze(ctx.entity(), method.operation());
+        MutationPlan plan = MutationPlanAnalyzer.analyze(ctx.entity(), method.mutationType());
 
         SqlBuilder sb = new SqlBuilder(entity);
         sb.dialect(dialect);
@@ -672,7 +672,7 @@ public final class WriteEmitter {
                 : method.parameters().getFirst().getSimpleName().toString();
 
         // Compute the mutation plan for cascade-driven code generation
-        MutationPlan plan = MutationPlanAnalyzer.analyze(ctx.entity(), method.operation());
+        MutationPlan plan = MutationPlanAnalyzer.analyze(ctx.entity(), method.mutationType());
 
         SqlBuilder sb = new SqlBuilder(entity);
         sb.dialect(dialect);
@@ -710,7 +710,7 @@ public final class WriteEmitter {
         TypeDefinition entity = ctx.entity();
 
         // Compute the mutation plan for cascade-driven code generation
-        MutationPlan plan = MutationPlanAnalyzer.analyze(ctx.entity(), method.operation());
+        MutationPlan plan = MutationPlanAnalyzer.analyze(ctx.entity(), method.mutationType());
 
         SqlBuilder sb = new SqlBuilder(entity);
         sb.dialect(dialect);
@@ -753,7 +753,7 @@ public final class WriteEmitter {
 
         boolean isDeleteById = isDeleteByIdPredicate(entity, method);
         String parentIdExpr = isDeleteById ? idParamName(method, entity) : null;
-        MutationPlan plan = isDeleteById ? MutationPlanAnalyzer.analyze(entity, method.operation()) : null;
+        MutationPlan plan = isDeleteById ? MutationPlanAnalyzer.analyze(entity, method.mutationType()) : null;
 
         if (plan != null) {
             emitCascadePreDelete(body, ctx, plan, parentIdExpr);

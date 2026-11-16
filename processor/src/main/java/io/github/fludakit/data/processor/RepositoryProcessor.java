@@ -2,15 +2,15 @@ package io.github.fludakit.data.processor;
 
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.context.RepositoryContext;
-import io.github.fludakit.data.processor.emitter.MetamodelEmitter;
-import io.github.fludakit.data.processor.emitter.RowMapperEmitter;
 import io.github.fludakit.data.processor.support.Diagnostics;
+import io.github.fludakit.data.processor.writer.MetamodelWriter;
+import io.github.fludakit.data.processor.writer.RepositoryWriter;
+import io.github.fludakit.data.processor.writer.RowMapperWriter;
 import io.github.fludakit.data.sql.H2Dialect;
 import io.github.fludakit.data.sql.SqlDialect;
 
 import javax.annotation.processing.AbstractProcessor;
 import javax.annotation.processing.Filer;
-import javax.annotation.processing.Messager;
 import javax.annotation.processing.ProcessingEnvironment;
 import javax.annotation.processing.RoundEnvironment;
 import javax.annotation.processing.SupportedAnnotationTypes;
@@ -59,7 +59,7 @@ public class RepositoryProcessor extends AbstractProcessor {
     public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
         if (roundEnv.processingOver()) return false;
 
-        // Phase 1: Scan types into the shared graph
+        // Phase 1: Scan annotated types into the shared TypeGraph
         try {
             new TypeDefinitionScanner(types, elements, diagnostics, typeGraph).scanRound(roundEnv);
         } catch (RuntimeException e) {
@@ -67,18 +67,21 @@ public class RepositoryProcessor extends AbstractProcessor {
             diagnostics.error("fluda-data: " + msg, null);
         }
 
-        // Phase 2: Visit repositories — resolve each context, then emit its members
+        // Phase 2: Write graph-owned artifacts once from TypeGraph (before any repository work)
+        writeRowMappers();
+        writeMetamodels();
+
+        // Phase 3: Analyze each @Repository against the graph, emit members, write Repository_
         for (Element element : roundEnv.getElementsAnnotatedWith(jakarta.data.repository.Repository.class)) {
             if (element.getKind() != javax.lang.model.element.ElementKind.INTERFACE) continue;
             TypeElement repository = (TypeElement) element;
             try {
-                RepositoryVisitor visitor = new RepositoryVisitor(repository, types, elements, diagnostics, filer, typeGraph, dialect);
-                // Phase 2a: resolve the repository into its context (entity, methods, generated helpers)
-                RepositoryContext ctx = visitor.resolveContext();
+                RepositoryAnalyzer analyzer = new RepositoryAnalyzer(
+                        repository, types, elements, diagnostics, typeGraph, dialect);
+                RepositoryContext ctx = analyzer.resolveContext();
                 if (ctx == null) continue;
-                // Phase 2b: resolve the context into generated member methods, then write the artifact
-                visitor.emitRepositoryMembers(ctx);
-                new RepositoryEmitter(repository, ctx, visitor.jdbcClientAccessor(), filer, diagnostics).emit();
+                analyzer.emitRepositoryMembers(ctx);
+                new RepositoryWriter(repository, ctx, analyzer.jdbcClientAccessor(), filer, diagnostics).write();
             } catch (RuntimeException e) {
                 String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getName();
                 diagnostics.error(
@@ -86,42 +89,36 @@ public class RepositoryProcessor extends AbstractProcessor {
                     repository);
             }
         }
-        
-        // Phase 3: Generate row mappers for all entity types (including association targets)
-        generateMissingRowMappers();
-        
-        // Phase 4: Generate metamodels for all value objects (needed for get() path composition)
-        generateValueObjectMetamodels();
-        
+
         return false;
     }
-    
-    private void generateMissingRowMappers() {
-        RowMapperEmitter emitter = new RowMapperEmitter(types, elements, filer);
 
-        // Generate row mappers for entities and aggregates
+    /** Row mappers for managed entities/aggregates and element-collection value objects. */
+    private void writeRowMappers() {
+        RowMapperWriter writer = new RowMapperWriter(types, elements, filer);
+
         for (String fqn : typeGraph.managedEntities()) {
             TypeDefinition def = typeGraph.get(fqn);
             if (def instanceof TypeDefinition.Entity || def instanceof TypeDefinition.Aggregate) {
-                emitter.emit(def);
+                writer.write(def);
             }
         }
 
-        // Generate row mappers for value objects used in element collections
         for (String fqn : typeGraph.elementCollectionValueObjects()) {
             TypeDefinition def = typeGraph.get(fqn);
             if (def instanceof TypeDefinition.ValueObject) {
-                emitter.emit(def);
+                writer.write(def);
             }
         }
     }
 
-    private void generateValueObjectMetamodels() {
-        MetamodelEmitter emitter = new MetamodelEmitter(filer, diagnostics);
-        for (String fqn : typeGraph.valueObjects()) {
+    /** Static metamodels for every registered type (entities, aggregates, value objects). */
+    private void writeMetamodels() {
+        MetamodelWriter writer = new MetamodelWriter(filer, diagnostics);
+        for (String fqn : typeGraph.nodes()) {
             TypeDefinition def = typeGraph.get(fqn);
             if (def != null) {
-                emitter.emit(def);
+                writer.write(def);
             }
         }
     }

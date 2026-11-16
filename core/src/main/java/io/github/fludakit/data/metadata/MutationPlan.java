@@ -6,8 +6,7 @@ import java.util.Objects;
 /**
  * The immutable result of analyzing a write method's cascade requirements.
  *
- * <p>Built by {@code MutationPlanAnalyzer} (processor) from a {@code TypeDefinition} and
- * {@code Operation}. Consumed by {@code WriteEmitter} (processor) for cascade-aware code generation.</p>
+ * <p>Built by {@code MutationPlanAnalyzer} (processor) from a {@code TypeDefinition} and {@link MutationType}. Consumed by {@code WriteEmitter} (processor) for cascade-aware code generation.</p>
  *
  * <p>Carries everything the emitter needs to decide what to mutate, in what order, and with what
  * mode.</p>

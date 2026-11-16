@@ -8,12 +8,12 @@ import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.JoinEdge;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.context.MethodContext;
+import io.github.fludakit.data.processor.context.MethodContext.Operation;
 import io.github.fludakit.data.processor.context.RepositoryContext;
 import io.github.fludakit.data.processor.support.ExceptionTranslation;
 import io.github.fludakit.data.processor.support.MethodOverrides;
 import io.github.fludakit.data.query.LikePattern;
 import io.github.fludakit.data.query.LimitSpec;
-import io.github.fludakit.data.query.Operation;
 import io.github.fludakit.data.query.ParamBinding;
 import io.github.fludakit.data.query.PagingMode;
 import io.github.fludakit.data.query.Predicate;
@@ -34,16 +34,15 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Generates method implementations for finder, count, exists, and deleteBy methods.
+ * Generates method implementations for finder, count, exists, and {@code @Query} methods.
  *
- * <p>Dispatches on {@link Operation} and {@link PagingMode}:</p>
+ * <p>Dispatches on {@link QueryDefinition} (+ {@link PagingMode} for reads):</p>
  * <ul>
- *   <li>{@code FIND + NONE} &rarr; plain finder returning a single entity, list, set, etc.</li>
- *   <li>{@code FIND + OFFSET} &rarr; offset-paged finder returning {@code Page<E>}</li>
- *   <li>{@code FIND + CURSOR} &rarr; cursor-paged finder returning {@code CursoredPage<E>}</li>
- *   <li>{@code COUNT} &rarr; count query returning {@code long}</li>
- *   <li>{@code EXISTS} &rarr; existence check returning {@code boolean}</li>
- *   <li>{@code DELETE} (with predicates) &rarr; bulk delete returning {@code long}</li>
+ *   <li>{@link QueryDefinition.Read} + NONE &rarr; plain finder</li>
+ *   <li>{@link QueryDefinition.Read} + OFFSET &rarr; offset-paged finder</li>
+ *   <li>{@link QueryDefinition.Read} + CURSOR &rarr; cursor-paged finder</li>
+ *   <li>{@link QueryDefinition.Count} / {@link QueryDefinition.Exists}</li>
+ *   <li>{@link QueryDefinition.Native} &rarr; custom {@code @Query}</li>
  * </ul>
  */
 public final class FindEmitter {
@@ -85,39 +84,24 @@ public final class FindEmitter {
      * @return the method spec, or {@code null} if the method is not handled by this emitter
      */
     public MethodSpec emit(RepositoryContext ctx, MethodContext method) {
-        // Custom @Query methods
-        if (method.customSql() != null) {
+        QueryDefinition query = method.query();
+
+        if (query instanceof QueryDefinition.Native) {
             return emitCustomQuery(ctx, method);
         }
-
-        Operation op = method.operation();
-        PagingMode pm = method.pagingMode();
-
-        // Plain finder
-        if (op == Operation.FIND && pm == PagingMode.NONE) {
-            return emitPlainFinder(ctx, method);
-        }
-
-        // Offset-paged finder
-        if (op == Operation.FIND && pm == PagingMode.OFFSET) {
-            return emitOffsetPagedFinder(ctx, method);
-        }
-
-        // Cursor-paged finder
-        if (op == Operation.FIND && pm == PagingMode.CURSOR) {
-            return emitCursorPagedFinder(ctx, method);
-        }
-
-        // Count
-        if (op == Operation.COUNT) {
+        if (query instanceof QueryDefinition.Count) {
             return emitCount(ctx, method);
         }
-
-        // Exists
-        if (op == Operation.EXISTS) {
+        if (query instanceof QueryDefinition.Exists) {
             return emitExists(ctx, method);
         }
-
+        if (query instanceof QueryDefinition.Read) {
+            return switch (method.pagingMode()) {
+                case NONE -> emitPlainFinder(ctx, method);
+                case OFFSET -> emitOffsetPagedFinder(ctx, method);
+                case CURSOR -> emitCursorPagedFinder(ctx, method);
+            };
+        }
         return null;
     }
 

@@ -1,4 +1,4 @@
-package io.github.fludakit.data.processor.emitter;
+package io.github.fludakit.data.processor.writer;
 
 import com.squareup.javapoet.AnnotationSpec;
 import com.squareup.javapoet.ClassName;
@@ -25,7 +25,7 @@ import java.util.Set;
  * Path composition uses the {@code get()} pattern: {@code _Order.customer.get(_Customer.name)}
  * produces a path-scoped attribute with combined path {@code "customer.name"}.</p>
  */
-public final class MetamodelEmitter {
+public final class MetamodelWriter {
 
     private static final String METAMODEL_PACKAGE = "io.github.fludakit.data.metamodel";
     private static final String PROCESSOR_FQN = "io.github.fludakit.data.processor.RepositoryProcessor";
@@ -84,12 +84,12 @@ public final class MetamodelEmitter {
     private final Filer filer;
     private final Diagnostics diagnostics;
 
-    public MetamodelEmitter(Filer filer, Diagnostics diagnostics) {
+    public MetamodelWriter(Filer filer, Diagnostics diagnostics) {
         this.filer = filer;
         this.diagnostics = diagnostics;
     }
 
-    public void emit(TypeDefinition entity) {
+    public void write(TypeDefinition entity) {
         String typeFqn = entity.typeName();
         String packageName = packageNameOf(typeFqn);
         String simpleName = simpleNameOf(typeFqn);

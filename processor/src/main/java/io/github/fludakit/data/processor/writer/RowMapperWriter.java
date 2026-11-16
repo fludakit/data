@@ -1,4 +1,4 @@
-package io.github.fludakit.data.processor.emitter;
+package io.github.fludakit.data.processor.writer;
 
 import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.CodeBlock;
@@ -26,10 +26,10 @@ import java.util.Set;
  *
  * <p>Eligibility: an entity is eligible only if all its props are JDBC-safe (scalars, enums,
  * or embedded value objects). Entities with {@link TypeDefinition.Prop.EntityCollection},
- * or {@link TypeDefinition.Prop.ElementCollection} are NOT eligible and {@link #emit(TypeDefinition)} returns
+ * or {@link TypeDefinition.Prop.ElementCollection} are NOT eligible and {@link #write(TypeDefinition)} returns
  * {@code null}.</p>
  */
-public final class RowMapperEmitter {
+public final class RowMapperWriter {
 
     private static final String ROW_MAPPER_FQN = "io.github.fludakit.jdbc.RowMapper";
     private static final ClassName RESULT_SET = ClassName.get("java.sql", "ResultSet");
@@ -55,19 +55,27 @@ public final class RowMapperEmitter {
     private final Elements elements;
     private final Filer filer;
 
-    public RowMapperEmitter(Types types, Elements elements, Filer filer) {
+    public RowMapperWriter(Types types, Elements elements, Filer filer) {
         this.types = types;
         this.elements = elements;
         this.filer = filer;
     }
 
     /**
+     * Derives the row-mapper {@link ClassName} for a mapped type without writing a file.
+     * Convention: {@code <package>.<SimpleName>RowMapper}.
+     */
+    public static ClassName rowMapperClassName(String typeFqn) {
+        return ClassName.get(packageNameOf(typeFqn), simpleNameOf(typeFqn) + "RowMapper");
+    }
+
+    /**
      * Generates a row mapper for the given entity or value-object type mapping.
      *
      * @param mapping the type mapping to generate a row mapper for
-     * @return the {@link ClassName} of the generated row mapper, or {@code null} if not eligible
+     * @return the {@link ClassName} of the generated row mapper, or {@code null} if writing failed
      */
-    public ClassName emit(TypeDefinition mapping) {
+    public ClassName write(TypeDefinition mapping) {
         String typeFqn = mapping.typeName();
         String packageName = packageNameOf(typeFqn);
         String simpleName = simpleNameOf(typeFqn);

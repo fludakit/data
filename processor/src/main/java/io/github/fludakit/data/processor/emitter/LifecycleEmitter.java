@@ -10,7 +10,7 @@ import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.RepositoryContext;
 import io.github.fludakit.data.processor.support.ExceptionTranslation;
 import io.github.fludakit.data.processor.support.MethodOverrides;
-import io.github.fludakit.data.query.Operation;
+import io.github.fludakit.data.processor.context.MethodContext.Operation;
 
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.type.DeclaredType;

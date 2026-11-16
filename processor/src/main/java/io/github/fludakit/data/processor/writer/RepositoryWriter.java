@@ -1,4 +1,4 @@
-package io.github.fludakit.data.processor;
+package io.github.fludakit.data.processor.writer;
 
 import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.FieldSpec;
@@ -16,13 +16,13 @@ import java.io.IOException;
 import java.util.Map;
 
 /**
- * Writes the generated {@code Repository_} skeleton for a resolved repository: the JDBC client
- * field, the SQL constants, the generated member methods, and the optional {@code JdbcClient} accessor.
+ * Writes the generated {@code Repository_} compilation unit for a resolved repository: JDBC client
+ * field, SQL constants, member methods, and the optional {@code JdbcClient} accessor.
  *
- * <p>Started by the host — {@link RepositoryProcessor} — once a repository has been resolved, so the
- * visitor stays a pure resolution step and the writing of generated artifacts is an emission concern.
+ * <p>File writing only — method {@code MethodSpec}s are produced by emitters and collected on
+ * {@link RepositoryContext} before this writer runs.</p>
  */
-final class RepositoryEmitter {
+public final class RepositoryWriter {
 
     private final TypeElement repository;
     private final RepositoryContext ctx;
@@ -30,8 +30,8 @@ final class RepositoryEmitter {
     private final Filer filer;
     private final Diagnostics diagnostics;
 
-    RepositoryEmitter(TypeElement repository, RepositoryContext ctx, ExecutableElement jdbcClientAccessor,
-                       Filer filer, Diagnostics diagnostics) {
+    public RepositoryWriter(TypeElement repository, RepositoryContext ctx, ExecutableElement jdbcClientAccessor,
+                            Filer filer, Diagnostics diagnostics) {
         this.repository = repository;
         this.ctx = ctx;
         this.jdbcClientAccessor = jdbcClientAccessor;
@@ -39,7 +39,7 @@ final class RepositoryEmitter {
         this.diagnostics = diagnostics;
     }
 
-    void emit() {
+    public void write() {
         String repoSimpleName = repository.getSimpleName().toString();
         ClassName repoClassName = ClassName.get(repository);
         ClassName generatedName = ClassName.get(

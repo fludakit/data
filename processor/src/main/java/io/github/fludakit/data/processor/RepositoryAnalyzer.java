@@ -768,7 +768,7 @@ final class RepositoryAnalyzer {
     // ── QueryDefinition assembly ─────────────────────────────────────────
 
     private MethodContext methodContext(ExecutableElement method, String methodName, Operation operation, QueryDefinition query) {
-        return new MethodContext(method, methodName, operation, method.getParameters(), query);
+        return new MethodContext(method, methodName, operation, query);
     }
 
     /**

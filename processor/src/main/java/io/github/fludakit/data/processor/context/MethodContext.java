@@ -2,14 +2,11 @@ package io.github.fludakit.data.processor.context;
 
 import io.github.fludakit.data.metadata.MutationPlan.MutationType;
 import io.github.fludakit.data.metadata.TypeDefinition;
-import io.github.fludakit.data.query.Order;
-import io.github.fludakit.data.query.PagingMode;
 import io.github.fludakit.data.query.ParamBinding;
 import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
 import io.github.fludakit.data.query.SortSpec;
-import io.github.fludakit.data.query.Window;
 
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.VariableElement;
@@ -21,7 +18,8 @@ import java.util.List;
  * Processor binding for one repository method: the lang.model element, lifecycle
  * {@link Operation}, and the pure {@link QueryDefinition} plan.
  *
- * <p>Query shape lives only on {@link #query()}. Accessors below are projections for emitters.</p>
+ * <p>Query shape lives only on {@link #query()}. Thin projections below are for emitter
+ * convenience — they do not store a second copy of the plan.</p>
  */
 public final class MethodContext {
 
@@ -37,23 +35,24 @@ public final class MethodContext {
     private final ExecutableElement method;
     private final String name;
     private final Operation operation;
-    private final List<? extends VariableElement> parameters;
     private final QueryDefinition query;
 
-    public MethodContext(ExecutableElement method, String name, Operation operation,
-                         List<? extends VariableElement> parameters, QueryDefinition query) {
+    public MethodContext(ExecutableElement method, String name, Operation operation, QueryDefinition query) {
         this.method = method;
         this.name = name;
         this.operation = operation;
-        this.parameters = parameters;
         this.query = query;
     }
 
     public ExecutableElement method() { return method; }
     public String name() { return name; }
     public Operation operation() { return operation; }
-    public List<? extends VariableElement> parameters() { return parameters; }
     public QueryDefinition query() { return query; }
+
+    /** Method parameters — delegated from {@link #method()}, not stored separately. */
+    public List<? extends VariableElement> parameters() {
+        return method.getParameters();
+    }
 
     public ResultKind resultKind() {
         return query.resultKind();
@@ -75,35 +74,8 @@ public final class MethodContext {
         return query instanceof QueryDefinition.Read r ? r.sorts() : List.of();
     }
 
-    public boolean distinct() {
-        return switch (query) {
-            case QueryDefinition.Read r -> r.distinct();
-            case QueryDefinition.Count c -> c.distinct();
-            default -> false;
-        };
-    }
-
-    public PagingMode pagingMode() {
-        if (!(query instanceof QueryDefinition.Read r)) {
-            return PagingMode.NONE;
-        }
-        return switch (r.window()) {
-            case Window.Offset ignored -> PagingMode.OFFSET;
-            case Window.Cursor ignored -> PagingMode.CURSOR;
-            default -> PagingMode.NONE;
-        };
-    }
-
     public String customSql() {
         return query instanceof QueryDefinition.Native n ? n.sql() : null;
-    }
-
-    public Order order() {
-        return query instanceof QueryDefinition.Read r ? r.order() : Order.None.INSTANCE;
-    }
-
-    public Window window() {
-        return query instanceof QueryDefinition.Read r ? r.window() : Window.None.unpaged();
     }
 
     /** Maps write operations to {@link MutationType}; throws for non-write ops. */
@@ -128,6 +100,7 @@ public final class MethodContext {
      * entity's type name.</p>
      */
     public boolean firstParameterIsEntity(TypeDefinition entity) {
+        List<? extends VariableElement> parameters = parameters();
         if (parameters.isEmpty()) {
             return true;
         }

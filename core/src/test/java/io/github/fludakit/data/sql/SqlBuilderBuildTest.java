@@ -1,7 +1,5 @@
 package io.github.fludakit.data.sql;
 
-import io.github.fludakit.data.metadata.ColumnRef;
-import io.github.fludakit.data.metadata.TableSchema;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.query.Connector;
 import io.github.fludakit.data.query.LimitSpec;
@@ -20,27 +18,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * The SQL rendering table: {@link SqlBuilder}'s structured-query terminals ({@link SqlBuilder#select()},
- * {@link SqlBuilder#count()}, {@link SqlBuilder#delete()}) are the one SQL layout renderer, so every
- * shape the processor used to assemble by hand is pinned here byte-for-byte against the strings the
- * processor pins already lock. The legacy delegation, the joined shell, the EXISTS conjunct, the
- * aggregate sort term, delete mode and the paged base constant are each a case; a change to any byte
- * of this table is a SQL change.
+ * Pins {@link QueryCompiler#compile} → {@link SqlBuilder#sql(SqlFragment)} byte-for-byte.
  */
 class SqlBuilderBuildTest {
 
-    private static final TableSchema ORDER = new TableSchema() {
-        private final List<ColumnRef> columns = List.of(
-                new ColumnRef.Simple("id", "order_table"),
-                new ColumnRef.Simple("status", "order_table"),
-                new ColumnRef.Simple("customer_id", "order_table"));
-
-        @Override public String tableName() { return "order_table"; }
-        @Override public String idColumn() { return "id"; }
-        @Override public List<ColumnRef> columns() { return columns; }
-    };
-
-    /** The customer entity the to-one association points at. */
     private static final TypeDefinition.Entity CUSTOMER = new TypeDefinition.Entity(
             "demo.Customer", "customer",
             new TypeDefinition.Prop.Id("id", "Long", "id", TypeDefinition.Prop.Id.GeneratedType.IDENTITY),
@@ -48,7 +29,6 @@ class SqlBuilderBuildTest {
             List.of(new TypeDefinition.Prop.Scalar("name", "String", "name", true)),
             List.of(), List.of(), List.of(), List.of());
 
-    /** The line entity the one-to-many collection points at. */
     private static final TypeDefinition.Entity LINE = new TypeDefinition.Entity(
             "demo.Line", "line",
             new TypeDefinition.Prop.Id("id", "Long", "id", TypeDefinition.Prop.Id.GeneratedType.IDENTITY),
@@ -56,16 +36,11 @@ class SqlBuilderBuildTest {
             List.of(new TypeDefinition.Prop.Scalar("product", "java.lang.Long", "product", true)),
             List.of(), List.of(), List.of(), List.of());
 
-    /** The tag value object stored in the element-collection child table. */
     private static final TypeDefinition.ValueObject TAG = new TypeDefinition.ValueObject(
             "demo.Tag",
             List.of(new TypeDefinition.Prop.Scalar("label", "String", "label", true)),
             List.of(), List.of(), List.of(), List.of());
 
-    /**
-     * The stand-in entity the structured queries resolve paths against: one root table, a to-one
-     * association, and the to-many / element collections the existential and sort cases ride.
-     */
     private static final TypeDefinition.Entity ATTRIBUTES = new TypeDefinition.Entity(
             "demo.Order", "order_table",
             new TypeDefinition.Prop.Id("id", "Long", "id", TypeDefinition.Prop.Id.GeneratedType.IDENTITY),
@@ -79,61 +54,61 @@ class SqlBuilderBuildTest {
             List.of(new TypeDefinition.Prop.ElementCollection(
                     "tags", "java.util.List", TAG, "order_tags", "order_id")));
 
-    /** The rendering-under-test: the variant the operation names, carrying only what it can use. */
-    private static QueryDefinition.Criteria model(Operation operation, List<Predicate> predicates,
-                                                  List<SortSpec> sorts, PagingMode paging, int limit) {
+    private static QueryDefinition model(Operation operation, List<Predicate> predicates,
+                                         List<SortSpec> sorts, PagingMode paging, int limit) {
         return model(operation, predicates, sorts, paging, limit, false);
     }
 
-    private static QueryDefinition.Criteria model(Operation operation, List<Predicate> predicates,
-                                                  List<SortSpec> sorts, PagingMode paging, int limit,
-                                                  boolean distinct) {
+    private static QueryDefinition model(Operation operation, List<Predicate> predicates,
+                                         List<SortSpec> sorts, PagingMode paging, int limit,
+                                         boolean distinct) {
         return switch (operation) {
             case COUNT -> new QueryDefinition.Count(predicates, List.of(), distinct);
             case EXISTS -> new QueryDefinition.Exists(predicates, List.of());
             case DELETE -> new QueryDefinition.DeleteWhere(predicates, List.of());
-            default -> new QueryDefinition.Read(ResultKind.LIST, predicates, sorts, paging,
-                    new LimitSpec(limit, 0), List.of(), List.of(), distinct);
+            default -> SqlBuilder.read(ResultKind.LIST, predicates, sorts, paging,
+                    new LimitSpec(limit, 0), distinct);
         };
     }
 
-    /**
-     * {@code DISTINCT} is a fact only a read and a count carry: it is the one thing a method name can
-     * state that changes the projection rather than the criteria, so it rides from the parse to the
-     * renderer on those two variants.
-     */
+    private static String build(Operation operation, List<Predicate> predicates,
+                                List<SortSpec> sorts, PagingMode paging, int limit) {
+        return new SqlBuilder(ATTRIBUTES).sql(model(operation, predicates, sorts, paging, limit));
+    }
+
+    private static Predicate pred(Predicate predicate) {
+        return predicate;
+    }
+
     @Test
     void distinctFindSelectsDistinctRows() {
-        String sql = new SqlBuilder(ORDER, ATTRIBUTES, model(Operation.FIND,
+        String sql = new SqlBuilder(ATTRIBUTES).sql(model(Operation.FIND,
                 List.of(pred(Predicate.of("status", Operator.EQ, "status"))),
-                List.of(), PagingMode.NONE, 0, true)).select();
+                List.of(), PagingMode.NONE, 0, true));
         assertEquals("SELECT DISTINCT \"id\", \"status\", \"customer_id\" FROM \"order_table\""
                 + " WHERE \"status\" = :status", sql);
     }
 
     @Test
     void distinctCountCountsDistinctIdentifiers() {
-        // COUNT(DISTINCT *) is not valid SQL, so the row identity column carries the DISTINCT.
-        String sql = new SqlBuilder(ORDER, ATTRIBUTES, model(Operation.COUNT,
+        String sql = new SqlBuilder(ATTRIBUTES).sql(model(Operation.COUNT,
                 List.of(pred(Predicate.of("status", Operator.EQ, "status"))),
-                List.of(), PagingMode.NONE, 0, true)).count();
+                List.of(), PagingMode.NONE, 0, true));
         assertEquals("SELECT COUNT(DISTINCT \"id\") FROM \"order_table\" WHERE \"status\" = :status", sql);
     }
 
     @Test
     void lifecycleStatementsRenderStraightFromTheTableShape() {
-        // Insert / update / delete-by-id are QueryDefinition variants too, so one render maps them —
-        // but they carry no criteria, so they never reach the planner or the resolver.
         assertEquals("INSERT INTO \"order_table\" (\"id\", \"status\", \"customer_id\")"
                         + " VALUES (:id, :status, :customer)",
-                new SqlBuilder(ORDER, ATTRIBUTES).render(new QueryDefinition.Insert()));
+                new SqlBuilder(ATTRIBUTES).sql(new QueryDefinition.Insert()));
         assertEquals("INSERT INTO \"order_table\" (\"status\", \"customer_id\") VALUES (:status, :customer)",
-                new SqlBuilder(ORDER, ATTRIBUTES).render(new QueryDefinition.Insert(false)));
+                new SqlBuilder(ATTRIBUTES).sql(new QueryDefinition.Insert(false)));
         assertEquals("UPDATE \"order_table\" SET \"status\" = :status, \"customer_id\" = :customer"
                         + " WHERE \"id\" = :id",
-                new SqlBuilder(ORDER, ATTRIBUTES).render(new QueryDefinition.Update()));
+                new SqlBuilder(ATTRIBUTES).sql(new QueryDefinition.Update()));
         assertEquals("DELETE FROM \"order_table\" WHERE \"id\" = :id",
-                new SqlBuilder(ORDER).render(new QueryDefinition.DeleteById()));
+                new SqlBuilder(ATTRIBUTES).sql(new QueryDefinition.DeleteById()));
     }
 
     @Test
@@ -151,18 +126,12 @@ class SqlBuilderBuildTest {
 
     @Test
     void theClassicHelpersTakeDistinctAsAnExplicitFlagToo() {
-        // The no-join statements predate the model, so they keep the explicit flag the model now
-        // supplies — both spellings must render the same SQL.
         List<Predicate> where = List.of(Predicate.of("status", Operator.EQ, "status"));
         assertEquals("SELECT DISTINCT \"order_table_0\".\"id\", \"order_table_0\".\"status\", \"order_table_0\".\"customer_id\" FROM \"order_table\""
                         + " AS \"order_table_0\" WHERE \"status\" = :status",
-                QueryCompiler.selectBy(H2Dialect.INSTANCE, ORDER, where, List.of(), 0, null, true));
+                QueryCompiler.selectBy(H2Dialect.INSTANCE, ATTRIBUTES, where, List.of(), 0, null, true));
         assertEquals("SELECT COUNT(DISTINCT \"id\") FROM \"order_table\" WHERE \"status\" = :status",
-                QueryCompiler.countBy(H2Dialect.INSTANCE, ORDER, where, true));
-    }
-
-    private static Predicate pred(Predicate predicate) {
-        return predicate;
+                QueryCompiler.countBy(H2Dialect.INSTANCE, ATTRIBUTES, where, true));
     }
 
     @Test
@@ -177,7 +146,6 @@ class SqlBuilderBuildTest {
 
     @Test
     void mixedConnectorsKeepDeclarationOrder() {
-        // a AND b OR c is (a AND b) OR c by SQL precedence, so the terms render in the declared order.
         assertEquals("SELECT \"id\", \"status\", \"customer_id\" FROM \"order_table\""
                         + " WHERE \"status\" = :a AND \"customer_id\" = :b OR \"status\" = :c",
                 build(Operation.FIND,
@@ -189,8 +157,6 @@ class SqlBuilderBuildTest {
 
     @Test
     void orWithAnExistentialPredicateKeepsTheExistentialInPlace() {
-        // The all-AND path reorders existential conjuncts to the end; under OR that would change the
-        // meaning, so an OR-bearing query renders every conjunct in declaration order.
         String sql = build(Operation.FIND,
                 List.of(pred(Predicate.of("tags.label", Operator.EQ, "label", Connector.OR)),
                         pred(Predicate.of("status", Operator.EQ, "status"))),
@@ -199,17 +165,6 @@ class SqlBuilderBuildTest {
                 + " WHERE EXISTS (SELECT 1 FROM \"order_tags\" \"order_tags\""
                 + " WHERE \"order_tags\".\"order_id\" = \"order_table\".\"id\" AND \"order_tags\".\"label\" = :label)"
                 + " AND \"status\" = :status", sql);
-    }
-
-    private static String build(Operation operation, List<Predicate> predicates,
-                                List<SortSpec> sorts, PagingMode paging, int limit) {
-        SqlBuilder builder = new SqlBuilder(ORDER, ATTRIBUTES,
-                model(operation, predicates, sorts, paging, limit));
-        return switch (operation) {
-            case COUNT, EXISTS -> builder.count();
-            case DELETE -> builder.delete();
-            default -> builder.select();
-        };
     }
 
     @Test
@@ -230,10 +185,9 @@ class SqlBuilderBuildTest {
                 return " OFFSET " + offsetExpression;
             }
         };
-        String sql = new SqlBuilder(ORDER, ATTRIBUTES,
-                model(Operation.FIND,
-                        List.of(pred(Predicate.of("customer.name", Operator.EQ, "customer_name"))),
-                        List.of(), PagingMode.NONE, 0)).dialect(testDialect).select();
+        String sql = new SqlBuilder(ATTRIBUTES).dialect(testDialect).sql(model(Operation.FIND,
+                List.of(pred(Predicate.of("customer.name", Operator.EQ, "customer_name"))),
+                List.of(), PagingMode.NONE, 0));
         assertEquals("SELECT `order_table`.`id`, `order_table`.`status`, `order_table`.`customer_id`"
                         + " FROM `order_table` LEFT JOIN `customer` AS `customer`"
                         + " ON `order_table`.`customer_id` = `customer`.`id`"
@@ -321,8 +275,8 @@ class SqlBuilderBuildTest {
     void pagedModelRendersTheBaseConstantSortFreeAndLimitFree() {
         List<Predicate> preds = List.of(pred(Predicate.of("customer.name", Operator.EQ, "customer_name")));
         List<SortSpec> sorts = List.of(new SortSpec("customer.name", false, false));
-        String base = new SqlBuilder(ORDER, ATTRIBUTES, model(Operation.FIND, preds, sorts,
-                PagingMode.OFFSET, 10)).select();
+        String base = new SqlBuilder(ATTRIBUTES).sql(model(Operation.FIND, preds, sorts,
+                PagingMode.OFFSET, 10));
         assertEquals("SELECT \"order_table\".\"id\", \"order_table\".\"status\","
                         + " \"order_table\".\"customer_id\""
                         + " FROM \"order_table\""
@@ -333,10 +287,12 @@ class SqlBuilderBuildTest {
 
     @Test
     void extraProjectionRidesTheQualifiedFindShellOnly() {
-        String sql = new SqlBuilder(ORDER, ATTRIBUTES,
+        String sql = new SqlBuilder(ATTRIBUTES).sql(
                 model(Operation.FIND,
                         List.of(pred(Predicate.of("customer.name", Operator.EQ, "customer_name"))),
-                        List.of(), PagingMode.NONE, 0)).select("\"customer\".\"id\" AS \"customer_join_id\"");
+                        List.of(), PagingMode.NONE, 0),
+                List.of(),
+                "\"customer\".\"id\" AS \"customer_join_id\"");
         assertEquals("SELECT \"order_table\".\"id\", \"order_table\".\"status\","
                         + " \"order_table\".\"customer_id\","
                         + " \"customer\".\"id\" AS \"customer_join_id\""
@@ -349,7 +305,16 @@ class SqlBuilderBuildTest {
     @Test
     void bareProjectionCannotCarryExtraColumns() {
         IllegalStateException failure = assertThrows(IllegalStateException.class,
-                () -> new SqlBuilder(ORDER).qualifiedRootSelect(List.of(), false, "\"customer\".\"id\""));
+                () -> new SqlBuilder(ATTRIBUTES).qualifiedRootSelect(List.of(), false, "\"customer\".\"id\""));
         assertEquals("bare projection cannot carry extraProjection", failure.getMessage());
+    }
+
+    @Test
+    void prettyFormatRunsSqlFormatter() {
+        String sql = new SqlBuilder(ATTRIBUTES).format(SqlFormat.PRETTY).sql(model(Operation.FIND,
+                List.of(pred(Predicate.of("status", Operator.EQ, "status"))),
+                List.of(), PagingMode.NONE, 0));
+        assertEquals(SqlFormatter.format(
+                "SELECT \"id\", \"status\", \"customer_id\" FROM \"order_table\" WHERE \"status\" = :status"), sql);
     }
 }

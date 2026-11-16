@@ -71,7 +71,7 @@ class TypeDefinitionTest {
             List.of(new TypeDefinition.Prop.ElementCollection(
                     "tags", "java.util.List", TAG, "customer_tags", "customer_id")));
 
-    // ── TableSchema: the table's physical columns ─────────────────────────
+    // ── Physical table columns ────────────────────────────────────────────
 
     @Test
     void columnsListOwnPhysicalColumnsInDeclarationOrder() {

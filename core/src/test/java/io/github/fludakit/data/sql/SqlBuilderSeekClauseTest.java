@@ -1,7 +1,5 @@
 package io.github.fludakit.data.sql;
 
-import io.github.fludakit.data.metadata.ColumnRef;
-import io.github.fludakit.data.metadata.TableSchema;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -16,33 +14,19 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class SqlBuilderSeekClauseTest {
 
-    private static final TableSchema SCHEMA = new TableSchema() {
-        @Override
-        public String tableName() {
-            return "widget";
-        }
-
-        @Override
-        public String idColumn() {
-            return "id";
-        }
-
-        @Override
-        public List<ColumnRef> columns() {
-            return List.of(new ColumnRef.Simple("id", "widget"), new ColumnRef.Simple("name", "widget"));
-        }
-    };
+    private static SqlBuilder builder() {
+        return new SqlBuilder(H2Dialect.INSTANCE, SqlFormat.COMPACT);
+    }
 
     private static String seek(List<String> terms, List<Boolean> ascending, boolean forward) {
-        return new SqlBuilder(SCHEMA).seekClause(terms, ascending, forward);
+        return builder().seekClause(terms, ascending, forward);
     }
 
     @Test
     void pagedSeekStatementJoinsShellSeekAndOrderByWithNoLimit() {
         // The seek statement is assembled in core: shell + connector + null-guarded seek + ORDER BY,
         // ending at ORDER BY with NO limit clause (the runtime splices the literal LIMIT for the extra row).
-        SqlBuilder builder = new SqlBuilder(SCHEMA).dialect(H2Dialect.INSTANCE);
-        String next = builder.pagedSeekStatement("SELECT \"id\", \"name\" FROM \"widget\"", false,
+        String next = builder().pagedSeekStatement("SELECT \"id\", \"name\" FROM \"widget\"", false,
                 List.of("\"name\""), List.of(true), true, List.of("\"name\""), null, null);
         assertThat(next).isEqualTo(
                 "SELECT \"id\", \"name\" FROM \"widget\" WHERE (:cursor0 IS NULL OR ((\"name\" > :cursor0)))"
@@ -54,8 +38,7 @@ class SqlBuilderSeekClauseTest {
 
     @Test
     void pagedSeekStatementAndsTheSeekOntoAShellThatAlreadyHasWhere() {
-        SqlBuilder builder = new SqlBuilder(SCHEMA).dialect(H2Dialect.INSTANCE);
-        String prev = builder.pagedSeekStatement("SELECT \"id\" FROM \"widget\" WHERE \"id\" > 0", true,
+        String prev = builder().pagedSeekStatement("SELECT \"id\" FROM \"widget\" WHERE \"id\" > 0", true,
                 List.of("\"name\""), List.of(true), false, List.of("\"name\""), null, null);
         assertThat(prev).isEqualTo("SELECT \"id\" FROM \"widget\" WHERE \"id\" > 0"
                 + " AND (:cursor0 IS NULL OR ((\"name\" < :cursor0))) ORDER BY \"name\" ASC");
@@ -63,8 +46,7 @@ class SqlBuilderSeekClauseTest {
 
     @Test
     void pagedSeekStatementSeeksNothingWithoutTerms() {
-        SqlBuilder builder = new SqlBuilder(SCHEMA).dialect(H2Dialect.INSTANCE);
-        assertThat(builder.pagedSeekStatement("SELECT \"id\", \"name\" FROM \"widget\"", false,
+        assertThat(builder().pagedSeekStatement("SELECT \"id\", \"name\" FROM \"widget\"", false,
                 List.of(), List.of(), true, List.of(), null, null))
                 .isEqualTo("SELECT \"id\", \"name\" FROM \"widget\"");
     }
@@ -146,12 +128,11 @@ class SqlBuilderSeekClauseTest {
     void pagedSeekStatementWrapsToManyAggregateSeeksInADerivedTable() {
         // The to-many shape: the seek compares an aggregate subquery, so the statement wraps the
         // shell in a derived table and re-points the aggregate + root-qualified terms at the inner alias.
-        SqlBuilder builder = new SqlBuilder(SCHEMA).dialect(H2Dialect.INSTANCE);
         String shell = "SELECT \"id\", \"status\" FROM \"orders\""
                 + " LEFT JOIN \"lines\" AS lines_ ON lines_.\"order_id\" = \"orders\".\"id\"";
         String aggregate = "(SELECT MIN(\"lines_.\"product\") FROM \"lines\" \"lines\""
                 + " WHERE \"lines\".\"order_id\" = \"orders\".\"id\")";
-        String stmt = builder.pagedSeekStatement(shell, false,
+        String stmt = builder().pagedSeekStatement(shell, false,
                 List.of(aggregate, "\"orders\".\"id\""), List.of(true, true), true,
                 List.of("\"agg_0\"", "\"orders\".\"id\""), List.of(aggregate), "\"orders\"");
         assertThat(stmt).isEqualTo("SELECT inner_.* FROM (" + shell + ") AS inner_"
@@ -163,8 +144,7 @@ class SqlBuilderSeekClauseTest {
 
     @Test
     void pagedSeekStatementSkipsTheWrapForLocalKeySeeks() {
-        SqlBuilder builder = new SqlBuilder(SCHEMA).dialect(H2Dialect.INSTANCE);
-        String stmt = builder.pagedSeekStatement("SELECT \"id\", \"name\" FROM \"widget\"", false,
+        String stmt = builder().pagedSeekStatement("SELECT \"id\", \"name\" FROM \"widget\"", false,
                 List.of("\"name\""), List.of(true), true, List.of("\"name\""), null, null);
         assertThat(stmt).doesNotContain("inner_");
         assertThat(stmt).doesNotContain("FROM (");
@@ -175,12 +155,11 @@ class SqlBuilderSeekClauseTest {
         // A simple local key sorting BEFORE a to-many aggregate must not be mistaken for the aggregate:
         // the aggregate still aliases to inner_.agg_0 (its seek term matches the aggregate expression),
         // not by position; the bare local key stays unqualified in the outer derived table.
-        SqlBuilder builder = new SqlBuilder(SCHEMA).dialect(H2Dialect.INSTANCE);
         String shell = "SELECT \"orders\".\"status\", MIN(lines_.\"product\") AS \"agg_0\""
                 + " FROM \"orders\" LEFT JOIN \"lines\" AS lines_ ON lines_.\"order_id\" = \"orders\".\"id\""
                 + " GROUP BY \"orders\".\"status\"";
         String aggregate = "MIN(lines_.\"product\")";
-        String stmt = builder.pagedSeekStatement(shell, false,
+        String stmt = builder().pagedSeekStatement(shell, false,
                 List.of("\"status\"", aggregate, "\"orders\".\"id\""), List.of(true, true, true), true,
                 List.of("\"status\"", "\"agg_0\"", "\"orders\".\"id\""), List.of(aggregate), "\"orders\"");
         assertThat(stmt)

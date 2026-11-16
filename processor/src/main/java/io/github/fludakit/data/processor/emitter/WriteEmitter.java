@@ -119,18 +119,18 @@ public final class WriteEmitter {
         // Register SQL constants
         String upsertSql;
         if (hasUpsert) {
-            SqlBuilder sb = new SqlBuilder(entity, entity);
+            SqlBuilder sb = new SqlBuilder(entity);
             sb.dialect(dialect);
             upsertSql = sb.upsert();
         } else {
-            SqlBuilder sb = new SqlBuilder(entity, entity);
+            SqlBuilder sb = new SqlBuilder(entity);
             sb.dialect(dialect);
             upsertSql = sb.update();
         }
         String upsertConstName = ctx.registerConstant(
                 hasUpsert ? "UPSERT" : "UPDATE_FOR_SAVE", upsertSql);
 
-        SqlBuilder insertSb = new SqlBuilder(entity, entity);
+        SqlBuilder insertSb = new SqlBuilder(entity);
         insertSb.dialect(dialect);
         String insertSql = strategy == IdStrategy.APP_ASSIGNED
                 ? insertSb.insert(true)
@@ -225,7 +225,7 @@ public final class WriteEmitter {
 
         String childVar = entityVar + "." + assoc.name();
 
-        SqlBuilder childSb = new SqlBuilder(childEntity, childEntity);
+        SqlBuilder childSb = new SqlBuilder(childEntity);
         childSb.dialect(dialect);
         TypeDefinition.Prop.Id childIdProp = childEntity.id();
         String childIdTypeFqn = childIdProp != null ? childIdProp.javaType() : "java.lang.Long";
@@ -337,7 +337,7 @@ public final class WriteEmitter {
 
         String childVar = entityVar + "." + assoc.name();
 
-        SqlBuilder childSb = new SqlBuilder(childEntity, childEntity);
+        SqlBuilder childSb = new SqlBuilder(childEntity);
         childSb.dialect(dialect);
         String childUpdateSql = childSb.update();
         String childUpdateConst = ctx.registerConstant(
@@ -379,7 +379,7 @@ public final class WriteEmitter {
 
         String inverseName = findInverseRelationName(childEntity, ctx.entity().typeName());
 
-        SqlBuilder childSb = new SqlBuilder(childEntity, childEntity);
+        SqlBuilder childSb = new SqlBuilder(childEntity);
         childSb.dialect(dialect);
         TypeDefinition.Prop.Id childIdProp = childEntity.id();
         String childIdTypeFqn = childIdProp != null ? childIdProp.javaType() : "java.lang.Long";
@@ -606,7 +606,7 @@ public final class WriteEmitter {
         // Compute the mutation plan for cascade-driven code generation
         MutationPlan plan = MutationPlanAnalyzer.analyze(ctx.entity(), method.operation());
 
-        SqlBuilder sb = new SqlBuilder(entity, entity);
+        SqlBuilder sb = new SqlBuilder(entity);
         sb.dialect(dialect);
         String insertSql = strategy == IdStrategy.APP_ASSIGNED
                 ? sb.insert(true)
@@ -674,7 +674,7 @@ public final class WriteEmitter {
         // Compute the mutation plan for cascade-driven code generation
         MutationPlan plan = MutationPlanAnalyzer.analyze(ctx.entity(), method.operation());
 
-        SqlBuilder sb = new SqlBuilder(entity, entity);
+        SqlBuilder sb = new SqlBuilder(entity);
         sb.dialect(dialect);
         String updateSql = sb.update();
         String constName = ctx.registerConstant("UPDATE", updateSql);
@@ -712,7 +712,7 @@ public final class WriteEmitter {
         // Compute the mutation plan for cascade-driven code generation
         MutationPlan plan = MutationPlanAnalyzer.analyze(ctx.entity(), method.operation());
 
-        SqlBuilder sb = new SqlBuilder(entity, entity);
+        SqlBuilder sb = new SqlBuilder(entity);
         sb.dialect(dialect);
         String deleteSql = sb.deleteById();
         String constName = ctx.registerConstant("DELETE", deleteSql);
@@ -745,7 +745,7 @@ public final class WriteEmitter {
         TypeDefinition entity = ctx.entity();
         SqlBuilder sqlBuilder = new SqlBuilder(entity);
         sqlBuilder.dialect(dialect);
-        String sql = sqlBuilder.render(new QueryDefinition.DeleteWhere(
+        String sql = sqlBuilder.sql(new QueryDefinition.DeleteWhere(
                 method.predicates(), List.of(), method.resultKind()));
         String constName = ctx.registerConstant(FindEmitter.toSqlConstantName(method.name()), sql);
 

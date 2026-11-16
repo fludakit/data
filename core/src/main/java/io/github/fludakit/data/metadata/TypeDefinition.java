@@ -6,13 +6,14 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Sealed metadata interface for mapped types (entity, aggregate root, or value object).
+ * Sealed metadata for a mapped type (entity, aggregate root, or value object) — both the logical
+ * attribute model and the physical table shape ({@link #tableName()}, {@link #idColumn()},
+ * {@link #columns()}).
  *
- * <p>Replaces the flat TypeDefinition record with a type-safe sealed hierarchy.
- * Each variant carries exactly the properties it needs: Entity and Aggregate have IDs and tables,
+ * <p>Each variant carries exactly the properties it needs: Entity and Aggregate have IDs and tables,
  * ValueObject does not. Properties are categorized into typed records for compile-time safety.</p>
  */
-public sealed interface TypeDefinition extends TableSchema
+public sealed interface TypeDefinition
         permits TypeDefinition.IdentityAware,
                 TypeDefinition.ValueObject {
 
@@ -63,7 +64,7 @@ public sealed interface TypeDefinition extends TableSchema
      */
     boolean ownsAggregateLifecycle();
 
-    // ── TableSchema implementation ───────────────────────────────────────
+    // ── Physical table shape ─────────────────────────────────────────────
 
     /**
      * Physical columns owned by this type's table.

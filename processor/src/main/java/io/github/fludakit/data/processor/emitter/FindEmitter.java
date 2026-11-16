@@ -160,9 +160,9 @@ public final class FindEmitter {
         
         ResultKind rk = method.resultKind() == ResultKind.COUNT || method.resultKind() == ResultKind.EXISTS
                 ? ResultKind.LIST : method.resultKind();
-        return sqlBuilder.render(new QueryDefinition.Read(
+        return sqlBuilder.sql(SqlBuilder.read(
                 rk, method.predicates(), method.sorts(),
-                PagingMode.NONE, LimitSpec.none(), List.of(), List.of(), method.distinct()));
+                PagingMode.NONE, LimitSpec.none(), method.distinct()));
     }
     
     /**
@@ -309,9 +309,9 @@ public final class FindEmitter {
         // Use SqlBuilder to render the query with JOINs
         ResultKind rk = method.resultKind() == ResultKind.COUNT || method.resultKind() == ResultKind.EXISTS
                 ? ResultKind.LIST : method.resultKind();
-        return sqlBuilder.render(
-            new QueryDefinition.Read(rk, method.predicates(), method.sorts(),
-                PagingMode.NONE, LimitSpec.none(), List.of(), List.of(), method.distinct()),
+        return sqlBuilder.sql(
+            SqlBuilder.read(rk, method.predicates(), method.sorts(),
+                PagingMode.NONE, LimitSpec.none(), method.distinct()),
             joinEdges,
             extraProjection.toString()
         );
@@ -479,7 +479,7 @@ public final class FindEmitter {
     private String buildCountSql(RepositoryContext ctx, MethodContext method) {
         SqlBuilder sqlBuilder = new SqlBuilder(ctx.entity());
         sqlBuilder.dialect(dialect);
-        return sqlBuilder.render(new QueryDefinition.Count(method.predicates(), List.of(), false));
+        return sqlBuilder.sql(new QueryDefinition.Count(method.predicates(), List.of(), false));
     }
 
     /**
@@ -580,20 +580,20 @@ public final class FindEmitter {
         }
 
         // Build the CursorSortProjection for the hydration case (the to-many sort/projection).
-        QueryDefinition.CursorSortProjection cursorProjection = null;
+        QueryCompiler.CursorSortProjection cursorProjection = null;
         if (hasToManySort && ecRelForHydration != null && ecRelForHydration.definition() != null) {
-            List<QueryDefinition.CursorSortProjection.SortColumn> sortColumns = new ArrayList<>();
+            List<QueryCompiler.CursorSortProjection.SortColumn> sortColumns = new ArrayList<>();
             for (SortSpec sort : sorts) {
                 String prop = sort.property();
                 if (prop.contains(".")) {
                     String firstSegment = prop.substring(0, prop.indexOf('.'));
                     if (firstSegment.equals(toManyPropForHydration)) {
                         String colPart = prop.substring(prop.indexOf('.') + 1).replace('.', '_');
-                        sortColumns.add(new QueryDefinition.CursorSortProjection.SortColumn(colPart, sort.ascending()));
+                        sortColumns.add(new QueryCompiler.CursorSortProjection.SortColumn(colPart, sort.ascending()));
                     }
                 }
             }
-            cursorProjection = new QueryDefinition.CursorSortProjection(
+            cursorProjection = new QueryCompiler.CursorSortProjection(
                     ecRelForHydration.definition().tableName(),
                     ecRelForHydration.fkColumn(),
                     toManyPropForHydration + "_",
@@ -611,9 +611,9 @@ public final class FindEmitter {
             baseSql = rendered.shell();
         } else {
             // No TO_MANY sort, use standard rendering
-            baseSql = sqlBuilder.render(new QueryDefinition.Read(
+            baseSql = sqlBuilder.sql(SqlBuilder.read(
                     ResultKind.LIST, method.predicates(), List.of(),
-                    PagingMode.NONE, LimitSpec.none(), List.of(), List.of(), method.distinct()));
+                    PagingMode.NONE, LimitSpec.none(), method.distinct()));
         }
 
         boolean shellHasWhere = !method.predicates().isEmpty();
@@ -978,7 +978,7 @@ public final class FindEmitter {
     private String buildExistsSql(RepositoryContext ctx, MethodContext method) {
         SqlBuilder sqlBuilder = new SqlBuilder(ctx.entity());
         sqlBuilder.dialect(dialect);
-        return sqlBuilder.render(new QueryDefinition.Exists(method.predicates(), List.of()));
+        return sqlBuilder.sql(new QueryDefinition.Exists(method.predicates(), List.of()));
     }
 
     // ── Custom @Query methods ────────────────────────────────────────────
@@ -1186,18 +1186,13 @@ public final class FindEmitter {
         SqlBuilder sqlBuilder = new SqlBuilder(ctx.entity());
         sqlBuilder.dialect(dialect);
         
-        // Build a Read query definition with empty sorts list
-        QueryDefinition.Read queryDef = new QueryDefinition.Read(
-            method.resultKind(),
-            method.predicates(),
-            List.of(), // Empty sorts - we'll add ORDER BY at runtime
-            method.pagingMode(),
-            LimitSpec.none(),
-            List.of(),
-            List.of(),
-            method.distinct()
-        );
-        
-        return sqlBuilder.render(queryDef);
+        // Empty sorts — ORDER BY is spliced at runtime from the Order parameter.
+        return sqlBuilder.sql(SqlBuilder.read(
+                method.resultKind(),
+                method.predicates(),
+                List.of(),
+                method.pagingMode(),
+                LimitSpec.none(),
+                method.distinct()));
     }
 }

@@ -6,8 +6,8 @@
  *   <li>{@link TypeDefinitionScanner} fills {@link TypeGraph} from {@code @Entity} /
  *       {@code @AggregateRoot} / {@code @ValueObject}</li>
  *   <li>{@code writer} types write graph artifacts ({@code *RowMapper}, {@code _Entity})</li>
- *   <li>{@link RepositoryAnalyzer} resolves each {@code @Repository} into contexts</li>
- *   <li>{@code emitter} types produce {@code MethodSpec}s; {@code writer.RepositoryWriter}
+ *   <li>{@link RepositoryAnalyzer} resolves each {@code @Repository} into a context</li>
+ *   <li>{@code emitter.RepositoryMemberEmitter} runs method emitters; {@code writer.RepositoryWriter}
  *       writes {@code Repository_}</li>
  * </ol>
  *

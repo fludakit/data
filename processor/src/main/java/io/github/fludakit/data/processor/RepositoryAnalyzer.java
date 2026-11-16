@@ -1,15 +1,10 @@
 package io.github.fludakit.data.processor;
 
 import com.squareup.javapoet.ClassName;
-import com.squareup.javapoet.MethodSpec;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.MethodContext.Operation;
 import io.github.fludakit.data.processor.context.RepositoryContext;
-import io.github.fludakit.data.processor.emitter.FindEmitter;
-import io.github.fludakit.data.processor.emitter.HydrationEmitter;
-import io.github.fludakit.data.processor.emitter.LifecycleEmitter;
-import io.github.fludakit.data.processor.emitter.WriteEmitter;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.writer.RowMapperWriter;
 import io.github.fludakit.data.qbn.Action;
@@ -25,7 +20,6 @@ import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
 import io.github.fludakit.data.query.SortSpec;
 import io.github.fludakit.data.query.Window;
-import io.github.fludakit.data.sql.SqlDialect;
 
 import jakarta.data.repository.By;
 import jakarta.data.repository.Delete;
@@ -55,10 +49,9 @@ import java.util.regex.Pattern;
 
 /**
  * Analyzes a single {@code @Repository}-annotated interface against the shared {@link TypeGraph}:
- * resolves the entity mapping and method contexts, then (separately) emits repository member methods.
+ * resolves the entity mapping and method contexts into a {@link RepositoryContext}.
  *
- * <p>Graph artifacts (row mappers, metamodels) are owned by {@link RepositoryProcessor} and are
- * already written before this analyzer runs.</p>
+ * <p>Resolution only — graph writers and method emitters are owned by {@link RepositoryProcessor}.</p>
  */
 final class RepositoryAnalyzer {
 
@@ -70,7 +63,6 @@ final class RepositoryAnalyzer {
     private static final String PAGE = "jakarta.data.page.Page";
     private static final String CURSORED_PAGE = "jakarta.data.page.CursoredPage";
 
-
     // QBN module is optional — check if it's on the classpath
     private static final boolean QBN_AVAILABLE = isQbnAvailable();
 
@@ -81,22 +73,14 @@ final class RepositoryAnalyzer {
     private final Elements elements;
     private final Diagnostics diagnostics;
     private final TypeGraph typeGraph;
-    private final SqlDialect dialect;
-
-    /** Method contexts built during analysis — consumed by later emitter tasks. */
-    private final List<MethodContext> methods = new ArrayList<>();
-
-    /** The optional {@code JdbcClient getJdbcClient()} escape hatch — at most one method. */
-    private ExecutableElement jdbcClientAccessor;
 
     RepositoryAnalyzer(TypeElement repository, Types types, Elements elements, Diagnostics diagnostics,
-                       TypeGraph typeGraph, SqlDialect dialect) {
+                       TypeGraph typeGraph) {
         this.repository = repository;
         this.types = types;
         this.elements = elements;
         this.diagnostics = diagnostics;
         this.typeGraph = typeGraph;
-        this.dialect = dialect;
     }
 
     private static boolean isQbnAvailable() {
@@ -110,11 +94,8 @@ final class RepositoryAnalyzer {
 
     /**
      * Resolves one repository into its {@link RepositoryContext}: the entity mapping from
-     * {@link TypeGraph}, the conventional row-mapper type name, and method contexts for every
-     * resolvable repository method.
-     *
-     * <p>Resolution only — graph artifacts are already emitted by {@link RepositoryProcessor}.
-     * {@link #emitRepositoryMembers} turns this context into generated member methods.</p>
+     * {@link TypeGraph}, the conventional row-mapper type name, base repository type for overrides,
+     * and method contexts for every resolvable repository method.
      */
     RepositoryContext resolveContext() {
         // 1. Resolve the entity type from the repository's generic superclass and interfaces
@@ -146,30 +127,11 @@ final class RepositoryAnalyzer {
         ClassName rowMapperType = RowMapperWriter.rowMapperClassName(entityFqn);
 
         // 4. Create the RepositoryContext and iterate abstract methods into method contexts
-        RepositoryContext resolvedContext = new RepositoryContext(entityMapping, rowMapperType);
-        scanMethods(entityMapping);
+        RepositoryContext resolvedContext = new RepositoryContext(
+                entityMapping, rowMapperType, resolveRepositoryDeclaredType());
+        scanMethods(resolvedContext, entityMapping);
 
         return resolvedContext;
-    }
-
-    /**
-     * Emits the generated member methods for a resolved {@link RepositoryContext}: the finders, the
-     * batch lifecycle methods, the writes, and the hydration helpers. The context owns the resolved
-     * data; this is where the emitting computation turns it into {@link MethodSpec}s.
-     */
-    void emitRepositoryMembers(RepositoryContext ctx) {
-        // The emission phase: turn the context resolved by {@link #resolveContext} into generated
-        // member methods — finders, batch lifecycle, writes, hydration.
-        DeclaredType repositoryDeclaredType = resolveRepositoryDeclaredType();
-        DeclaredType repositoryOwnType = (DeclaredType) repository.asType();
-        emitFinders(ctx, repositoryDeclaredType, repositoryOwnType);
-        emitLifecycleMethods(ctx, repositoryDeclaredType, repositoryOwnType);
-        emitWriteMethods(ctx, repositoryDeclaredType, repositoryOwnType);
-        emitHydrationMethods(ctx, ctx.entity());
-    }
-
-    ExecutableElement jdbcClientAccessor() {
-        return jdbcClientAccessor;
     }
 
     // ── Entity type resolution ───────────────────────────────────────────
@@ -284,7 +246,7 @@ final class RepositoryAnalyzer {
 
     // ── Method resolution ────────────────────────────────────────────────
 
-    private void scanMethods(TypeDefinition entityMapping) {
+    private void scanMethods(RepositoryContext ctx, TypeDefinition entityMapping) {
         for (javax.lang.model.element.Element member : elements.getAllMembers(repository)) {
             if (member.getKind() != ElementKind.METHOD) continue;
             ExecutableElement method = (ExecutableElement) member;
@@ -300,7 +262,7 @@ final class RepositoryAnalyzer {
 
             // Handle the optional JdbcClient escape hatch: JdbcClient getJdbcClient()
             if (isJdbcClientAccessor(method)) {
-                jdbcClientAccessor = method;
+                ctx.setJdbcClientAccessor(method);
                 continue;
             }
 
@@ -308,14 +270,14 @@ final class RepositoryAnalyzer {
             if (method.getAnnotation(Query.class) != null) {
                 MethodContext queryCtx = resolveQueryMethod(method);
                 if (queryCtx != null) {
-                    methods.add(queryCtx);
+                    ctx.methods().add(queryCtx);
                 }
                 continue;
             }
 
             MethodContext methodCtx = resolveMethod(method, entityMapping);
             if (methodCtx != null) {
-                methods.add(methodCtx);
+                ctx.methods().add(methodCtx);
             } else {
                 // Method could not be resolved — throw error suggesting @Query
                 String methodName = method.getSimpleName().toString();
@@ -908,54 +870,6 @@ final class RepositoryAnalyzer {
             }
         }
         return bindings;
-    }
-
-    // ── Generated-member emission ────────────────────────────────────────
-
-    private void emitFinders(RepositoryContext ctx, DeclaredType repositoryDeclaredType, DeclaredType repositoryOwnType) {
-        FindEmitter findEmitter = new FindEmitter(dialect, types, repositoryDeclaredType, repositoryOwnType);
-        for (MethodContext mc : methods) {
-            MethodSpec emitted = findEmitter.emit(ctx, mc);
-            if (emitted != null) {
-                ctx.auxMethods().add(emitted);
-            }
-        }
-    }
-
-    private void emitLifecycleMethods(RepositoryContext ctx, DeclaredType repositoryDeclaredType, DeclaredType repositoryOwnType) {
-        LifecycleEmitter lifecycleEmitter = new LifecycleEmitter(types, repositoryDeclaredType, repositoryOwnType);
-        for (MethodContext mc : methods) {
-            MethodSpec emitted = lifecycleEmitter.emit(ctx, mc);
-            if (emitted != null) {
-                ctx.auxMethods().add(emitted);
-            }
-        }
-    }
-
-    private void emitWriteMethods(RepositoryContext ctx, DeclaredType repositoryDeclaredType, DeclaredType repositoryOwnType) {
-        WriteEmitter writeEmitter = new WriteEmitter(dialect, types, elements, repositoryDeclaredType, repositoryOwnType);
-        for (MethodContext mc : methods) {
-            MethodSpec emitted = writeEmitter.emit(ctx, mc);
-            if (emitted != null) {
-                ctx.auxMethods().add(emitted);
-            }
-        }
-    }
-
-    private void emitHydrationMethods(RepositoryContext ctx, TypeDefinition entityMapping) {
-        HydrationEmitter hydrationEmitter = new HydrationEmitter(dialect);
-        if (hydrationEmitter.hasCollectionsToHydrate(entityMapping)) {
-            MethodSpec hydrateMethod = hydrationEmitter.emitHydrate(ctx);
-            if (hydrateMethod != null) {
-                ctx.auxMethods().add(hydrateMethod);
-            }
-            MethodSpec hydrateListMethod = hydrationEmitter.emitHydrateList(ctx);
-            if (hydrateListMethod != null) {
-                ctx.auxMethods().add(hydrateListMethod);
-            }
-            List<MethodSpec> loaders = hydrationEmitter.emitCollectionLoaders(ctx);
-            ctx.auxMethods().addAll(loaders);
-        }
     }
 
     // ── Utility methods ──────────────────────────────────────────────────

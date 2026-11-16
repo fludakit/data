@@ -2,6 +2,7 @@ package io.github.fludakit.data.processor;
 
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.context.RepositoryContext;
+import io.github.fludakit.data.processor.emitter.RepositoryMemberEmitter;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.writer.MetamodelWriter;
 import io.github.fludakit.data.processor.writer.RepositoryWriter;
@@ -71,17 +72,16 @@ public class RepositoryProcessor extends AbstractProcessor {
         writeRowMappers();
         writeMetamodels();
 
-        // Phase 3: Analyze each @Repository against the graph, emit members, write Repository_
+        // Phase 3: Analyze each @Repository, emit members, write Repository_
         for (Element element : roundEnv.getElementsAnnotatedWith(jakarta.data.repository.Repository.class)) {
             if (element.getKind() != javax.lang.model.element.ElementKind.INTERFACE) continue;
             TypeElement repository = (TypeElement) element;
             try {
-                RepositoryAnalyzer analyzer = new RepositoryAnalyzer(
-                        repository, types, elements, diagnostics, typeGraph, dialect);
-                RepositoryContext ctx = analyzer.resolveContext();
+                RepositoryContext ctx = new RepositoryAnalyzer(
+                        repository, types, elements, diagnostics, typeGraph).resolveContext();
                 if (ctx == null) continue;
-                analyzer.emitRepositoryMembers(ctx);
-                new RepositoryWriter(repository, ctx, analyzer.jdbcClientAccessor(), filer, diagnostics).write();
+                new RepositoryMemberEmitter(repository, types, elements, dialect).emit(ctx);
+                new RepositoryWriter(repository, ctx, ctx.jdbcClientAccessor(), filer, diagnostics).write();
             } catch (RuntimeException e) {
                 String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getName();
                 diagnostics.error(

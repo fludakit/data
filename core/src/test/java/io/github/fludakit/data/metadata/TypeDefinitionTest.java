@@ -36,21 +36,21 @@ class TypeDefinitionTest {
 
     private static final TypeDefinition.Entity AUTHOR = new TypeDefinition.Entity(
             "demo.Author", "author",
-            new TypeDefinition.Prop.Id("id", "Long", "id", TypeDefinition.Prop.Id.GeneratedType.IDENTITY),
+            new TypeDefinition.Prop.Id("id", "Long", "id"),
             null,
             List.of(new TypeDefinition.Prop.Scalar("name", "String", "name", true)),
             List.of(), List.of(), List.of(), List.of());
 
     private static final TypeDefinition.Entity LINE = new TypeDefinition.Entity(
             "demo.Line", "line",
-            new TypeDefinition.Prop.Id("id", "Long", "id", TypeDefinition.Prop.Id.GeneratedType.IDENTITY),
+            new TypeDefinition.Prop.Id("id", "Long", "id"),
             null,
             List.of(new TypeDefinition.Prop.Scalar("qty", "Integer", "qty", true)),
             List.of(), List.of(), List.of(), List.of());
 
     private static final TypeDefinition.Aggregate BOOK = new TypeDefinition.Aggregate(
             "demo.Book", "book",
-            new TypeDefinition.Prop.Id("id", "Long", "id", TypeDefinition.Prop.Id.GeneratedType.IDENTITY),
+            new TypeDefinition.Prop.Id("id", "Long", "id"),
             new TypeDefinition.Prop.Version("version", "long", "version"),
             List.of(new TypeDefinition.Prop.Scalar("title", "String", "title", true)),
             List.of(),
@@ -62,7 +62,7 @@ class TypeDefinitionTest {
 
     private static final TypeDefinition.Aggregate CUSTOMER = new TypeDefinition.Aggregate(
             "demo.Customer", "customer",
-            new TypeDefinition.Prop.Id("id", "Long", "id", TypeDefinition.Prop.Id.GeneratedType.IDENTITY),
+            new TypeDefinition.Prop.Id("id", "Long", "id"),
             null,
             List.of(new TypeDefinition.Prop.Scalar("name", "String", "name", true)),
             List.of(new TypeDefinition.Prop.Embedded(

@@ -724,15 +724,11 @@ public sealed interface TypeDefinition
         /**
          * The primary key property.
          */
-        record Id(String name, String javaType, String columnName, GeneratedType generated) implements Prop {
+        record Id(String name, String javaType, String columnName) implements Prop {
 
             @Override
             public <R> R accept(Visitor<R> visitor) {
                 return visitor.visitId(this);
-            }
-
-            public enum GeneratedType {
-                NONE, AUTO, IDENTITY, SEQUENCE, UUID
             }
         }
 

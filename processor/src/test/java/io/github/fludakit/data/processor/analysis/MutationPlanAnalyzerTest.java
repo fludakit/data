@@ -145,8 +145,7 @@ class MutationPlanAnalyzerTest {
     @Test
     void compositionCascadeHasNestedChildren() {
         // Build an aggregate whose composition child has its own element collection
-        TypeDefinition.Prop.Id childId = new TypeDefinition.Prop.Id("id", "java.lang.Long", "id",
-                TypeDefinition.Prop.Id.GeneratedType.IDENTITY);
+        TypeDefinition.Prop.Id childId = new TypeDefinition.Prop.Id("id", "java.lang.Long", "id");
         TypeDefinition.ValueObject childVo = new TypeDefinition.ValueObject(
                 "ChildElement", List.of(new TypeDefinition.Prop.Scalar("value", "java.lang.String", "value", false)),
                 List.of(), List.of(), List.of(), List.of());
@@ -159,8 +158,7 @@ class MutationPlanAnalyzerTest {
                 "child", "ChildEntity", childEntity, "child_id", false, true,
                 TypeDefinition.Prop.Association.Cascade.ALL);
 
-        TypeDefinition.Prop.Id rootId = new TypeDefinition.Prop.Id("id", "java.lang.Long", "id",
-                TypeDefinition.Prop.Id.GeneratedType.IDENTITY);
+        TypeDefinition.Prop.Id rootId = new TypeDefinition.Prop.Id("id", "java.lang.Long", "id");
         TypeDefinition.Aggregate root = new TypeDefinition.Aggregate(
                 "Root", "root", rootId, null,
                 List.of(), List.of(), List.of(composition), List.of(), List.of());
@@ -181,13 +179,11 @@ class MutationPlanAnalyzerTest {
 
     // Helper methods to build test TypeDefinitions
     private static TypeDefinition.Aggregate buildTestAggregate() {
-        TypeDefinition.Prop.Id id = new TypeDefinition.Prop.Id("id", "java.lang.Long", "id",
-                TypeDefinition.Prop.Id.GeneratedType.IDENTITY);
+        TypeDefinition.Prop.Id id = new TypeDefinition.Prop.Id("id", "java.lang.Long", "id");
         TypeDefinition.Prop.Scalar name = new TypeDefinition.Prop.Scalar("name", "java.lang.String", "name", false);
 
         // Composing to-one child entity
-        TypeDefinition.Prop.Id childId = new TypeDefinition.Prop.Id("id", "java.lang.Long", "id",
-                TypeDefinition.Prop.Id.GeneratedType.IDENTITY);
+        TypeDefinition.Prop.Id childId = new TypeDefinition.Prop.Id("id", "java.lang.Long", "id");
         TypeDefinition.Prop.Scalar childName = new TypeDefinition.Prop.Scalar("name", "java.lang.String", "name", false);
         TypeDefinition.Entity childEntity = new TypeDefinition.Entity(
                 "ChildEntity", "child_entity", childId, null,
@@ -197,8 +193,7 @@ class MutationPlanAnalyzerTest {
                 TypeDefinition.Prop.Association.Cascade.ALL);
 
         // Entity collection child
-        TypeDefinition.Prop.Id ecChildId = new TypeDefinition.Prop.Id("id", "java.lang.Long", "id",
-                TypeDefinition.Prop.Id.GeneratedType.IDENTITY);
+        TypeDefinition.Prop.Id ecChildId = new TypeDefinition.Prop.Id("id", "java.lang.Long", "id");
         TypeDefinition.Prop.Scalar ecChildName = new TypeDefinition.Prop.Scalar("company", "java.lang.String", "company", false);
         TypeDefinition.Entity ecChildEntity = new TypeDefinition.Entity(
                 "CollectionChild", "collection_child", ecChildId, null,
@@ -220,8 +215,7 @@ class MutationPlanAnalyzerTest {
     }
 
     private static TypeDefinition.Entity buildTestEntity() {
-        TypeDefinition.Prop.Id id = new TypeDefinition.Prop.Id("id", "java.lang.Long", "id",
-                TypeDefinition.Prop.Id.GeneratedType.IDENTITY);
+        TypeDefinition.Prop.Id id = new TypeDefinition.Prop.Id("id", "java.lang.Long", "id");
         TypeDefinition.Prop.Scalar name = new TypeDefinition.Prop.Scalar("name", "java.lang.String", "name", false);
 
         // Element collection only (entity rules: no composition, no entity collection cascade)
@@ -237,13 +231,11 @@ class MutationPlanAnalyzerTest {
     }
 
     private static TypeDefinition.Aggregate buildAggregateWithAggregateTarget() {
-        TypeDefinition.Prop.Id id = new TypeDefinition.Prop.Id("id", "java.lang.Long", "id",
-                TypeDefinition.Prop.Id.GeneratedType.IDENTITY);
+        TypeDefinition.Prop.Id id = new TypeDefinition.Prop.Id("id", "java.lang.Long", "id");
         TypeDefinition.Prop.Scalar name = new TypeDefinition.Prop.Scalar("name", "java.lang.String", "name", false);
 
         // Entity collection whose target is an Aggregate (should be skipped by Rule 4)
-        TypeDefinition.Prop.Id aggChildId = new TypeDefinition.Prop.Id("id", "java.lang.Long", "id",
-                TypeDefinition.Prop.Id.GeneratedType.IDENTITY);
+        TypeDefinition.Prop.Id aggChildId = new TypeDefinition.Prop.Id("id", "java.lang.Long", "id");
         TypeDefinition.Prop.Scalar aggChildName = new TypeDefinition.Prop.Scalar("name", "java.lang.String", "name", false);
         TypeDefinition.Aggregate aggChild = new TypeDefinition.Aggregate(
                 "AggregateChild", "aggregate_child", aggChildId, null,

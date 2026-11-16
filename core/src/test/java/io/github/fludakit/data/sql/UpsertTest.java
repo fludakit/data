@@ -102,7 +102,7 @@ class UpsertTest {
 
     static TypeDefinition note() {
         TypeDefinition.Prop.Id idProp = new TypeDefinition.Prop.Id(
-                "id", "java.lang.Long", "id", TypeDefinition.Prop.Id.GeneratedType.IDENTITY);
+                "id", "java.lang.Long", "id");
         TypeDefinition.Prop.Scalar titleProp = new TypeDefinition.Prop.Scalar(
                 "title", "java.lang.String", "title", false);
         return TestMappings.aggregateRoot("Note", "note",

@@ -14,7 +14,8 @@ import java.util.List;
 
 /**
  * Orchestrates method-body emitters for one resolved repository: finders, lifecycle, writes,
- * and hydration helpers. Does not write files — {@code RepositoryWriter} owns the Filer.
+ * and hydration helpers. Appends results to {@link RepositoryContext#emission()}; does not write
+ * files — {@code RepositoryWriter} owns the Filer.
  */
 public final class RepositoryMemberEmitter {
 

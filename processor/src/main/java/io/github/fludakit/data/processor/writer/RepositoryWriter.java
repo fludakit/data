@@ -20,7 +20,8 @@ import java.util.Map;
  * field, SQL constants, member methods, and the optional {@code JdbcClient} accessor.
  *
  * <p>File writing only — method {@code MethodSpec}s are produced by emitters and collected on
- * {@link RepositoryContext} before this writer runs.</p>
+ * {@link RepositoryContext#emission()} before this writer runs. The analysis plan on the context
+ * is frozen.</p>
  */
 public final class RepositoryWriter {
 

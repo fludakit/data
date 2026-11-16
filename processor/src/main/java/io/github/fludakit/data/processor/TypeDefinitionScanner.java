@@ -68,7 +68,7 @@ final class TypeDefinitionScanner {
         collectAnnotated(roundEnv, ValueObject.class, allTypes, seen);
 
         for (TypeElement te : allTypes) {
-            visitType(te);
+            scanType(te);
         }
 
         resolveAllReferences();
@@ -78,14 +78,14 @@ final class TypeDefinitionScanner {
      * Builds the {@link TypeDefinition} for a single type. Returns the cached definition if already
      * scanned, or {@code null} if a cycle is detected.
      */
-    TypeDefinition visitType(TypeElement type) {
-        return visitType(type, false);
+    TypeDefinition scanType(TypeElement type) {
+        return scanType(type, false);
     }
     
     /**
      * Builds the {@link TypeDefinition} for a single type, optionally forcing entity treatment.
      */
-    TypeDefinition visitType(TypeElement type, boolean forceEntity) {
+    TypeDefinition scanType(TypeElement type, boolean forceEntity) {
         String fqn = type.getQualifiedName().toString();
         if (graph.contains(fqn)) return graph.get(fqn);
         if (!inProgress.add(fqn)) return null; // cycle
@@ -172,7 +172,7 @@ final class TypeDefinitionScanner {
         if (def == null) {
             TypeElement te = elements.getTypeElement(fqn);
             if (te != null && !inProgress.contains(te.getQualifiedName().toString())) {
-                visitType(te, true);
+                scanType(te, true);
                 def = graph.get(fqn);
             }
         }
@@ -182,9 +182,7 @@ final class TypeDefinitionScanner {
     private TypeDefinition.Prop.Id buildIdProp(String fieldName, TypeMirror fieldType, String ownerFqn) {
         String typeFqn = typeFqn(fieldType);
         String columnName = Names.toSnakeCase(fieldName);
-        // Default to NONE - could be enhanced to detect @GeneratedValue
-        return new TypeDefinition.Prop.Id(fieldName, typeFqn, columnName,
-                TypeDefinition.Prop.Id.GeneratedType.NONE);
+        return new TypeDefinition.Prop.Id(fieldName, typeFqn, columnName);
     }
 
     // ── Field classification — entities / aggregate roots ────────────────
@@ -315,7 +313,7 @@ final class TypeDefinitionScanner {
                     // Look up the element type's TypeDefinition from the graph
                     TypeDefinition targetType = graph.get(elementFqn);
                     if (targetType == null && elementTE != null && !inProgress.contains(elementFqn)) {
-                        visitType(elementTE, true);
+                        scanType(elementTE, true);
                         targetType = graph.get(elementFqn);
                     }
                     
@@ -389,7 +387,7 @@ final class TypeDefinitionScanner {
         if (targetType == null) {
             // Element type not scanned yet - scan it now
             if (!inProgress.contains(voFqn)) {
-                visitType(elementTE, true);
+                scanType(elementTE, true);
                 targetType = graph.get(voFqn);
             }
         }

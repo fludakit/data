@@ -27,14 +27,14 @@ class SqlBuilderBuildTest {
 
     private static final TypeDefinition.Entity CUSTOMER = new TypeDefinition.Entity(
             "demo.Customer", "customer",
-            new TypeDefinition.Prop.Id("id", "Long", "id", TypeDefinition.Prop.Id.GeneratedType.IDENTITY),
+            new TypeDefinition.Prop.Id("id", "Long", "id"),
             null,
             List.of(new TypeDefinition.Prop.Scalar("name", "String", "name", true)),
             List.of(), List.of(), List.of(), List.of());
 
     private static final TypeDefinition.Entity LINE = new TypeDefinition.Entity(
             "demo.Line", "line",
-            new TypeDefinition.Prop.Id("id", "Long", "id", TypeDefinition.Prop.Id.GeneratedType.IDENTITY),
+            new TypeDefinition.Prop.Id("id", "Long", "id"),
             null,
             List.of(new TypeDefinition.Prop.Scalar("product", "java.lang.Long", "product", true)),
             List.of(), List.of(), List.of(), List.of());
@@ -46,7 +46,7 @@ class SqlBuilderBuildTest {
 
     private static final TypeDefinition.Entity ATTRIBUTES = new TypeDefinition.Entity(
             "demo.Order", "order_table",
-            new TypeDefinition.Prop.Id("id", "Long", "id", TypeDefinition.Prop.Id.GeneratedType.IDENTITY),
+            new TypeDefinition.Prop.Id("id", "Long", "id"),
             null,
             List.of(new TypeDefinition.Prop.Scalar("status", "String", "status", false)),
             List.of(),

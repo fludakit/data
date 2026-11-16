@@ -126,12 +126,11 @@ final class RepositoryAnalyzer {
         // 3. Bind the conventional row-mapper type (written earlier from TypeGraph by the host)
         ClassName rowMapperType = RowMapperWriter.rowMapperClassName(entityFqn);
 
-        // 4. Create the RepositoryContext and iterate abstract methods into method contexts
-        RepositoryContext resolvedContext = new RepositoryContext(
-                entityMapping, rowMapperType, resolveRepositoryDeclaredType());
-        scanMethods(resolvedContext, entityMapping);
-
-        return resolvedContext;
+        // 4. Scan methods, then freeze into an immutable RepositoryContext
+        MethodScan scan = scanMethods(entityMapping);
+        return new RepositoryContext(
+                entityMapping, rowMapperType, resolveRepositoryDeclaredType(),
+                scan.methods(), scan.jdbcClientAccessor());
     }
 
     // ── Entity type resolution ───────────────────────────────────────────
@@ -246,7 +245,11 @@ final class RepositoryAnalyzer {
 
     // ── Method resolution ────────────────────────────────────────────────
 
-    private void scanMethods(RepositoryContext ctx, TypeDefinition entityMapping) {
+    private record MethodScan(List<MethodContext> methods, ExecutableElement jdbcClientAccessor) {}
+
+    private MethodScan scanMethods(TypeDefinition entityMapping) {
+        List<MethodContext> methods = new ArrayList<>();
+        ExecutableElement jdbcClientAccessor = null;
         for (javax.lang.model.element.Element member : elements.getAllMembers(repository)) {
             if (member.getKind() != ElementKind.METHOD) continue;
             ExecutableElement method = (ExecutableElement) member;
@@ -262,7 +265,7 @@ final class RepositoryAnalyzer {
 
             // Handle the optional JdbcClient escape hatch: JdbcClient getJdbcClient()
             if (isJdbcClientAccessor(method)) {
-                ctx.setJdbcClientAccessor(method);
+                jdbcClientAccessor = method;
                 continue;
             }
 
@@ -270,14 +273,14 @@ final class RepositoryAnalyzer {
             if (method.getAnnotation(Query.class) != null) {
                 MethodContext queryCtx = resolveQueryMethod(method);
                 if (queryCtx != null) {
-                    ctx.methods().add(queryCtx);
+                    methods.add(queryCtx);
                 }
                 continue;
             }
 
             MethodContext methodCtx = resolveMethod(method, entityMapping);
             if (methodCtx != null) {
-                ctx.methods().add(methodCtx);
+                methods.add(methodCtx);
             } else {
                 // Method could not be resolved — throw error suggesting @Query
                 String methodName = method.getSimpleName().toString();
@@ -290,6 +293,7 @@ final class RepositoryAnalyzer {
                 );
             }
         }
+        return new MethodScan(methods, jdbcClientAccessor);
     }
 
     private MethodContext resolveMethod(ExecutableElement method, TypeDefinition entityMapping) {

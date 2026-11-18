@@ -1,10 +1,10 @@
 package io.github.fludakit.data.processor.context;
 
+import io.github.fludakit.data.metadata.MutationPlan.MutationType;
 import io.github.fludakit.data.metadata.TypeDefinition;
-import io.github.fludakit.data.query.Operation;
 import io.github.fludakit.data.query.ParamBinding;
-import io.github.fludakit.data.query.PagingMode;
 import io.github.fludakit.data.query.Predicate;
+import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
 import io.github.fludakit.data.query.SortSpec;
 
@@ -14,49 +14,80 @@ import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
 import java.util.List;
 
+/**
+ * Processor binding for one repository method: the lang.model element, lifecycle
+ * {@link Operation}, and the pure {@link QueryDefinition} plan.
+ *
+ * <p>Query shape lives only on {@link #query()}. Thin projections below are for emitter
+ * convenience — they do not store a second copy of the plan.</p>
+ */
 public final class MethodContext {
+
+    /**
+     * Repository-method intent for emitter/analyzer routing (processor-only).
+     * Distinct from {@link QueryDefinition} variants — e.g. {@link #SAVE} maps to
+     * {@link QueryDefinition.Upsert} for SQL.
+     */
+    public enum Operation {
+        FIND, COUNT, EXISTS, DELETE, INSERT, UPDATE, SAVE
+    }
+
     private final ExecutableElement method;
     private final String name;
     private final Operation operation;
-    private final ResultKind resultKind;
-    private final boolean distinct;
-    private final List<? extends VariableElement> parameters;
-    private final List<ParamBinding> paramBindings;
-    private final List<Predicate> predicates;
-    private final List<SortSpec> sorts;
-    private final PagingMode pagingMode;
-    private final String customSql;
+    private final QueryDefinition query;
 
-    public MethodContext(ExecutableElement method, String name, Operation operation,
-                         ResultKind resultKind, boolean distinct,
-                         List<? extends VariableElement> parameters,
-                         List<ParamBinding> paramBindings,
-                         List<Predicate> predicates, List<SortSpec> sorts,
-                         PagingMode pagingMode, String customSql) {
+    public MethodContext(ExecutableElement method, String name, Operation operation, QueryDefinition query) {
         this.method = method;
         this.name = name;
         this.operation = operation;
-        this.resultKind = resultKind;
-        this.distinct = distinct;
-        this.parameters = parameters;
-        this.paramBindings = paramBindings;
-        this.predicates = predicates;
-        this.sorts = sorts;
-        this.pagingMode = pagingMode;
-        this.customSql = customSql;
+        this.query = query;
     }
 
     public ExecutableElement method() { return method; }
     public String name() { return name; }
     public Operation operation() { return operation; }
-    public ResultKind resultKind() { return resultKind; }
-    public boolean distinct() { return distinct; }
-    public List<? extends VariableElement> parameters() { return parameters; }
-    public List<ParamBinding> paramBindings() { return paramBindings; }
-    public List<Predicate> predicates() { return predicates; }
-    public List<SortSpec> sorts() { return sorts; }
-    public PagingMode pagingMode() { return pagingMode; }
-    public String customSql() { return customSql; }
+    public QueryDefinition query() { return query; }
+
+    /** Method parameters — delegated from {@link #method()}, not stored separately. */
+    public List<? extends VariableElement> parameters() {
+        return method.getParameters();
+    }
+
+    public ResultKind resultKind() {
+        return query.resultKind();
+    }
+
+    public List<Predicate> predicates() {
+        return query instanceof QueryDefinition.Criteria c ? c.predicates() : List.of();
+    }
+
+    public List<ParamBinding> paramBindings() {
+        return switch (query) {
+            case QueryDefinition.Criteria c -> c.paramBindings();
+            case QueryDefinition.Native n -> n.paramBindings();
+            default -> List.of();
+        };
+    }
+
+    public List<SortSpec> sorts() {
+        return query instanceof QueryDefinition.Read r ? r.sorts() : List.of();
+    }
+
+    public String customSql() {
+        return query instanceof QueryDefinition.Native n ? n.sql() : null;
+    }
+
+    /** Maps write operations to {@link MutationType}; throws for non-write ops. */
+    public MutationType mutationType() {
+        return switch (operation) {
+            case INSERT -> MutationType.INSERT;
+            case SAVE -> MutationType.SAVE;
+            case UPDATE -> MutationType.UPDATE;
+            case DELETE -> MutationType.DELETE;
+            default -> throw new IllegalStateException("Not a write operation: " + operation);
+        };
+    }
 
     /**
      * Whether the first parameter is the entity itself rather than its identifier.
@@ -69,6 +100,7 @@ public final class MethodContext {
      * entity's type name.</p>
      */
     public boolean firstParameterIsEntity(TypeDefinition entity) {
+        List<? extends VariableElement> parameters = parameters();
         if (parameters.isEmpty()) {
             return true;
         }

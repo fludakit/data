@@ -253,8 +253,8 @@ class QueryByMethodNameEmissionTest {
         String impl = sqlFlat(generatedDir.resolve("distinctq/Memos_.java"));
         assertTrue(impl.contains("SELECT DISTINCT \"id\", \"text\" FROM \"memos\" WHERE \"text\" = :text"),
                 "a Distinct find must select distinct rows:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("SELECT COUNT(*) FROM \"memos\" WHERE \"text\" = :text"),
-                "a Distinct count keeps the COUNT(*) total:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("SELECT COUNT(DISTINCT \"id\") FROM \"memos\" WHERE \"text\" = :text"),
+                "a Distinct count must count distinct ids:" + System.lineSeparator() + impl);
 
     }
 

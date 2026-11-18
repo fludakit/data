@@ -7,6 +7,7 @@ import com.squareup.javapoet.ParameterizedTypeName;
 import io.github.fludakit.data.processor.support.ExceptionTranslation;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.context.RepositoryContext;
+import io.github.fludakit.data.processor.writer.RowMapperWriter;
 import io.github.fludakit.data.sql.SqlBuilder;
 import io.github.fludakit.data.sql.SqlDialect;
 
@@ -290,15 +291,8 @@ public final class HydrationEmitter {
         return Character.toUpperCase(s.charAt(0)) + s.substring(1);
     }
 
-    /**
-     * Derives the row mapper class name for a given entity/value-object type.
-     * Convention: {@code <package>.<SimpleName>RowMapper}.
-     */
     private ClassName deriveRowMapperType(String typeFqn) {
-        int lastDot = typeFqn.lastIndexOf('.');
-        String pkg = lastDot > 0 ? typeFqn.substring(0, lastDot) : "";
-        String simple = lastDot > 0 ? typeFqn.substring(lastDot + 1) : typeFqn;
-        return ClassName.get(pkg, simple + "RowMapper");
+        return RowMapperWriter.rowMapperClassName(typeFqn);
     }
 
     /**

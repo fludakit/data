@@ -1,29 +1,25 @@
 package io.github.fludakit.data.processor;
 
 import com.squareup.javapoet.ClassName;
-import com.squareup.javapoet.MethodSpec;
-import com.squareup.javapoet.TypeSpec;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.context.MethodContext;
+import io.github.fludakit.data.processor.context.MethodContext.Operation;
 import io.github.fludakit.data.processor.context.RepositoryContext;
-import io.github.fludakit.data.processor.emitter.FindEmitter;
-import io.github.fludakit.data.processor.emitter.HydrationEmitter;
-import io.github.fludakit.data.processor.emitter.LifecycleEmitter;
-import io.github.fludakit.data.processor.emitter.MetamodelEmitter;
-import io.github.fludakit.data.processor.emitter.RowMapperEmitter;
-import io.github.fludakit.data.processor.emitter.WriteEmitter;
 import io.github.fludakit.data.processor.support.Diagnostics;
+import io.github.fludakit.data.processor.writer.RowMapperWriter;
+import io.github.fludakit.data.qbn.Action;
 import io.github.fludakit.data.qbn.ParsedMethodName;
 import io.github.fludakit.data.qbn.QueryByMethodNameParser;
 import io.github.fludakit.data.query.LikePattern;
+import io.github.fludakit.data.query.LimitSpec;
 import io.github.fludakit.data.query.Operator;
-import io.github.fludakit.data.query.Operation;
+import io.github.fludakit.data.query.Order;
 import io.github.fludakit.data.query.ParamBinding;
-import io.github.fludakit.data.query.PagingMode;
 import io.github.fludakit.data.query.Predicate;
+import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
 import io.github.fludakit.data.query.SortSpec;
-import io.github.fludakit.data.sql.SqlDialect;
+import io.github.fludakit.data.query.Window;
 
 import jakarta.data.repository.By;
 import jakarta.data.repository.Delete;
@@ -35,7 +31,6 @@ import jakarta.data.repository.Query;
 import jakarta.data.repository.Save;
 import jakarta.data.repository.Update;
 
-import javax.annotation.processing.Filer;
 import javax.lang.model.element.ElementKind;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.Modifier;
@@ -46,7 +41,6 @@ import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
 import javax.lang.model.util.Elements;
 import javax.lang.model.util.Types;
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -54,10 +48,12 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Visits a single {@code @Repository}-annotated interface, resolves its entity type and methods,
- * and generates the skeleton {@code Repository_} class.
+ * Analyzes a single {@code @Repository}-annotated interface against the shared {@link TypeGraph}:
+ * resolves the entity mapping and method contexts into a {@link RepositoryContext}.
+ *
+ * <p>Resolution only — graph writers and method emitters are owned by {@link RepositoryProcessor}.</p>
  */
-final class RepositoryVisitor {
+final class RepositoryAnalyzer {
 
     private static final String CRUD_REPOSITORY = "jakarta.data.repository.CrudRepository";
     private static final String BASIC_REPOSITORY = "jakarta.data.repository.BasicRepository";
@@ -76,25 +72,15 @@ final class RepositoryVisitor {
     private final Types types;
     private final Elements elements;
     private final Diagnostics diagnostics;
-    private final Filer filer;
     private final TypeGraph typeGraph;
-    private final SqlDialect dialect;
 
-    /** Method contexts built during visit — consumed by later emitter tasks. */
-    private final List<MethodContext> methods = new ArrayList<>();
-
-    /** The optional {@code JdbcClient getJdbcClient()} escape hatch — at most one method. */
-    private ExecutableElement jdbcClientAccessor;
-
-    RepositoryVisitor(TypeElement repository, Types types, Elements elements, Diagnostics diagnostics,
-                      Filer filer, TypeGraph typeGraph, SqlDialect dialect) {
+    RepositoryAnalyzer(TypeElement repository, Types types, Elements elements, Diagnostics diagnostics,
+                       TypeGraph typeGraph) {
         this.repository = repository;
         this.types = types;
         this.elements = elements;
         this.diagnostics = diagnostics;
-        this.filer = filer;
         this.typeGraph = typeGraph;
-        this.dialect = dialect;
     }
 
     private static boolean isQbnAvailable() {
@@ -107,12 +93,9 @@ final class RepositoryVisitor {
     }
 
     /**
-     * Resolves one repository into its {@link RepositoryContext}: the entity mapping, the generated
-     * row mapper / metamodel for it, and the method contexts for every resolvable repository method.
-     *
-     * <p>This is the resolution phase — it reads the type graph and the repository interface, and
-     * produces the context. It owns no emission: {@link #emitRepositoryMembers} turns the context into
-     * generated member methods.</p>
+     * Resolves one repository into its {@link RepositoryContext}: the entity mapping from
+     * {@link TypeGraph}, the conventional row-mapper type name, base repository type for overrides,
+     * and method contexts for every resolvable repository method.
      */
     RepositoryContext resolveContext() {
         // 1. Resolve the entity type from the repository's generic superclass and interfaces
@@ -140,47 +123,14 @@ final class RepositoryVisitor {
             return null;
         }
 
-        // 3. Generate row mapper (or null if not eligible)
-        RowMapperEmitter rowMapperEmitter = new RowMapperEmitter(types, elements, filer);
-        ClassName rowMapperType = rowMapperEmitter.emit(entityMapping);
-        if (rowMapperType == null) {
-            // Fallback placeholder for entities with references/collections (not row-mappable)
-            rowMapperType = ClassName.bestGuess(entityFqn + "RowMapper");
-        }
+        // 3. Bind the conventional row-mapper type (written earlier from TypeGraph by the host)
+        ClassName rowMapperType = RowMapperWriter.rowMapperClassName(entityFqn);
 
-        // 4a. Generate row mappers for VO types used in element collections
-        // Note: ElementCollection stores element type FQN, not a TypeDefinition
-        // Row mappers for element types are generated when scanning the VO itself
-
-        // 4b. Generate static metamodel (_Entity interface)
-        new MetamodelEmitter(filer, diagnostics).emit(entityMapping);
-
-        // 5. Create the RepositoryContext and iterate abstract methods, resolving them into method contexts
-        RepositoryContext resolvedContext = new RepositoryContext(entityMapping, rowMapperType);
-        scanMethods(entityMapping);
-
-        // 6. Hand the resolved context to the emission phase — see emitRepositoryMembers.
-        return resolvedContext;
-    }
-
-    /**
-     * Emits the generated member methods for a resolved {@link RepositoryContext}: the finders, the
-     * batch lifecycle methods, the writes, and the hydration helpers. The context owns the resolved
-     * data; this is where the emitting computation turns it into {@link MethodSpec}s.
-     */
-    void emitRepositoryMembers(RepositoryContext ctx) {
-        // The emission phase: turn the context resolved by {@link #resolveContext} into generated
-        // member methods — finders, batch lifecycle, writes, hydration.
-        DeclaredType repositoryDeclaredType = resolveRepositoryDeclaredType();
-        DeclaredType repositoryOwnType = (DeclaredType) repository.asType();
-        emitFinders(ctx, repositoryDeclaredType, repositoryOwnType);
-        emitLifecycleMethods(ctx, repositoryDeclaredType, repositoryOwnType);
-        emitWriteMethods(ctx, repositoryDeclaredType, repositoryOwnType);
-        emitHydrationMethods(ctx, ctx.entity());
-    }
-
-    ExecutableElement jdbcClientAccessor() {
-        return jdbcClientAccessor;
+        // 4. Scan methods, then freeze into an immutable RepositoryContext
+        MethodScan scan = scanMethods(entityMapping);
+        return new RepositoryContext(
+                entityMapping, rowMapperType, resolveRepositoryDeclaredType(),
+                scan.methods(), scan.jdbcClientAccessor());
     }
 
     // ── Entity type resolution ───────────────────────────────────────────
@@ -295,7 +245,11 @@ final class RepositoryVisitor {
 
     // ── Method resolution ────────────────────────────────────────────────
 
-    private void scanMethods(TypeDefinition entityMapping) {
+    private record MethodScan(List<MethodContext> methods, ExecutableElement jdbcClientAccessor) {}
+
+    private MethodScan scanMethods(TypeDefinition entityMapping) {
+        List<MethodContext> methods = new ArrayList<>();
+        ExecutableElement jdbcClientAccessor = null;
         for (javax.lang.model.element.Element member : elements.getAllMembers(repository)) {
             if (member.getKind() != ElementKind.METHOD) continue;
             ExecutableElement method = (ExecutableElement) member;
@@ -339,6 +293,7 @@ final class RepositoryVisitor {
                 );
             }
         }
+        return new MethodScan(methods, jdbcClientAccessor);
     }
 
     private MethodContext resolveMethod(ExecutableElement method, TypeDefinition entityMapping) {
@@ -346,9 +301,9 @@ final class RepositoryVisitor {
 
         // Priority 1: Lifecycle annotations (@Save, @Insert, @Update, @Delete, @Find)
         // These are first-class citizens and can appear on any interface method
-        Operation annotatedOp = resolveLifecycleAnnotation(method);
-        if (annotatedOp != null) {
-            return resolveAnnotatedMethod(method, methodName, annotatedOp, entityMapping);
+        Operation annotated = resolveLifecycleAnnotation(method);
+        if (annotated != null) {
+            return resolveAnnotatedMethod(method, methodName, annotated, entityMapping);
         }
 
         // Priority 2 & 3 only apply to Jakarta Data-derived repositories
@@ -357,8 +312,8 @@ final class RepositoryVisitor {
         // Priority 2: Built-in CRUD methods from Jakarta Data standard interfaces
         // Fixed list with known semantics — skip annotation processing
         if (isJakartaDataRepository && isBuiltInCrudMethod(methodName)) {
-            Operation op = resolveBuiltInOperation(methodName);
-            return resolveBuiltInCrudMethod(method, methodName, op, entityMapping);
+            Operation operation = resolveBuiltInOperation(methodName);
+            return resolveBuiltInCrudMethod(method, methodName, operation, entityMapping);
         }
 
         // Priority 3: Query By Name (QBN) parsing
@@ -439,7 +394,6 @@ final class RepositoryVisitor {
         }
         
         ResultKind resultKind = resolveResultKind(method, operation);
-        PagingMode pagingMode = resolvePagingMode(method, resultKind);
         List<Predicate> predicates = resolveByAnnotations(method, entityMapping);
 
         // Replace Jakarta Data's "id(this)" JDQL convention with the actual ID property name
@@ -447,10 +401,9 @@ final class RepositoryVisitor {
 
         List<SortSpec> sorts = resolveOrderByAnnotations(method);
         List<ParamBinding> paramBindings = buildParamBindings(method, predicates);
-        boolean distinct = false;
 
-        return new MethodContext(method, methodName, operation, resultKind, distinct,
-                method.getParameters(), paramBindings, predicates, sorts, pagingMode, null);
+        return methodContext(method, methodName, operation,
+                buildQuery(operation, resultKind, false, predicates, paramBindings, sorts, method));
     }
 
     private boolean isBuiltInCrudMethod(String methodName) {
@@ -477,8 +430,6 @@ final class RepositoryVisitor {
     private MethodContext resolveBuiltInCrudMethod(ExecutableElement method, String methodName,
                                                     Operation operation, TypeDefinition entityMapping) {
         ResultKind resultKind = resolveResultKind(method, operation);
-        PagingMode pagingMode = resolvePagingMode(method, resultKind);
-        boolean distinct = false;
 
         // Create predicates based on method name
         List<Predicate> predicates = switch (methodName) {
@@ -492,18 +443,16 @@ final class RepositoryVisitor {
             default -> List.of();
         };
 
-        List<SortSpec> sorts = List.of();
         List<ParamBinding> paramBindings = buildParamBindings(method, predicates);
 
-        return new MethodContext(method, methodName, operation, resultKind, distinct,
-                method.getParameters(), paramBindings, predicates, sorts, pagingMode, null);
+        return methodContext(method, methodName, operation,
+                buildQuery(operation, resultKind, false, predicates, paramBindings, List.of(), method));
     }
 
     private MethodContext resolveQbnMethod(ExecutableElement method, String methodName,
                                             ParsedMethodName parsed, TypeDefinition entityMapping) {
-        Operation operation = parsed.operation();
+        Operation operation = operationFromAction(parsed.action());
         ResultKind resultKind = resolveResultKind(method, operation);
-        PagingMode pagingMode = resolvePagingMode(method, resultKind);
         boolean distinct = parsed.distinct();
 
         // Predicates from parsed method name
@@ -519,8 +468,17 @@ final class RepositoryVisitor {
 
         List<ParamBinding> paramBindings = buildParamBindings(method, predicates);
 
-        return new MethodContext(method, methodName, operation, resultKind, distinct,
-                method.getParameters(), paramBindings, predicates, sorts, pagingMode, null);
+        return methodContext(method, methodName, operation,
+                buildQuery(operation, resultKind, distinct, predicates, paramBindings, sorts, method));
+    }
+
+    private static Operation operationFromAction(Action action) {
+        return switch (action) {
+            case FIND -> Operation.FIND;
+            case DELETE -> Operation.DELETE;
+            case COUNT -> Operation.COUNT;
+            case EXISTS -> Operation.EXISTS;
+        };
     }
 
     /**
@@ -672,20 +630,6 @@ final class RepositoryVisitor {
         return ResultKind.SINGLE;
     }
 
-    // ── PagingMode resolution ────────────────────────────────────────────
-
-    private PagingMode resolvePagingMode(ExecutableElement method, ResultKind resultKind) {
-        for (VariableElement param : method.getParameters()) {
-            String paramFqn = erasureFqn(param.asType());
-            if (PAGE_REQUEST.equals(paramFqn)) {
-                // Determine OFFSET vs CURSOR based on return type
-                if (resultKind == ResultKind.CURSORED_PAGE) return PagingMode.CURSOR;
-                return PagingMode.OFFSET;
-            }
-        }
-        return PagingMode.NONE;
-    }
-
     // ── Predicate resolution ─────────────────────────────────────────────
 
     /**
@@ -813,11 +757,7 @@ final class RepositoryVisitor {
         String sql = query.value();
         String methodName = method.getSimpleName().toString();
 
-        // Determine operation: DELETE SQL → DELETE, otherwise FIND
-        Operation operation = sql.trim().toUpperCase().startsWith("DELETE")
-                ? Operation.DELETE : Operation.FIND;
-
-        // Determine result kind from return type
+        Operation operation = sql.trim().toUpperCase().startsWith("DELETE") ? Operation.DELETE : Operation.FIND;
         ResultKind resultKind = resolveResultKind(method, operation);
 
         // Extract named parameters from SQL
@@ -826,8 +766,65 @@ final class RepositoryVisitor {
         // Build param bindings matching method parameters to named SQL parameters
         List<ParamBinding> bindings = buildQueryBindings(method, namedParams);
 
-        return new MethodContext(method, methodName, operation, resultKind, false,
-                method.getParameters(), bindings, List.of(), List.of(), PagingMode.NONE, sql);
+        return methodContext(method, methodName, operation, new QueryDefinition.Native(sql, resultKind, bindings));
+    }
+
+    // ── QueryDefinition assembly ─────────────────────────────────────────
+
+    private MethodContext methodContext(ExecutableElement method, String methodName, Operation operation, QueryDefinition query) {
+        return new MethodContext(method, methodName, operation, query);
+    }
+
+    /**
+     * Builds the pure query plan. {@link Operation#SAVE} maps to {@link QueryDefinition.Upsert};
+     * criteria intents carry predicates/bindings/order/window.
+     */
+    private QueryDefinition buildQuery(Operation operation, ResultKind resultKind, boolean distinct,
+                                       List<Predicate> predicates, List<ParamBinding> bindings,
+                                       List<SortSpec> sorts, ExecutableElement method) {
+        return switch (operation) {
+            case FIND -> new QueryDefinition.Read(
+                    resultKind, predicates, bindings, distinct,
+                    resolveOrder(method, sorts), resolveWindow(method, resultKind));
+            case COUNT -> new QueryDefinition.Count(predicates, bindings, distinct);
+            case EXISTS -> new QueryDefinition.Exists(predicates, bindings);
+            case DELETE -> predicates.isEmpty()
+                    ? new QueryDefinition.DeleteById(resultKind)
+                    : new QueryDefinition.DeleteWhere(predicates, bindings, resultKind);
+            case INSERT -> new QueryDefinition.Insert(resultKind, true);
+            case UPDATE -> new QueryDefinition.Update(resultKind);
+            case SAVE -> new QueryDefinition.Upsert(resultKind);
+        };
+    }
+
+    private Order resolveOrder(ExecutableElement method, List<SortSpec> sorts) {
+        List<? extends VariableElement> params = method.getParameters();
+        for (int i = 0; i < params.size(); i++) {
+            String typeFqn = params.get(i).asType().toString();
+            if (typeFqn.contains("jakarta.data.Order") || typeFqn.contains("jakarta.data.Sort")) {
+                return new Order.Dynamic(i);
+            }
+        }
+        if (sorts == null || sorts.isEmpty()) {
+            return Order.None.INSTANCE;
+        }
+        return Order.Static.of(sorts);
+    }
+
+    private Window resolveWindow(ExecutableElement method, ResultKind resultKind) {
+        List<? extends VariableElement> params = method.getParameters();
+        for (int i = 0; i < params.size(); i++) {
+            String paramFqn = erasureFqn(params.get(i).asType());
+            if (PAGE_REQUEST.equals(paramFqn)) {
+                return resultKind == ResultKind.CURSORED_PAGE
+                        ? new Window.Cursor(i)
+                        : new Window.Offset(i);
+            }
+            if ("jakarta.data.Limit".equals(paramFqn)) {
+                return new Window.Limit(i);
+            }
+        }
+        return new Window.None(LimitSpec.none());
     }
 
     /**
@@ -877,54 +874,6 @@ final class RepositoryVisitor {
             }
         }
         return bindings;
-    }
-
-    // ── Generated-member emission ────────────────────────────────────────
-
-    private void emitFinders(RepositoryContext ctx, DeclaredType repositoryDeclaredType, DeclaredType repositoryOwnType) {
-        FindEmitter findEmitter = new FindEmitter(dialect, types, repositoryDeclaredType, repositoryOwnType);
-        for (MethodContext mc : methods) {
-            MethodSpec emitted = findEmitter.emit(ctx, mc);
-            if (emitted != null) {
-                ctx.auxMethods().add(emitted);
-            }
-        }
-    }
-
-    private void emitLifecycleMethods(RepositoryContext ctx, DeclaredType repositoryDeclaredType, DeclaredType repositoryOwnType) {
-        LifecycleEmitter lifecycleEmitter = new LifecycleEmitter(types, repositoryDeclaredType, repositoryOwnType);
-        for (MethodContext mc : methods) {
-            MethodSpec emitted = lifecycleEmitter.emit(ctx, mc);
-            if (emitted != null) {
-                ctx.auxMethods().add(emitted);
-            }
-        }
-    }
-
-    private void emitWriteMethods(RepositoryContext ctx, DeclaredType repositoryDeclaredType, DeclaredType repositoryOwnType) {
-        WriteEmitter writeEmitter = new WriteEmitter(dialect, types, elements, repositoryDeclaredType, repositoryOwnType);
-        for (MethodContext mc : methods) {
-            MethodSpec emitted = writeEmitter.emit(ctx, mc);
-            if (emitted != null) {
-                ctx.auxMethods().add(emitted);
-            }
-        }
-    }
-
-    private void emitHydrationMethods(RepositoryContext ctx, TypeDefinition entityMapping) {
-        HydrationEmitter hydrationEmitter = new HydrationEmitter(dialect);
-        if (hydrationEmitter.hasCollectionsToHydrate(entityMapping)) {
-            MethodSpec hydrateMethod = hydrationEmitter.emitHydrate(ctx);
-            if (hydrateMethod != null) {
-                ctx.auxMethods().add(hydrateMethod);
-            }
-            MethodSpec hydrateListMethod = hydrationEmitter.emitHydrateList(ctx);
-            if (hydrateListMethod != null) {
-                ctx.auxMethods().add(hydrateListMethod);
-            }
-            List<MethodSpec> loaders = hydrationEmitter.emitCollectionLoaders(ctx);
-            ctx.auxMethods().addAll(loaders);
-        }
     }
 
     // ── Utility methods ──────────────────────────────────────────────────

@@ -6,14 +6,16 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Sealed metadata interface for mapped types (entity, aggregate root, or value object).
+ * Sealed metadata for a mapped type (entity, aggregate root, or value object) — both the logical
+ * attribute model and the physical table shape ({@link #tableName()}, {@link #idColumn()},
+ * {@link #columns()}).
  *
- * <p>Replaces the flat TypeDefinition record with a type-safe sealed hierarchy.
- * Each variant carries exactly the properties it needs: Entity and Aggregate have IDs and tables,
+ * <p>Each variant carries exactly the properties it needs: Entity and Aggregate have IDs and tables,
  * ValueObject does not. Properties are categorized into typed records for compile-time safety.</p>
  */
-public sealed interface TypeDefinition extends TableSchema
-        permits TypeDefinition.IdentityAware,
+public sealed interface TypeDefinition
+        permits TypeDefinition.Entity,
+                TypeDefinition.Aggregate,
                 TypeDefinition.ValueObject {
 
     /** The fully-qualified Java type name. */
@@ -49,11 +51,6 @@ public sealed interface TypeDefinition extends TableSchema
     }
 
     /**
-     * Returns whether this type has an identifier column (Entity and Aggregate only).
-     */
-    boolean hasId();
-
-    /**
      * Returns the ID column name, or {@code null} for value objects.
      */
     String idColumn();
@@ -63,7 +60,7 @@ public sealed interface TypeDefinition extends TableSchema
      */
     boolean ownsAggregateLifecycle();
 
-    // ── TableSchema implementation ───────────────────────────────────────
+    // ── Physical table shape ─────────────────────────────────────────────
 
     /**
      * Physical columns owned by this type's table.
@@ -148,11 +145,9 @@ public sealed interface TypeDefinition extends TableSchema
     default Map<String, ColumnRef> columnRefs() {
         Map<String, ColumnRef> refs = new LinkedHashMap<>();
         // Add ID column first (only at root level)
-        if (hasId()) {
-            Prop.Id id = id();
-            if (id != null) {
-                refs.put(id.name(), new ColumnRef.Simple(id.columnName(), tableName()));
-            }
+        Prop.Id id = id();
+        if (id != null) {
+            refs.put(id.name(), new ColumnRef.Simple(id.columnName(), tableName()));
         }
         ColumnRefCollector collector = new ColumnRefCollector(refs, tableName(), "");
         for (Prop prop : properties()) {
@@ -444,29 +439,6 @@ public sealed interface TypeDefinition extends TableSchema
         }
     }
 
-    // ── Identity-aware types (Entity / Aggregate) ─────────────────────────
-
-    /**
-     * The shared shape of entity and aggregate-root types: a table-backed type with an identity,
-     * an optional version, and mapped properties. Value objects are not identity-aware.
-     */
-    sealed interface IdentityAware extends TypeDefinition
-            permits TypeDefinition.Entity, TypeDefinition.Aggregate {
-
-        /** The optimistic-locking version property, or {@code null}. */
-        Prop.Version version();
-
-        List<Prop.Scalar> scalars();
-
-        List<Prop.Embedded> embedded();
-
-        List<Prop.Association> associations();
-
-        List<Prop.EntityCollection> entityCollections();
-
-        List<Prop.ElementCollection> elementCollections();
-    }
-
     // ── Nested Entity record ─────────────────────────────────────────────
 
     /**
@@ -482,7 +454,7 @@ public sealed interface TypeDefinition extends TableSchema
             List<Prop.Association> associations,
             List<Prop.EntityCollection> entityCollections,
             List<Prop.ElementCollection> elementCollections
-    ) implements IdentityAware {
+    ) implements TypeDefinition {
 
         public Entity {
             scalars = List.copyOf(scalars);
@@ -495,11 +467,6 @@ public sealed interface TypeDefinition extends TableSchema
         @Override
         public List<Prop> properties() {
             return entityProperties(id, version, scalars, embedded, associations, entityCollections, elementCollections);
-        }
-
-        @Override
-        public boolean hasId() {
-            return true;
         }
 
         @Override
@@ -538,7 +505,7 @@ public sealed interface TypeDefinition extends TableSchema
             List<Prop.Association> associations,
             List<Prop.EntityCollection> entityCollections,
             List<Prop.ElementCollection> elementCollections
-    ) implements IdentityAware {
+    ) implements TypeDefinition {
 
         public Aggregate {
             scalars = List.copyOf(scalars);
@@ -551,11 +518,6 @@ public sealed interface TypeDefinition extends TableSchema
         @Override
         public List<Prop> properties() {
             return entityProperties(id, version, scalars, embedded, associations, entityCollections, elementCollections);
-        }
-
-        @Override
-        public boolean hasId() {
-            return true;
         }
 
         @Override
@@ -616,11 +578,6 @@ public sealed interface TypeDefinition extends TableSchema
         @Override
         public Prop.Id id() {
             return null; // Value objects have no identity
-        }
-
-        @Override
-        public boolean hasId() {
-            return false;
         }
 
         @Override
@@ -767,15 +724,11 @@ public sealed interface TypeDefinition extends TableSchema
         /**
          * The primary key property.
          */
-        record Id(String name, String javaType, String columnName, GeneratedType generated) implements Prop {
+        record Id(String name, String javaType, String columnName) implements Prop {
 
             @Override
             public <R> R accept(Visitor<R> visitor) {
                 return visitor.visitId(this);
-            }
-
-            public enum GeneratedType {
-                NONE, AUTO, IDENTITY, SEQUENCE, UUID
             }
         }
 

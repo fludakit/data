@@ -811,17 +811,15 @@ class WriteEmissionTest {
                 "Widget.java", "WidgetRepository.java", "Segment.java", "SegmentRepository.java");
 
         String ticket = sqlFlat(generatedDir.resolve("appkey/TicketRepository_.java"));
-        // No-keyholder shape: the identity column is part of the INSERT and bound from the entity.
-        assertTrue(ticket.contains("INSERT = \"INSERT INTO \"tickets\" (\"id\", \"label\") VALUES (:id, :label)\""),
-                "the app-assigned id must be an INSERT column:" + System.lineSeparator() + ticket);
-        assertTrue(ticket.contains(
-                        "jdbcClient.sql(INSERT).param(\"id\", entity.getId()).param(\"label\", entity.getLabel()).update()"),
-                "the pre-assigned id parameter must be bound and the update must skip the keyholder:"
-                        + System.lineSeparator() + ticket);
+        // Uniform null-id rule: omit id + keyholder when null; bind id when present (INSERT_WITH_ID).
+        assertTrue(ticket.contains("INSERT = \"INSERT INTO \"tickets\" (\"label\") VALUES (:label)\""),
+                "null-id INSERT omits the identity column:" + System.lineSeparator() + ticket);
+        assertTrue(ticket.contains("INSERT_WITH_ID = \"INSERT INTO \"tickets\" (\"id\", \"label\") VALUES (:id, :label)\""),
+                "present-id INSERT includes the identity column:" + System.lineSeparator() + ticket);
+        assertTrue(ticket.contains("entity.setId((String) keys.getKey())"),
+                "String id is cast directly from the generated key:" + System.lineSeparator() + ticket);
         assertTrue(!ticket.contains("longValue"),
                 "String id must not use the Number coercion:" + System.lineSeparator() + ticket);
-        assertTrue(!ticket.contains("GeneratedKeyHolder") && !ticket.contains("keys.getKey()"),
-                "String id must not do the keyholder roundtrip:" + System.lineSeparator() + ticket);
 
         String badge = sqlFlat(generatedDir.resolve("appkey/BadgeRepository_.java"));
         assertTrue(badge.contains("INSERT = \"INSERT INTO \"badges\" (\"serial\") VALUES (:serial)\""),
@@ -1182,19 +1180,18 @@ class WriteEmissionTest {
                 "the generated-key id set and orphan loop must follow the Long id type:"
                         + System.lineSeparator() + impl);
 
-        // Write side (app-assigned Tag): the id column is bound on INSERT, and the sync is always-update
-        // by the child's own id — there is no keyholder branch.
-        assertTrue(impl.contains("EC_INSERT_TAGS = \"INSERT INTO \"tags\" (\"id\", \"label\", \"hub_id\") VALUES (:id, :label, :hub)\""),
-                "app-assigned children must bind the id on INSERT:" + System.lineSeparator() + impl);
+        // Write side (String-id Tag): same null-id rule as Long children — keyholder when null, update when present.
+        assertTrue(impl.contains("EC_INSERT_TAGS = \"INSERT INTO \"tags\" (\"label\", \"hub_id\") VALUES (:label, :hub)\""),
+                "null-id children insert without binding the id:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("GeneratedKeyHolder ecKeys_tags")
+                        && impl.contains("child_tags.setId((String) ecKeys_tags.getKey())"),
+                "String child keys must be backfilled onto the child object:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("jdbcClient.sql(EC_UPDATE_TAGS).param(\"id\", child_tags.getId()).param(\"label\", child_tags.getLabel()).param(\"hub\", entity.getId()).update()"),
-                "app-assigned children must always update by their own id (no keyholder branch):"
-                        + System.lineSeparator() + impl);
-        assertTrue(!impl.contains("GeneratedKeyHolder ecKeys_tags"),
-                "app-assigned children must not generate a keyholder branch:" + System.lineSeparator() + impl);
+                "present-id children update by their own id:" + System.lineSeparator() + impl);
         assertTrue(impl.contains("Set<String> existingIds_tags")
                         && impl.contains(".query(String.class)")
                         && impl.contains("for (String orphanId : existingIds_tags)"),
-                "the app-assigned id set and orphan loop must follow the String id type:"
+                "the String id set and orphan loop must follow the String id type:"
                         + System.lineSeparator() + impl);
 
         // deleteById cascades children first, in collection order, then the root row.

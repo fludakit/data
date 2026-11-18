@@ -11,261 +11,286 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * The ONE ordered SQL accumulator: every statement the engine emits is assembled as named parts and
- * rendered in exactly one order by exactly one {@link SqlDialect}.
- *
- * <p>The parts, in the order {@link #render(SqlDialect)} emits them:</p>
- *
- * <pre>
- * &lt;keyword&gt;[ DISTINCT] [&lt;projection&gt;] FROM &lt;table&gt;
- *     &lt;joins&gt;
- *     [WHERE &lt;where&gt;]
- *     [ORDER BY &lt;orderBy&gt;]
- *     &lt;pagination&gt;
- * </pre>
- *
- * <p>Three properties make this the substrate rather than a string being concatenated by hand:</p>
- * <ol>
- * <li><b>Joins are deduplicated by child table, structurally.</b> Two predicates that traverse the
- *     same relationship contribute the same {@link JoinEdge}; the map keeps the first and drops the
- *     rest. Dedup is the accumulator's job, not a caller's bookkeeping — previously it was an
- *     implicit side effect of {@code joinClause(List)} being handed an already-flat edge list.</li>
- * <li><b>Every identifier goes through the dialect at render time.</b> The accumulator stores raw
- *     table and column names; quoting, limit and offset syntax are the dialect's one
- *     responsibility, and no dialect branch appears in any builder.</li>
- * <li><b>A part that was never set is never emitted.</b> An absent WHERE is not {@code WHERE true},
- *     an absent ORDER BY is not {@code ORDER BY null}.</li>
- * </ol>
- *
- * <p>Mutable by design: a builder fills it in whatever order the caller's fluent chain arrives, and
- * {@code render} is the only thing that imposes SQL's order.</p>
+ * Immutable SQL-shaped parts produced by {@link QueryCompiler}. {@link #render(SqlDialect)} is the
+ * only place these parts become a literal; formatting is {@link SqlBuilder}'s job.
  */
-public final class SqlFragment {
+public sealed interface SqlFragment permits SqlFragment.Query, SqlFragment.Opaque {
 
-    private String keyword = "SELECT";
-    private String projection = "";
-    private boolean distinct;
-    private String table;
-    private String tableAlias;
-    private final Map<String, JoinEdge> joins = new LinkedHashMap<>();
-    private final List<QueryCompiler.Conjunct> where = new ArrayList<>();
-    private final List<String> orderBy = new ArrayList<>();
-    private Integer limit;
-    private Integer offset;
+    /** Renders this fragment through {@code dialect} as one single-line statement. */
+    String render(SqlDialect dialect);
 
-    // ------------------------------------------------------------------- assembly
+    /** One WHERE conjunct plus whether it joins to the preceding one with {@code OR}. */
+    record Conjunct(String sql, boolean orJoined) {
+        public Conjunct {
+            Objects.requireNonNull(sql, "sql");
+        }
+    }
 
-    /** Sets the leading SQL keyword: {@code SELECT}, {@code DELETE}, ... */
-    public SqlFragment keyword(String keyword) {
-        this.keyword = Objects.requireNonNull(keyword, "keyword");
-        return this;
+    /** One join edge rendered under an explicit alias. */
+    record Joined(String alias, JoinEdge edge) {
+        public Joined {
+            Objects.requireNonNull(alias, "alias");
+            Objects.requireNonNull(edge, "edge");
+        }
     }
 
     /**
-     * Sets the SELECT list verbatim. Callers compose it — bare {@code "col"}, {@code "root"."col"}
-     * or an aggregate such as {@code COUNT(*)} — because only they know which shape the statement
-     * needs. {@code DISTINCT} is a separate flag so that a projection need never encode it.
+     * A structured {@code SELECT} or {@code DELETE}: projection, joins, where, order, and optional
+     * limit/offset. Cursor seek keys travel with the fragment when the compiler derived them; they
+     * are not rendered into the base statement.
      */
-    public SqlFragment projection(String projection) {
-        this.projection = projection == null ? "" : projection;
-        return this;
-    }
+    record Query(
+            String keyword,
+            boolean distinct,
+            String projection,
+            String table,
+            String tableAlias,
+            List<Joined> joins,
+            List<Conjunct> where,
+            List<String> groupBy,
+            List<String> orderBy,
+            Integer limit,
+            Integer offset,
+            List<String> seekKeys
+    ) implements SqlFragment {
 
-    /** Marks the projection {@code DISTINCT}. Ignored unless a projection is set. */
-    public SqlFragment distinct(boolean distinct) {
-        this.distinct = distinct;
-        return this;
-    }
-
-    /** Sets the root table; quoted by the dialect at render time. */
-    public SqlFragment table(String table) {
-        this.table = Objects.requireNonNull(table, "table");
-        return this;
-    }
-
-    /** As {@link #table(String)}, also aliasing the table in the rendered {@code FROM} clause. */
-    public SqlFragment table(String table, String alias) {
-        this.table = Objects.requireNonNull(table, "table");
-        this.tableAlias = Objects.requireNonNull(alias, "alias");
-        return this;
-    }
-
-    /** Adds one relation edge; a second edge reaching the same child table is dropped. */
-    public SqlFragment join(JoinEdge edge) {
-        return join(edge, edge.childTable());
-    }
-
-    /** As {@link #join(JoinEdge)}, using the alias from the map if present. */
-    public SqlFragment join(JoinEdge edge, String alias) {
-        Objects.requireNonNull(edge, "edge");
-        Objects.requireNonNull(alias, "alias");
-        joins.putIfAbsent(alias, edge);
-        return this;
-    }
-
-    /** Adds every edge in {@code edges}, in order, deduplicated by child table. */
-    public SqlFragment join(Collection<JoinEdge> edges) {
-        Objects.requireNonNull(edges, "edges");
-        for (JoinEdge edge : edges) {
-            join(edge);
+        public Query {
+            Objects.requireNonNull(keyword, "keyword");
+            projection = projection == null ? "" : projection;
+            Objects.requireNonNull(table, "table");
+            joins = List.copyOf(joins);
+            where = List.copyOf(where);
+            groupBy = List.copyOf(groupBy);
+            orderBy = List.copyOf(orderBy);
+            seekKeys = List.copyOf(seekKeys);
         }
-        return this;
-    }
 
-    /** Appends a WHERE conjunct joined to the preceding one with {@code AND}. */
-    public SqlFragment where(String sql) {
-        return where(sql, false);
-    }
-
-    /** Appends a WHERE conjunct; {@code or} joins it with {@code OR} instead of {@code AND}. */
-    public SqlFragment where(String sql, boolean orJoined) {
-        Objects.requireNonNull(sql, "sql");
-        where.add(new QueryCompiler.Conjunct(sql, orJoined));
-        return this;
-    }
-
-    /** Appends an ORDER BY term, already rendered (quoting, {@code LOWER}, aggregate subquery). */
-    public SqlFragment orderBy(String term) {
-        Objects.requireNonNull(term, "term");
-        orderBy.add(term);
-        return this;
-    }
-
-    /** Sets the row limit; {@code <= 0} or {@code null} emits no limit clause. */
-    public SqlFragment limit(Integer limit) {
-        this.limit = limit;
-        return this;
-    }
-
-    /** Sets the row offset; {@code null} emits no offset clause. */
-    public SqlFragment offset(Integer offset) {
-        this.offset = offset;
-        return this;
-    }
-
-    // ------------------------------------------------------------------- inspection
-
-    /** The deduplicated join edges, in insertion order. */
-    public List<JoinEdge> joins() {
-        return List.copyOf(joins.values());
-    }
-
-    /** The number of WHERE conjuncts accumulated. */
-    public int whereCount() {
-        return where.size();
-    }
-
-    // ------------------------------------------------------------------- rendering
-
-    /**
-     * Renders every accumulated part through {@code dialect}, in SQL's order.
-     *
-     * @throws IllegalStateException when no root table was set — a statement without a FROM definition
-     *                               is never a valid rendering, and silently emitting one would turn
-     *                               a caller's missing step into a database error
-     */
-    public String render(SqlDialect dialect) {
-        Objects.requireNonNull(dialect, "dialect");
-        if (table == null) {
-            throw new IllegalStateException("SqlFragment has no root table — call table(..) before render(..)");
+        /** The join edges in insertion order. */
+        public List<JoinEdge> joinEdges() {
+            return joins.stream().map(Joined::edge).toList();
         }
-        StringBuilder sb = new StringBuilder(keyword);
-        if (distinct && !projection.isEmpty()) {
-            sb.append(" DISTINCT");
+
+        /** Starts a mutable builder for compiler assembly. */
+        public static Builder builder() {
+            return new Builder();
         }
-        if (!projection.isEmpty()) {
-            sb.append(' ').append(projection);
+
+        @Override
+        public String render(SqlDialect dialect) {
+            Objects.requireNonNull(dialect, "dialect");
+            StringBuilder sb = new StringBuilder(keyword);
+            if (distinct && !projection.isEmpty()) {
+                sb.append(" DISTINCT");
+            }
+            if (!projection.isEmpty()) {
+                sb.append(' ').append(projection);
+            }
+            appendFrom(sb, dialect);
+            appendJoins(sb, dialect, joins);
+            appendWhere(sb, where);
+            appendGroupBy(sb);
+            appendOrderBy(sb, orderBy);
+            appendPagination(sb, dialect, limit, offset);
+            return sb.toString();
         }
-        appendFrom(sb, dialect);
-        renderJoins(sb, dialect);
-        renderWhere(sb);
-        renderOrderBy(sb);
-        renderPagination(sb, dialect);
-        return sb.toString();
+
+        /**
+         * Keyword, projection, {@code FROM}, and joins only — for callers that append seek, order,
+         * or limit themselves.
+         */
+        public String renderWithoutTail(SqlDialect dialect) {
+            Objects.requireNonNull(dialect, "dialect");
+            StringBuilder sb = new StringBuilder(keyword);
+            if (distinct && !projection.isEmpty()) {
+                sb.append(" DISTINCT");
+            }
+            if (!projection.isEmpty()) {
+                sb.append(' ').append(projection);
+            }
+            appendFrom(sb, dialect);
+            appendJoins(sb, dialect, joins);
+            return sb.toString();
+        }
+
+        private void appendFrom(StringBuilder sql, SqlDialect dialect) {
+            sql.append(" FROM ").append(dialect.quoteIdentifier(table));
+            if (tableAlias != null) {
+                sql.append(" AS ").append(dialect.quoteIdentifier(tableAlias));
+            }
+        }
+
+        private void appendGroupBy(StringBuilder sql) {
+            if (groupBy.isEmpty()) {
+                return;
+            }
+            sql.append(" GROUP BY ").append(String.join(", ", groupBy));
+        }
+
+        /** Mutable assembly used only inside {@link QueryCompiler}. */
+        public static final class Builder {
+            private String keyword = "SELECT";
+            private boolean distinct;
+            private String projection = "";
+            private String table;
+            private String tableAlias;
+            private final Map<String, JoinEdge> joins = new LinkedHashMap<>();
+            private final List<Conjunct> where = new ArrayList<>();
+            private final List<String> groupBy = new ArrayList<>();
+            private final List<String> orderBy = new ArrayList<>();
+            private Integer limit;
+            private Integer offset;
+            private final List<String> seekKeys = new ArrayList<>();
+
+            public Builder keyword(String keyword) {
+                this.keyword = Objects.requireNonNull(keyword, "keyword");
+                return this;
+            }
+
+            public Builder distinct(boolean distinct) {
+                this.distinct = distinct;
+                return this;
+            }
+
+            public Builder projection(String projection) {
+                this.projection = projection == null ? "" : projection;
+                return this;
+            }
+
+            public Builder table(String table) {
+                this.table = Objects.requireNonNull(table, "table");
+                return this;
+            }
+
+            public Builder table(String table, String alias) {
+                this.table = Objects.requireNonNull(table, "table");
+                this.tableAlias = Objects.requireNonNull(alias, "alias");
+                return this;
+            }
+
+            public Builder join(JoinEdge edge) {
+                return join(edge, edge.childTable());
+            }
+
+            public Builder join(JoinEdge edge, String alias) {
+                Objects.requireNonNull(edge, "edge");
+                Objects.requireNonNull(alias, "alias");
+                joins.putIfAbsent(alias, edge);
+                return this;
+            }
+
+            public Builder join(Collection<JoinEdge> edges) {
+                Objects.requireNonNull(edges, "edges");
+                for (JoinEdge edge : edges) {
+                    if (edge != null) {
+                        join(edge);
+                    }
+                }
+                return this;
+            }
+
+            public Builder where(String sql) {
+                return where(sql, false);
+            }
+
+            public Builder where(String sql, boolean orJoined) {
+                where.add(new Conjunct(sql, orJoined));
+                return this;
+            }
+
+            public Builder where(Conjunct conjunct) {
+                where.add(Objects.requireNonNull(conjunct, "conjunct"));
+                return this;
+            }
+
+            public Builder groupBy(String term) {
+                groupBy.add(Objects.requireNonNull(term, "term"));
+                return this;
+            }
+
+            public Builder orderBy(String term) {
+                orderBy.add(Objects.requireNonNull(term, "term"));
+                return this;
+            }
+
+            public Builder limit(Integer limit) {
+                this.limit = limit;
+                return this;
+            }
+
+            public Builder offset(Integer offset) {
+                this.offset = offset;
+                return this;
+            }
+
+            public Builder seekKey(String key) {
+                seekKeys.add(Objects.requireNonNull(key, "key"));
+                return this;
+            }
+
+            public Query build() {
+                if (table == null) {
+                    throw new IllegalStateException("SqlFragment has no root table — call table(..) before build()");
+                }
+                List<Joined> joined = joins.entrySet().stream()
+                        .map(e -> new Joined(e.getKey(), e.getValue()))
+                        .toList();
+                return new Query(keyword, distinct, projection, table, tableAlias,
+                        joined, List.copyOf(where), List.copyOf(groupBy),
+                        List.copyOf(orderBy), limit, offset, List.copyOf(seekKeys));
+            }
+        }
     }
 
-    /**
-     * Renders only the join chain — {@code LEFT JOIN ... AS ... ON ...}, one per distinct child
-     * table, or {@code ""} when nothing joins. Callers that splice their own join string onto a
-     * pre-rendered shell (the generated paged readers) render exactly this.
-     */
-    public String renderJoins(SqlDialect dialect) {
-        Objects.requireNonNull(dialect, "dialect");
-        StringBuilder sb = new StringBuilder();
-        renderJoins(sb, dialect);
-        return sb.toString();
+    /** Fully-formed SQL: native {@code @Query} text, or a lifecycle/physical statement. */
+    record Opaque(String sql) implements SqlFragment {
+        public Opaque {
+            Objects.requireNonNull(sql, "sql");
+        }
+
+        @Override
+        public String render(SqlDialect dialect) {
+            return sql;
+        }
     }
 
-    /** Renders only the join chain for {@code edges}, deduplicated by child table. */
-    public static String joins(SqlDialect dialect, Collection<JoinEdge> edges) {
+    // ------------------------------------------------------------------- shared helpers
+
+    /** The table-qualified form of {@code column}, e.g. {@code "root"."name"}. */
+    static String qualified(SqlDialect dialect, String table, String column) {
+        return dialect.quoteIdentifier(table) + "." + dialect.quoteIdentifier(column);
+    }
+
+    /** Deduplicated {@code LEFT JOIN} chain for {@code edges}. */
+    static String joins(SqlDialect dialect, Collection<JoinEdge> edges) {
         return joins(dialect, edges, Set.of());
     }
 
     /**
-     * Renders only the join chain for {@code edges}, deduplicated by child table and DROPPING every
-     * edge onto a table already named in {@code alreadyJoined}.
-     *
-     * <p>A caller that splices this onto a pre-rendered shell must suppress the shell's own joins:
-     * the shell already emitted {@code LEFT JOIN "author" AS "author"}, so repeating the alias makes
-     * every reference to it ambiguous. The caller knows which tables its shell joined; this overload
-     * is where that knowledge is applied, so the suppression rule lives once instead of in every
-     * generated splice site.</p>
+     * Join chain for {@code edges}, dropping every edge onto a table already named in
+     * {@code alreadyJoined}.
      */
-    public static String joins(SqlDialect dialect, Collection<JoinEdge> edges,
-                               Collection<String> alreadyJoined) {
+    static String joins(SqlDialect dialect, Collection<JoinEdge> edges,
+                        Collection<String> alreadyJoined) {
         Objects.requireNonNull(dialect, "dialect");
         Objects.requireNonNull(edges, "edges");
         Objects.requireNonNull(alreadyJoined, "alreadyJoined");
-        List<JoinEdge> remaining = new ArrayList<>();
+        Query.Builder builder = Query.builder().table("_");
         for (JoinEdge edge : edges) {
-            if (edge == null) {
+            if (edge == null || alreadyJoined.contains(edge.childTable())) {
                 continue;
             }
-            if (alreadyJoined.contains(edge.childTable())) {
-                continue;
-            }
-            remaining.add(edge);
+            builder.join(edge);
         }
-        SqlFragment fragment = new SqlFragment();
-        fragment.join(remaining);
-        return fragment.renderJoins(dialect);
-    }
-
-    /**
-     * Renders the shell only — keyword, projection, {@code FROM}, join chain — dropping WHERE,
-     * ORDER BY and pagination. A caller that appends those itself (a runtime paged read splicing
-     * its own seek predicate and limit) starts from this.
-     */
-    public String renderWithoutTail(SqlDialect dialect) {
-        Objects.requireNonNull(dialect, "dialect");
-        if (table == null) {
-            throw new IllegalStateException("SqlFragment has no root table — call table(..) before render(..)");
-        }
-        StringBuilder sb = new StringBuilder(keyword);
-        if (distinct && !projection.isEmpty()) {
-            sb.append(" DISTINCT");
-        }
-        if (!projection.isEmpty()) {
-            sb.append(' ').append(projection);
-        }
-        appendFrom(sb, dialect);
-        renderJoins(sb, dialect);
+        StringBuilder sb = new StringBuilder();
+        appendJoins(sb, dialect, builder.build().joins());
         return sb.toString();
     }
 
-    private void appendFrom(StringBuilder sql, SqlDialect dialect) {
-        sql.append(" FROM ").append(dialect.quoteIdentifier(table));
-        if (tableAlias != null) {
-            sql.append(" AS ").append(dialect.quoteIdentifier(tableAlias));
-        }
-    }
-
-    private void renderJoins(StringBuilder sql, SqlDialect dialect) {
-        for (Map.Entry<String, JoinEdge> entry : joins.entrySet()) {
-            String alias = entry.getKey();
-            JoinEdge join = entry.getValue();
+    private static void appendJoins(StringBuilder sql, SqlDialect dialect, List<Joined> joins) {
+        for (Joined joined : joins) {
+            JoinEdge join = joined.edge();
             String owner = dialect.quoteIdentifier(join.ownerTable());
-            String quotedAlias = dialect.quoteIdentifier(alias);
+            String quotedAlias = dialect.quoteIdentifier(joined.alias());
             String childTable = dialect.quoteIdentifier(join.childTable());
             sql.append(" LEFT JOIN ").append(childTable)
                     .append(" AS ").append(quotedAlias)
@@ -276,7 +301,7 @@ public final class SqlFragment {
         }
     }
 
-    private void renderWhere(StringBuilder sql) {
+    private static void appendWhere(StringBuilder sql, List<Conjunct> where) {
         if (where.isEmpty()) {
             return;
         }
@@ -289,14 +314,15 @@ public final class SqlFragment {
         }
     }
 
-    private void renderOrderBy(StringBuilder sql) {
+    private static void appendOrderBy(StringBuilder sql, List<String> orderBy) {
         if (orderBy.isEmpty()) {
             return;
         }
         sql.append(" ORDER BY ").append(String.join(", ", orderBy));
     }
 
-    private void renderPagination(StringBuilder sql, SqlDialect dialect) {
+    private static void appendPagination(StringBuilder sql, SqlDialect dialect,
+                                         Integer limit, Integer offset) {
         boolean hasLimit = limit != null && limit > 0;
         boolean hasOffset = offset != null && offset >= 0;
         if (hasLimit && hasOffset) {
@@ -306,10 +332,5 @@ public final class SqlFragment {
         } else if (hasOffset) {
             sql.append(dialect.offsetClause(Integer.toString(offset)));
         }
-    }
-
-    /** The table-qualified form of {@code column}, e.g. {@code "root"."name"}. */
-    public static String qualified(SqlDialect dialect, String table, String column) {
-        return dialect.quoteIdentifier(table) + "." + dialect.quoteIdentifier(column);
     }
 }

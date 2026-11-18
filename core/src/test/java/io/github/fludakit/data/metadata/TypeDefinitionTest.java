@@ -2,6 +2,7 @@ package io.github.fludakit.data.metadata;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -35,21 +36,21 @@ class TypeDefinitionTest {
 
     private static final TypeDefinition.Entity AUTHOR = new TypeDefinition.Entity(
             "demo.Author", "author",
-            new TypeDefinition.Prop.Id("id", "Long", "id", TypeDefinition.Prop.Id.GeneratedType.IDENTITY),
+            new TypeDefinition.Prop.Id("id", "Long", "id"),
             null,
             List.of(new TypeDefinition.Prop.Scalar("name", "String", "name", true)),
             List.of(), List.of(), List.of(), List.of());
 
     private static final TypeDefinition.Entity LINE = new TypeDefinition.Entity(
             "demo.Line", "line",
-            new TypeDefinition.Prop.Id("id", "Long", "id", TypeDefinition.Prop.Id.GeneratedType.IDENTITY),
+            new TypeDefinition.Prop.Id("id", "Long", "id"),
             null,
             List.of(new TypeDefinition.Prop.Scalar("qty", "Integer", "qty", true)),
             List.of(), List.of(), List.of(), List.of());
 
     private static final TypeDefinition.Aggregate BOOK = new TypeDefinition.Aggregate(
             "demo.Book", "book",
-            new TypeDefinition.Prop.Id("id", "Long", "id", TypeDefinition.Prop.Id.GeneratedType.IDENTITY),
+            new TypeDefinition.Prop.Id("id", "Long", "id"),
             new TypeDefinition.Prop.Version("version", "long", "version"),
             List.of(new TypeDefinition.Prop.Scalar("title", "String", "title", true)),
             List.of(),
@@ -61,7 +62,7 @@ class TypeDefinitionTest {
 
     private static final TypeDefinition.Aggregate CUSTOMER = new TypeDefinition.Aggregate(
             "demo.Customer", "customer",
-            new TypeDefinition.Prop.Id("id", "Long", "id", TypeDefinition.Prop.Id.GeneratedType.IDENTITY),
+            new TypeDefinition.Prop.Id("id", "Long", "id"),
             null,
             List.of(new TypeDefinition.Prop.Scalar("name", "String", "name", true)),
             List.of(new TypeDefinition.Prop.Embedded(
@@ -71,7 +72,7 @@ class TypeDefinitionTest {
             List.of(new TypeDefinition.Prop.ElementCollection(
                     "tags", "java.util.List", TAG, "customer_tags", "customer_id")));
 
-    // ── TableSchema: the table's physical columns ─────────────────────────
+    // ── Physical table columns ────────────────────────────────────────────
 
     @Test
     void columnsListOwnPhysicalColumnsInDeclarationOrder() {
@@ -222,14 +223,14 @@ class TypeDefinitionTest {
 
     @Test
     void identityAndLifecycleHelpers() {
-        assertTrue(BOOK.hasId());
+        assertInstanceOf(TypeDefinition.Aggregate.class, BOOK);
         assertTrue(BOOK.ownsAggregateLifecycle());
         assertEquals("id", BOOK.idColumn());
 
-        assertTrue(AUTHOR.hasId());
+        assertInstanceOf(TypeDefinition.Entity.class, AUTHOR);
         assertFalse(AUTHOR.ownsAggregateLifecycle());
 
-        assertFalse(ADDRESS.hasId());
+        assertInstanceOf(TypeDefinition.ValueObject.class, ADDRESS);
         assertFalse(ADDRESS.ownsAggregateLifecycle());
         assertNull(ADDRESS.idColumn());
     }

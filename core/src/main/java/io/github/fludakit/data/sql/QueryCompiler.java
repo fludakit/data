@@ -4,16 +4,15 @@ import io.github.fludakit.data.Names;
 import io.github.fludakit.data.metadata.ColumnPlacement;
 import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.JoinEdge;
-import io.github.fludakit.data.metadata.TableSchema;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.metadata.UnknownAttributePathException;
 import io.github.fludakit.data.query.Connector;
-import io.github.fludakit.data.query.Operation;
 import io.github.fludakit.data.query.Operator;
-import io.github.fludakit.data.query.PagingMode;
+import io.github.fludakit.data.query.Order;
 import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.SortSpec;
+import io.github.fludakit.data.query.Window;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -23,57 +22,21 @@ import java.util.Objects;
 import java.util.stream.Collectors;
 
 /**
- * Compiles a logical {@link QueryDefinition} into physical SQL: one pass resolves and classifies
- * every predicate and sort ref, then assembles the whole statement as a {@link SqlFragment}.
+ * Compiles a logical {@link QueryDefinition} into an {@link SqlFragment}. Path resolution, join
+ * versus {@code EXISTS} classification, projection, and the window policy all live here — there is
+ * no separate planner type.
  *
- * <p>This is the engine's only structured-query renderer. {@link SqlBuilder} exposes it as instance
- * methods for callers that splice dynamic SQL at runtime (the generated paged readers); it owns no
- * rendering logic of its own, so there is exactly one place where a logical path becomes a
- * physical column.</p>
- *
- * <h2>The layout rules</h2>
- * <ul>
- * <li>An existential (to-many head) predicate ref renders as an
- *     {@link #existsConjunct EXISTS} conjunct and contributes NO join; in DELETE mode every
- *     traversed predicate ref does, because a joined {@code DELETE ... LEFT JOIN} is invalid SQL on
- *     H2/PostgreSQL/SQL Server. The DELETE-mode suppression inspects predicate refs only: an emitted
- *     delete model always carries empty sorts, so a hand-built model with {@code Operation.DELETE}
- *     and joined sort refs would render an invalid statement — joined sort refs are not supported
- *     for DELETE.</li>
- * <li>An existential sort renders an {@link #aggregateSortTerm} and contributes NO join; only
- *     to-one predicate refs and to-one sort refs splice the join chain.</li>
- * <li>The classic {@link #selectBy}/{@link #countBy}/{@link #deleteBy} builders stay as a separate
- *     raw-predicates API (no {@code QueryDefinition}, no resolver) for the generated paged readers,
- *     which splice a seek predicate and cursor ORDER BY onto a pre-baked shell at runtime.</li>
- * <li>A {@code model.paging()} other than {@link PagingMode#NONE} renders the BASE constant:
- *     ORDER BY and LIMIT are spliced at runtime by the generated paged read, so the declared sorts
- *     and the static limit are dropped from this rendering.</li>
- * <li>The root-id tiebreak is a runtime cursor concern only; a model's {@code sorts()} render
- *     exactly as declared.</li>
- * </ul>
- * {@code extraProjection} is the joined full-materialisation payload and rides FIND shells only —
- * count and delete ignore it.
+ * <p>{@link SqlBuilder} turns a fragment into a literal (and optionally formats it). This class
+ * never returns a formatted string.</p>
  */
 public final class QueryCompiler {
 
     private QueryCompiler() {
     }
 
-    /** One WHERE conjunct plus the connector that joins it to the preceding one. */
-    public record Conjunct(String sql, boolean orJoined) {
-    }
-
     /**
-     * The resolved shape of one query: which edges to join, which conjuncts to assert in which
-     * order, which terms to order by, and whether the whole thing degrades to the pre-join classic
-     * statement.
-     */
-    public record Plan(List<JoinEdge> joins, List<Conjunct> where, List<String> orderBy, int limit) {
-    }
-
-    /**
-     * The rendered shape of a cursor-paged to-many sort/projection: the base SELECT shell, the ORDER BY
-     * aliases, and the keyset seek terms.
+     * The rendered shape of a cursor-paged to-many sort/projection: the base SELECT shell, the
+     * ORDER BY aliases, and the keyset seek terms.
      */
     public record RenderedCursorSortProjection(String shell, List<String> orderByTerms, List<String> seekTerms) {
         public RenderedCursorSortProjection {
@@ -82,133 +45,189 @@ public final class QueryCompiler {
         }
     }
 
+    /**
+     * A cursor-paged to-many sort/projection input: LEFT JOIN + GROUP BY + MIN/MAX aggregates.
+     */
+    public record CursorSortProjection(
+            String childTable,
+            String fkColumn,
+            String joinAlias,
+            List<SortColumn> sortColumns
+    ) {
+        public CursorSortProjection {
+            sortColumns = List.copyOf(sortColumns);
+        }
+
+        public record SortColumn(String columnSuffix, boolean ascending) {
+        }
+    }
+
     // ------------------------------------------------------------------- entry points
 
-    /**
-     * Renders one statement. The single entry point every façade funnels into, so the mapping from
-     * a statement to its SQL lives here and nowhere else.
-     *
-     * <p>Lifecycle statements leave immediately: they have no path to resolve, no join to plan and no
-     * predicate to classify, so they render straight from the table shape. Only the criteria
-     * statements reach the planner.</p>
-     *
-     * @param schema      the root table shape
-     * @param resolver    entity-rooted attribute path resolver; required by a criteria statement and
-     *                    by an INSERT/UPDATE, unused by {@code DeleteById}
-     * @param dialect     the SQL syntax to render with
-     * @param model       the statement
-     * @param extraProjection the joined full-materialisation payload, or {@code null}
-     */
-    public static String render(TableSchema schema, TypeDefinition resolver, SqlDialect dialect,
-                                QueryDefinition model, String extraProjection) {
-        return render(schema, resolver, dialect, model, List.of(), extraProjection);
+    /** Compiles {@code query} against {@code typeModel}. */
+    public static SqlFragment compile(QueryDefinition query, TypeDefinition typeModel, SqlDialect dialect) {
+        return compile(query, typeModel, dialect, List.of(), null);
     }
 
     /**
-     * As {@link #render}, additionally seeding the join chain with {@code extraEdges}.
-     *
-     * <p>Edges a projection contributes rather than a predicate: a caller that asks for
-     * {@code author.name} joins the author table even with no predicate on it. Planning must see
-     * those BEFORE it decides whether the statement joins, because that decision is what qualifies
-     * every leaf — a WHERE term left bare while the projection is qualified is ambiguous the moment
-     * the joined table shares a column name.</p>
+     * As {@link #compile(QueryDefinition, TypeDefinition, SqlDialect)}, seeding joins with
+     * {@code extraEdges} and appending {@code extraProjection} on a find shell.
      */
-    public static String render(TableSchema schema, TypeDefinition resolver, SqlDialect dialect,
-                                QueryDefinition model, List<JoinEdge> extraEdges, String extraProjection) {
-        Objects.requireNonNull(schema, "schema");
+    public static SqlFragment compile(QueryDefinition query, TypeDefinition typeModel, SqlDialect dialect,
+                                      List<JoinEdge> extraEdges, String extraProjection) {
+        Objects.requireNonNull(query, "query");
+        Objects.requireNonNull(typeModel, "typeModel");
         Objects.requireNonNull(dialect, "dialect");
-        Objects.requireNonNull(model, "model");
         Objects.requireNonNull(extraEdges, "extraEdges");
-        return switch (model) {
-            case QueryDefinition.Insert insert -> insert(dialect, schema, requireResolver(resolver),
-                    insert.includeId());
-            case QueryDefinition.Upsert ignored -> upsert(dialect, schema, requireResolver(resolver));
-            case QueryDefinition.Update ignored -> update(dialect, schema, requireResolver(resolver));
-            case QueryDefinition.DeleteById ignored -> deleteById(dialect, schema);
-            case QueryDefinition.DeleteByFk byFk -> deleteByFk(dialect, byFk.table(), byFk.fkColumn());
-            case QueryDefinition.SelectForeignKey selectFk -> selectForeignKey(dialect, schema, selectFk.fkColumn());
-            case QueryDefinition.DeleteChildByIdAndFk d -> deleteChildByIdAndFk(dialect, d.table(), d.idColumn(), d.fkColumn());
-            case QueryDefinition.SelectChildIds s -> selectChildIds(dialect, s.table(), s.idColumn(), s.fkColumn());
-            case QueryDefinition.InsertColumns i -> insertColumns(dialect, i.table(), i.columns(), i.paramNames());
-            case QueryDefinition.CorrelatedSort cs -> correlatedSort(dialect, cs.childTable(), cs.leafColumn(), cs.fkColumn(), cs.ownerTable(), cs.ownerIdColumn(), cs.ascending());
-            case QueryDefinition.SelectByFk s -> selectByFk(dialect, s.table(), s.whereColumn(), s.paramName(), s.projection());
-            case QueryDefinition.Native nativeQuery -> nativeQuery.sql();
-            case QueryDefinition.Criteria criteria -> {
-                Objects.requireNonNull(resolver, "resolver");
-                Plan plan = new QueryPlanner(schema, resolver, dialect, criteria, extraEdges).plan();
-                yield fragment(schema, dialect, criteria, plan, extraProjection).render(dialect);
-            }
+        return switch (query) {
+            case QueryDefinition.Insert insert -> compileInsert(dialect, typeModel, insert.includeId());
+            case QueryDefinition.Upsert ignored -> compileUpsert(dialect, typeModel);
+            case QueryDefinition.Update ignored -> compileUpdate(dialect, typeModel);
+            case QueryDefinition.DeleteById ignored -> compileDeleteById(dialect, typeModel);
+            case QueryDefinition.Native nativeQuery -> new SqlFragment.Opaque(nativeQuery.sql());
+            case QueryDefinition.Criteria criteria -> compileCriteria(criteria, typeModel, dialect,
+                    extraEdges, extraProjection);
         };
     }
 
-    /** Resolves and classifies one criteria statement without rendering it. */
-    public static Plan plan(TableSchema schema, TypeDefinition resolver, SqlDialect dialect,
-                            QueryDefinition.Criteria model) {
-        return plan(schema, resolver, dialect, model, List.of());
-    }
+    // ------------------------------------------------------------------- criteria compilation
 
-    /** As {@link #plan}, seeding the join chain with {@code extraEdges}. */
-    public static Plan plan(TableSchema schema, TypeDefinition resolver, SqlDialect dialect,
-                            QueryDefinition.Criteria model, List<JoinEdge> extraEdges) {
-        return new QueryPlanner(schema, resolver, dialect, model, extraEdges).plan();
-    }
-
-    private static TypeDefinition requireResolver(TypeDefinition resolver) {
-        if (resolver == null) {
-            throw new IllegalStateException("this statement binds logical attribute paths and needs a"
-                    + " column resolver — construct it with SqlBuilder(TableSchema, TypeDefinition)");
-        }
-        return resolver;
-    }
-
-    // ------------------------------------------------------------------- assembly
-
-    /**
-     * Fills a {@link SqlFragment} from a resolved plan. Visible so a caller that has already planned
-     * a query can reuse the plan, and so tests can assert on the parts instead of the string.
-     */
-    public static SqlFragment fragment(TableSchema schema, SqlDialect dialect, QueryDefinition.Criteria model,
-                                       Plan plan, String extraProjection) {
-        boolean spliceJoins = !plan.joins().isEmpty();
-        boolean countMode = model instanceof QueryDefinition.Count || model instanceof QueryDefinition.Exists;
+    private static SqlFragment compileCriteria(QueryDefinition.Criteria model, TypeDefinition typeModel,
+                                               SqlDialect dialect, List<JoinEdge> extraEdges,
+                                               String extraProjection) {
         boolean deleteMode = model instanceof QueryDefinition.DeleteWhere;
-        SqlFragment fragment = new SqlFragment().table(schema.tableName()).join(plan.joins());
+        boolean countMode = model instanceof QueryDefinition.Count || model instanceof QueryDefinition.Exists;
+        List<Predicate> predicates = model.predicates();
+        List<SortSpec> sorts = List.of();
+        int limit = 0;
+        if (model instanceof QueryDefinition.Read read) {
+            boolean bakeWindow = read.window() instanceof Window.None;
+            boolean bakeOrder = bakeWindow && read.order() instanceof Order.Static;
+            sorts = bakeOrder ? read.sorts() : List.of();
+            limit = bakeWindow ? ((Window.None) read.window()).limit().limit() : 0;
+        }
+
+        List<JoinEdge> joinEdges = new ArrayList<>(extraEdges);
+        List<Integer> existentialIndices = new ArrayList<>();
+        List<ColumnPlacement> predicateRefs = new ArrayList<>();
+        List<ColumnPlacement> sortRefs = new ArrayList<>();
+        List<Boolean> existentialSorts = new ArrayList<>();
+
+        for (int i = 0; i < predicates.size(); i++) {
+            Predicate predicate = predicates.get(i);
+            ColumnPlacement ref = resolveColumn(typeModel, predicate.property());
+            predicateRefs.add(ref);
+            if (isExistential(typeModel, predicate.property()) || (deleteMode && !ref.local())) {
+                existentialIndices.add(i);
+            } else {
+                joinEdges.addAll(ref.edges());
+            }
+        }
+        for (SortSpec sort : sorts) {
+            ColumnPlacement ref = resolveColumn(typeModel, sort.property());
+            boolean existential = isExistential(typeModel, sort.property());
+            sortRefs.add(ref);
+            existentialSorts.add(existential);
+            if (!existential) {
+                joinEdges.addAll(ref.edges());
+            }
+        }
+
+        boolean spliceJoins = !joinEdges.isEmpty();
+        List<SqlFragment.Conjunct> where = whereConjuncts(dialect, typeModel, predicates, predicateRefs,
+                existentialIndices, spliceJoins);
+        List<String> orderBy = orderByTerms(dialect, typeModel, sorts, sortRefs, existentialSorts, spliceJoins);
+
+        SqlFragment.Query.Builder fragment = SqlFragment.Query.builder()
+                .table(typeModel.tableName())
+                .join(joinEdges);
         if (countMode) {
-            // COUNT collapses to COUNT(*), or to COUNT(DISTINCT <id>) when the query asks for
-            // distinct rows: a root row is identified by its id, and COUNT(DISTINCT *) is not SQL.
-            fragment.keyword("SELECT").projection(distinct(model) && schema.idColumn() != null
-                    ? "COUNT(DISTINCT " + dialect.quoteIdentifier(schema.idColumn()) + ")"
+            boolean distinct = model instanceof QueryDefinition.Count c && c.distinct();
+            fragment.keyword("SELECT").projection(distinct && typeModel.idColumn() != null
+                    ? "COUNT(DISTINCT " + dialect.quoteIdentifier(typeModel.idColumn()) + ")"
                     : "COUNT(*)");
         } else if (deleteMode) {
             fragment.keyword("DELETE");
         } else {
-            // Joined find: every root column is qualified by the root table. Unqualified bare names
-            // become ambiguous the moment a join adds a table sharing a column name (e.g. the definition's
-            // own "id"), and a full-materialisation read joins exactly such a table. Qualifying keeps
-            // each label = its physical column, so the generated row mapper still reads it by name.
+            boolean distinct = model instanceof QueryDefinition.Read r && r.distinct();
             fragment.keyword("SELECT")
-                    .projection(rootProjection(dialect, schema, spliceJoins, extraProjection))
-                    .distinct(distinct(model));
+                    .projection(rootProjection(dialect, typeModel, spliceJoins, extraProjection))
+                    .distinct(distinct);
         }
-        for (Conjunct conjunct : plan.where()) {
-            fragment.where(conjunct.sql(), conjunct.orJoined());
+        for (SqlFragment.Conjunct conjunct : where) {
+            fragment.where(conjunct);
         }
-        for (String term : plan.orderBy()) {
+        for (String term : orderBy) {
             fragment.orderBy(term);
         }
-        if (plan.limit() > 0) {
-            fragment.limit(plan.limit());
+        if (limit > 0) {
+            fragment.limit(limit);
         }
-        return fragment;
+        return fragment.build();
     }
 
-    private static String rootProjection(SqlDialect dialect, TableSchema schema, boolean qualified,
+    private static List<SqlFragment.Conjunct> whereConjuncts(
+            SqlDialect dialect, TypeDefinition typeModel, List<Predicate> predicates,
+            List<ColumnPlacement> predicateRefs, List<Integer> existentialIndices, boolean spliceJoins) {
+        List<SqlFragment.Conjunct> conjuncts = new ArrayList<>();
+        if (predicates.stream().anyMatch(p -> Connector.isOr(p.connector()))) {
+            for (int i = 0; i < predicates.size(); i++) {
+                conjuncts.add(new SqlFragment.Conjunct(
+                        conjunctAt(dialect, typeModel, predicates, predicateRefs, existentialIndices, i, spliceJoins),
+                        i > 0 && Connector.isOr(predicates.get(i).connector())));
+            }
+        } else {
+            for (int i = 0; i < predicates.size(); i++) {
+                if (!existentialIndices.contains(i)) {
+                    conjuncts.add(new SqlFragment.Conjunct(
+                            conjunctAt(dialect, typeModel, predicates, predicateRefs, existentialIndices, i, spliceJoins),
+                            false));
+                }
+            }
+            for (int i : existentialIndices) {
+                conjuncts.add(new SqlFragment.Conjunct(
+                        conjunctAt(dialect, typeModel, predicates, predicateRefs, existentialIndices, i, spliceJoins),
+                        false));
+            }
+        }
+        return conjuncts;
+    }
+
+    private static String conjunctAt(SqlDialect dialect, TypeDefinition typeModel, List<Predicate> predicates,
+                                     List<ColumnPlacement> predicateRefs, List<Integer> existentialIndices,
+                                     int index, boolean spliceJoins) {
+        Predicate predicate = predicates.get(index);
+        ColumnPlacement ref = predicateRefs.get(index);
+        return existentialIndices.contains(index)
+                ? existsConjunct(dialect, predicate, ref)
+                : renderPredicate(dialect, predicate, ref, typeModel.tableName(), spliceJoins);
+    }
+
+    private static List<String> orderByTerms(SqlDialect dialect, TypeDefinition typeModel, List<SortSpec> sorts,
+                                             List<ColumnPlacement> sortRefs, List<Boolean> existentialSorts,
+                                             boolean spliceJoins) {
+        List<String> terms = new ArrayList<>(sorts.size());
+        for (int i = 0; i < sorts.size(); i++) {
+            SortSpec sort = sorts.get(i);
+            ColumnPlacement ref = sortRefs.get(i);
+            boolean existential = Boolean.TRUE.equals(existentialSorts.get(i));
+            String term = existential
+                    ? aggregateSortTerm(dialect, typeModel, ref, sort.ascending())
+                    : isLocalTo(ref.leaf(), typeModel.tableName()) && !spliceJoins
+                            ? dialect.quoteIdentifier(ref.leaf().column())
+                            : qualify(dialect, ref.leaf(), typeModel.tableName());
+            terms.add(orderTerm(term, sort, existential));
+        }
+        return terms;
+    }
+
+    private static String rootProjection(SqlDialect dialect, TypeDefinition typeModel, boolean qualified,
                                          String extraProjection) {
         if (!qualified && extraProjection != null && !extraProjection.isEmpty()) {
             throw new IllegalStateException("bare projection cannot carry extraProjection");
         }
-        String columns = schema.columns().stream()
-                .map(c -> qualified ? SqlFragment.qualified(dialect, schema.tableName(), c.column())
+        String columns = typeModel.columns().stream()
+                .map(c -> qualified ? SqlFragment.qualified(dialect, typeModel.tableName(), c.column())
                         : dialect.quoteIdentifier(c.column()))
                 .collect(Collectors.joining(", "));
         return extraProjection == null || extraProjection.isEmpty()
@@ -216,194 +235,172 @@ public final class QueryCompiler {
                 : columns + ", " + extraProjection;
     }
 
-    /** {@code DISTINCT} is a fact only a read and a count carry; every other statement ignores it. */
-    private static boolean distinct(QueryDefinition.Criteria model) {
-        return switch (model) {
-            case QueryDefinition.Read read -> read.distinct();
-            case QueryDefinition.Count count -> count.distinct();
-            case QueryDefinition.Exists ignored -> false;
-            case QueryDefinition.DeleteWhere ignored -> false;
-        };
+    // ------------------------------------------------------------------- lifecycle / physical → Opaque
+
+    private static SqlFragment compileInsert(SqlDialect dialect, TypeDefinition typeModel, boolean includeId) {
+        return new SqlFragment.Opaque(insert(dialect, typeModel, includeId));
     }
 
-    // ------------------------------------------------------------------- classic statements
-
-    /** Renders a classic no-join SELECT. */
-    public static String selectBy(SqlDialect dialect, TableSchema schema, List<Predicate> predicates,
-                                  List<SortSpec> sorts, int limit, String cursorClause) {
-        return selectBy(dialect, schema, predicates, sorts, limit, cursorClause, false);
+    private static SqlFragment compileUpsert(SqlDialect dialect, TypeDefinition typeModel) {
+        return new SqlFragment.Opaque(upsert(dialect, typeModel));
     }
 
-    /** Renders a classic no-join SELECT, optionally {@code DISTINCT}. */
-    public static String selectBy(SqlDialect dialect, TableSchema schema, List<Predicate> predicates,
+    private static SqlFragment compileUpdate(SqlDialect dialect, TypeDefinition typeModel) {
+        return new SqlFragment.Opaque(update(dialect, typeModel));
+    }
+
+    private static SqlFragment compileDeleteById(SqlDialect dialect, TypeDefinition typeModel) {
+        return new SqlFragment.Opaque(deleteById(dialect, typeModel));
+    }
+
+    /** Physical cascade DELETE by parent FK. */
+    public static SqlFragment deleteByFk(SqlDialect dialect, String table, String fkColumn) {
+        return new SqlFragment.Opaque("DELETE FROM " + dialect.quoteIdentifier(table)
+                + " WHERE " + dialect.quoteIdentifier(fkColumn) + " = :parentId");
+    }
+
+    /** Physical select of a foreign-key column by identifier. */
+    public static SqlFragment selectForeignKey(SqlDialect dialect, TypeDefinition typeModel, String fkColumn) {
+        return new SqlFragment.Opaque("SELECT " + dialect.quoteIdentifier(fkColumn)
+                + " FROM " + dialect.quoteIdentifier(typeModel.tableName())
+                + " WHERE " + dialect.quoteIdentifier(typeModel.idColumn()) + " = :id");
+    }
+
+    /** Physical orphan DELETE by child id and parent FK. */
+    public static SqlFragment deleteChildByIdAndFk(SqlDialect dialect, String table, String idColumn, String fkColumn) {
+        return new SqlFragment.Opaque("DELETE FROM " + dialect.quoteIdentifier(table)
+                + " WHERE " + dialect.quoteIdentifier(idColumn) + " = :childId"
+                + " AND " + dialect.quoteIdentifier(fkColumn) + " = :parentId");
+    }
+
+    /** Physical select of child ids by parent FK. */
+    public static SqlFragment selectChildIds(SqlDialect dialect, String table, String idColumn, String fkColumn) {
+        return new SqlFragment.Opaque("SELECT " + dialect.quoteIdentifier(idColumn)
+                + " FROM " + dialect.quoteIdentifier(table)
+                + " WHERE " + dialect.quoteIdentifier(fkColumn) + " = :parentId");
+    }
+
+    /** Physical INSERT with an explicit column/parameter list. */
+    public static SqlFragment insertColumns(SqlDialect dialect, String table, List<String> columns,
+                                            List<String> paramNames) {
+        String names = columns.stream().map(dialect::quoteIdentifier).collect(Collectors.joining(", "));
+        String params = paramNames.stream().map(n -> ":" + paramName(n)).collect(Collectors.joining(", "));
+        return new SqlFragment.Opaque("INSERT INTO " + dialect.quoteIdentifier(table)
+                + " (" + names + ") VALUES (" + params + ")");
+    }
+
+    /** Correlated aggregate sort term for a non-hydrated to-many cursor sort. */
+    public static SqlFragment correlatedSort(SqlDialect dialect, String childTable, String leafColumn,
+                                             String fkColumn, String ownerTable, String ownerIdColumn,
+                                             boolean ascending) {
+        return new SqlFragment.Opaque("(SELECT " + (ascending ? "MIN" : "MAX")
+                + "(" + dialect.quoteIdentifier(childTable) + "." + dialect.quoteIdentifier(leafColumn) + ")"
+                + " FROM " + dialect.quoteIdentifier(childTable)
+                + " WHERE " + dialect.quoteIdentifier(childTable) + "." + dialect.quoteIdentifier(fkColumn)
+                + " = " + dialect.quoteIdentifier(ownerTable) + "." + dialect.quoteIdentifier(ownerIdColumn) + ")");
+    }
+
+    /** Child-table hydration SELECT. */
+    public static SqlFragment selectByFk(SqlDialect dialect, String table, String whereColumn,
+                                         String paramName, String projection) {
+        String proj = projection == null || projection.isEmpty() ? "*" : projection;
+        return new SqlFragment.Opaque("SELECT " + proj + " FROM " + dialect.quoteIdentifier(table)
+                + " WHERE " + dialect.quoteIdentifier(whereColumn) + " = :" + paramName);
+    }
+
+    // ------------------------------------------------------------------- classic no-join helpers
+
+    /** Classic no-join SELECT (optionally DISTINCT). */
+    public static String selectBy(SqlDialect dialect, TypeDefinition typeModel, List<Predicate> predicates,
                                   List<SortSpec> sorts, int limit, String cursorClause, boolean distinct) {
-        String mainAlias = schema.tableName().toLowerCase() + "_0";
-        String cols = schema.columns().stream()
+        String mainAlias = typeModel.tableName().toLowerCase() + "_0";
+        String cols = typeModel.columns().stream()
                 .map(c -> dialect.quoteIdentifier(mainAlias) + "." + dialect.quoteIdentifier(c.column()))
                 .collect(Collectors.joining(", "));
-        SqlFragment fragment = new SqlFragment()
+        SqlFragment.Query.Builder fragment = SqlFragment.Query.builder()
                 .keyword("SELECT")
                 .projection(cols)
                 .distinct(distinct)
-                .table(schema.tableName(), mainAlias);
-        appendWhere(fragment, dialect, predicates, cursorClause);
-        for (String term : classicOrderByTerms(dialect, schema, sorts, mainAlias)) {
+                .table(typeModel.tableName(), mainAlias);
+        appendClassicWhere(fragment, dialect, predicates, cursorClause);
+        for (String term : classicOrderByTerms(dialect, sorts, mainAlias)) {
             fragment.orderBy(term);
         }
         if (limit > 0) {
             fragment.limit(limit);
         }
-        return fragment.render(dialect);
+        return fragment.build().render(dialect);
     }
 
-    /** Renders a classic no-join COUNT; a distinct count collapses to {@code COUNT(DISTINCT id)}. */
-    public static String countBy(SqlDialect dialect, TableSchema schema, List<Predicate> predicates, boolean distinct) {
-        // Distinct counts the distinct results: a root row is identified by its id, so the count
-        // collapses to COUNT(DISTINCT <id>) — COUNT(DISTINCT *) is not valid SQL.
-        String projection = distinct && schema.idColumn() != null
-                ? "COUNT(DISTINCT " + dialect.quoteIdentifier(schema.idColumn()) + ")"
+    public static String selectBy(SqlDialect dialect, TypeDefinition typeModel, List<Predicate> predicates,
+                                  List<SortSpec> sorts, int limit, String cursorClause) {
+        return selectBy(dialect, typeModel, predicates, sorts, limit, cursorClause, false);
+    }
+
+    public static String countBy(SqlDialect dialect, TypeDefinition typeModel, List<Predicate> predicates,
+                                 boolean distinct) {
+        String projection = distinct && typeModel.idColumn() != null
+                ? "COUNT(DISTINCT " + dialect.quoteIdentifier(typeModel.idColumn()) + ")"
                 : "COUNT(*)";
-        SqlFragment fragment = new SqlFragment()
+        SqlFragment.Query.Builder fragment = SqlFragment.Query.builder()
                 .keyword("SELECT")
                 .projection(projection)
-                .table(schema.tableName());
-        appendWhere(fragment, dialect, predicates, null);
-        return fragment.render(dialect);
+                .table(typeModel.tableName());
+        appendClassicWhere(fragment, dialect, predicates, null);
+        return fragment.build().render(dialect);
     }
 
-    /** Renders a classic no-join DELETE. */
-    public static String deleteBy(SqlDialect dialect, TableSchema schema, List<Predicate> predicates) {
-        SqlFragment fragment = new SqlFragment()
+    public static String deleteBy(SqlDialect dialect, TypeDefinition typeModel, List<Predicate> predicates) {
+        SqlFragment.Query.Builder fragment = SqlFragment.Query.builder()
                 .keyword("DELETE")
-                .table(schema.tableName());
-        appendWhere(fragment, dialect, predicates, null);
-        return fragment.render(dialect);
+                .table(typeModel.tableName());
+        appendClassicWhere(fragment, dialect, predicates, null);
+        return fragment.build().render(dialect);
     }
 
-    /** Renders an INSERT; {@code includeId=false} omits a database-generated identity column. */
-    public static String insert(SqlDialect dialect, TableSchema schema, TypeDefinition attributes,
-                                boolean includeId) {
-        List<ColumnRef> cols = schema.columns();
+    public static String insert(SqlDialect dialect, TypeDefinition typeModel, boolean includeId) {
+        List<ColumnRef> cols = typeModel.columns();
         if (!includeId) {
             cols = cols.stream()
-                    .filter(c -> schema.idColumn() == null || !c.column().equals(schema.idColumn()))
+                    .filter(c -> typeModel.idColumn() == null || !c.column().equals(typeModel.idColumn()))
                     .toList();
         }
         if (cols.isEmpty()) {
-            // An entity whose only column is a database-generated identifier binds NOTHING, and
-            // `INSERT INTO t () VALUES ()` is not SQL. The row is still a real insert — every
-            // column takes its default and the identity is generated by the database — so the
-            // dialect's all-defaults form goes out, and the keyholder roundtrip that reads the
-            // generated key back is unchanged.
-            return dialect.insertDefaultValues(schema.tableName());
+            return dialect.insertDefaultValues(typeModel.tableName());
         }
         String names = cols.stream().map(c -> dialect.quoteIdentifier(c.column())).collect(Collectors.joining(", "));
-        String params = cols.stream().map(c -> ":" + paramName(attributePath(attributes, c)))
+        String params = cols.stream().map(c -> ":" + paramName(attributePath(typeModel, c)))
                 .collect(Collectors.joining(", "));
-        return "INSERT INTO " + dialect.quoteIdentifier(schema.tableName()) + " (" + names + ") VALUES (" + params + ")";
+        return "INSERT INTO " + dialect.quoteIdentifier(typeModel.tableName()) + " (" + names + ") VALUES (" + params + ")";
     }
 
-    /**
-     * Renders an upsert — insert the row, or update it when the identifier already exists — in
-     * whichever single-statement form {@code dialect} declares.
-     *
-     * <p>The identifier always rides along: it is the match key, so an upsert has no
-     * {@code includeId} decision to make. The column list and the {@code :param} tokens are identical
-     * across every form — only the dialect's spelling of "or update it" differs, so the spelling
-     * lives in {@link SqlDialect#upsertStatement} and this method only computes the shared pieces.</p>
-     *
-     * @throws IllegalStateException when the dialect declares {@link UpsertForm#NONE}; a caller that
-     *         must honour the contract there issues an {@link #update} and, if it matched nothing, an
-     *         {@link #insert} carrying the identifier
-     */
-    public static String upsert(SqlDialect dialect, TableSchema schema, TypeDefinition attributes) {
-        List<ColumnRef> cols = schema.columns();
+    public static String upsert(SqlDialect dialect, TypeDefinition typeModel) {
+        List<ColumnRef> cols = typeModel.columns();
         List<String> names = cols.stream().map(ColumnRef::column).toList();
-        List<String> params = cols.stream().map(c -> ":" + paramName(attributePath(attributes, c)))
-                .toList();
-        return dialect.upsertStatement(schema.tableName(), schema.idColumn(), names, params);
+        List<String> params = cols.stream().map(c -> ":" + paramName(attributePath(typeModel, c))).toList();
+        return dialect.upsertStatement(typeModel.tableName(), typeModel.idColumn(), names, params);
     }
 
-    /** Renders an UPDATE by identifier. */
-    public static String update(SqlDialect dialect, TableSchema schema, TypeDefinition attributes) {
-        String idCol = dialect.quoteIdentifier(schema.idColumn());
-        String sets = schema.columns().stream()
-                .filter(c -> !c.column().equals(schema.idColumn()))
-                .map(c -> dialect.quoteIdentifier(c.column()) + " = :" + paramName(attributePath(attributes, c)))
+    public static String update(SqlDialect dialect, TypeDefinition typeModel) {
+        String idCol = dialect.quoteIdentifier(typeModel.idColumn());
+        String sets = typeModel.columns().stream()
+                .filter(c -> !c.column().equals(typeModel.idColumn()))
+                .map(c -> dialect.quoteIdentifier(c.column()) + " = :" + paramName(attributePath(typeModel, c)))
                 .collect(Collectors.joining(", "));
         if (sets.isEmpty()) {
-            // Nothing to assign but the row still has to be touched: `UPDATE t SET  WHERE ...` is not
-            // SQL. Assigning the identifier to itself leaves the row exactly as it was while still
-            // reporting one affected row when it exists and zero when it does not — which is the only
-            // thing the caller's `if (updated == 0) insert` decision reads from it.
-            return "UPDATE " + dialect.quoteIdentifier(schema.tableName()) + " SET " + idCol + " = " + idCol
+            return "UPDATE " + dialect.quoteIdentifier(typeModel.tableName()) + " SET " + idCol + " = " + idCol
                     + " WHERE " + idCol + " = :id";
         }
-        return "UPDATE " + dialect.quoteIdentifier(schema.tableName()) + " SET " + sets + " WHERE " + idCol + " = :id";
+        return "UPDATE " + dialect.quoteIdentifier(typeModel.tableName()) + " SET " + sets + " WHERE " + idCol + " = :id";
     }
 
-    /** Renders a DELETE by identifier. */
-    public static String deleteById(SqlDialect dialect, TableSchema schema) {
-        return "DELETE FROM " + dialect.quoteIdentifier(schema.tableName()) + " WHERE "
-                + dialect.quoteIdentifier(schema.idColumn()) + " = :id";
+    public static String deleteById(SqlDialect dialect, TypeDefinition typeModel) {
+        return "DELETE FROM " + dialect.quoteIdentifier(typeModel.tableName()) + " WHERE "
+                + dialect.quoteIdentifier(typeModel.idColumn()) + " = :id";
     }
 
-    /** Renders a cascade {@code DELETE} of one child table's rows by the parent's foreign key. */
-    private static String deleteByFk(SqlDialect dialect, String table, String fkColumn) {
-        return "DELETE FROM " + dialect.quoteIdentifier(table)
-                + " WHERE " + dialect.quoteIdentifier(fkColumn) + " = :parentId";
-    }
-
-    /** Renders the context table's foreign-key column read for one identifier. */
-    private static String selectForeignKey(SqlDialect dialect, TableSchema schema, String fkColumn) {
-        return "SELECT " + dialect.quoteIdentifier(fkColumn)
-                + " FROM " + dialect.quoteIdentifier(schema.tableName())
-                + " WHERE " + dialect.quoteIdentifier(schema.idColumn()) + " = :id";
-    }
-
-    /** Renders a child-row DELETE by both its id and the parent's foreign key (diff-sync orphan). */
-    private static String deleteChildByIdAndFk(SqlDialect dialect, String table, String idColumn, String fkColumn) {
-        return "DELETE FROM " + dialect.quoteIdentifier(table)
-                + " WHERE " + dialect.quoteIdentifier(idColumn) + " = :childId"
-                + " AND " + dialect.quoteIdentifier(fkColumn) + " = :parentId";
-    }
-
-    /** Renders a child table's identifier read by the parent's foreign key (diff-sync existing IDs). */
-    private static String selectChildIds(SqlDialect dialect, String table, String idColumn, String fkColumn) {
-        return "SELECT " + dialect.quoteIdentifier(idColumn)
-                + " FROM " + dialect.quoteIdentifier(table)
-                + " WHERE " + dialect.quoteIdentifier(fkColumn) + " = :parentId";
-    }
-
-    /** Renders an INSERT into a child table with an explicit column and parameter list. */
-    private static String insertColumns(SqlDialect dialect, String table, List<String> columns, List<String> paramNames) {
-        String names = columns.stream().map(dialect::quoteIdentifier).collect(Collectors.joining(", "));
-        String params = paramNames.stream().map(n -> ":" + paramName(n)).collect(Collectors.joining(", "));
-        return "INSERT INTO " + dialect.quoteIdentifier(table) + " (" + names + ") VALUES (" + params + ")";
-    }
-
-    /** Renders a correlated aggregate sort term for a non-hydrated to-many cursor sort. */
-    private static String correlatedSort(SqlDialect dialect, String childTable, String leafColumn, String fkColumn,
-                                         String ownerTable, String ownerIdColumn, boolean ascending) {
-        return "(SELECT " + (ascending ? "MIN" : "MAX")
-                + "(" + dialect.quoteIdentifier(childTable) + "." + dialect.quoteIdentifier(leafColumn) + ")"
-                + " FROM " + dialect.quoteIdentifier(childTable)
-                + " WHERE " + dialect.quoteIdentifier(childTable) + "." + dialect.quoteIdentifier(fkColumn)
-                + " = " + dialect.quoteIdentifier(ownerTable) + "." + dialect.quoteIdentifier(ownerIdColumn) + ")";
-    }
-
-    /** Renders a child-table hydration SELECT. */
-    private static String selectByFk(SqlDialect dialect, String table, String whereColumn, String paramName, String projection) {
-        String proj = projection.isEmpty() ? "*" : projection;
-        return "SELECT " + proj + " FROM " + dialect.quoteIdentifier(table)
-                + " WHERE " + dialect.quoteIdentifier(whereColumn) + " = :" + paramName;
-    }
-
-    /**
-     * Renders the row-mapper projection of a type: each mapped column aliased to its property name
-     * (id/scalar) or, for an association, to its FK column name unless {@code associationAliasIsName}.
-     */
-    public static String rowMapperProjection(SqlDialect dialect, TypeDefinition type, boolean associationAliasIsName) {
+    public static String rowMapperProjection(SqlDialect dialect, TypeDefinition type,
+                                             boolean associationAliasIsName) {
         List<String> cols = new ArrayList<>();
         ProjectionColumnCollector collector = new ProjectionColumnCollector(cols, dialect, associationAliasIsName);
         for (TypeDefinition.Prop prop : type.properties()) {
@@ -412,11 +409,6 @@ public final class QueryCompiler {
         return String.join(", ", cols);
     }
 
-    /**
-     * Accumulates the row-mapper projection ({@code column AS alias}) for the mapped property kinds:
-     * id and scalar map by name, an association maps by its FK column unless
-     * {@code associationAliasIsName}; version, embedded and collection properties project nothing.
-     */
     private static final class ProjectionColumnCollector implements TypeDefinition.Prop.Visitor<Void> {
         private final List<String> cols;
         private final SqlDialect dialect;
@@ -472,7 +464,6 @@ public final class QueryCompiler {
 
     // ------------------------------------------------------------------- splice primitives
 
-    /** Qualifies a table-local column by its owner table, or the supplied root. */
     public static String qualify(SqlDialect dialect, ColumnRef columnRef, String rootTable) {
         String qualifier = columnRef.table() != null ? columnRef.table() : rootTable;
         if (qualifier == null) {
@@ -482,77 +473,47 @@ public final class QueryCompiler {
         return SqlFragment.qualified(dialect, qualifier, columnRef.column());
     }
 
-    /** The deduplicated {@code LEFT JOIN} chain these relation edges require (empty when none). */
     public static String joinClause(SqlDialect dialect, List<JoinEdge> edges) {
         return SqlFragment.joins(dialect, edges);
     }
 
-    /**
-     * As {@link #joinClause(SqlDialect, List)}, dropping every edge onto a table already named in
-     * {@code alreadyJoined} — the tables a pre-rendered shell the caller splices onto has already
-     * joined. Repeating such an alias makes every reference to it ambiguous.
-     */
     public static String joinClause(SqlDialect dialect, List<JoinEdge> edges,
                                     Collection<String> alreadyJoined) {
         return SqlFragment.joins(dialect, edges, alreadyJoined);
     }
 
-    /**
-     * The ONE rendering of the root-table projection/join shell: a SELECT list of the root columns
-     * (comma-separated in schema order, optionally followed by a comma and {@code extraProjection}),
-     * FROM the quoted table, then the deduped join chain for {@code traversedToOne}.
-     * {@code qualified} keeps the deliberate split intact: a statement that splices joins qualifies
-     * every leaf ({@code "root"."col"}, so a joined table sharing a column name cannot make the list
-     * ambiguous) while an EXISTS-only statement keeps the bare {@code "col"} projection.
-     */
-    public static String qualifiedRootSelect(SqlDialect dialect, TableSchema schema, List<JoinEdge> traversedToOne,
-                                             boolean qualified, String extraProjection) {
-        return qualifiedRootSelect(dialect, schema, traversedToOne, qualified, extraProjection, false);
+    public static String qualifiedRootSelect(SqlDialect dialect, TypeDefinition typeModel,
+                                             List<JoinEdge> traversedToOne, boolean qualified,
+                                             String extraProjection) {
+        return qualifiedRootSelect(dialect, typeModel, traversedToOne, qualified, extraProjection, false);
     }
 
-    /** As {@link #qualifiedRootSelect}, honouring {@code DISTINCT}. */
-    public static String qualifiedRootSelect(SqlDialect dialect, TableSchema schema, List<JoinEdge> traversedToOne,
-                                             boolean qualified, String extraProjection, boolean distinct) {
-        SqlFragment fragment = new SqlFragment()
+    public static String qualifiedRootSelect(SqlDialect dialect, TypeDefinition typeModel,
+                                             List<JoinEdge> traversedToOne, boolean qualified,
+                                             String extraProjection, boolean distinct) {
+        return SqlFragment.Query.builder()
                 .keyword("SELECT")
-                .projection(rootProjection(dialect, schema, qualified, extraProjection))
+                .projection(rootProjection(dialect, typeModel, qualified, extraProjection))
                 .distinct(distinct)
-                .table(schema.tableName())
-                .join(traversedToOne);
-        return fragment.renderWithoutTail(dialect);
+                .table(typeModel.tableName())
+                .join(traversedToOne)
+                .build()
+                .renderWithoutTail(dialect);
     }
 
-    /**
-     * The EXISTS conjunct a predicate on an existential (to-many head) — or on ANY traversed ref in a
-     * DELETE — renders instead of a joined WHERE term: the ref's LAST edge supplies the child table
-     * and the edge-side column; the correlation closes on the edge's owner-side column — the root id
-     * for a to-many head, the owner-side FK for a to-one head. The leaf term is
-     * {@link #render(SqlDialect, Predicate, ColumnPlacement)}'s table-qualified rendering, so the
-     * named parameter and the caller's binding are unchanged.
-     */
     public static String existsConjunct(SqlDialect dialect, Predicate predicate, ColumnPlacement placement) {
         List<JoinEdge> edges = placement.edges();
         JoinEdge join = edges.getLast();
         String owner = join.ownerTable();
         return "EXISTS (SELECT 1 FROM " + dialect.quoteIdentifier(join.childTable()) + " "
                 + dialect.quoteIdentifier(join.childTable())
-                + " WHERE " + dialect.quoteIdentifier(join.childTable()) + "." + dialect.quoteIdentifier(join.childColumn())
+                + " WHERE " + dialect.quoteIdentifier(join.childTable()) + "."
+                + dialect.quoteIdentifier(join.childColumn())
                 + " = " + dialect.quoteIdentifier(owner) + "." + dialect.quoteIdentifier(join.ownerColumn())
-                + " AND " + render(dialect, predicate, placement) + ")";
+                + " AND " + renderPredicate(dialect, predicate, placement) + ")";
     }
 
-
-    /**
-     * The correlated scalar subquery a to-many sort orders by: {@code MIN} of the leaf column for an
-     * ascending key, {@code MAX} for a descending one — exactly the edge the descriptor-driven cursor
-     * key reduction collapses the value list to, so seek and sort agree. The head edge opens the
-     * subquery {@code FROM} (alias WITHOUT {@code AS}, mirroring nothing else on the statement);
-     * deeper edges chain inside as the same {@code LEFT JOIN ... AS ... ON ...} fragments the join
-     * clause emits, qualified per-path. Correlation is the head's {@code childFk = rootTable.rootId}
-     * pair taken from its {@code Collection} edge. Every identifier goes through the dialect; the
-     * result is used VERBATIM as an ORDER BY / seek term.
-     */
-    public static String aggregateSortTerm(SqlDialect dialect, TableSchema schema, ColumnPlacement placement,
+    public static String aggregateSortTerm(SqlDialect dialect, TypeDefinition typeModel, ColumnPlacement placement,
                                            boolean ascending) {
         List<JoinEdge> edges = placement.edges();
         if (edges.isEmpty()) {
@@ -562,7 +523,7 @@ public final class QueryCompiler {
         String owner = head.ownerTable();
         StringBuilder sb = new StringBuilder("(SELECT ")
                 .append(ascending ? "MIN(" : "MAX(")
-                .append(qualify(dialect, placement.leaf(), schema.tableName()))
+                .append(qualify(dialect, placement.leaf(), typeModel.tableName()))
                 .append(") FROM ").append(dialect.quoteIdentifier(head.childTable()))
                 .append(' ').append(dialect.quoteIdentifier(head.childTable()));
         sb.append(SqlFragment.joins(dialect, edges.subList(1, edges.size())));
@@ -574,23 +535,17 @@ public final class QueryCompiler {
         return sb.toString();
     }
 
-    /**
-     * Renders the base SELECT shell of a cursor-paged to-many sort/projection: the root projection
-     * columns (from {@link TableSchema#columns()}) plus one MIN/MAX aggregate per to-many sort, then
-     * {@code FROM} + {@code LEFT JOIN} + {@code GROUP BY}. Also returns the ORDER BY aliases and the
-     * keyset seek terms so the caller never assembles them.
-     */
     public static RenderedCursorSortProjection renderCursorSortProjection(
-            SqlDialect dialect, TableSchema schema, QueryDefinition.CursorSortProjection projection) {
-        String rootTable = dialect.quoteIdentifier(schema.tableName());
+            SqlDialect dialect, TypeDefinition typeModel, CursorSortProjection projection) {
+        String rootTable = dialect.quoteIdentifier(typeModel.tableName());
         String childTable = dialect.quoteIdentifier(projection.childTable());
         String fkColumn = dialect.quoteIdentifier(projection.fkColumn());
-        String ownerIdColumn = dialect.quoteIdentifier(schema.idColumn());
+        String ownerIdColumn = dialect.quoteIdentifier(typeModel.idColumn());
         String joinAlias = projection.joinAlias();
 
         List<String> selectColumns = new ArrayList<>();
         List<String> groupByColumns = new ArrayList<>();
-        for (ColumnRef col : schema.columns()) {
+        for (ColumnRef col : typeModel.columns()) {
             String qualified = rootTable + "." + dialect.quoteIdentifier(col.column());
             selectColumns.add(qualified);
             groupByColumns.add(qualified);
@@ -599,7 +554,7 @@ public final class QueryCompiler {
         List<String> orderByTerms = new ArrayList<>();
         List<String> seekTerms = new ArrayList<>();
         int aggIndex = 0;
-        for (QueryDefinition.CursorSortProjection.SortColumn sort : projection.sortColumns()) {
+        for (CursorSortProjection.SortColumn sort : projection.sortColumns()) {
             String aggFunc = sort.ascending() ? "MIN" : "MAX";
             String expr = aggFunc + "(" + joinAlias + "." + dialect.quoteIdentifier(sort.columnSuffix()) + ")";
             selectColumns.add(expr + " AS " + dialect.quoteIdentifier("agg_" + aggIndex));
@@ -617,8 +572,7 @@ public final class QueryCompiler {
         return new RenderedCursorSortProjection(shell, orderByTerms, seekTerms);
     }
 
-    /** Renders a predicate with its column qualified by the resolved leaf. */
-    public static String render(SqlDialect dialect, Predicate predicate, ColumnPlacement placement) {
+    public static String renderPredicate(SqlDialect dialect, Predicate predicate, ColumnPlacement placement) {
         ColumnRef leaf = placement.leaf();
         String col = placement.local() && leaf.table() == null
                 ? dialect.quoteIdentifier(leaf.column())
@@ -626,13 +580,8 @@ public final class QueryCompiler {
         return renderOperator(predicate.operator(), col, predicate.param(), predicate.ignoreCase());
     }
 
-    /**
-     * Renders a predicate with its column qualified by the resolved leaf: an explicit table for a
-     * traversed leaf, and a fully-local ref stays unqualified for legacy parity unless
-     * {@code qualifyRoot} (a joined statement) forces it.
-     */
-    public static String render(SqlDialect dialect, Predicate predicate, ColumnPlacement placement,
-                                String rootTable, boolean qualifyRoot) {
+    public static String renderPredicate(SqlDialect dialect, Predicate predicate, ColumnPlacement placement,
+                                         String rootTable, boolean qualifyRoot) {
         ColumnRef leaf = placement.leaf();
         boolean localRootColumn = isLocalTo(leaf, rootTable);
         String col = localRootColumn && !qualifyRoot
@@ -641,33 +590,36 @@ public final class QueryCompiler {
         return renderOperator(predicate.operator(), col, predicate.param(), predicate.ignoreCase());
     }
 
-    /**
-     * One ORDER BY term: the rendered column, {@code LOWER(...)}-wrapped when the sort asks for
-     * case-insensitive ordering, then the direction. An existential sort wraps an aggregate subquery
-     * whose MIN/MAX already picked a case-sensitive edge — and the runtime cursor key reduces the
-     * same value list case-sensitively — so folding there would order by something the seek cannot
-     * reproduce; the processor rejects that combination instead.
-     */
+    /** @deprecated use {@link #renderPredicate(SqlDialect, Predicate, ColumnPlacement)} */
+    @Deprecated
+    public static String render(SqlDialect dialect, Predicate predicate, ColumnPlacement placement) {
+        return renderPredicate(dialect, predicate, placement);
+    }
+
+    /** @deprecated use {@link #renderPredicate(SqlDialect, Predicate, ColumnPlacement, String, boolean)} */
+    @Deprecated
+    public static String render(SqlDialect dialect, Predicate predicate, ColumnPlacement placement,
+                                String rootTable, boolean qualifyRoot) {
+        return renderPredicate(dialect, predicate, placement, rootTable, qualifyRoot);
+    }
+
     public static String orderTerm(String renderedColumn, SortSpec sort, boolean existentialSort) {
         boolean fold = sort.ignoreCase() && !existentialSort;
         return (fold ? "LOWER(" + renderedColumn + ")" : renderedColumn)
                 + (sort.ascending() ? " ASC" : " DESC");
     }
 
-    /** The ORDER BY clause of a classic no-join statement, one term per declared sort. */
-    public static String classicOrderBy(SqlDialect dialect, TableSchema schema, List<SortSpec> sorts) {
-        return classicOrderBy(dialect, schema, sorts, null);
+    public static String classicOrderBy(SqlDialect dialect, TypeDefinition typeModel, List<SortSpec> sorts) {
+        return classicOrderBy(dialect, typeModel, sorts, null);
     }
 
-    /** Renders an ORDER BY clause for a simple (no-join) query. */
-    public static String classicOrderBy(SqlDialect dialect, TableSchema schema, List<SortSpec> sorts, String mainAlias) {
-        List<String> terms = classicOrderByTerms(dialect, schema, sorts, mainAlias);
+    public static String classicOrderBy(SqlDialect dialect, TypeDefinition typeModel, List<SortSpec> sorts,
+                                        String mainAlias) {
+        List<String> terms = classicOrderByTerms(dialect, sorts, mainAlias);
         return terms.isEmpty() ? "" : " ORDER BY " + String.join(", ", terms);
     }
 
-    /** The rendered ORDER BY terms of a classic no-join statement, in declared sort order. */
-    private static List<String> classicOrderByTerms(SqlDialect dialect, TableSchema schema,
-                                                    List<SortSpec> sorts, String mainAlias) {
+    private static List<String> classicOrderByTerms(SqlDialect dialect, List<SortSpec> sorts, String mainAlias) {
         List<String> terms = new ArrayList<>(sorts.size());
         for (SortSpec s : sorts) {
             String column = s.property().replace('.', '_');
@@ -679,59 +631,31 @@ public final class QueryCompiler {
         return terms;
     }
 
-    // ------------------------------------------------------------------- helpers
-
-    /**
-     * Resolves one logical attribute path, falling back to a root-table column for an unknown path.
-     *
-     * <p>The fallback is what lets a hand-written {@code @Query} or a method-name predicate on a
-     * column the descriptor does not publish still render: a bare path degrades to its own
-     * snake_case column name on the root table rather than failing the whole statement.</p>
-     *
-     * <p>Catches {@link UnknownAttributePathException} and NOT {@link IllegalArgumentException}: the
-     * fallback is a decision about ONE class of error, and catching the supertype also degraded every
-     * other illegal-argument failure thrown anywhere inside the resolution — an empty SQL identifier,
-     * a cursor key with mismatched directions — into a silently wrong column. A resolver that throws
-     * anything else is a bug, and now it propagates instead of rendering.</p>
-     */
-    public static ColumnPlacement resolveColumn(TableSchema schema, TypeDefinition attributes, String path) {
+    public static ColumnPlacement resolveColumn(TypeDefinition typeModel, String path) {
         try {
-            return attributes.resolve(path);
+            return typeModel.resolve(path);
         } catch (UnknownAttributePathException unknownPath) {
-            return new ColumnPlacement(new ColumnRef.Simple(Names.columnBase(path), schema.tableName()));
+            return new ColumnPlacement(new ColumnRef.Simple(Names.columnBase(path), typeModel.tableName()));
         }
     }
 
-    /** Whether {@code leaf} is a column local to {@code table}: owned by no table or by that table. */
     public static boolean isLocalTo(ColumnRef leaf, String table) {
         return leaf.table() == null || leaf.table().equals(table);
     }
 
-    /** Whether the head of {@code path} is a to-many relation or collection. */
-    public static boolean isExistential(TypeDefinition attributes, String path) {
-        return pathHead(path) != null && attributes.isToManyPath(path);
+    public static boolean isExistential(TypeDefinition typeModel, String path) {
+        return pathHead(path) != null && typeModel.isToManyPath(path);
     }
 
-    /** The first segment of an entity-rooted path, or {@code null} when it has no child segment. */
     public static String pathHead(String path) {
         int dot = path.indexOf('.');
         return dot < 0 ? null : path.substring(0, dot);
     }
 
-    /**
-     * Maps a dot-separated property path to the named-parameter token used in the generated SQL
-     * (e.g. {@code "address.street"} becomes {@code "address_street"}). Callers that bind parameters
-     * programmatically must use the same mapping so the emitted {@code .param(...)} names line up.
-     */
     public static String paramName(String path) {
         return path.replace('.', '_');
     }
 
-    /**
-     * How many values an operator binds: none for the nullary ones, two for {@code BETWEEN}, one
-     * otherwise. Callers that allocate method arguments to predicates must use this so the tokens
-     * rendered by {@link #renderOperator} and the values bound at runtime stay in step.
-     */
     public static int parameterCount(Operator operator) {
         return switch (operator) {
             case IS_NULL, IS_NOT_NULL, TRUE, FALSE -> 0;
@@ -740,22 +664,16 @@ public final class QueryCompiler {
         };
     }
 
-    /** The named-parameter tokens {@code operator} renders for {@code param}, in binding order. */
     public static List<String> paramNames(Operator operator, String param) {
         return switch (operator) {
             case IS_NULL, IS_NOT_NULL, TRUE, FALSE -> List.of();
-            // Named for the ROLE of each bound, not for its index: both placeholders are derived from
-            // the FIRST parameter name ("low"), so numbering them made the upper bound read as
-            // ":low_1" — a reader has to re-derive which bound that is every time.
             case BETWEEN, NOT_BETWEEN -> List.of(param + "_from", param + "_to");
             default -> List.of(param);
         };
     }
 
-    /** The logical attribute path that owns {@code column}, taken from the WRITE view when available. */
-    public static String attributePath(TypeDefinition attributes, ColumnRef column) {
-        Map<String, ColumnRef> refs = attributes instanceof TypeDefinition td
-                ? td.columnRefs() : attributes.columnRefs();
+    public static String attributePath(TypeDefinition typeModel, ColumnRef column) {
+        Map<String, ColumnRef> refs = typeModel.columnRefs();
         return refs.entrySet().stream()
                 .filter(entry -> entry.getValue().column().equals(column.column()))
                 .map(Map.Entry::getKey)
@@ -764,8 +682,8 @@ public final class QueryCompiler {
                         "No logical attribute path maps to column '" + column.column() + "'"));
     }
 
-    private static void appendWhere(SqlFragment fragment, SqlDialect dialect, List<Predicate> predicates,
-                                    String cursorClause) {
+    private static void appendClassicWhere(SqlFragment.Query.Builder fragment, SqlDialect dialect,
+                                           List<Predicate> predicates, String cursorClause) {
         boolean hasOr = predicates.stream().anyMatch(p -> Connector.isOr(p.connector()));
         boolean hasCursor = cursorClause != null && !cursorClause.isBlank();
         if (!predicates.isEmpty()) {
@@ -778,8 +696,6 @@ public final class QueryCompiler {
                 ors.add(i > 0 && Connector.isOr(p.connector()));
             }
             if (hasOr && hasCursor) {
-                // The cursor conjunct joins with AND and must not bind to the caller's last OR term,
-                // so an OR-bearing user expression is grouped as one conjunct before the cursor clause.
                 fragment.where("(" + joinConjuncts(conjuncts, ors) + ")", false);
             } else {
                 for (int i = 0; i < conjuncts.size(); i++) {
@@ -792,7 +708,6 @@ public final class QueryCompiler {
         }
     }
 
-    /** Joins rendered conjuncts with each one's connector; entry 0's flag is ignored. */
     private static String joinConjuncts(List<String> conjuncts, List<Boolean> orJoinedFlags) {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < conjuncts.size(); i++) {
@@ -808,12 +723,6 @@ public final class QueryCompiler {
         return ignoreCase ? renderIgnoreCase(operator, column, param) : renderOperator(operator, column, param);
     }
 
-    /**
-     * The case-folding form of an operator, wrapping both sides in {@code LOWER(...)}. Only the
-     * operators where folding changes the comparison are listed; {@code In}/{@code NotIn} fall
-     * through (their argument is a collection, so folding one bound token would be wrong) as do the
-     * nullary and range operators, for which case is meaningless.
-     */
     private static String renderIgnoreCase(Operator operator, String column, String param) {
         String lowerCol = "LOWER(" + column + ")";
         String lowerParam = "LOWER(:" + param + ")";

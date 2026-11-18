@@ -2,7 +2,6 @@ package io.github.fludakit.data.sql;
 
 import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.TypeDefinition;
-import io.github.fludakit.data.query.Operation;
 import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
 import org.junit.jupiter.api.Test;
@@ -84,9 +83,8 @@ class UpsertTest {
     }
 
     @Test
-    void anUpsertIsASaveThatReportsWhatTheMethodDeclares() {
+    void anUpsertReportsWhatTheMethodDeclares() {
         QueryDefinition.Upsert upsert = new QueryDefinition.Upsert(ResultKind.AFFECTED);
-        assertEquals(Operation.SAVE, upsert.operation());
         assertEquals(ResultKind.AFFECTED, upsert.resultKind());
         assertEquals(ResultKind.VOID, new QueryDefinition.Upsert().resultKind());
         assertEquals(ResultKind.VOID, new QueryDefinition.Upsert(null).resultKind());
@@ -104,7 +102,7 @@ class UpsertTest {
 
     static TypeDefinition note() {
         TypeDefinition.Prop.Id idProp = new TypeDefinition.Prop.Id(
-                "id", "java.lang.Long", "id", TypeDefinition.Prop.Id.GeneratedType.IDENTITY);
+                "id", "java.lang.Long", "id");
         TypeDefinition.Prop.Scalar titleProp = new TypeDefinition.Prop.Scalar(
                 "title", "java.lang.String", "title", false);
         return TestMappings.aggregateRoot("Note", "note",

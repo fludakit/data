@@ -8,18 +8,18 @@ import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.JoinEdge;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.context.MethodContext;
+import io.github.fludakit.data.processor.context.MethodContext.Operation;
 import io.github.fludakit.data.processor.context.RepositoryContext;
 import io.github.fludakit.data.processor.support.ExceptionTranslation;
 import io.github.fludakit.data.processor.support.MethodOverrides;
 import io.github.fludakit.data.query.LikePattern;
-import io.github.fludakit.data.query.LimitSpec;
-import io.github.fludakit.data.query.Operation;
+import io.github.fludakit.data.query.Order;
 import io.github.fludakit.data.query.ParamBinding;
-import io.github.fludakit.data.query.PagingMode;
 import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
 import io.github.fludakit.data.query.SortSpec;
+import io.github.fludakit.data.query.Window;
 import io.github.fludakit.data.sql.QueryCompiler;
 import io.github.fludakit.data.sql.SqlBuilder;
 import io.github.fludakit.data.sql.SqlDialect;
@@ -34,16 +34,15 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Generates method implementations for finder, count, exists, and deleteBy methods.
+ * Generates method implementations for finder, count, exists, and {@code @Query} methods.
  *
- * <p>Dispatches on {@link Operation} and {@link PagingMode}:</p>
+ * <p>Dispatches on {@link MethodContext#query()} ({@link QueryDefinition}):</p>
  * <ul>
- *   <li>{@code FIND + NONE} &rarr; plain finder returning a single entity, list, set, etc.</li>
- *   <li>{@code FIND + OFFSET} &rarr; offset-paged finder returning {@code Page<E>}</li>
- *   <li>{@code FIND + CURSOR} &rarr; cursor-paged finder returning {@code CursoredPage<E>}</li>
- *   <li>{@code COUNT} &rarr; count query returning {@code long}</li>
- *   <li>{@code EXISTS} &rarr; existence check returning {@code boolean}</li>
- *   <li>{@code DELETE} (with predicates) &rarr; bulk delete returning {@code long}</li>
+ *   <li>{@link QueryDefinition.Read} + {@link Window.None}/{@link Window.Limit} &rarr; plain finder</li>
+ *   <li>{@link QueryDefinition.Read} + {@link Window.Offset} &rarr; offset-paged finder</li>
+ *   <li>{@link QueryDefinition.Read} + {@link Window.Cursor} &rarr; cursor-paged finder</li>
+ *   <li>{@link QueryDefinition.Count} / {@link QueryDefinition.Exists}</li>
+ *   <li>{@link QueryDefinition.Native} &rarr; custom {@code @Query}</li>
  * </ul>
  */
 public final class FindEmitter {
@@ -85,40 +84,63 @@ public final class FindEmitter {
      * @return the method spec, or {@code null} if the method is not handled by this emitter
      */
     public MethodSpec emit(RepositoryContext ctx, MethodContext method) {
-        // Custom @Query methods
-        if (method.customSql() != null) {
-            return emitCustomQuery(ctx, method);
+        return switch (method.query()) {
+            case QueryDefinition.Native ignored -> emitCustomQuery(ctx, method);
+            case QueryDefinition.Count ignored -> emitCount(ctx, method);
+            case QueryDefinition.Exists ignored -> emitExists(ctx, method);
+            case QueryDefinition.Read read -> switch (read.window()) {
+                case Window.Offset ignored -> emitOffsetPagedFinder(ctx, method);
+                case Window.Cursor ignored -> emitCursorPagedFinder(ctx, method);
+                case Window.None ignored -> emitPlainFinder(ctx, method);
+                case Window.Limit ignored -> emitPlainFinder(ctx, method);
+            };
+            default -> null;
+        };
+    }
+
+    /** Unpaged select shell from the method's {@link QueryDefinition.Read} (limit/seek applied later). */
+    private static QueryDefinition.Read selectShell(MethodContext method) {
+        QueryDefinition.Read read = requireRead(method);
+        ResultKind rk = switch (read.resultKind()) {
+            case COUNT, EXISTS -> ResultKind.LIST;
+            default -> read.resultKind();
+        };
+        return new QueryDefinition.Read(
+                rk, read.predicates(), read.paramBindings(), read.distinct(),
+                read.order(), Window.None.unpaged());
+    }
+
+    /** Select shell with order stripped — {@code ORDER BY} is spliced at runtime. */
+    private static QueryDefinition.Read selectShellUnordered(MethodContext method) {
+        QueryDefinition.Read shell = selectShell(method);
+        return new QueryDefinition.Read(
+                shell.resultKind(), shell.predicates(), shell.paramBindings(), shell.distinct(),
+                Order.None.INSTANCE, Window.None.unpaged());
+    }
+
+    private static QueryDefinition.Read requireRead(MethodContext method) {
+        if (method.query() instanceof QueryDefinition.Read read) {
+            return read;
         }
+        throw new IllegalStateException("Expected QueryDefinition.Read for " + method.name()
+                + ", got " + method.query().getClass().getSimpleName());
+    }
 
-        Operation op = method.operation();
-        PagingMode pm = method.pagingMode();
+    private static QueryDefinition.Count countDefinition(MethodContext method) {
+        return switch (method.query()) {
+            case QueryDefinition.Count c -> c;
+            case QueryDefinition.Read r -> new QueryDefinition.Count(r.predicates(), r.paramBindings(), r.distinct());
+            case QueryDefinition.Criteria c -> new QueryDefinition.Count(c.predicates(), c.paramBindings(), false);
+            default -> throw new IllegalStateException("Cannot derive COUNT from " + method.query());
+        };
+    }
 
-        // Plain finder
-        if (op == Operation.FIND && pm == PagingMode.NONE) {
-            return emitPlainFinder(ctx, method);
-        }
-
-        // Offset-paged finder
-        if (op == Operation.FIND && pm == PagingMode.OFFSET) {
-            return emitOffsetPagedFinder(ctx, method);
-        }
-
-        // Cursor-paged finder
-        if (op == Operation.FIND && pm == PagingMode.CURSOR) {
-            return emitCursorPagedFinder(ctx, method);
-        }
-
-        // Count
-        if (op == Operation.COUNT) {
-            return emitCount(ctx, method);
-        }
-
-        // Exists
-        if (op == Operation.EXISTS) {
-            return emitExists(ctx, method);
-        }
-
-        return null;
+    private static QueryDefinition.Exists existsDefinition(MethodContext method) {
+        return switch (method.query()) {
+            case QueryDefinition.Exists e -> e;
+            case QueryDefinition.Criteria c -> new QueryDefinition.Exists(c.predicates(), c.paramBindings());
+            default -> throw new IllegalStateException("Cannot derive EXISTS from " + method.query());
+        };
     }
 
     // ── Plain finder ─────────────────────────────────────────────────────
@@ -157,12 +179,8 @@ public final class FindEmitter {
             // Build SQL with LEFT JOINs for associations
             return buildSelectWithComposingJoins(ctx, allAssocs, method);
         }
-        
-        ResultKind rk = method.resultKind() == ResultKind.COUNT || method.resultKind() == ResultKind.EXISTS
-                ? ResultKind.LIST : method.resultKind();
-        return sqlBuilder.render(new QueryDefinition.Read(
-                rk, method.predicates(), method.sorts(),
-                PagingMode.NONE, LimitSpec.none(), List.of(), List.of(), method.distinct()));
+
+        return sqlBuilder.sql(selectShell(method));
     }
     
     /**
@@ -307,14 +325,7 @@ public final class FindEmitter {
         }
         
         // Use SqlBuilder to render the query with JOINs
-        ResultKind rk = method.resultKind() == ResultKind.COUNT || method.resultKind() == ResultKind.EXISTS
-                ? ResultKind.LIST : method.resultKind();
-        return sqlBuilder.render(
-            new QueryDefinition.Read(rk, method.predicates(), method.sorts(),
-                PagingMode.NONE, LimitSpec.none(), List.of(), List.of(), method.distinct()),
-            joinEdges,
-            extraProjection.toString()
-        );
+        return sqlBuilder.sql(selectShell(method), joinEdges, extraProjection.toString());
     }
 
     private void addPlainFinderBody(MethodSpec.Builder builder, RepositoryContext ctx,
@@ -479,7 +490,7 @@ public final class FindEmitter {
     private String buildCountSql(RepositoryContext ctx, MethodContext method) {
         SqlBuilder sqlBuilder = new SqlBuilder(ctx.entity());
         sqlBuilder.dialect(dialect);
-        return sqlBuilder.render(new QueryDefinition.Count(method.predicates(), List.of(), false));
+        return sqlBuilder.sql(countDefinition(method));
     }
 
     /**
@@ -580,20 +591,20 @@ public final class FindEmitter {
         }
 
         // Build the CursorSortProjection for the hydration case (the to-many sort/projection).
-        QueryDefinition.CursorSortProjection cursorProjection = null;
+        QueryCompiler.CursorSortProjection cursorProjection = null;
         if (hasToManySort && ecRelForHydration != null && ecRelForHydration.definition() != null) {
-            List<QueryDefinition.CursorSortProjection.SortColumn> sortColumns = new ArrayList<>();
+            List<QueryCompiler.CursorSortProjection.SortColumn> sortColumns = new ArrayList<>();
             for (SortSpec sort : sorts) {
                 String prop = sort.property();
                 if (prop.contains(".")) {
                     String firstSegment = prop.substring(0, prop.indexOf('.'));
                     if (firstSegment.equals(toManyPropForHydration)) {
                         String colPart = prop.substring(prop.indexOf('.') + 1).replace('.', '_');
-                        sortColumns.add(new QueryDefinition.CursorSortProjection.SortColumn(colPart, sort.ascending()));
+                        sortColumns.add(new QueryCompiler.CursorSortProjection.SortColumn(colPart, sort.ascending()));
                     }
                 }
             }
-            cursorProjection = new QueryDefinition.CursorSortProjection(
+            cursorProjection = new QueryCompiler.CursorSortProjection(
                     ecRelForHydration.definition().tableName(),
                     ecRelForHydration.fkColumn(),
                     toManyPropForHydration + "_",
@@ -610,10 +621,8 @@ public final class FindEmitter {
             rendered = sqlBuilder.cursorSortProjection(cursorProjection);
             baseSql = rendered.shell();
         } else {
-            // No TO_MANY sort, use standard rendering
-            baseSql = sqlBuilder.render(new QueryDefinition.Read(
-                    ResultKind.LIST, method.predicates(), List.of(),
-                    PagingMode.NONE, LimitSpec.none(), List.of(), List.of(), method.distinct()));
+            // No TO_MANY sort — unpaged, unordered shell; seek/order spliced below
+            baseSql = sqlBuilder.sql(selectShellUnordered(method));
         }
 
         boolean shellHasWhere = !method.predicates().isEmpty();
@@ -978,7 +987,7 @@ public final class FindEmitter {
     private String buildExistsSql(RepositoryContext ctx, MethodContext method) {
         SqlBuilder sqlBuilder = new SqlBuilder(ctx.entity());
         sqlBuilder.dialect(dialect);
-        return sqlBuilder.render(new QueryDefinition.Exists(method.predicates(), List.of()));
+        return sqlBuilder.sql(existsDefinition(method));
     }
 
     // ── Custom @Query methods ────────────────────────────────────────────
@@ -1185,19 +1194,8 @@ public final class FindEmitter {
         
         SqlBuilder sqlBuilder = new SqlBuilder(ctx.entity());
         sqlBuilder.dialect(dialect);
-        
-        // Build a Read query definition with empty sorts list
-        QueryDefinition.Read queryDef = new QueryDefinition.Read(
-            method.resultKind(),
-            method.predicates(),
-            List.of(), // Empty sorts - we'll add ORDER BY at runtime
-            method.pagingMode(),
-            LimitSpec.none(),
-            List.of(),
-            List.of(),
-            method.distinct()
-        );
-        
-        return sqlBuilder.render(queryDef);
+
+        // Empty sorts — ORDER BY is spliced at runtime from the Order parameter.
+        return sqlBuilder.sql(selectShellUnordered(method));
     }
 }

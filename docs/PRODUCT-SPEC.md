@@ -33,7 +33,7 @@ Target API: `jakarta.data:jakarta.data-api:1.0.1` (1.0 FINAL section numbers).
 |---|---|
 | CRUD | `CrudRepository` / `BasicRepository`: `findById`, `findAll`, `save`, `insert`, `update`, `deleteById`, plus `*All` variants |
 | Query by method name | `findByX` / `deleteByX` — required in 1.0 but deprecated; document as such; prefer `@Find` / `@Query` going forward |
-| Parameter queries | `@Find` / `@Delete` with `@By` (blank/`""` or omitted → parameter name under `-parameters`), static `@OrderBy` |
+| Parameter queries | `@Find` / `@Delete` with `@By` (or omitted `@By` → parameter name under `-parameters`), static `@OrderBy` |
 | Pagination | Offset `Page` and cursor `CursoredPage` via `PageRequest` (spec 4.8) |
 | Limit / sort | Standalone `Limit` (4.6); dynamic `Sort` / `Order` (4.6 / 4.7) |
 | Metamodel | Static `_Entity` metamodel and row-mapper generation (3.3) |
@@ -42,13 +42,13 @@ Target API: `jakarta.data:jakarta.data-api:1.0.1` (1.0 FINAL section numbers).
 
 Document these as extensions (never reinterpret as JDQL/JPQL):
 
-- `@Query` **native SQL** with `:name` parameters (`@Param("")` or omitted `@Param` → Java parameter name under `-parameters`)
+- `@Query` **native SQL** with `:name` parameters (omitted `@Param` → Java parameter name under `-parameters`)
 - Positional `?1` in native SQL
 - Any other vendor-specific `@Query` behavior
 
 ### Parameter names (`-parameters`)
 
-When the Maven/javac `-parameters` flag is enabled, FluDa fills a blank `@By("")` / `@Param("")` value from the Java parameter name at compile time (`@By("") String title` ≡ `@By("title") String title`). Jakarta Data also allows omitting `@By` / `@Param` entirely when the name matches the attribute / named SQL parameter. Compound attributes use `_` in the parameter name (`address_city` → `address.city`). A non-blank `@By("...")` / `@Param("...")` always wins. FluDa enables `-parameters` in its integration-test compiler config and in the processor test harness. (jakarta.data-api 1.0.1 has no default for `value()`, so “blank” is written as `""`.)
+`@By` / `@Param` both require a `value()` — there is no optional/default attribute. When the annotation is omitted and `-parameters` is enabled, FluDa uses the Java parameter name (`String title` ≡ `@By("title") String title`; same for `@Param` / `:title`). Compound attributes use `_` in the parameter name (`address_city` → `address.city`). An explicit `@By("...")` / `@Param("...")` always wins. FluDa enables `-parameters` in its integration-test compiler config and in the processor test harness.
 
 ### Deferred
 

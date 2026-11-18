@@ -16,9 +16,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Blank {@code @By("")}/{@code @Param("")} (and omitted annotations when Jakarta Data allows)
- * are filled from the Java parameter name under {@code -parameters} (see issue #51).
- * jakarta.data-api 1.0.1 has no default for {@code value()}, so empty is written as {@code ""}.
+ * When {@code @By}/{@code @Param} are omitted, FluDa uses the Java parameter name under
+ * {@code -parameters} (Jakarta Data). Both annotations require a {@code value()} — there is no
+ * optional/default attribute (see issue #51).
  */
 class ParameterNameDefaultsTest {
 
@@ -53,7 +53,6 @@ class ParameterNameDefaultsTest {
                 @Repository
                 public interface Notes extends CrudRepository<Note, Long> {
                     @Find List<Note> byName(String title);
-                    @Find List<Note> byBlankBy(@By("") String title);
                     @Find List<Note> byExplicit(@By("title") String ignored);
                 }
                 """);
@@ -62,9 +61,7 @@ class ParameterNameDefaultsTest {
         String impl = sqlFlat(generatedDir.resolve("pnfind/Notes_.java"));
 
         assertTrue(impl.contains("FROM \"notes\" WHERE \"title\" = :title"),
-                "parameter name must become the equality attribute:" + System.lineSeparator() + impl);
-        assertTrue(impl.contains("BY_BLANK_BY_SQL = \"SELECT \"id\", \"title\" FROM \"notes\" WHERE \"title\" = :title\""),
-                "blank @By(\"\") must use the Java parameter name as the attribute:"
+                "omitted @By must use the Java parameter name as the attribute:"
                         + System.lineSeparator() + impl);
         assertTrue(impl.contains("FROM \"notes\" WHERE \"title\" = :ignored"),
                 "explicit @By must win over the Java parameter name:" + System.lineSeparator() + impl);
@@ -122,7 +119,7 @@ class ParameterNameDefaultsTest {
     }
 
     @Test
-    void queryBindsNamedParameterFromBlankOrOmittedParamAnnotation() throws Exception {
+    void queryBindsNamedParameterFromOmittedOrExplicitParamAnnotation() throws Exception {
         Path sourceDir = Files.createDirectories(workspace.resolve("src/pn-query"));
         Path classesDir = Files.createDirectories(workspace.resolve("classes-pn-query"));
         Path generatedDir = Files.createDirectories(workspace.resolve("generated-pn-query"));
@@ -149,8 +146,6 @@ class ParameterNameDefaultsTest {
                 @Repository
                 public interface Books extends CrudRepository<Book, Long> {
                     @Query("SELECT id, title FROM books WHERE title = :title")
-                    List<Book> searchBlank(@Param("") String title);
-                    @Query("SELECT id, title FROM books WHERE title = :title")
                     List<Book> searchOmitted(String title);
                     @Query("SELECT id, title FROM books WHERE title = :title")
                     List<Book> searchExplicit(@Param("title") String ignored);
@@ -160,9 +155,6 @@ class ParameterNameDefaultsTest {
         compile(sourceDir, classesDir, generatedDir, "Book.java", "Books.java");
         String impl = sqlFlat(generatedDir.resolve("pnquery/Books_.java"));
 
-        assertTrue(impl.contains("public List<Book> searchBlank") && impl.contains(".param(\"title\", title)"),
-                "blank @Param(\"\") must bind :title from the Java parameter name:"
-                        + System.lineSeparator() + impl);
         assertTrue(impl.contains("public List<Book> searchOmitted") && impl.contains(".param(\"title\", title)"),
                 "omitted @Param must bind :title from the Java parameter name:"
                         + System.lineSeparator() + impl);

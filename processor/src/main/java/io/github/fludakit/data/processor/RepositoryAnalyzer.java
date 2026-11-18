@@ -654,9 +654,9 @@ final class RepositoryAnalyzer {
     // ── Predicate resolution ─────────────────────────────────────────────
 
     /**
-     * Resolves predicates for {@code @Find} / parameter-based {@code @Delete}: {@code @By("...")}
-     * when present with a non-blank value; otherwise the Java parameter name (blank {@code @By("")}
-     * or omitted {@code @By}, requiring {@code -parameters}) with {@code _} mapped to {@code .}.
+     * Resolves predicates for {@code @Find} / parameter-based {@code @Delete}: omitted {@code @By}
+     * uses the Java parameter name ({@code -parameters}, {@code _} → {@code .}); present {@code @By}
+     * uses its required {@code value()}.
      *
      * @return the predicates, or {@code null} when an unknown attribute was diagnosed
      */
@@ -690,7 +690,6 @@ final class RepositoryAnalyzer {
 
     /**
      * Resolves predicates from explicit {@code @By} annotations only (QBN / lifecycle paths).
-     * A blank {@code @By("")} value is filled from the Java parameter name at compile time.
      */
     private List<Predicate> resolveByAnnotations(ExecutableElement method, TypeDefinition entityMapping) {
         List<Predicate> predicates = new ArrayList<>();
@@ -698,26 +697,22 @@ final class RepositoryAnalyzer {
             By byAnnotation = param.getAnnotation(By.class);
             if (byAnnotation != null) {
                 String paramName = param.getSimpleName().toString();
-                predicates.add(Predicate.of(resolveByPropertyPath(param), Operator.EQ, paramName));
+                predicates.add(Predicate.of(byAnnotation.value(), Operator.EQ, paramName));
             }
         }
         return predicates;
     }
 
     /**
-     * Entity attribute path for a method parameter: non-blank {@code @By} value wins; blank or
-     * absent {@code @By} uses the Java parameter name ({@code _} → {@code .}).
+     * Entity attribute path: no {@code @By} → Java parameter name ({@code _} → {@code .});
+     * with {@code @By} → its required {@code value()} (no default in jakarta.data-api).
      */
     private static String resolveByPropertyPath(VariableElement param) {
-        String paramName = param.getSimpleName().toString();
         By byAnnotation = param.getAnnotation(By.class);
         if (byAnnotation != null) {
-            String value = byAnnotation.value();
-            if (value != null && !value.isBlank()) {
-                return value;
-            }
+            return byAnnotation.value();
         }
-        return paramName.replace('_', '.');
+        return param.getSimpleName().toString().replace('_', '.');
     }
 
     private boolean isSpecialQueryParameter(VariableElement param) {
@@ -925,8 +920,8 @@ final class RepositoryAnalyzer {
 
     /**
      * Builds {@link ParamBinding}s for a {@code @Query} method by matching method parameters
-     * to named SQL parameters. Non-blank {@code @Param("...")} wins; blank {@code @Param("")}
-     * or omitted {@code @Param} uses the Java parameter name ({@code -parameters}).
+     * to named SQL parameters. No {@code @Param} → Java parameter name; with {@code @Param} →
+     * its required {@code value()} (no default in jakarta.data-api).
      */
     private List<ParamBinding> buildQueryBindings(ExecutableElement method, List<String> namedParams) {
         List<ParamBinding> bindings = new ArrayList<>();
@@ -948,16 +943,13 @@ final class RepositoryAnalyzer {
     }
 
     /**
-     * Named SQL parameter for a {@code @Query} method argument: non-blank {@code @Param} value
-     * wins; blank or absent {@code @Param} uses the Java parameter name.
+     * Named SQL parameter: no {@code @Param} → Java parameter name; with {@code @Param} →
+     * its required {@code value()}.
      */
     private static String resolveQueryParamName(VariableElement param) {
         Param paramAnnotation = param.getAnnotation(Param.class);
         if (paramAnnotation != null) {
-            String value = paramAnnotation.value();
-            if (value != null && !value.isBlank()) {
-                return value;
-            }
+            return paramAnnotation.value();
         }
         return param.getSimpleName().toString();
     }

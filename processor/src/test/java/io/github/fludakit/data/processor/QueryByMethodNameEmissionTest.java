@@ -454,8 +454,8 @@ class QueryByMethodNameEmissionTest {
                 public interface Notes extends CrudRepository<Note, Long> {
                     @Find List<Note> findByTitleLike(@By("title") String pattern);
                     @Find List<Note> findByBodyIn(@By("body") String body);
-                    // No @By and a name that is not a query-by-method name at all: both are irrelevant.
-                    @Find List<Note> searchTitleLike(String marker);
+                    // No @By: with -parameters the parameter name is the attribute (Jakarta Data default).
+                    @Find List<Note> searchNamed(String title);
                 }
                 """);
 
@@ -468,9 +468,9 @@ class QueryByMethodNameEmissionTest {
         assertTrue(impl.contains("FROM \"notes\" WHERE \"body\" = :body"),
                 "the @By property with the implied equality must win over the name's In:"
                         + System.lineSeparator() + impl);
-        // Without @By there are no criteria at all, so the method compiles to an unfiltered SELECT.
-        assertTrue(impl.contains("SEARCH_TITLE_LIKE_SQL = \"SELECT \"id\", \"title\", \"body\" FROM \"notes\"\""),
-                "without @By the method must render an unfiltered SELECT:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("FROM \"notes\" WHERE \"title\" = :title"),
+                "without @By the parameter name must become the equality attribute under -parameters:"
+                        + System.lineSeparator() + impl);
         assertTrue(!impl.contains("\"title\" LIKE") && !impl.contains("\"title\" IN"),
                 "an annotated method's name must never be analyzed for a property or an operator:"
                         + System.lineSeparator() + impl);

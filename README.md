@@ -29,6 +29,8 @@ public interface CustomerRepository extends CrudRepository<Customer, Long> {
 
 The processor generates a CDI bean `CustomerRepository_` with static SQL constants, a code-generated row mapper, and a Jakarta Data static metamodel. Add `fluda-data-qbn` to the annotation processor path to enable query-by-method-name finders like `findByName` and `countByEmail`.
 
+Enable the compiler `-parameters` flag (`maven-compiler-plugin` `<parameters>true</parameters>`) so `@Find`/`@Delete`/`@Query` can omit `@By`/`@Param` when the Java parameter name matches the entity attribute or named SQL parameter.
+
 ## Building
 
 ```bash

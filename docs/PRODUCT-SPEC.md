@@ -33,7 +33,7 @@ Target API: `jakarta.data:jakarta.data-api:1.0.1` (1.0 FINAL section numbers).
 |---|---|
 | CRUD | `CrudRepository` / `BasicRepository`: `findById`, `findAll`, `save`, `insert`, `update`, `deleteById`, plus `*All` variants |
 | Query by method name | `findByX` / `deleteByX` — required in 1.0 but deprecated; document as such; prefer `@Find` / `@Query` going forward |
-| Parameter queries | `@Find` / `@Delete` with `@By`, static `@OrderBy` |
+| Parameter queries | `@Find` / `@Delete` with `@By` (or parameter name when compiled with `-parameters`), static `@OrderBy` |
 | Pagination | Offset `Page` and cursor `CursoredPage` via `PageRequest` (spec 4.8) |
 | Limit / sort | Standalone `Limit` (4.6); dynamic `Sort` / `Order` (4.6 / 4.7) |
 | Metamodel | Static `_Entity` metamodel and row-mapper generation (3.3) |
@@ -42,9 +42,13 @@ Target API: `jakarta.data:jakarta.data-api:1.0.1` (1.0 FINAL section numbers).
 
 Document these as extensions (never reinterpret as JDQL/JPQL):
 
-- `@Query` **native SQL** with `:name` parameters
+- `@Query` **native SQL** with `:name` parameters (`@Param` optional when the Java parameter name matches and `-parameters` is enabled)
 - Positional `?1` in native SQL
 - Any other vendor-specific `@Query` behavior
+
+### Parameter names (`-parameters`)
+
+When the Maven/javac `-parameters` flag is enabled, Jakarta Data allows omitting `@By` / `@Param` if the method parameter name matches the entity attribute or named SQL parameter. Compound attributes use `_` in the parameter name (`address_city` → `address.city`). Explicit `@By("...")` always wins over the Java name. FluDa enables `-parameters` in its integration-test compiler config and in the processor test harness.
 
 ### Deferred
 

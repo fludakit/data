@@ -16,8 +16,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Jakarta Data allows omitting {@code @By}/{@code @Param} when parameter names match attributes
- * / named SQL parameters and the compile uses {@code -parameters} (see issue #51).
+ * Blank {@code @By("")}/{@code @Param("")} (and omitted annotations when Jakarta Data allows)
+ * are filled from the Java parameter name under {@code -parameters} (see issue #51).
+ * jakarta.data-api 1.0.1 has no default for {@code value()}, so empty is written as {@code ""}.
  */
 class ParameterNameDefaultsTest {
 
@@ -52,6 +53,7 @@ class ParameterNameDefaultsTest {
                 @Repository
                 public interface Notes extends CrudRepository<Note, Long> {
                     @Find List<Note> byName(String title);
+                    @Find List<Note> byBlankBy(@By("") String title);
                     @Find List<Note> byExplicit(@By("title") String ignored);
                 }
                 """);
@@ -61,6 +63,9 @@ class ParameterNameDefaultsTest {
 
         assertTrue(impl.contains("FROM \"notes\" WHERE \"title\" = :title"),
                 "parameter name must become the equality attribute:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("BY_BLANK_BY_SQL = \"SELECT \"id\", \"title\" FROM \"notes\" WHERE \"title\" = :title\""),
+                "blank @By(\"\") must use the Java parameter name as the attribute:"
+                        + System.lineSeparator() + impl);
         assertTrue(impl.contains("FROM \"notes\" WHERE \"title\" = :ignored"),
                 "explicit @By must win over the Java parameter name:" + System.lineSeparator() + impl);
     }
@@ -117,7 +122,7 @@ class ParameterNameDefaultsTest {
     }
 
     @Test
-    void queryBindsNamedParameterFromParameterNameWithoutParamAnnotation() throws Exception {
+    void queryBindsNamedParameterFromBlankOrOmittedParamAnnotation() throws Exception {
         Path sourceDir = Files.createDirectories(workspace.resolve("src/pn-query"));
         Path classesDir = Files.createDirectories(workspace.resolve("classes-pn-query"));
         Path generatedDir = Files.createDirectories(workspace.resolve("generated-pn-query"));
@@ -137,22 +142,35 @@ class ParameterNameDefaultsTest {
         Files.writeString(sourceDir.resolve("Books.java"), """
                 package pnquery;
                 import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Param;
                 import jakarta.data.repository.Query;
                 import jakarta.data.repository.Repository;
                 import java.util.List;
                 @Repository
                 public interface Books extends CrudRepository<Book, Long> {
                     @Query("SELECT id, title FROM books WHERE title = :title")
-                    List<Book> search(String title);
+                    List<Book> searchBlank(@Param("") String title);
+                    @Query("SELECT id, title FROM books WHERE title = :title")
+                    List<Book> searchOmitted(String title);
+                    @Query("SELECT id, title FROM books WHERE title = :title")
+                    List<Book> searchExplicit(@Param("title") String ignored);
                 }
                 """);
 
         compile(sourceDir, classesDir, generatedDir, "Book.java", "Books.java");
         String impl = sqlFlat(generatedDir.resolve("pnquery/Books_.java"));
 
-        assertTrue(impl.contains(".param(\"title\", title)"),
-                "@Query must bind :title from the parameter name without @Param:"
+        assertTrue(impl.contains("public List<Book> searchBlank") && impl.contains(".param(\"title\", title)"),
+                "blank @Param(\"\") must bind :title from the Java parameter name:"
                         + System.lineSeparator() + impl);
+        assertTrue(impl.contains("public List<Book> searchOmitted") && impl.contains(".param(\"title\", title)"),
+                "omitted @Param must bind :title from the Java parameter name:"
+                        + System.lineSeparator() + impl);
+        String explicitBody = impl.substring(impl.indexOf("public List<Book> searchExplicit"));
+        explicitBody = explicitBody.substring(0, explicitBody.indexOf("@Override", 1));
+        assertTrue(explicitBody.contains(".param(\"title\", ignored)"),
+                "explicit @Param(\"title\") must win over the Java parameter name:"
+                        + System.lineSeparator() + explicitBody);
     }
 
     @Test

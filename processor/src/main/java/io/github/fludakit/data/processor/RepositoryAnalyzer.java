@@ -654,9 +654,9 @@ final class RepositoryAnalyzer {
     // ── Predicate resolution ─────────────────────────────────────────────
 
     /**
-     * Resolves predicates for {@code @Find} / parameter-based {@code @Delete}: explicit {@code @By}
-     * when present, otherwise the Java parameter name (requires {@code -parameters}) with
-     * {@code _} mapped to {@code .} for compound paths.
+     * Resolves predicates for {@code @Find} / parameter-based {@code @Delete}: {@code @By("...")}
+     * when present with a non-blank value; otherwise the Java parameter name (blank {@code @By("")}
+     * or omitted {@code @By}, requiring {@code -parameters}) with {@code _} mapped to {@code .}.
      *
      * @return the predicates, or {@code null} when an unknown attribute was diagnosed
      */
@@ -667,11 +667,8 @@ final class RepositoryAnalyzer {
             if (isSpecialQueryParameter(param)) {
                 continue;
             }
-            By byAnnotation = param.getAnnotation(By.class);
             String paramName = param.getSimpleName().toString();
-            String propertyPath = byAnnotation != null
-                    ? byAnnotation.value()
-                    : paramName.replace('_', '.');
+            String propertyPath = resolveByPropertyPath(param);
 
             if (!"id(this)".equals(propertyPath)) {
                 try {
@@ -693,18 +690,34 @@ final class RepositoryAnalyzer {
 
     /**
      * Resolves predicates from explicit {@code @By} annotations only (QBN / lifecycle paths).
+     * A blank {@code @By("")} value is filled from the Java parameter name at compile time.
      */
     private List<Predicate> resolveByAnnotations(ExecutableElement method, TypeDefinition entityMapping) {
         List<Predicate> predicates = new ArrayList<>();
         for (VariableElement param : method.getParameters()) {
             By byAnnotation = param.getAnnotation(By.class);
             if (byAnnotation != null) {
-                String propertyPath = byAnnotation.value();
                 String paramName = param.getSimpleName().toString();
-                predicates.add(Predicate.of(propertyPath, Operator.EQ, paramName));
+                predicates.add(Predicate.of(resolveByPropertyPath(param), Operator.EQ, paramName));
             }
         }
         return predicates;
+    }
+
+    /**
+     * Entity attribute path for a method parameter: non-blank {@code @By} value wins; blank or
+     * absent {@code @By} uses the Java parameter name ({@code _} → {@code .}).
+     */
+    private static String resolveByPropertyPath(VariableElement param) {
+        String paramName = param.getSimpleName().toString();
+        By byAnnotation = param.getAnnotation(By.class);
+        if (byAnnotation != null) {
+            String value = byAnnotation.value();
+            if (value != null && !value.isBlank()) {
+                return value;
+            }
+        }
+        return paramName.replace('_', '.');
     }
 
     private boolean isSpecialQueryParameter(VariableElement param) {
@@ -912,8 +925,8 @@ final class RepositoryAnalyzer {
 
     /**
      * Builds {@link ParamBinding}s for a {@code @Query} method by matching method parameters
-     * to named SQL parameters. Uses {@code @Param} annotation value if present, otherwise
-     * falls back to the parameter name.
+     * to named SQL parameters. Non-blank {@code @Param("...")} wins; blank {@code @Param("")}
+     * or omitted {@code @Param} uses the Java parameter name ({@code -parameters}).
      */
     private List<ParamBinding> buildQueryBindings(ExecutableElement method, List<String> namedParams) {
         List<ParamBinding> bindings = new ArrayList<>();
@@ -924,14 +937,7 @@ final class RepositoryAnalyzer {
             // Skip Limit / Sort / Order / PageRequest
             if (isSpecialQueryParameter(param)) continue;
 
-            // Determine the SQL parameter name: @Param value or parameter name (-parameters)
-            String paramName;
-            Param paramAnnotation = param.getAnnotation(Param.class);
-            if (paramAnnotation != null) {
-                paramName = paramAnnotation.value();
-            } else {
-                paramName = param.getSimpleName().toString();
-            }
+            String paramName = resolveQueryParamName(param);
 
             // Only bind if this name appears in the SQL named parameters
             if (namedParams.contains(paramName)) {
@@ -939,6 +945,21 @@ final class RepositoryAnalyzer {
             }
         }
         return bindings;
+    }
+
+    /**
+     * Named SQL parameter for a {@code @Query} method argument: non-blank {@code @Param} value
+     * wins; blank or absent {@code @Param} uses the Java parameter name.
+     */
+    private static String resolveQueryParamName(VariableElement param) {
+        Param paramAnnotation = param.getAnnotation(Param.class);
+        if (paramAnnotation != null) {
+            String value = paramAnnotation.value();
+            if (value != null && !value.isBlank()) {
+                return value;
+            }
+        }
+        return param.getSimpleName().toString();
     }
 
     // ── Utility methods ──────────────────────────────────────────────────

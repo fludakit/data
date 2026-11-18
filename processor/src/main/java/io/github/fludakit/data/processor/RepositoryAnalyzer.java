@@ -2,6 +2,7 @@ package io.github.fludakit.data.processor;
 
 import com.squareup.javapoet.ClassName;
 import io.github.fludakit.data.metadata.TypeDefinition;
+import io.github.fludakit.data.metadata.UnknownAttributePathException;
 import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.MethodContext.Operation;
 import io.github.fludakit.data.processor.context.RepositoryContext;
@@ -62,6 +63,9 @@ final class RepositoryAnalyzer {
     private static final String PAGE_REQUEST = "jakarta.data.page.PageRequest";
     private static final String PAGE = "jakarta.data.page.Page";
     private static final String CURSORED_PAGE = "jakarta.data.page.CursoredPage";
+    private static final String LIMIT = "jakarta.data.Limit";
+    private static final String SORT = "jakarta.data.Sort";
+    private static final String ORDER = "jakarta.data.Order";
 
     // QBN module is optional — check if it's on the classpath
     private static final boolean QBN_AVAILABLE = isQbnAvailable();
@@ -281,8 +285,12 @@ final class RepositoryAnalyzer {
             MethodContext methodCtx = resolveMethod(method, entityMapping);
             if (methodCtx != null) {
                 methods.add(methodCtx);
+            } else if (resolveLifecycleAnnotation(method) != null) {
+                // @Find/@Delete already emitted a located diagnostic (e.g. unknown attribute); skip.
+                continue;
             } else {
                 // Method could not be resolved — throw error suggesting @Query
+                // Broader throw→diagnostics migration tracked in https://github.com/fludakit/data/issues/54
                 String methodName = method.getSimpleName().toString();
                 String repoName = repository.getQualifiedName().toString();
                 throw new IllegalStateException(
@@ -368,33 +376,34 @@ final class RepositoryAnalyzer {
 
     private MethodContext resolveAnnotatedMethod(ExecutableElement method, String methodName,
                                                   Operation operation, TypeDefinition entityMapping) {
-        // Validate that write operations accept entity or entity collection parameters
-        if (operation == Operation.SAVE || operation == Operation.INSERT || operation == Operation.UPDATE || operation == Operation.DELETE) {
-            if (!method.getParameters().isEmpty()) {
+        boolean lifecycleEntityDelete = operation == Operation.DELETE
+                && isLifecycleEntityParameter(method, entityMapping);
+
+        // SAVE/INSERT/UPDATE always take the entity (or collection). DELETE does when the
+        // first parameter is the entity; otherwise it is a parameter-based automatic query (#51).
+        if (operation == Operation.SAVE || operation == Operation.INSERT || operation == Operation.UPDATE
+                || lifecycleEntityDelete) {
+            if (!method.getParameters().isEmpty() && !isLifecycleEntityParameter(method, entityMapping)) {
                 VariableElement firstParam = method.getParameters().getFirst();
                 String paramType = firstParam.asType().toString();
-                String entityType = entityMapping.typeName();
-                
-                // Check if parameter is the entity type, a generic type variable (S extends Entity), 
-                // or a collection of entities (including generic collections like List<S>, List<? extends T>)
-                boolean isValid = paramType.equals(entityType) 
-                        || paramType.startsWith("java.util.List<" + entityType)
-                        || paramType.startsWith("java.util.Collection<" + entityType)
-                        // Allow generic type parameters (e.g., <S extends Entity> S save(S entity))
-                        || (paramType.length() == 1 && Character.isUpperCase(paramType.charAt(0)))
-                        // Allow collections of generic type parameters (e.g., List<S>, List<? extends T>)
-                        || paramType.matches("java\\.util\\.(List|Collection)<\\??\\s*(extends\\s+)?[A-Z]>");
-                
-                if (!isValid) {
-                    throw new IllegalArgumentException(
-                            "Method " + methodName + " carries a lifecycle annotation and must accept "
-                            + "the repository entity type (" + entityType + ") or a collection thereof, not " + paramType);
-                }
+                // Throw style kept for now; located diagnostics tracked in #54
+                throw new IllegalArgumentException(
+                        "Method " + methodName + " carries a lifecycle annotation and must accept "
+                        + "the repository entity type (" + entityMapping.typeName()
+                        + ") or a collection thereof, not " + paramType);
             }
         }
-        
+
         ResultKind resultKind = resolveResultKind(method, operation);
-        List<Predicate> predicates = resolveByAnnotations(method, entityMapping);
+        List<Predicate> predicates;
+        if (operation == Operation.FIND || (operation == Operation.DELETE && !lifecycleEntityDelete)) {
+            predicates = resolveAutomaticQueryPredicates(method, entityMapping);
+            if (predicates == null) {
+                return null; // unknown attribute already diagnosed
+            }
+        } else {
+            predicates = resolveByAnnotations(method, entityMapping);
+        }
 
         // Replace Jakarta Data's "id(this)" JDQL convention with the actual ID property name
         predicates = replaceIdThis(predicates, entityMapping);
@@ -404,6 +413,18 @@ final class RepositoryAnalyzer {
 
         return methodContext(method, methodName, operation,
                 buildQuery(operation, resultKind, false, predicates, paramBindings, sorts, method));
+    }
+
+    /** True when the first parameter is the entity (or a collection thereof) for lifecycle writes. */
+    private boolean isLifecycleEntityParameter(ExecutableElement method, TypeDefinition entityMapping) {
+        if (method.getParameters().isEmpty()) return false;
+        String paramType = method.getParameters().getFirst().asType().toString();
+        String entityType = entityMapping.typeName();
+        return paramType.equals(entityType)
+                || paramType.startsWith("java.util.List<" + entityType)
+                || paramType.startsWith("java.util.Collection<" + entityType)
+                || (paramType.length() == 1 && Character.isUpperCase(paramType.charAt(0)))
+                || paramType.matches("java\\.util\\.(List|Collection)<\\??\\s*(extends\\s+)?[A-Z]>");
     }
 
     private boolean isBuiltInCrudMethod(String methodName) {
@@ -633,19 +654,75 @@ final class RepositoryAnalyzer {
     // ── Predicate resolution ─────────────────────────────────────────────
 
     /**
-     * Resolves predicates from {@code @By} annotations on method parameters.
+     * Resolves predicates for {@code @Find} / parameter-based {@code @Delete}: omitted {@code @By}
+     * uses the Java parameter name ({@code -parameters}, {@code _} → {@code .}); present {@code @By}
+     * uses its required {@code value()}.
+     *
+     * @return the predicates, or {@code null} when an unknown attribute was diagnosed
+     */
+    private List<Predicate> resolveAutomaticQueryPredicates(ExecutableElement method,
+                                                            TypeDefinition entityMapping) {
+        List<Predicate> predicates = new ArrayList<>();
+        for (VariableElement param : method.getParameters()) {
+            if (isSpecialQueryParameter(param)) {
+                continue;
+            }
+            String paramName = param.getSimpleName().toString();
+            String propertyPath = resolveByPropertyPath(param);
+
+            if (!"id(this)".equals(propertyPath)) {
+                try {
+                    entityMapping.resolve(propertyPath);
+                } catch (UnknownAttributePathException e) {
+                    diagnostics.error(
+                            "Unknown entity attribute '" + propertyPath + "' for parameter '"
+                                    + paramName + "' on " + entityMapping.typeName()
+                                    + ". Annotate with @By(\"...\") or compile with -parameters so the "
+                                    + "parameter name matches an attribute.",
+                            param);
+                    return null;
+                }
+            }
+            predicates.add(Predicate.of(propertyPath, Operator.EQ, paramName));
+        }
+        return predicates;
+    }
+
+    /**
+     * Resolves predicates from explicit {@code @By} annotations only (QBN / lifecycle paths).
      */
     private List<Predicate> resolveByAnnotations(ExecutableElement method, TypeDefinition entityMapping) {
         List<Predicate> predicates = new ArrayList<>();
         for (VariableElement param : method.getParameters()) {
             By byAnnotation = param.getAnnotation(By.class);
             if (byAnnotation != null) {
-                String propertyPath = byAnnotation.value();
                 String paramName = param.getSimpleName().toString();
-                predicates.add(Predicate.of(propertyPath, Operator.EQ, paramName));
+                predicates.add(Predicate.of(byAnnotation.value(), Operator.EQ, paramName));
             }
         }
         return predicates;
+    }
+
+    /**
+     * Entity attribute path: no {@code @By} → Java parameter name ({@code _} → {@code .});
+     * with {@code @By} → its required {@code value()} (no default in jakarta.data-api).
+     */
+    private static String resolveByPropertyPath(VariableElement param) {
+        By byAnnotation = param.getAnnotation(By.class);
+        if (byAnnotation != null) {
+            return byAnnotation.value();
+        }
+        return param.getSimpleName().toString().replace('_', '.');
+    }
+
+    private boolean isSpecialQueryParameter(VariableElement param) {
+        String fqn = erasureFqn(param.asType());
+        return PAGE_REQUEST.equals(fqn)
+                || LIMIT.equals(fqn)
+                || SORT.equals(fqn)
+                || ORDER.equals(fqn)
+                || fqn.startsWith(SORT + "<")
+                || fqn.startsWith(ORDER + "<");
     }
 
     /**
@@ -696,12 +773,10 @@ final class RepositoryAnalyzer {
         List<ParamBinding> bindings = new ArrayList<>();
         List<? extends VariableElement> params = method.getParameters();
 
-        // Count non-paging parameters
+        // Attribute / query value parameters only (skip Limit, Sort, Order, PageRequest)
         List<Integer> nonPagingParamIndices = new ArrayList<>();
         for (int i = 0; i < params.size(); i++) {
-            VariableElement param = params.get(i);
-            String paramFqn = erasureFqn(param.asType());
-            if (!PAGE_REQUEST.equals(paramFqn)) {
+            if (!isSpecialQueryParameter(params.get(i))) {
                 nonPagingParamIndices.add(i);
             }
         }
@@ -845,8 +920,8 @@ final class RepositoryAnalyzer {
 
     /**
      * Builds {@link ParamBinding}s for a {@code @Query} method by matching method parameters
-     * to named SQL parameters. Uses {@code @Param} annotation value if present, otherwise
-     * falls back to the parameter name.
+     * to named SQL parameters. No {@code @Param} → Java parameter name; with {@code @Param} →
+     * its required {@code value()} (no default in jakarta.data-api).
      */
     private List<ParamBinding> buildQueryBindings(ExecutableElement method, List<String> namedParams) {
         List<ParamBinding> bindings = new ArrayList<>();
@@ -854,19 +929,10 @@ final class RepositoryAnalyzer {
 
         for (int i = 0; i < params.size(); i++) {
             VariableElement param = params.get(i);
-            String paramFqn = erasureFqn(param.asType());
+            // Skip Limit / Sort / Order / PageRequest
+            if (isSpecialQueryParameter(param)) continue;
 
-            // Skip paging parameters
-            if (PAGE_REQUEST.equals(paramFqn)) continue;
-
-            // Determine the SQL parameter name: @Param value or parameter name
-            String paramName;
-            Param paramAnnotation = param.getAnnotation(Param.class);
-            if (paramAnnotation != null) {
-                paramName = paramAnnotation.value();
-            } else {
-                paramName = param.getSimpleName().toString();
-            }
+            String paramName = resolveQueryParamName(param);
 
             // Only bind if this name appears in the SQL named parameters
             if (namedParams.contains(paramName)) {
@@ -874,6 +940,18 @@ final class RepositoryAnalyzer {
             }
         }
         return bindings;
+    }
+
+    /**
+     * Named SQL parameter: no {@code @Param} → Java parameter name; with {@code @Param} →
+     * its required {@code value()}.
+     */
+    private static String resolveQueryParamName(VariableElement param) {
+        Param paramAnnotation = param.getAnnotation(Param.class);
+        if (paramAnnotation != null) {
+            return paramAnnotation.value();
+        }
+        return param.getSimpleName().toString();
     }
 
     // ── Utility methods ──────────────────────────────────────────────────

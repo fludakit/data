@@ -357,6 +357,7 @@ final class ProcessorHarness {
                     "-classpath", System.getProperty("java.class.path"),
                     "-d", classesDir.toString(),
                     "-s", generatedDir.toString(),
+                    "-parameters",
                     "-processor", "io.github.fludakit.data.processor.RepositoryProcessor"));
             options.addAll(processorOptions);
             boolean success = compiler.getTask(null, fm, diagnostics, options, null, units).call();

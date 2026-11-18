@@ -285,15 +285,20 @@ final class RepositoryAnalyzer {
             MethodContext methodCtx = resolveMethod(method, entityMapping);
             if (methodCtx != null) {
                 methods.add(methodCtx);
+            } else if (resolveLifecycleAnnotation(method) != null) {
+                // @Find/@Delete already emitted a located diagnostic (e.g. unknown attribute); skip.
+                continue;
             } else {
-                // Located diagnostic; skip the method without aborting the repository
+                // Method could not be resolved — throw error suggesting @Query
+                // Broader throw→diagnostics migration tracked in https://github.com/fludakit/data/issues/54
                 String methodName = method.getSimpleName().toString();
-                diagnostics.error(
+                String repoName = repository.getQualifiedName().toString();
+                throw new IllegalStateException(
                     "Cannot resolve method '" + methodName + "' in repository " +
-                    repository.getQualifiedName() + ". Either add a lifecycle annotation " +
+                    repoName + ". Either add a lifecycle annotation " +
                     "(@Find, @Save, @Insert, @Update, @Delete), use a recognized CRUD method name " +
-                    "(findById, save, etc.), use Query By Name (findByXxx), or add a custom @Query annotation.",
-                    method);
+                    "(findById, save, etc.), use Query By Name (findByXxx), or add a custom @Query annotation."
+                );
             }
         }
         return new MethodScan(methods, jdbcClientAccessor);
@@ -375,17 +380,17 @@ final class RepositoryAnalyzer {
                 && isLifecycleEntityParameter(method, entityMapping);
 
         // SAVE/INSERT/UPDATE always take the entity (or collection). DELETE does when the
-        // first parameter is the entity; otherwise it is a parameter-based automatic query.
+        // first parameter is the entity; otherwise it is a parameter-based automatic query (#51).
         if (operation == Operation.SAVE || operation == Operation.INSERT || operation == Operation.UPDATE
                 || lifecycleEntityDelete) {
             if (!method.getParameters().isEmpty() && !isLifecycleEntityParameter(method, entityMapping)) {
                 VariableElement firstParam = method.getParameters().getFirst();
-                diagnostics.error(
+                String paramType = firstParam.asType().toString();
+                // Throw style kept for now; located diagnostics tracked in #54
+                throw new IllegalArgumentException(
                         "Method " + methodName + " carries a lifecycle annotation and must accept "
                         + "the repository entity type (" + entityMapping.typeName()
-                        + ") or a collection thereof, not " + firstParam.asType(),
-                        method);
-                return null;
+                        + ") or a collection thereof, not " + paramType);
             }
         }
 

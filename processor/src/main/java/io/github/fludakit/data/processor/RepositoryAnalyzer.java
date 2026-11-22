@@ -286,19 +286,16 @@ final class RepositoryAnalyzer {
             if (methodCtx != null) {
                 methods.add(methodCtx);
             } else if (resolveLifecycleAnnotation(method) != null) {
-                // @Find/@Delete already emitted a located diagnostic (e.g. unknown attribute); skip.
+                // Annotated method already emitted a located diagnostic; skip this method only.
                 continue;
             } else {
-                // Method could not be resolved — throw error suggesting @Query
-                // Broader throw→diagnostics migration tracked in https://github.com/fludakit/data/issues/54
                 String methodName = method.getSimpleName().toString();
-                String repoName = repository.getQualifiedName().toString();
-                throw new IllegalStateException(
+                diagnostics.error(
                     "Cannot resolve method '" + methodName + "' in repository " +
-                    repoName + ". Either add a lifecycle annotation " +
+                    repository.getQualifiedName() + ". Either add a lifecycle annotation " +
                     "(@Find, @Save, @Insert, @Update, @Delete), use a recognized CRUD method name " +
-                    "(findById, save, etc.), use Query By Name (findByXxx), or add a custom @Query annotation."
-                );
+                    "(findById, save, etc.), use Query By Name (findByXxx), or add a custom @Query annotation.",
+                    method);
             }
         }
         return new MethodScan(methods, jdbcClientAccessor);
@@ -385,12 +382,12 @@ final class RepositoryAnalyzer {
                 || lifecycleEntityDelete) {
             if (!method.getParameters().isEmpty() && !isLifecycleEntityParameter(method, entityMapping)) {
                 VariableElement firstParam = method.getParameters().getFirst();
-                String paramType = firstParam.asType().toString();
-                // Throw style kept for now; located diagnostics tracked in #54
-                throw new IllegalArgumentException(
+                diagnostics.error(
                         "Method " + methodName + " carries a lifecycle annotation and must accept "
                         + "the repository entity type (" + entityMapping.typeName()
-                        + ") or a collection thereof, not " + paramType);
+                        + ") or a collection thereof, not " + firstParam.asType(),
+                        method);
+                return null;
             }
         }
 

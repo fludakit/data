@@ -81,7 +81,7 @@ public class RepositoryProcessor extends AbstractProcessor {
                         repository, types, elements, diagnostics, typeGraph).resolveContext();
                 if (ctx == null) continue;
                 new RepositoryMemberEmitter(repository, types, elements, dialect).emit(ctx);
-                new RepositoryWriter(repository, ctx, ctx.jdbcClientAccessor(), filer, diagnostics).write();
+                new RepositoryWriter(repository, ctx, filer, diagnostics).write();
             } catch (RuntimeException e) {
                 String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getName();
                 diagnostics.error(

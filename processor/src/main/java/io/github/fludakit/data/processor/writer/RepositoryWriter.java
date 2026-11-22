@@ -27,15 +27,13 @@ public final class RepositoryWriter {
 
     private final TypeElement repository;
     private final RepositoryContext ctx;
-    private final ExecutableElement jdbcClientAccessor;
     private final Filer filer;
     private final Diagnostics diagnostics;
 
-    public RepositoryWriter(TypeElement repository, RepositoryContext ctx, ExecutableElement jdbcClientAccessor,
+    public RepositoryWriter(TypeElement repository, RepositoryContext ctx,
                             Filer filer, Diagnostics diagnostics) {
         this.repository = repository;
         this.ctx = ctx;
-        this.jdbcClientAccessor = jdbcClientAccessor;
         this.filer = filer;
         this.diagnostics = diagnostics;
     }
@@ -78,6 +76,7 @@ public final class RepositoryWriter {
         }
 
         // Add the JdbcClient accessor override, when the repository declares one
+        ExecutableElement jdbcClientAccessor = ctx.jdbcClientAccessor();
         if (jdbcClientAccessor != null) {
             shell.addMethod(MethodSpec.overriding(jdbcClientAccessor)
                     .addStatement("return this.$L", "jdbcClient")

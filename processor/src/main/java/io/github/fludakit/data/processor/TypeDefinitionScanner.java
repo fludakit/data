@@ -131,7 +131,7 @@ final class TypeDefinitionScanner {
             String fieldName = field.getSimpleName().toString();
             TypeMirror fieldType = field.asType();
 
-            if (hasIdentityAnnotation(field) || (idProp == null && isIdentifierField(field))) {
+            if (hasIdentityAnnotation(field) || (idProp == null && isNamedId(field))) {
                 // @Identity wins over the name fallback regardless of field order
                 idProp = buildIdProp(fieldName, fieldType, fqn);
             } else if (isVO) {
@@ -197,10 +197,13 @@ final class TypeDefinitionScanner {
         return field.getAnnotation(Identity.class) != null;
     }
 
+    private static boolean isNamedId(VariableElement field) {
+        return field.getSimpleName().toString().equalsIgnoreCase("id");
+    }
+
     /** The scanner's identifier rule: {@code @Identity} or a field named {@code id}. */
     private static boolean isIdentifierField(VariableElement field) {
-        return hasIdentityAnnotation(field)
-                || field.getSimpleName().toString().equalsIgnoreCase("id");
+        return hasIdentityAnnotation(field) || isNamedId(field);
     }
 
     private boolean declaresIdentifier(TypeElement type) {

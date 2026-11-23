@@ -21,7 +21,6 @@ import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
 import io.github.fludakit.data.query.SortSpec;
 import io.github.fludakit.data.query.Window;
-import io.github.fludakit.data.sql.QueryCompiler;
 
 import jakarta.data.repository.By;
 import jakarta.data.repository.Delete;
@@ -805,10 +804,10 @@ final class RepositoryScanner {
         }
 
         // Every predicate must be fully bindable; a half-bound plan compiles but fails at runtime.
-        // QueryCompiler owns the operator arity table (nullary operators bind no value).
+        // Operator owns the bind-arity table (nullary operators bind no value).
         int requiredSlots = 0;
         for (Predicate pred : predicates) {
-            requiredSlots += QueryCompiler.parameterCount(pred.operator());
+            requiredSlots += pred.operator().parameterCount();
         }
         if (requiredSlots > nonPagingParamIndices.size()) {
             throw new IllegalArgumentException("method '" + method.getSimpleName() + "' requires "
@@ -818,7 +817,7 @@ final class RepositoryScanner {
         // Map each predicate to its binding slot(s)
         int slotIndex = 0;
         for (Predicate pred : predicates) {
-            int slots = QueryCompiler.parameterCount(pred.operator());
+            int slots = pred.operator().parameterCount();
             if (slots == 0) {
                 continue;
             }

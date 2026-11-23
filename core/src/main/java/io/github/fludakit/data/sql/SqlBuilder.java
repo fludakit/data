@@ -353,7 +353,7 @@ public final class SqlBuilder {
     }
 
     public static int parameterCount(Operator operator) {
-        return QueryCompiler.parameterCount(operator);
+        return operator.parameterCount();
     }
 
     public static List<String> paramNames(Operator operator, String param) {

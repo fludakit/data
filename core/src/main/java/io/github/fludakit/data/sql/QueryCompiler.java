@@ -656,14 +656,6 @@ public final class QueryCompiler {
         return path.replace('.', '_');
     }
 
-    public static int parameterCount(Operator operator) {
-        return switch (operator) {
-            case IS_NULL, IS_NOT_NULL, TRUE, FALSE -> 0;
-            case BETWEEN, NOT_BETWEEN -> 2;
-            default -> 1;
-        };
-    }
-
     public static List<String> paramNames(Operator operator, String param) {
         return switch (operator) {
             case IS_NULL, IS_NOT_NULL, TRUE, FALSE -> List.of();

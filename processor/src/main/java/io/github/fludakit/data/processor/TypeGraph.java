@@ -16,8 +16,10 @@ import java.util.Set;
  * read from. It replaces the scattered caches the visitor used to keep (definition cache,
  * managed-entity FQNs, element-collection value objects, and deferred relation targets) with one
  * named structure, so the graph — not a generated per-type descriptor class — is the descriptor.</p>
+ *
+ * <p>The type-side twin of {@link RepositoryGraph}: the scanner fills it, the writers read it.</p>
  */
-final class TypeGraph {
+public final class TypeGraph {
 
     /** Every mapped type, keyed by fully-qualified type name, in discovery order. */
     private final Map<String, TypeDefinition> nodes = new LinkedHashMap<>();
@@ -40,7 +42,7 @@ final class TypeGraph {
     }
 
     /** Looks up a node by fully-qualified type name, or {@code null}. */
-    TypeDefinition get(String fqn) {
+    public TypeDefinition get(String fqn) {
         return nodes.get(fqn);
     }
 
@@ -50,17 +52,17 @@ final class TypeGraph {
     }
 
     /** Every registered node FQN, in discovery order. */
-    Set<String> nodes() {
+    public Set<String> nodes() {
         return Collections.unmodifiableSet(nodes.keySet());
     }
 
     /** The entity and aggregate-root node FQNs. */
-    Set<String> managedEntities() {
+    public Set<String> managedEntities() {
         return Collections.unmodifiableSet(managedEntities);
     }
 
     /** The value objects used as element collection element types. */
-    Set<String> elementCollectionValueObjects() {
+    public Set<String> elementCollectionValueObjects() {
         return Collections.unmodifiableSet(elementCollectionValueObjects);
     }
 

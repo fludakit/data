@@ -2,17 +2,17 @@ package io.github.fludakit.data.processor.emitter;
 
 import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.CodeBlock;
-import com.squareup.javapoet.MethodSpec;
-import io.github.fludakit.data.metadata.MutationPlan;
-import io.github.fludakit.data.metadata.MutationPlan.CascadeMode;
-import io.github.fludakit.data.metadata.MutationPlan.CascadeSpec;
 import io.github.fludakit.data.metadata.TypeDefinition;
+import io.github.fludakit.data.processor.context.MutationPlan;
+import io.github.fludakit.data.processor.context.MutationPlan.CascadeMode;
+import io.github.fludakit.data.processor.context.MutationPlan.CascadeSpec;
 import io.github.fludakit.data.processor.context.RepositoryContext;
 import io.github.fludakit.data.sql.SqlBuilder;
 import io.github.fludakit.data.sql.SqlDialect;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 
 /**
  * Builds cascade / child-table {@link CodeBlock}s from a {@link MutationPlan}.
@@ -75,28 +75,28 @@ final class CascadeSupport {
 
         for (CascadeSpec child : spec.children()) {
             if (child.mode() != CascadeMode.PRE_INSERT) {
-                emitPostCascadeSpecIntoBody(body, child, ctx, childVar);
+                emitPostCascadeSpec(child, ctx, childVar, body::add);
             }
         }
 
         body.add("}\n");
     }
 
-    void emitPostCascadeSpec(MethodSpec.Builder builder, CascadeSpec spec, RepositoryContext ctx, String entityVar) {
+    /**
+     * Renders one post-cascade step and hands it to the sink. A step that contributes no code is
+     * skipped, so a sink never receives an empty statement.
+     *
+     * @param sink where the rendered step goes — a method body, a statement, or a loop body
+     */
+    void emitPostCascadeSpec(CascadeSpec spec, RepositoryContext ctx, String entityVar,
+                             Consumer<CodeBlock> sink) {
         CodeBlock code = buildPostCascadeCodeBlock(spec, ctx, entityVar);
         if (!code.toString().isEmpty()) {
-            builder.addStatement(code);
+            sink.accept(code);
         }
     }
 
-    void emitPostCascadeSpecIntoBody(CodeBlock.Builder body, CascadeSpec spec, RepositoryContext ctx, String entityVar) {
-        CodeBlock code = buildPostCascadeCodeBlock(spec, ctx, entityVar);
-        if (!code.toString().isEmpty()) {
-            body.add(code);
-        }
-    }
-
-    CodeBlock buildPostCascadeCodeBlock(CascadeSpec spec, RepositoryContext ctx, String entityVar) {
+    private CodeBlock buildPostCascadeCodeBlock(CascadeSpec spec, RepositoryContext ctx, String entityVar) {
         return switch (spec.mode()) {
             case UPDATE -> buildCompositionUpdateCodeBlock(spec, ctx, entityVar);
             case DIFF_SYNC -> buildDiffSyncCodeBlock(spec, ctx, entityVar);
@@ -130,11 +130,10 @@ final class CascadeSupport {
         cascade.add(".update();\n");
 
         for (CascadeSpec child : spec.children()) {
-            CodeBlock code = buildPostCascadeCodeBlock(child, ctx, childVar);
-            if (!code.toString().isEmpty()) {
+            emitPostCascadeSpec(child, ctx, childVar, code -> {
                 cascade.add(code);
                 cascade.add("\n");
-            }
+            });
         }
 
         cascade.add("}");
@@ -219,10 +218,7 @@ final class CascadeSupport {
         if (spec.mode() == CascadeMode.PRE_INSERT) {
             emitPreInsertSpec(body, spec, ctx, entityVar);
         } else {
-            CodeBlock code = buildPostCascadeCodeBlock(spec, ctx, entityVar);
-            if (!code.toString().isEmpty()) {
-                body.add(code);
-            }
+            emitPostCascadeSpec(spec, ctx, entityVar, body::add);
         }
     }
 

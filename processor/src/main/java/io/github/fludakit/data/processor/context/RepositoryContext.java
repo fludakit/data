@@ -6,23 +6,51 @@ import io.github.fludakit.data.metadata.TypeDefinition;
 
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.type.DeclaredType;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
- * Frozen repository analysis plan plus a separate {@link EmissionContext} for emission scratch.
+ * The resolved plan for one repository, plus the output emitted for it.
  *
- * <p>Built once by {@code RepositoryAnalyzer}: entity, methods, row-mapper type, base repository
- * type for overrides, optional {@code JdbcClient} accessor. Emitters append SQL constants and
- * {@link MethodSpec}s on {@link #emission()}; {@code RepositoryWriter} consumes both.</p>
+ * <p>Built once by {@code RepositoryScanner}: entity, methods, row-mapper type, base repository
+ * type for overrides, optional `JdbcClient` accessor. Emitters append SQL constants and
+ * {@link MethodSpec}s here; `RepositoryWriter` consumes both.</p>
  */
 public final class RepositoryContext {
+
+    /**
+     * Where this repository stands in the resolve → plan → emit → write pipeline.
+     *
+     * <p>The status only moves forward, so a repository is emitted and written exactly once per
+     * compilation — a later processing round re-visits it without touching it again.</p>
+     */
+    public enum Status {
+        /** Resolved, but not emitted yet. */
+        PLANNED,
+        /** Emitted in full — ready to be written. */
+        EMITTED,
+        /** Written to its compilation unit. */
+        WRITTEN,
+        /** Emission failed — the repository is not written. */
+        FAILED
+    }
+
     private final TypeDefinition entity;
     private final ClassName rowMapperType;
     private final DeclaredType baseRepositoryType;
     private final List<MethodContext> methods;
     private final ExecutableElement jdbcClientAccessor;
-    private final EmissionContext emission = new EmissionContext();
+
+    /** The SQL constants emitted for this repository, by constant name. */
+    private final Map<String, String> constants = new LinkedHashMap<>();
+
+    /** The methods emitted for this repository. */
+    private final List<MethodSpec> auxMethods = new ArrayList<>();
+
+    /** Whether this repository was emitted, failed to emit, or is still planned. */
+    private Status status = Status.PLANNED;
 
     public RepositoryContext(TypeDefinition entity, ClassName rowMapperType,
                              DeclaredType baseRepositoryType, List<MethodContext> methods,
@@ -40,17 +68,32 @@ public final class RepositoryContext {
     public List<MethodContext> methods() { return methods; }
     public ExecutableElement jdbcClientAccessor() { return jdbcClientAccessor; }
 
-    /** Mutable emission scratch (constants + aux methods). */
-    public EmissionContext emission() { return emission; }
+    /** The SQL constants emitted for this repository, by constant name. */
+    public Map<String, String> constants() { return constants; }
 
-    /** Delegates to {@link EmissionContext#constants()}. */
-    public Map<String, String> constants() { return emission.constants(); }
+    /** The methods emitted for this repository. */
+    public List<MethodSpec> auxMethods() { return auxMethods; }
 
-    /** Delegates to {@link EmissionContext#auxMethods()}. */
-    public List<MethodSpec> auxMethods() { return emission.auxMethods(); }
-
-    /** Delegates to {@link EmissionContext#registerConstant(String, String)}. */
+    /** Register a SQL constant, deduplicating by content. Returns the constant name. */
     public String registerConstant(String base, String sql) {
-        return emission.registerConstant(base, sql);
+        String name = base;
+        int suffix = 2;
+        while (constants.containsKey(name) && !constants.get(name).equals(sql)) {
+            name = base + "_" + suffix++;
+        }
+        constants.put(name, sql);
+        return name;
     }
+
+    /** Where this repository stands in the resolve → plan → emit pipeline. */
+    public Status status() { return status; }
+
+    /** Marks this repository as emitted in full. */
+    public void markEmitted() { this.status = Status.EMITTED; }
+
+    /** Marks this repository as written to its compilation unit. */
+    public void markWritten() { this.status = Status.WRITTEN; }
+
+    /** Marks this repository as failed to emit — it is not written. */
+    public void markFailed() { this.status = Status.FAILED; }
 }

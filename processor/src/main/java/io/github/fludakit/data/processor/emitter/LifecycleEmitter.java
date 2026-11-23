@@ -25,13 +25,13 @@ import java.util.List;
  * <p>Each method loops over the input iterable and delegates to the
  * corresponding single-entity method (save, deleteById).</p>
  */
-public final class LifecycleEmitter {
+final class LifecycleEmitter {
 
     private final Types types;
     private final DeclaredType baseRepositoryType;
     private final DeclaredType repositoryOwnType;
 
-    public LifecycleEmitter(Types types, DeclaredType baseRepositoryType, DeclaredType repositoryOwnType) {
+    LifecycleEmitter(Types types, DeclaredType baseRepositoryType, DeclaredType repositoryOwnType) {
         this.types = types;
         this.baseRepositoryType = baseRepositoryType;
         this.repositoryOwnType = repositoryOwnType;
@@ -69,7 +69,7 @@ public final class LifecycleEmitter {
         return false;
     }
 
-    public MethodSpec emit(RepositoryContext ctx, MethodContext method) {
+    MethodSpec emit(RepositoryContext ctx, MethodContext method) {
         Operation op = method.operation();
         String name = method.name();
 

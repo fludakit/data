@@ -1,7 +1,7 @@
 package io.github.fludakit.data.processor.context;
 
-import io.github.fludakit.data.metadata.MutationPlan.MutationType;
 import io.github.fludakit.data.metadata.TypeDefinition;
+import io.github.fludakit.data.processor.context.MutationPlan.MutationType;
 import io.github.fludakit.data.query.ParamBinding;
 import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.QueryDefinition;

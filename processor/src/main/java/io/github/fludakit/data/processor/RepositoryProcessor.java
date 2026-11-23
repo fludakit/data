@@ -1,7 +1,8 @@
 package io.github.fludakit.data.processor;
 
-import io.github.fludakit.data.metadata.TypeDefinition;
-import io.github.fludakit.data.processor.context.RepositoryContext;
+import io.github.fludakit.data.annotation.AggregateRoot;
+import io.github.fludakit.data.annotation.Entity;
+import io.github.fludakit.data.annotation.ValueObject;
 import io.github.fludakit.data.processor.emitter.RepositoryMemberEmitter;
 import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.processor.writer.MetamodelWriter;
@@ -18,9 +19,14 @@ import javax.annotation.processing.SupportedAnnotationTypes;
 import javax.annotation.processing.SupportedOptions;
 import javax.lang.model.SourceVersion;
 import javax.lang.model.element.Element;
+import javax.lang.model.element.ElementKind;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.util.Elements;
 import javax.lang.model.util.Types;
+import java.lang.annotation.Annotation;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 @SupportedAnnotationTypes({
@@ -41,6 +47,9 @@ public class RepositoryProcessor extends AbstractProcessor {
     /** The type cache for the whole compilation: populated by the early scan, read by everything else. */
     private final TypeGraph typeGraph = new TypeGraph();
 
+    /** The repository cache for the whole compilation: populated by the scan, read by the emitter and writer. */
+    private final RepositoryGraph repositoryGraph = new RepositoryGraph();
+
     @Override
     public SourceVersion getSupportedSourceVersion() {
         return SourceVersion.latestSupported();
@@ -60,67 +69,43 @@ public class RepositoryProcessor extends AbstractProcessor {
     public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
         if (roundEnv.processingOver()) return false;
 
+        // The round's inputs, one list each: the mapped types and the repositories.
+        List<TypeElement> mappedTypes = collect(roundEnv, ElementKind.CLASS,
+                Entity.class, AggregateRoot.class, ValueObject.class);
+        List<TypeElement> repositories = collect(roundEnv, ElementKind.INTERFACE,
+                jakarta.data.repository.Repository.class);
+
         // Phase 1: Scan annotated types into the shared TypeGraph
-        try {
-            new TypeDefinitionScanner(types, elements, diagnostics, typeGraph).scanRound(roundEnv);
-        } catch (RuntimeException e) {
-            String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getName();
-            diagnostics.error("fluda-data: " + msg, null);
-        }
+        new TypeDefinitionScanner(types, elements, diagnostics, typeGraph).scanTypes(mappedTypes);
 
         // Phase 2: Write graph-owned artifacts once from TypeGraph (before any repository work)
-        writeRowMappers();
-        writeMetamodels();
+        new RowMapperWriter(types, elements, filer).write(typeGraph);
+        new MetamodelWriter(filer, diagnostics).write(typeGraph);
 
-        // Phase 3: Analyze each @Repository, emit members, write Repository_
-        for (Element element : roundEnv.getElementsAnnotatedWith(jakarta.data.repository.Repository.class)) {
-            if (element.getKind() != javax.lang.model.element.ElementKind.INTERFACE) continue;
-            TypeElement repository = (TypeElement) element;
-            try {
-                RepositoryContext ctx = new RepositoryAnalyzer(
-                        repository, types, elements, diagnostics, typeGraph).resolveContext();
-                if (ctx == null) continue;
-                new RepositoryMemberEmitter(repository, types, elements, dialect).emit(ctx);
-                new RepositoryWriter(repository, ctx, filer, diagnostics).write();
-            } catch (RuntimeException e) {
-                String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getName();
-                diagnostics.error(
-                    "fluda-data could not generate " + repository.getSimpleName() + "_: " + msg,
-                    repository);
-            }
-        }
+        // Phase 3: Resolve every repository into the shared RepositoryGraph, then emit and write from it
+        new RepositoryScanner(types, elements, diagnostics, typeGraph, repositoryGraph)
+                .scanRepositories(repositories);
+        new RepositoryMemberEmitter(types, elements, dialect, diagnostics).emit(repositoryGraph);
+        new RepositoryWriter(filer, diagnostics).write(repositoryGraph);
 
         return false;
     }
 
-    /** Row mappers for managed entities/aggregates and element-collection value objects. */
-    private void writeRowMappers() {
-        RowMapperWriter writer = new RowMapperWriter(types, elements, filer);
-
-        for (String fqn : typeGraph.managedEntities()) {
-            TypeDefinition def = typeGraph.get(fqn);
-            if (def instanceof TypeDefinition.Entity || def instanceof TypeDefinition.Aggregate) {
-                writer.write(def);
+    /**
+     * Collects the round's elements carrying any of the given annotations, de-duplicated by
+     * fully-qualified name and kept in discovery order.
+     */
+    private List<TypeElement> collect(RoundEnvironment roundEnv, ElementKind kind,
+                                      Class<? extends Annotation>... annotations) {
+        Map<String, TypeElement> byFqn = new LinkedHashMap<>();
+        for (Class<? extends Annotation> annotation : annotations) {
+            for (Element element : roundEnv.getElementsAnnotatedWith(annotation)) {
+                if (element.getKind() != kind) continue;
+                TypeElement type = (TypeElement) element;
+                byFqn.putIfAbsent(type.getQualifiedName().toString(), type);
             }
         }
-
-        for (String fqn : typeGraph.elementCollectionValueObjects()) {
-            TypeDefinition def = typeGraph.get(fqn);
-            if (def instanceof TypeDefinition.ValueObject) {
-                writer.write(def);
-            }
-        }
-    }
-
-    /** Static metamodels for every registered type (entities, aggregates, value objects). */
-    private void writeMetamodels() {
-        MetamodelWriter writer = new MetamodelWriter(filer, diagnostics);
-        for (String fqn : typeGraph.nodes()) {
-            TypeDefinition def = typeGraph.get(fqn);
-            if (def != null) {
-                writer.write(def);
-            }
-        }
+        return List.copyOf(byFqn.values());
     }
 
     private SqlDialect resolveDialect(String option) {

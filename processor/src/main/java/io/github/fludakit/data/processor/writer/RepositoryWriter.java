@@ -5,6 +5,7 @@ import com.squareup.javapoet.FieldSpec;
 import com.squareup.javapoet.JavaFile;
 import com.squareup.javapoet.MethodSpec;
 import com.squareup.javapoet.TypeSpec;
+import io.github.fludakit.data.processor.RepositoryGraph;
 import io.github.fludakit.data.processor.context.RepositoryContext;
 import io.github.fludakit.data.processor.support.Diagnostics;
 
@@ -16,29 +17,43 @@ import java.io.IOException;
 import java.util.Map;
 
 /**
- * Writes the generated {@code Repository_} compilation unit for a resolved repository: JDBC client
- * field, SQL constants, member methods, and the optional {@code JdbcClient} accessor.
+ * Writes the generated {@code Repository_} compilation unit for every resolved repository: JDBC
+ * client field, SQL constants, member methods, and the optional {@code JdbcClient} accessor.
  *
  * <p>File writing only — method {@code MethodSpec}s are produced by emitters and collected on
- * {@link RepositoryContext#emission()} before this writer runs. The analysis plan on the context
- * is frozen.</p>
+ * {@link RepositoryContext} before this writer runs.</p>
  */
 public final class RepositoryWriter {
 
-    private final TypeElement repository;
-    private final RepositoryContext ctx;
     private final Filer filer;
     private final Diagnostics diagnostics;
 
-    public RepositoryWriter(TypeElement repository, RepositoryContext ctx,
-                            Filer filer, Diagnostics diagnostics) {
-        this.repository = repository;
-        this.ctx = ctx;
+    public RepositoryWriter(Filer filer, Diagnostics diagnostics) {
         this.filer = filer;
         this.diagnostics = diagnostics;
     }
 
-    public void write() {
+    /** Writes the {@code Repository_} unit of every repository that was emitted and not yet written. */
+    public void write(RepositoryGraph graph) {
+        for (String fqn : graph.repositories()) {
+            RepositoryContext ctx = graph.context(fqn);
+            if (ctx == null || ctx.status() != RepositoryContext.Status.EMITTED) continue;
+            TypeElement repository = graph.repository(fqn);
+            try {
+                if (writeRepository(repository, ctx)) {
+                    ctx.markWritten();
+                }
+            } catch (RuntimeException e) {
+                String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getName();
+                diagnostics.error(
+                    "fluda-data could not generate " + repository.getSimpleName() + "_: " + msg,
+                    repository);
+            }
+        }
+    }
+
+    /** Writes one repository's compilation unit. Returns whether it was written. */
+    private boolean writeRepository(TypeElement repository, RepositoryContext ctx) {
         String repoSimpleName = repository.getSimpleName().toString();
         ClassName repoClassName = ClassName.get(repository);
         ClassName generatedName = ClassName.get(
@@ -87,8 +102,10 @@ public final class RepositoryWriter {
             JavaFile.builder(repoClassName.packageName(), shell.build())
                     .build()
                     .writeTo(filer);
+            return true;
         } catch (IOException e) {
             diagnostics.error("Failed to write " + generatedName + ": " + e.getMessage(), repository);
+            return false;
         }
     }
 }

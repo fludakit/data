@@ -49,12 +49,13 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Analyzes a single {@code @Repository}-annotated interface against the shared {@link TypeGraph}:
- * resolves the entity mapping and method contexts into a {@link RepositoryContext}.
+ * Scans {@code @Repository}-annotated interfaces against the shared {@link TypeGraph}: resolves
+ * the entity mapping and method contexts into a {@link RepositoryContext}, and a whole round of
+ * repositories into one {@link RepositoryGraph}.
  *
  * <p>Resolution only — graph writers and method emitters are owned by {@link RepositoryProcessor}.</p>
  */
-final class RepositoryAnalyzer {
+final class RepositoryScanner {
 
     private static final String CRUD_REPOSITORY = "jakarta.data.repository.CrudRepository";
     private static final String BASIC_REPOSITORY = "jakarta.data.repository.BasicRepository";
@@ -72,19 +73,19 @@ final class RepositoryAnalyzer {
 
     /** Pattern matching named parameters in @Query SQL (e.g. {@code :name}). */
     private static final Pattern NAMED_PARAM_PATTERN = Pattern.compile(":([a-zA-Z_]\\w*)");
-    private final TypeElement repository;
     private final Types types;
     private final Elements elements;
     private final Diagnostics diagnostics;
     private final TypeGraph typeGraph;
+    private final RepositoryGraph repositoryGraph;
 
-    RepositoryAnalyzer(TypeElement repository, Types types, Elements elements, Diagnostics diagnostics,
-                       TypeGraph typeGraph) {
-        this.repository = repository;
+    RepositoryScanner(Types types, Elements elements, Diagnostics diagnostics, TypeGraph typeGraph,
+                      RepositoryGraph repositoryGraph) {
         this.types = types;
         this.elements = elements;
         this.diagnostics = diagnostics;
         this.typeGraph = typeGraph;
+        this.repositoryGraph = repositoryGraph;
     }
 
     private static boolean isQbnAvailable() {
@@ -97,13 +98,36 @@ final class RepositoryAnalyzer {
     }
 
     /**
+     * Scans every repository of the round into the shared {@link RepositoryGraph}, keyed by
+     * repository FQN.
+     *
+     * <p>A repository that cannot be resolved is reported and left out of the graph; the other
+     * repositories of the round are unaffected.</p>
+     */
+    void scanRepositories(List<TypeElement> repositories) {
+        for (TypeElement repository : repositories) {
+            try {
+                RepositoryContext context = resolveContext(repository);
+                if (context != null) {
+                    repositoryGraph.put(repository, context);
+                }
+            } catch (RuntimeException e) {
+                String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getName();
+                diagnostics.error(
+                        "fluda-data could not generate " + repository.getSimpleName() + "_: " + msg,
+                        repository);
+            }
+        }
+    }
+
+    /**
      * Resolves one repository into its {@link RepositoryContext}: the entity mapping from
      * {@link TypeGraph}, the conventional row-mapper type name, base repository type for overrides,
      * and method contexts for every resolvable repository method.
      */
-    RepositoryContext resolveContext() {
+    private RepositoryContext resolveContext(TypeElement repository) {
         // 1. Resolve the entity type from the repository's generic superclass and interfaces
-        TypeMirror entityTypeMirror = resolveEntityType();
+        TypeMirror entityTypeMirror = resolveEntityType(repository);
         if (entityTypeMirror == null) {
             diagnostics.error("Cannot resolve entity type for repository " + repository.getQualifiedName(),
                     repository);
@@ -130,10 +154,10 @@ final class RepositoryAnalyzer {
         // 3. Bind the conventional row-mapper type (written earlier from TypeGraph by the host)
         ClassName rowMapperType = RowMapperWriter.rowMapperClassName(entityFqn);
 
-        // 4. Scan methods, then freeze into an immutable RepositoryContext
-        MethodScan scan = scanMethods(entityMapping);
+        // 4. Scan methods, then freeze the plan into a RepositoryContext
+        MethodScan scan = scanMethods(repository, entityMapping);
         return new RepositoryContext(
-                entityMapping, rowMapperType, resolveRepositoryDeclaredType(),
+                entityMapping, rowMapperType, resolveRepositoryDeclaredType(repository),
                 scan.methods(), scan.jdbcClientAccessor());
     }
 
@@ -144,7 +168,7 @@ final class RepositoryAnalyzer {
      * Walks the interface hierarchy to find CrudRepository, BasicRepository, or DataRepository
      * and extracts the first type argument.
      */
-    private TypeMirror resolveEntityType() {
+    private TypeMirror resolveEntityType(TypeElement repository) {
         // Try superclass first (extends CrudRepository<E, K>)
         TypeMirror superclass = repository.getSuperclass();
         TypeMirror entityType = extractEntityTypeArg(superclass);
@@ -214,7 +238,7 @@ final class RepositoryAnalyzer {
      * type arguments (e.g., CrudRepository<Customer, Long>) not just the repository
      * interface itself.
      */
-    private DeclaredType resolveRepositoryDeclaredType() {
+    private DeclaredType resolveRepositoryDeclaredType(TypeElement repository) {
         // Check superclass first (e.g. TaskRepository extends CrudRepository<Task, Long>)
         TypeMirror superclass = repository.getSuperclass();
         DeclaredType found = matchBaseRepositoryType(superclass);
@@ -251,7 +275,7 @@ final class RepositoryAnalyzer {
 
     private record MethodScan(List<MethodContext> methods, ExecutableElement jdbcClientAccessor) {}
 
-    private MethodScan scanMethods(TypeDefinition entityMapping) {
+    private MethodScan scanMethods(TypeElement repository, TypeDefinition entityMapping) {
         List<MethodContext> methods = new ArrayList<>();
         ExecutableElement jdbcClientAccessor = null;
         for (javax.lang.model.element.Element member : elements.getAllMembers(repository)) {
@@ -282,7 +306,7 @@ final class RepositoryAnalyzer {
                 continue;
             }
 
-            MethodContext methodCtx = resolveMethod(method, entityMapping);
+            MethodContext methodCtx = resolveMethod(repository, method, entityMapping);
             if (methodCtx != null) {
                 methods.add(methodCtx);
             } else if (resolveLifecycleAnnotation(method) != null) {
@@ -301,7 +325,8 @@ final class RepositoryAnalyzer {
         return new MethodScan(methods, jdbcClientAccessor);
     }
 
-    private MethodContext resolveMethod(ExecutableElement method, TypeDefinition entityMapping) {
+    private MethodContext resolveMethod(TypeElement repository, ExecutableElement method,
+                                       TypeDefinition entityMapping) {
         String methodName = method.getSimpleName().toString();
 
         // Priority 1: Lifecycle annotations (@Save, @Insert, @Update, @Delete, @Find)
@@ -312,7 +337,7 @@ final class RepositoryAnalyzer {
         }
 
         // Priority 2 & 3 only apply to Jakarta Data-derived repositories
-        boolean isJakartaDataRepository = extendsJakartaDataInterface();
+        boolean isJakartaDataRepository = extendsJakartaDataInterface(repository);
 
         // Priority 2: Built-in CRUD methods from Jakarta Data standard interfaces
         // Fixed list with known semantics — skip annotation processing
@@ -336,7 +361,7 @@ final class RepositoryAnalyzer {
     /**
      * Checks if the repository extends a Jakarta Data interface (CrudRepository, BasicRepository, or DataRepository).
      */
-    private boolean extendsJakartaDataInterface() {
+    private boolean extendsJakartaDataInterface(TypeElement repository) {
         // Check superclass
         if (isJakartaDataInterface(repository.getSuperclass())) return true;
 

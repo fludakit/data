@@ -1,4 +1,6 @@
-package io.github.fludakit.data.metadata;
+package io.github.fludakit.data.processor.context;
+
+import io.github.fludakit.data.metadata.TypeDefinition;
 
 import java.util.List;
 import java.util.Objects;
@@ -6,7 +8,10 @@ import java.util.Objects;
 /**
  * The immutable result of analyzing a write method's cascade requirements.
  *
- * <p>Built by {@code MutationPlanAnalyzer} (processor) from a {@code TypeDefinition} and {@link MutationType}. Consumed by {@code WriteEmitter} (processor) for cascade-aware code generation.</p>
+ * <p>Built by {@link io.github.fludakit.data.processor.MutationPlanAnalyzer} from a
+ * {@link TypeDefinition} and {@link MutationType}. Consumed by
+ * {@code WriteEmitter} for cascade-aware code
+ * generation.</p>
  *
  * <p>Carries everything the emitter needs to decide what to mutate, in what order, and with what
  * mode.</p>

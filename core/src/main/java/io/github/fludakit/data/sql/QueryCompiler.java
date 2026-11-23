@@ -94,10 +94,10 @@ public final class QueryCompiler {
         Objects.requireNonNull(dialect, "dialect");
         Objects.requireNonNull(extraEdges, "extraEdges");
         return switch (query) {
-            case QueryDefinition.Insert insert -> compileInsert(dialect, typeModel, insert.includeId());
-            case QueryDefinition.Upsert ignored -> compileUpsert(dialect, typeModel);
-            case QueryDefinition.Update ignored -> compileUpdate(dialect, typeModel);
-            case QueryDefinition.DeleteById ignored -> compileDeleteById(dialect, typeModel);
+            case QueryDefinition.Insert insert -> insert(dialect, typeModel, insert.includeId());
+            case QueryDefinition.Upsert ignored -> upsert(dialect, typeModel);
+            case QueryDefinition.Update ignored -> update(dialect, typeModel);
+            case QueryDefinition.DeleteById ignored -> deleteById(dialect, typeModel);
             case QueryDefinition.Native nativeQuery -> new SqlFragment.Opaque(nativeQuery.sql());
             case QueryDefinition.Criteria criteria -> compileCriteria(criteria, typeModel, dialect,
                     extraEdges, extraProjection);
@@ -251,22 +251,6 @@ public final class QueryCompiler {
 
     // ------------------------------------------------------------------- lifecycle / physical → Opaque
 
-    private static SqlFragment compileInsert(SqlDialect dialect, TypeDefinition typeModel, boolean includeId) {
-        return new SqlFragment.Opaque(insert(dialect, typeModel, includeId));
-    }
-
-    private static SqlFragment compileUpsert(SqlDialect dialect, TypeDefinition typeModel) {
-        return new SqlFragment.Opaque(upsert(dialect, typeModel));
-    }
-
-    private static SqlFragment compileUpdate(SqlDialect dialect, TypeDefinition typeModel) {
-        return new SqlFragment.Opaque(update(dialect, typeModel));
-    }
-
-    private static SqlFragment compileDeleteById(SqlDialect dialect, TypeDefinition typeModel) {
-        return new SqlFragment.Opaque(deleteById(dialect, typeModel));
-    }
-
     /** Physical cascade DELETE by parent FK. */
     public static SqlFragment deleteByFk(SqlDialect dialect, String table, String fkColumn) {
         return new SqlFragment.Opaque("DELETE FROM " + dialect.quoteIdentifier(table)
@@ -325,8 +309,8 @@ public final class QueryCompiler {
     // ------------------------------------------------------------------- classic no-join helpers
 
     /** Classic no-join SELECT (optionally DISTINCT). */
-    public static String selectBy(SqlDialect dialect, TypeDefinition typeModel, List<Predicate> predicates,
-                                  List<SortSpec> sorts, int limit, String cursorClause, boolean distinct) {
+    public static SqlFragment selectBy(SqlDialect dialect, TypeDefinition typeModel, List<Predicate> predicates,
+                                       List<SortSpec> sorts, int limit, String cursorClause, boolean distinct) {
         String mainAlias = typeModel.tableName().toLowerCase() + "_0";
         String cols = typeModel.columns().stream()
                 .map(c -> dialect.quoteIdentifier(mainAlias) + "." + dialect.quoteIdentifier(c.column()))
@@ -343,16 +327,16 @@ public final class QueryCompiler {
         if (limit > 0) {
             fragment.limit(limit);
         }
-        return fragment.build().render(dialect);
+        return fragment.build();
     }
 
-    public static String selectBy(SqlDialect dialect, TypeDefinition typeModel, List<Predicate> predicates,
-                                  List<SortSpec> sorts, int limit, String cursorClause) {
+    public static SqlFragment selectBy(SqlDialect dialect, TypeDefinition typeModel, List<Predicate> predicates,
+                                       List<SortSpec> sorts, int limit, String cursorClause) {
         return selectBy(dialect, typeModel, predicates, sorts, limit, cursorClause, false);
     }
 
-    public static String countBy(SqlDialect dialect, TypeDefinition typeModel, List<Predicate> predicates,
-                                 boolean distinct) {
+    public static SqlFragment countBy(SqlDialect dialect, TypeDefinition typeModel, List<Predicate> predicates,
+                                      boolean distinct) {
         String projection = distinct && typeModel.idColumn() != null
                 ? "COUNT(DISTINCT " + dialect.quoteIdentifier(typeModel.idColumn()) + ")"
                 : "COUNT(*)";
@@ -361,18 +345,18 @@ public final class QueryCompiler {
                 .projection(projection)
                 .table(typeModel.tableName());
         appendClassicWhere(fragment, dialect, predicates, null);
-        return fragment.build().render(dialect);
+        return fragment.build();
     }
 
-    public static String deleteBy(SqlDialect dialect, TypeDefinition typeModel, List<Predicate> predicates) {
+    public static SqlFragment deleteBy(SqlDialect dialect, TypeDefinition typeModel, List<Predicate> predicates) {
         SqlFragment.Query.Builder fragment = SqlFragment.Query.builder()
                 .keyword("DELETE")
                 .table(typeModel.tableName());
         appendClassicWhere(fragment, dialect, predicates, null);
-        return fragment.build().render(dialect);
+        return fragment.build();
     }
 
-    public static String insert(SqlDialect dialect, TypeDefinition typeModel, boolean includeId) {
+    public static SqlFragment insert(SqlDialect dialect, TypeDefinition typeModel, boolean includeId) {
         List<ColumnRef> cols = typeModel.columns();
         if (!includeId) {
             cols = cols.stream()
@@ -380,37 +364,39 @@ public final class QueryCompiler {
                     .toList();
         }
         if (cols.isEmpty()) {
-            return dialect.insertDefaultValues(typeModel.tableName());
+            return new SqlFragment.Opaque(dialect.insertDefaultValues(typeModel.tableName()));
         }
         String names = cols.stream().map(c -> dialect.quoteIdentifier(c.column())).collect(Collectors.joining(", "));
         String params = cols.stream().map(c -> ":" + paramName(attributePath(typeModel, c)))
                 .collect(Collectors.joining(", "));
-        return "INSERT INTO " + dialect.quoteIdentifier(typeModel.tableName()) + " (" + names + ") VALUES (" + params + ")";
+        return new SqlFragment.Opaque("INSERT INTO " + dialect.quoteIdentifier(typeModel.tableName())
+                + " (" + names + ") VALUES (" + params + ")");
     }
 
-    public static String upsert(SqlDialect dialect, TypeDefinition typeModel) {
+    public static SqlFragment upsert(SqlDialect dialect, TypeDefinition typeModel) {
         List<ColumnRef> cols = typeModel.columns();
         List<String> names = cols.stream().map(ColumnRef::column).toList();
         List<String> params = cols.stream().map(c -> ":" + paramName(attributePath(typeModel, c))).toList();
-        return dialect.upsertStatement(typeModel.tableName(), typeModel.idColumn(), names, params);
+        return new SqlFragment.Opaque(dialect.upsertStatement(typeModel.tableName(), typeModel.idColumn(), names, params));
     }
 
-    public static String update(SqlDialect dialect, TypeDefinition typeModel) {
+    public static SqlFragment update(SqlDialect dialect, TypeDefinition typeModel) {
         String idCol = dialect.quoteIdentifier(typeModel.idColumn());
         String sets = typeModel.columns().stream()
                 .filter(c -> !c.column().equals(typeModel.idColumn()))
                 .map(c -> dialect.quoteIdentifier(c.column()) + " = :" + paramName(attributePath(typeModel, c)))
                 .collect(Collectors.joining(", "));
         if (sets.isEmpty()) {
-            return "UPDATE " + dialect.quoteIdentifier(typeModel.tableName()) + " SET " + idCol + " = " + idCol
-                    + " WHERE " + idCol + " = :id";
+            return new SqlFragment.Opaque("UPDATE " + dialect.quoteIdentifier(typeModel.tableName())
+                    + " SET " + idCol + " = " + idCol + " WHERE " + idCol + " = :id");
         }
-        return "UPDATE " + dialect.quoteIdentifier(typeModel.tableName()) + " SET " + sets + " WHERE " + idCol + " = :id";
+        return new SqlFragment.Opaque("UPDATE " + dialect.quoteIdentifier(typeModel.tableName())
+                + " SET " + sets + " WHERE " + idCol + " = :id");
     }
 
-    public static String deleteById(SqlDialect dialect, TypeDefinition typeModel) {
-        return "DELETE FROM " + dialect.quoteIdentifier(typeModel.tableName()) + " WHERE "
-                + dialect.quoteIdentifier(typeModel.idColumn()) + " = :id";
+    public static SqlFragment deleteById(SqlDialect dialect, TypeDefinition typeModel) {
+        return new SqlFragment.Opaque("DELETE FROM " + dialect.quoteIdentifier(typeModel.tableName())
+                + " WHERE " + dialect.quoteIdentifier(typeModel.idColumn()) + " = :id");
     }
 
     public static String rowMapperProjection(SqlDialect dialect, TypeDefinition type,
@@ -496,23 +482,22 @@ public final class QueryCompiler {
         return SqlFragment.joins(dialect, edges, alreadyJoined);
     }
 
-    public static String qualifiedRootSelect(SqlDialect dialect, TypeDefinition typeModel,
-                                             List<JoinEdge> traversedToOne, boolean qualified,
-                                             String extraProjection) {
+    public static SqlFragment.Query qualifiedRootSelect(SqlDialect dialect, TypeDefinition typeModel,
+                                                        List<JoinEdge> traversedToOne, boolean qualified,
+                                                        String extraProjection) {
         return qualifiedRootSelect(dialect, typeModel, traversedToOne, qualified, extraProjection, false);
     }
 
-    public static String qualifiedRootSelect(SqlDialect dialect, TypeDefinition typeModel,
-                                             List<JoinEdge> traversedToOne, boolean qualified,
-                                             String extraProjection, boolean distinct) {
+    public static SqlFragment.Query qualifiedRootSelect(SqlDialect dialect, TypeDefinition typeModel,
+                                                        List<JoinEdge> traversedToOne, boolean qualified,
+                                                        String extraProjection, boolean distinct) {
         return SqlFragment.Query.builder()
                 .keyword("SELECT")
                 .projection(rootProjection(dialect, typeModel, qualified, extraProjection))
                 .distinct(distinct)
                 .table(typeModel.tableName())
                 .join(traversedToOne)
-                .build()
-                .renderWithoutTail(dialect);
+                .build();
     }
 
     public static String existsConjunct(SqlDialect dialect, Predicate predicate, ColumnPlacement placement) {

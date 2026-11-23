@@ -285,20 +285,24 @@ public final class SqlBuilder {
     }
 
     public String selectBy(List<Predicate> predicates, List<SortSpec> sorts, int limit, String cursorClause) {
-        return QueryCompiler.selectBy(dialect, requireTypeModel(), predicates, sorts, limit, cursorClause);
+        return sql(QueryCompiler.selectBy(dialect, requireTypeModel(), predicates, sorts, limit, cursorClause));
     }
 
     public String selectBy(List<Predicate> predicates, List<SortSpec> sorts, int limit, String cursorClause,
                            boolean distinct) {
-        return QueryCompiler.selectBy(dialect, requireTypeModel(), predicates, sorts, limit, cursorClause, distinct);
+        return sql(QueryCompiler.selectBy(dialect, requireTypeModel(), predicates, sorts, limit, cursorClause, distinct));
     }
 
     public String countBy(List<Predicate> predicates) {
-        return QueryCompiler.countBy(dialect, requireTypeModel(), predicates, false);
+        return countBy(predicates, false);
+    }
+
+    public String countBy(List<Predicate> predicates, boolean distinct) {
+        return sql(QueryCompiler.countBy(dialect, requireTypeModel(), predicates, distinct));
     }
 
     public String deleteBy(List<Predicate> predicates) {
-        return QueryCompiler.deleteBy(dialect, requireTypeModel(), predicates);
+        return sql(QueryCompiler.deleteBy(dialect, requireTypeModel(), predicates));
     }
 
     // --------------------------------------------------------------- splice primitives
@@ -344,7 +348,8 @@ public final class SqlBuilder {
     }
 
     public String qualifiedRootSelect(List<JoinEdge> traversedToOne, boolean qualified, String extraProjection) {
-        return QueryCompiler.qualifiedRootSelect(dialect, requireTypeModel(), traversedToOne, qualified, extraProjection);
+        return QueryCompiler.qualifiedRootSelect(dialect, requireTypeModel(), traversedToOne, qualified, extraProjection)
+                .renderWithoutTail(dialect);
     }
 
     public String orderBy(List<SortSpec> sorts) {

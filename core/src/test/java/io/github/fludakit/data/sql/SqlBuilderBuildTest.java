@@ -137,11 +137,12 @@ class SqlBuilderBuildTest {
     @Test
     void theClassicHelpersTakeDistinctAsAnExplicitFlagToo() {
         List<Predicate> where = List.of(Predicate.of("status", Operator.EQ, "status"));
+        SqlBuilder builder = new SqlBuilder(ATTRIBUTES).dialect(H2Dialect.INSTANCE);
         assertEquals("SELECT DISTINCT \"order_table_0\".\"id\", \"order_table_0\".\"status\", \"order_table_0\".\"customer_id\" FROM \"order_table\""
                         + " AS \"order_table_0\" WHERE \"status\" = :status",
-                QueryCompiler.selectBy(H2Dialect.INSTANCE, ATTRIBUTES, where, List.of(), 0, null, true));
+                builder.selectBy(where, List.of(), 0, null, true));
         assertEquals("SELECT COUNT(DISTINCT \"id\") FROM \"order_table\" WHERE \"status\" = :status",
-                QueryCompiler.countBy(H2Dialect.INSTANCE, ATTRIBUTES, where, true));
+                builder.countBy(where, true));
     }
 
     @Test

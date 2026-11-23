@@ -11,7 +11,7 @@ This document describes how to set up the project, make changes, and submit them
 
 ## Scope
 
-Associations are supported as to-one references, element collections, and aggregate-owned entity collections. Many-to-many relations stored in a join table are deliberately out of scope — model the join table as an entity with two to-one references instead. Please open an issue to discuss before sending a patch that adds join-table support.
+The product boundary — the supported Jakarta Data v1 subset, provider extensions, deferred features, and the DDD entity model — is defined in [AGENTS.md](AGENTS.md). Read it before making changes and classify your change accordingly. Please open an issue to discuss before sending a patch that expands the declared scope (for example, join-table support).
 
 ## Prerequisites
 
@@ -32,8 +32,11 @@ cd data
 
 ```
 .
-├── core/                   # fluda-data-core — core functionality
-└── ...                     # add more modules as needed
+├── core/                # fluda-data-core — runtime API, annotations, SQL support
+├── qbn/                 # fluda-data-qbn — query-by-method-name parser
+├── processor/           # fluda-data-processor — compile-time annotation processor
+├── integration-tests/   # end-to-end tests against in-memory H2
+└── tck-runner/          # local Jakarta Data TCK tool — outside the reactor, git-ignored (see its README)
 ```
 
 ## Code style
@@ -44,7 +47,7 @@ Formatting is driven by the committed [`.editorconfig`](.editorconfig) (IntelliJ
 - No wildcard imports — one class per import.
 - Import layout: project classes, then `java.**` / `javax.**` / `jakarta.**`, then static imports.
 
-Use IntelliJ IDEA's **Reformat Code** action (which reads `.editorconfig`) before committing, so formatting changes are kept out of functional diffs.
+Format code to match `.editorconfig` before committing (IntelliJ IDEA's **Reformat Code** action reads it), so formatting changes are kept out of functional diffs.
 
 ## Testing
 
@@ -53,6 +56,8 @@ Run the unit tests:
 ```bash
 ./mvnw test
 ```
+
+Integration tests run against in-memory H2 — no Docker or external database is needed. `./mvnw clean install` builds and tests all reactor modules.
 
 ## Commits and pull requests
 

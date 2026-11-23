@@ -1,27 +1,16 @@
-# FluDa Data — Product Scope (Agent Spec)
+# FluDa Data — Agent Guide
 
-Source decisions: [#29](https://github.com/fludakit/data/issues/29) (Jakarta Data v1 subset), [#30](https://github.com/fludakit/data/issues/30) (DDD annotation contracts).
+FluDa Data is a compile-time repository generator for Jakarta EE / CDI over JDBC: typed CDI repository beans, static SQL, row mappers, and static metamodel generated at compile time, with no runtime entity reflection. It implements a **declared subset** of Jakarta Data 1.0.1 and a **provider-owned DDD entity model**.
 
-This document is the agent-facing product boundary for FluDa Data. Prefer it over inferred scope from code when deciding what to implement, reject, or defer.
+This file is the product boundary. Prefer it over scope inferred from code when deciding what to implement, reject, or defer. Source decisions: [#29](https://github.com/fludakit/data/issues/29) (Jakarta Data v1 subset), [#30](https://github.com/fludakit/data/issues/30) (DDD annotation contracts).
 
-## Purpose
+## When changing FluDa Data
 
-FluDa Data is a compile-time repository generator for Jakarta EE / CDI over JDBC. It implements a **declared subset** of Jakarta Data 1.0.1 and a **provider-owned DDD entity model**. Spec-conformant behavior, non-portable extensions, and deferred features must stay visibly distinct — never silently emulate JDQL/JPQL or invent unspecified cascade rules.
-
-## Goals
-
-1. Generate typed CDI repository beans at compile time (static SQL, row mappers, static metamodel) with no runtime entity reflection.
-2. Ship a coherent Jakarta Data v1 subset that application code can rely on.
-3. Enforce DDD ownership contracts (`@AggregateRoot` / `@Entity` / `@ValueObject` / `@Association` / `@Identity`) at compile time.
-4. Fail early with located diagnostics; never abort a whole repository for one unresolvable method via an escaped `IllegalStateException`.
-
-## Non-goals (v1)
-
-- JDQL and JPQL (including any `"id(this)"`-style placeholder presented as JDQL).
-- Many-to-many join tables (model a join entity with two to-one references instead).
-- Runtime bytecode generation or runtime model discovery.
-
----
+1. Classify the change as **spec-conformant**, **provider extension**, or **deferred/out of scope**, and keep the three visibly distinct in code and docs.
+2. Match new repository method support to the v1 matrix below; reject illegal `Limit`/`PageRequest`/`First` combos at compile time.
+3. Apply the lifecycle ownership table to association/collection persistence; cascade only within it.
+4. Report user model mistakes as located `diagnostics.error(...)` / warnings on the offending element, then skip that method — an escaped `IllegalStateException` aborts the whole repository.
+5. Keep README's supported-vs-deferred matrix aligned with this file when scope changes.
 
 ## Jakarta Data v1 subset (#29)
 
@@ -40,7 +29,7 @@ Target API: `jakarta.data:jakarta.data-api:1.0.1` (1.0 FINAL section numbers).
 
 ### Non-portable provider extensions (in scope, not conformance)
 
-Document these as extensions (never reinterpret as JDQL/JPQL):
+Document these as extensions; native SQL is the only accepted `@Query` language:
 
 - `@Query` **native SQL** with `:name` parameters (omitted `@Param` → Java parameter name under `-parameters`)
 - Positional `?1` in native SQL
@@ -50,22 +39,18 @@ Document these as extensions (never reinterpret as JDQL/JPQL):
 
 `@By` / `@Param` both require a `value()` — there is no optional/default attribute. When the annotation is omitted and `-parameters` is enabled, FluDa uses the Java parameter name (`String title` ≡ `@By("title") String title`; same for `@Param` / `:title`). Compound attributes use `_` in the parameter name (`address_city` → `address.city`). An explicit `@By("...")` / `@Param("...")` always wins. FluDa enables `-parameters` in its integration-test compiler config and in the processor test harness.
 
-### Deferred
+### Out of scope (v1)
 
-- **JDQL** — reject; remove `"id(this)"` string substitution rather than shipping it as JDQL
-- **JPQL** — deferred; native SQL is the only accepted `@Query` language
+- **JDQL** — reject; remove `"id(this)"` string substitution rather than shipping it as JDQL.
+- **JPQL** — deferred.
+- Many-to-many join tables — model a join entity with two to-one references instead.
+- Runtime bytecode generation or runtime model discovery.
 
 ### Must reject at compile time (spec 4.6)
 
 - More than one `Limit` or `PageRequest` parameter
 - `Limit` and `PageRequest` on the same method
 - `Limit` or `PageRequest` combined with the `First` keyword
-
-### Fail-early method resolution
-
-An unresolvable repository method MUST use `diagnostics.error(...)` on the method element and skip that method. It MUST NOT throw `IllegalStateException` and abort the whole repository.
-
----
 
 ## DDD entity model (#30)
 
@@ -93,8 +78,8 @@ Rules of thumb:
 ### `@Identity`
 
 - Marks the identifier field.
-- Product concern for find/save mapping: **assigned** vs **DB-generated** identity — express that on `@Identity` (or equivalent declared metadata). Do not invent a parallel processor-only strategy from Java type guessing.
-- Do not keep unused generation enums on the metadata model.
+- Product concern for find/save mapping: **assigned** vs **DB-generated** identity — express that on `@Identity` (or equivalent declared metadata), never as a processor-only strategy guessed from Java types.
+- Keep the metadata model free of unused generation enums.
 
 ### `@ValueObject`
 
@@ -115,20 +100,7 @@ Rules of thumb:
 
 - No mandatory `@Embedded` / `@ElementCollection` annotations — classification comes from type shape and ownership.
 
----
-
-## Agent checklist
-
-When changing FluDa Data:
-
-1. Classify the change as **spec-conformant**, **provider extension**, or **deferred/out of scope**.
-2. If adding repository method support, match the v1 matrix above; reject illegal `Limit`/`PageRequest`/`First` combos.
-3. If touching persistence of associations or collections, apply the lifecycle ownership table — do not cascade outside it.
-4. Prefer located `diagnostics.error` / warnings over thrown exceptions on user model mistakes.
-5. Keep README’s supported-vs-deferred matrix aligned with this document when scope changes.
-
 ## Related docs
 
-- [Constitution](https://github.com/fludakit/data/blob/main/.specify/memory/constitution.md) — engineering principles (compile-time generation, TDD, single SQL source).
-- [README](https://github.com/fludakit/data/blob/main/README.md) — usage entry point.
+- [README](README.md) — usage entry point.
 - Issues [#29](https://github.com/fludakit/data/issues/29), [#30](https://github.com/fludakit/data/issues/30).

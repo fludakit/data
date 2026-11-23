@@ -131,8 +131,7 @@ final class TypeDefinitionScanner {
             String fieldName = field.getSimpleName().toString();
             TypeMirror fieldType = field.asType();
 
-            if (isIdentifierField(member)
-                    && (field.getAnnotation(Identity.class) != null || idProp == null)) {
+            if (hasIdentityAnnotation(field) || (idProp == null && isIdentifierField(field))) {
                 // @Identity wins over the name fallback regardless of field order
                 idProp = buildIdProp(fieldName, fieldType, fqn);
             } else if (isVO) {
@@ -194,16 +193,22 @@ final class TypeDefinitionScanner {
         return new TypeDefinition.Prop.Id(fieldName, typeFqn, columnName);
     }
 
-    /** The scanner's identifier rule: a non-static field with {@code @Identity} or named {@code id}. */
-    private static boolean isIdentifierField(Element member) {
-        return member.getKind() == ElementKind.FIELD
-                && !member.getModifiers().contains(Modifier.STATIC)
-                && (member.getAnnotation(Identity.class) != null
-                    || member.getSimpleName().toString().equalsIgnoreCase("id"));
+    private static boolean hasIdentityAnnotation(VariableElement field) {
+        return field.getAnnotation(Identity.class) != null;
+    }
+
+    /** The scanner's identifier rule: {@code @Identity} or a field named {@code id}. */
+    private static boolean isIdentifierField(VariableElement field) {
+        return hasIdentityAnnotation(field)
+                || field.getSimpleName().toString().equalsIgnoreCase("id");
     }
 
     private boolean declaresIdentifier(TypeElement type) {
-        return elements.getAllMembers(type).stream().anyMatch(TypeDefinitionScanner::isIdentifierField);
+        return elements.getAllMembers(type).stream()
+                .filter(m -> m.getKind() == ElementKind.FIELD)
+                .filter(m -> !m.getModifiers().contains(Modifier.STATIC))
+                .map(m -> (VariableElement) m)
+                .anyMatch(TypeDefinitionScanner::isIdentifierField);
     }
 
     // ── Field classification — entities / aggregate roots ────────────────

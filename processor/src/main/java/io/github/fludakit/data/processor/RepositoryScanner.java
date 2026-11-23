@@ -21,6 +21,7 @@ import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
 import io.github.fludakit.data.query.SortSpec;
 import io.github.fludakit.data.query.Window;
+import io.github.fludakit.data.sql.QueryCompiler;
 
 import jakarta.data.repository.By;
 import jakarta.data.repository.Delete;
@@ -803,28 +804,35 @@ final class RepositoryScanner {
             }
         }
 
+        // Every predicate must be fully bindable; a half-bound plan compiles but fails at runtime.
+        // QueryCompiler owns the operator arity table (nullary operators bind no value).
+        int requiredSlots = 0;
+        for (Predicate pred : predicates) {
+            requiredSlots += QueryCompiler.parameterCount(pred.operator());
+        }
+        if (requiredSlots > nonPagingParamIndices.size()) {
+            throw new IllegalArgumentException("method '" + method.getSimpleName() + "' requires "
+                    + requiredSlots + " query parameter(s) but declares " + nonPagingParamIndices.size());
+        }
+
         // Map each predicate to its binding slot(s)
         int slotIndex = 0;
         for (Predicate pred : predicates) {
-            Operator op = pred.operator();
-
-            if (op == Operator.BETWEEN || op == Operator.NOT_BETWEEN) {
-                // BETWEEN needs TWO consecutive parameter slots -> _from and _to
-                if (slotIndex + 1 < nonPagingParamIndices.size()) {
-                    int fromParamIdx = nonPagingParamIndices.get(slotIndex);
-                    int toParamIdx = nonPagingParamIndices.get(slotIndex + 1);
-                    bindings.add(new ParamBinding(fromParamIdx, pred.param() + "_from", LikePattern.NONE));
-                    bindings.add(new ParamBinding(toParamIdx, pred.param() + "_to", LikePattern.NONE));
-                    slotIndex += 2; // Consumed two parameter slots
-                }
-            } else {
-                // Regular operator: one parameter slot
-                if (slotIndex < nonPagingParamIndices.size()) {
-                    int paramIdx = nonPagingParamIndices.get(slotIndex);
-                    bindings.add(new ParamBinding(paramIdx, pred.param(), LikePattern.of(op)));
-                    slotIndex++;
-                }
+            int slots = QueryCompiler.parameterCount(pred.operator());
+            if (slots == 0) {
+                continue;
             }
+            if (slots == 2) {
+                // BETWEEN needs TWO consecutive parameter slots -> _from and _to
+                int fromParamIdx = nonPagingParamIndices.get(slotIndex);
+                int toParamIdx = nonPagingParamIndices.get(slotIndex + 1);
+                bindings.add(new ParamBinding(fromParamIdx, pred.param() + "_from", LikePattern.NONE));
+                bindings.add(new ParamBinding(toParamIdx, pred.param() + "_to", LikePattern.NONE));
+            } else {
+                int paramIdx = nonPagingParamIndices.get(slotIndex);
+                bindings.add(new ParamBinding(paramIdx, pred.param(), LikePattern.of(pred.operator())));
+            }
+            slotIndex += slots;
         }
 
         return bindings;

@@ -217,6 +217,51 @@ class QueryByMethodNameEmissionTest {
     }
 
     @Test
+    void nullaryOperatorConsumesNoParameterSlot() throws Exception {
+        // A nullary operator binds no value, so it must not consume a binding slot: in a mixed
+        // finder the positional binder used to hand the tag parameter to the IS NULL condition
+        // (.param("text", tag)) and leave :tag itself unbound — compilable, wrong at runtime.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/nullary-mix"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-nullary-mix"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-nullary-mix"));
+        Files.writeString(sourceDir.resolve("Memo.java"), """
+                package nullarymix;
+                @io.github.fludakit.data.annotation.Entity
+                public class Memo {
+                    public Long id;
+                    public String text;
+                    public String tag;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getText() { return text; }
+                    public void setText(String text) { this.text = text; }
+                    public String getTag() { return tag; }
+                    public void setTag(String tag) { this.tag = tag; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Memos.java"), """
+                package nullarymix;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.List;
+                @Repository
+                public interface Memos extends CrudRepository<Memo, Long> {
+                    List<Memo> findByTextNullOrTag(String tag);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Memo.java", "Memos.java");
+
+        String impl = sqlFlat(generatedDir.resolve("nullarymix/Memos_.java"));
+        assertTrue(impl.contains("\"text\" IS NULL OR \"tag\" = :tag"),
+                "the mixed finder must render both conditions:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("param(\"tag\", tag)"),
+                "the tag parameter must bind to :tag:" + System.lineSeparator() + impl);
+        assertFalse(impl.contains("param(\"text\", tag)"),
+                "the tag parameter must not be bound to the nullary condition:" + System.lineSeparator() + impl);
+    }
+
+    @Test
     void distinctSubjectKeywordRendersSelectDistinct() throws Exception {
         // Distinct is a deliberate superset of the Jakarta Data BNF, so it is a KEYWORD here, not
         // ignored text: the name states the de-duplication and the statement must honour it.

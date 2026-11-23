@@ -618,6 +618,174 @@ class ValidationDiagnosticsTest {
                 "the valid repository must still be generated after the rejection");
     }
 
+    @Test
+    void qbnMethodWithMorePredicatesThanParametersIsRejected() throws Exception {
+        // The QBN parser only sees the method NAME, so nothing compared its predicate count with
+        // the declared parameters: findByTitleAndText(String title) compiled into SQL with :title
+        // AND :text but only .param("title", ...) — a query that fails at runtime, not build time.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/arity-qbn"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-arity-qbn"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-arity-qbn"));
+        writeNoteFixture(sourceDir, "arityqbn", """
+                package arityqbn;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.List;
+                @Repository
+                public interface Notes extends CrudRepository<Note, Long> {
+                    List<Note> findByTitleAndText(String title);
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Memo.java"), """
+                package arityqbn;
+                import io.github.fludakit.data.annotation.Entity;
+                import io.github.fludakit.data.annotation.Identity;
+                @Entity
+                public class Memo {
+                    @Identity Long id;
+                    String text;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getText() { return text; }
+                    public void setText(String text) { this.text = text; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Memos.java"), """
+                package arityqbn;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Memos extends CrudRepository<Memo, Long> { }
+                """);
+
+        TaskResult result = runTask(sourceDir, classesDir, generatedDir,
+                "Note.java", "Notes.java", "Memo.java", "Memos.java");
+
+        assertFalse(result.success(), "a QBN method with unbindable predicates must be rejected");
+        assertTrue(result.diagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR
+                        && d.getMessage(Locale.ROOT).contains("findByTitleAndText")
+                        && d.getMessage(Locale.ROOT).contains("requires 2")
+                        && d.getSource() != null && d.getSource().getName().endsWith("Notes.java")),
+                "expected an arity diagnostic naming the method, located on Notes:"
+                        + System.lineSeparator() + result.diagnostics());
+        assertTrue(Files.exists(generatedDir.resolve("arityqbn/Memos_.java")),
+                "the other repository in the same round must still be generated");
+    }
+
+    @Test
+    void betweenWithASingleParameterIsRejected() throws Exception {
+        // BETWEEN consumes TWO parameter slots; with one parameter the old guard bound neither,
+        // silently emitting a query with two unbound named parameters.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/arity-between"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-arity-between"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-arity-between"));
+        writeNoteFixture(sourceDir, "aritybetween", """
+                package aritybetween;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.List;
+                @Repository
+                public interface Notes extends CrudRepository<Note, Long> {
+                    List<Note> findByAgeBetween(int from);
+                }
+                """);
+
+        TaskResult result = runTask(sourceDir, classesDir, generatedDir, "Note.java", "Notes.java");
+
+        assertFalse(result.success(), "a BETWEEN with one parameter must be rejected");
+        assertTrue(result.diagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR
+                        && d.getMessage(Locale.ROOT).contains("findByAgeBetween")
+                        && d.getMessage(Locale.ROOT).contains("requires 2")
+                        && d.getSource() != null && d.getSource().getName().endsWith("Notes.java")),
+                "expected an arity diagnostic naming the method, located on Notes:"
+                        + System.lineSeparator() + result.diagnostics());
+    }
+
+    @Test
+    void bySupplementOutnumberingParametersIsRejected() throws Exception {
+        // @By predicates SUPPLEMENT the QBN predicates, so findByTitle(@By("text") String x) has
+        // two conditions for one parameter — and the positional binder would even bind x to the
+        // wrong condition (:title). The count check must see the supplemented total.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/arity-by"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-arity-by"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-arity-by"));
+        writeNoteFixture(sourceDir, "arityby", """
+                package arityby;
+                import jakarta.data.repository.By;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.List;
+                @Repository
+                public interface Notes extends CrudRepository<Note, Long> {
+                    List<Note> findByTitle(@By("text") String x);
+                }
+                """);
+
+        TaskResult result = runTask(sourceDir, classesDir, generatedDir, "Note.java", "Notes.java");
+
+        assertFalse(result.success(), "a @By supplement outnumbering parameters must be rejected");
+        assertTrue(result.diagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR
+                        && d.getMessage(Locale.ROOT).contains("findByTitle")
+                        && d.getMessage(Locale.ROOT).contains("requires 2")
+                        && d.getSource() != null && d.getSource().getName().endsWith("Notes.java")),
+                "expected an arity diagnostic naming the method, located on Notes:"
+                        + System.lineSeparator() + result.diagnostics());
+    }
+
+    @Test
+    void builtInFindByIdWithoutParametersIsRejected() throws Exception {
+        // A no-arg findById() overload matches the built-in name and builds the id predicate, but
+        // there is no parameter to bind it to — the same silent drop on the built-in path.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/arity-builtin"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-arity-builtin"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-arity-builtin"));
+        writeNoteFixture(sourceDir, "aritybuiltin", """
+                package aritybuiltin;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.Optional;
+                @Repository
+                public interface Notes extends CrudRepository<Note, Long> {
+                    Optional<Note> findById();
+                }
+                """);
+
+        TaskResult result = runTask(sourceDir, classesDir, generatedDir, "Note.java", "Notes.java");
+
+        assertFalse(result.success(), "a no-arg findById() must be rejected");
+        assertTrue(result.diagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR
+                        && d.getMessage(Locale.ROOT).contains("findById")
+                        && d.getMessage(Locale.ROOT).contains("requires 1")
+                        && d.getSource() != null && d.getSource().getName().endsWith("Notes.java")),
+                "expected an arity diagnostic naming the method, located on Notes:"
+                        + System.lineSeparator() + result.diagnostics());
+    }
+
+    /** Note (@Entity: id, title, text, age) + the given Notes repository source. */
+    private void writeNoteFixture(Path sourceDir, String pkg, String notesSource) throws Exception {
+        Files.writeString(sourceDir.resolve("Note.java"), """
+                package %s;
+                import io.github.fludakit.data.annotation.Entity;
+                import io.github.fludakit.data.annotation.Identity;
+                @Entity
+                public class Note {
+                    @Identity Long id;
+                    String title;
+                    String text;
+                    int age;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getTitle() { return title; }
+                    public void setTitle(String title) { this.title = title; }
+                    public String getText() { return text; }
+                    public void setText(String text) { this.text = text; }
+                    public int getAge() { return age; }
+                    public void setAge(int age) { this.age = age; }
+                }
+                """.formatted(pkg));
+        Files.writeString(sourceDir.resolve("Notes.java"), notesSource);
+    }
+
     /** Track (@ValueObject, List<Cue>) + the given Cue source + an unrelated Note/Notes repository. */
     private void writeVoListFixture(Path sourceDir, String pkg, String cueSource) throws Exception {
         Files.writeString(sourceDir.resolve("Track.java"), """

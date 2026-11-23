@@ -11,7 +11,6 @@ import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
 import io.github.fludakit.data.query.SortSpec;
 
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -265,13 +264,8 @@ public final class SqlBuilder {
      */
     public QueryCompiler.RenderedCursorSortProjection cursorSortProjection(
             String childTable, String fkColumn, String joinAlias, Map<String, Boolean> sortColumns) {
-        List<QueryCompiler.CursorSortProjection.SortColumn> columns = new ArrayList<>();
-        for (Map.Entry<String, Boolean> entry : sortColumns.entrySet()) {
-            columns.add(new QueryCompiler.CursorSortProjection.SortColumn(entry.getKey(), entry.getValue()));
-        }
-        QueryCompiler.CursorSortProjection projection =
-                new QueryCompiler.CursorSortProjection(childTable, fkColumn, joinAlias, columns);
-        return QueryCompiler.renderCursorSortProjection(dialect, requireTypeModel(), projection);
+        return QueryCompiler.renderCursorSortProjection(dialect, requireTypeModel(),
+                childTable, fkColumn, joinAlias, sortColumns);
     }
 
     public String correlatedSort(String childTable, String leafColumn, String fkColumn,

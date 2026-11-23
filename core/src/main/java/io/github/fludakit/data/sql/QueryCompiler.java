@@ -535,6 +535,22 @@ public final class QueryCompiler {
         return sb.toString();
     }
 
+    /**
+     * As {@link #renderCursorSortProjection(SqlDialect, TypeDefinition, CursorSortProjection)},
+     * assembling the projection from its components. {@code sortColumns} maps column suffix to
+     * sort direction in iteration order.
+     */
+    public static RenderedCursorSortProjection renderCursorSortProjection(
+            SqlDialect dialect, TypeDefinition typeModel,
+            String childTable, String fkColumn, String joinAlias, Map<String, Boolean> sortColumns) {
+        List<CursorSortProjection.SortColumn> columns = new ArrayList<>();
+        for (Map.Entry<String, Boolean> entry : sortColumns.entrySet()) {
+            columns.add(new CursorSortProjection.SortColumn(entry.getKey(), entry.getValue()));
+        }
+        return renderCursorSortProjection(dialect, typeModel,
+                new CursorSortProjection(childTable, fkColumn, joinAlias, columns));
+    }
+
     public static RenderedCursorSortProjection renderCursorSortProjection(
             SqlDialect dialect, TypeDefinition typeModel, CursorSortProjection projection) {
         String rootTable = dialect.quoteIdentifier(typeModel.tableName());

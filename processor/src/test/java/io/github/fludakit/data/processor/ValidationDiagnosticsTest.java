@@ -561,6 +561,63 @@ class ValidationDiagnosticsTest {
                 "the valid repository must still be generated after the scan failure");
     }
 
+    @Test
+    void rejectsEntityWithDuplicateIdentityAnnotations() throws Exception {
+        // Two @Identity fields used to resolve silently to whichever came last in field order, so
+        // the generated mapper keyed on a column the author never chose. The ambiguity must be
+        // rejected where it is declared, and the rest of the round must survive.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/duplicate-identity"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-duplicate-identity"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-duplicate-identity"));
+        Files.writeString(sourceDir.resolve("Tag.java"), """
+                package duplicateidentity;
+                import io.github.fludakit.data.annotation.Entity;
+                import io.github.fludakit.data.annotation.Identity;
+                @Entity
+                public class Tag {
+                    @Identity Long id;
+                    @Identity String code;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getCode() { return code; }
+                    public void setCode(String code) { this.code = code; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Note.java"), """
+                package duplicateidentity;
+                import io.github.fludakit.data.annotation.Entity;
+                import io.github.fludakit.data.annotation.Identity;
+                @Entity
+                public class Note {
+                    @Identity Long id;
+                    String text;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getText() { return text; }
+                    public void setText(String text) { this.text = text; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Notes.java"), """
+                package duplicateidentity;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Notes extends CrudRepository<Note, Long> { }
+                """);
+
+        TaskResult result = runTask(sourceDir, classesDir, generatedDir,
+                "Tag.java", "Note.java", "Notes.java");
+
+        assertFalse(result.success(), "an entity with two @Identity fields must be rejected");
+        assertTrue(result.diagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR
+                        && d.getMessage(Locale.ROOT).contains("multiple @Identity")
+                        && d.getSource() != null && d.getSource().getName().endsWith("Tag.java")),
+                "expected a duplicate-identity diagnostic located on Tag:"
+                        + System.lineSeparator() + result.diagnostics());
+        assertTrue(Files.exists(generatedDir.resolve("duplicateidentity/Notes_.java")),
+                "the valid repository must still be generated after the rejection");
+    }
+
     /** Track (@ValueObject, List<Cue>) + the given Cue source + an unrelated Note/Notes repository. */
     private void writeVoListFixture(Path sourceDir, String pkg, String cueSource) throws Exception {
         Files.writeString(sourceDir.resolve("Track.java"), """

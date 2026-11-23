@@ -121,6 +121,7 @@ final class TypeDefinitionScanner {
         List<TypeDefinition.Prop.EntityCollection> entityCollections = new ArrayList<>();
         List<TypeDefinition.Prop.ElementCollection> elementCollections = new ArrayList<>();
         TypeDefinition.Prop.Id idProp = null;
+        String annotatedIdName = null;
         TypeDefinition.Prop.Version versionProp = null;
 
         for (Element member : elements.getAllMembers(type)) {
@@ -131,8 +132,15 @@ final class TypeDefinitionScanner {
             String fieldName = field.getSimpleName().toString();
             TypeMirror fieldType = field.asType();
 
-            if (hasIdentityAnnotation(field) || (idProp == null && isNamedId(field))) {
+            if (hasIdentityAnnotation(field)) {
+                if (annotatedIdName != null) {
+                    throw new IllegalArgumentException("Entity " + fqn + " declares multiple @Identity fields ('"
+                            + annotatedIdName + "', '" + fieldName + "'); keep exactly one");
+                }
+                annotatedIdName = fieldName;
                 // @Identity wins over the name fallback regardless of field order
+                idProp = buildIdProp(fieldName, fieldType, fqn);
+            } else if (idProp == null && isNamedId(field)) {
                 idProp = buildIdProp(fieldName, fieldType, fqn);
             } else if (isVO) {
                 classifyVOField(field, fieldName, fieldType, scalars, embedded, associations, entityCollections, elementCollections);

@@ -141,7 +141,7 @@ class CursorSeekEmissionTest {
         compile(sourceDir, classesDir, generatedDir, "Line.java", "Order.java", "Orders.java");
 
         String impl = sqlFlat(generatedDir.resolve("ordcurs/Orders_.java"));
-        assertTrue(impl.contains("CURSOR_FIND_BY_SQL = \"SELECT inner_.* FROM (SELECT \"orders\".\"id\", \"orders\".\"status\", MIN(lines_.\"product\") AS \"agg_0\" FROM \"orders\" LEFT JOIN \"lines\" AS lines_ ON lines_.\"order_id\" = \"orders\".\"id\" GROUP BY \"orders\".\"id\", \"orders\".\"status\") AS inner_ WHERE (:cursor0 IS NULL OR ((inner_.\"agg_0\" > :cursor0) OR ((inner_.\"agg_0\" = :cursor0 OR (inner_.\"agg_0\" IS NULL AND :cursor0 IS NULL)) AND inner_.\"id\" > :cursor1))) ORDER BY inner_.\"agg_0\" ASC, inner_.\"id\" ASC\""),
+        assertTrue(impl.contains("CURSOR_FIND_BY_SQL = \"SELECT inner_.* FROM (SELECT \"orders\".\"id\", \"orders\".\"status\", MIN(\"lines_\".\"product\") AS \"agg_0\" FROM \"orders\" LEFT JOIN \"lines\" AS \"lines_\" ON \"orders\".\"id\" = \"lines_\".\"order_id\" GROUP BY \"orders\".\"id\", \"orders\".\"status\") AS inner_ WHERE (:cursor0 IS NULL OR ((inner_.\"agg_0\" > :cursor0) OR ((inner_.\"agg_0\" = :cursor0 OR (inner_.\"agg_0\" IS NULL AND :cursor0 IS NULL)) AND inner_.\"id\" > :cursor1))) ORDER BY inner_.\"agg_0\" ASC, inner_.\"id\" ASC\""),
                 "the to-many cursor seek must wrap the aggregate subquery and seek on the inner alias:"
                         + System.lineSeparator() + impl);
         assertTrue(impl.contains(".param(\"cursor1\", pageRequest.cursor().map(c -> c.get(1)).orElse(null))"),

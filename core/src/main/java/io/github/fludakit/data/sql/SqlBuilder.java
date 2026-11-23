@@ -264,8 +264,10 @@ public final class SqlBuilder {
      */
     public QueryCompiler.RenderedCursorSortProjection cursorSortProjection(
             String childTable, String fkColumn, String joinAlias, Map<String, Boolean> sortColumns) {
-        return QueryCompiler.renderCursorSortProjection(dialect, requireTypeModel(),
-                childTable, fkColumn, joinAlias, sortColumns);
+        QueryCompiler.CompiledCursorSortProjection compiled = QueryCompiler.compileCursorSortProjection(
+                dialect, requireTypeModel(), childTable, fkColumn, joinAlias, sortColumns);
+        return new QueryCompiler.RenderedCursorSortProjection(
+                compiled.shell().render(dialect), compiled.orderByTerms(), compiled.seekTerms());
     }
 
     public String correlatedSort(String childTable, String leafColumn, String fkColumn,

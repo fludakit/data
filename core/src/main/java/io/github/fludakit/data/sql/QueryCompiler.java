@@ -36,10 +36,24 @@ public final class QueryCompiler {
 
     /**
      * The rendered shape of a cursor-paged to-many sort/projection: the base SELECT shell, the
-     * ORDER BY aliases, and the keyset seek terms.
+     * ORDER BY aliases, and the keyset seek terms. Produced by {@link SqlBuilder} from a
+     * {@link CompiledCursorSortProjection}.
      */
     public record RenderedCursorSortProjection(String shell, List<String> orderByTerms, List<String> seekTerms) {
         public RenderedCursorSortProjection {
+            orderByTerms = List.copyOf(orderByTerms);
+            seekTerms = List.copyOf(seekTerms);
+        }
+    }
+
+    /**
+     * The compiled shape of a cursor-paged to-many sort/projection: the aggregate SELECT shell as
+     * a fragment, plus the ORDER BY aliases and keyset seek terms, pre-quoted like
+     * {@link SqlFragment.Query}'s own terms.
+     */
+    public record CompiledCursorSortProjection(SqlFragment.Query shell, List<String> orderByTerms, List<String> seekTerms) {
+        public CompiledCursorSortProjection {
+            Objects.requireNonNull(shell, "shell");
             orderByTerms = List.copyOf(orderByTerms);
             seekTerms = List.copyOf(seekTerms);
         }
@@ -536,35 +550,32 @@ public final class QueryCompiler {
     }
 
     /**
-     * As {@link #renderCursorSortProjection(SqlDialect, TypeDefinition, CursorSortProjection)},
+     * As {@link #compileCursorSortProjection(SqlDialect, TypeDefinition, CursorSortProjection)},
      * assembling the projection from its components. {@code sortColumns} maps column suffix to
      * sort direction in iteration order.
      */
-    public static RenderedCursorSortProjection renderCursorSortProjection(
+    public static CompiledCursorSortProjection compileCursorSortProjection(
             SqlDialect dialect, TypeDefinition typeModel,
             String childTable, String fkColumn, String joinAlias, Map<String, Boolean> sortColumns) {
         List<CursorSortProjection.SortColumn> columns = new ArrayList<>();
         for (Map.Entry<String, Boolean> entry : sortColumns.entrySet()) {
             columns.add(new CursorSortProjection.SortColumn(entry.getKey(), entry.getValue()));
         }
-        return renderCursorSortProjection(dialect, typeModel,
+        return compileCursorSortProjection(dialect, typeModel,
                 new CursorSortProjection(childTable, fkColumn, joinAlias, columns));
     }
 
-    public static RenderedCursorSortProjection renderCursorSortProjection(
+    public static CompiledCursorSortProjection compileCursorSortProjection(
             SqlDialect dialect, TypeDefinition typeModel, CursorSortProjection projection) {
         String rootTable = dialect.quoteIdentifier(typeModel.tableName());
-        String childTable = dialect.quoteIdentifier(projection.childTable());
-        String fkColumn = dialect.quoteIdentifier(projection.fkColumn());
-        String ownerIdColumn = dialect.quoteIdentifier(typeModel.idColumn());
-        String joinAlias = projection.joinAlias();
+        String quotedAlias = dialect.quoteIdentifier(projection.joinAlias());
 
+        SqlFragment.Query.Builder shell = SqlFragment.Query.builder().table(typeModel.tableName());
         List<String> selectColumns = new ArrayList<>();
-        List<String> groupByColumns = new ArrayList<>();
         for (ColumnRef col : typeModel.columns()) {
             String qualified = rootTable + "." + dialect.quoteIdentifier(col.column());
             selectColumns.add(qualified);
-            groupByColumns.add(qualified);
+            shell.groupBy(qualified);
         }
 
         List<String> orderByTerms = new ArrayList<>();
@@ -572,20 +583,18 @@ public final class QueryCompiler {
         int aggIndex = 0;
         for (CursorSortProjection.SortColumn sort : projection.sortColumns()) {
             String aggFunc = sort.ascending() ? "MIN" : "MAX";
-            String expr = aggFunc + "(" + joinAlias + "." + dialect.quoteIdentifier(sort.columnSuffix()) + ")";
+            String expr = aggFunc + "(" + quotedAlias + "." + dialect.quoteIdentifier(sort.columnSuffix()) + ")";
             selectColumns.add(expr + " AS " + dialect.quoteIdentifier("agg_" + aggIndex));
             orderByTerms.add(dialect.quoteIdentifier("agg_" + aggIndex));
             seekTerms.add(expr);
             aggIndex++;
         }
 
-        String shell = "SELECT " + String.join(", ", selectColumns)
-                + " FROM " + rootTable
-                + " LEFT JOIN " + childTable + " AS " + joinAlias
-                + " ON " + joinAlias + "." + fkColumn + " = " + rootTable + "." + ownerIdColumn
-                + " GROUP BY " + String.join(", ", groupByColumns);
-
-        return new RenderedCursorSortProjection(shell, orderByTerms, seekTerms);
+        JoinEdge edge = new JoinEdge.ToMany(
+                new ColumnRef.Simple(typeModel.idColumn(), typeModel.tableName()),
+                new ColumnRef.ForeignKey(projection.fkColumn(), projection.childTable()));
+        shell.projection(String.join(", ", selectColumns)).join(edge, projection.joinAlias());
+        return new CompiledCursorSortProjection(shell.build(), orderByTerms, seekTerms);
     }
 
     public static String renderPredicate(SqlDialect dialect, Predicate predicate, ColumnPlacement placement) {

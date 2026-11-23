@@ -131,10 +131,9 @@ final class TypeDefinitionScanner {
             String fieldName = field.getSimpleName().toString();
             TypeMirror fieldType = field.asType();
 
-            if (field.getAnnotation(Identity.class) != null) {
-                idProp = buildIdProp(fieldName, fieldType, fqn);
-            } else if (idProp == null && fieldName.equalsIgnoreCase("id")) {
-                // Fallback: treat field named "id" as identifier when no @Identity annotation present
+            if (isIdentifierField(member)
+                    && (field.getAnnotation(Identity.class) != null || idProp == null)) {
+                // @Identity wins over the name fallback regardless of field order
                 idProp = buildIdProp(fieldName, fieldType, fqn);
             } else if (isVO) {
                 classifyVOField(field, fieldName, fieldType, scalars, embedded, associations, entityCollections, elementCollections);
@@ -195,17 +194,16 @@ final class TypeDefinitionScanner {
         return new TypeDefinition.Prop.Id(fieldName, typeFqn, columnName);
     }
 
-    /** The scanner's identifier rule: an {@code @Identity} field or a field named {@code id}. */
+    /** The scanner's identifier rule: a non-static field with {@code @Identity} or named {@code id}. */
+    private static boolean isIdentifierField(Element member) {
+        return member.getKind() == ElementKind.FIELD
+                && !member.getModifiers().contains(Modifier.STATIC)
+                && (member.getAnnotation(Identity.class) != null
+                    || member.getSimpleName().toString().equalsIgnoreCase("id"));
+    }
+
     private boolean declaresIdentifier(TypeElement type) {
-        for (Element member : elements.getAllMembers(type)) {
-            if (member.getKind() != ElementKind.FIELD) continue;
-            if (member.getModifiers().contains(Modifier.STATIC)) continue;
-            if (member.getAnnotation(Identity.class) != null
-                    || member.getSimpleName().toString().equalsIgnoreCase("id")) {
-                return true;
-            }
-        }
-        return false;
+        return elements.getAllMembers(type).stream().anyMatch(TypeDefinitionScanner::isIdentifierField);
     }
 
     // ── Field classification — entities / aggregate roots ────────────────

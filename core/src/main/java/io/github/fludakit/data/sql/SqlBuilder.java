@@ -11,8 +11,10 @@ import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
 import io.github.fludakit.data.query.SortSpec;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Collectors;
 
@@ -256,8 +258,19 @@ public final class SqlBuilder {
         return sql(QueryCompiler.insertColumns(dialect, table, columns, paramNames));
     }
 
+    /**
+     * Renders a cursor-paged to-many sort/projection from its components, so callers outside core
+     * never name the compiler-owned projection records. {@code sortColumns} maps column suffix to
+     * sort direction in iteration order.
+     */
     public QueryCompiler.RenderedCursorSortProjection cursorSortProjection(
-            QueryCompiler.CursorSortProjection projection) {
+            String childTable, String fkColumn, String joinAlias, Map<String, Boolean> sortColumns) {
+        List<QueryCompiler.CursorSortProjection.SortColumn> columns = new ArrayList<>();
+        for (Map.Entry<String, Boolean> entry : sortColumns.entrySet()) {
+            columns.add(new QueryCompiler.CursorSortProjection.SortColumn(entry.getKey(), entry.getValue()));
+        }
+        QueryCompiler.CursorSortProjection projection =
+                new QueryCompiler.CursorSortProjection(childTable, fkColumn, joinAlias, columns);
         return QueryCompiler.renderCursorSortProjection(dialect, requireTypeModel(), projection);
     }
 

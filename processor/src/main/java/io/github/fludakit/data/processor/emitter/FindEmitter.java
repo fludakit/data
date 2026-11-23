@@ -20,7 +20,6 @@ import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
 import io.github.fludakit.data.query.SortSpec;
 import io.github.fludakit.data.query.Window;
-import io.github.fludakit.data.sql.QueryCompiler;
 import io.github.fludakit.data.sql.SqlBuilder;
 import io.github.fludakit.data.sql.SqlDialect;
 
@@ -426,6 +425,7 @@ final class FindEmitter {
             // plus a runtime direction; relation paths render a pre-computed correlated aggregate
             // (MIN for ASC, MAX for DESC) whose direction is already embedded.
             Map<String, ColumnPlacement> orderPaths = collectDynamicOrderPaths(ctx.entity());
+            SqlBuilder sortSql = new SqlBuilder(ctx.entity()).dialect(dialect);
             body.add("        String $L = switch ($L) {\n", "orderTerm", "prop");
             for (Map.Entry<String, ColumnPlacement> entry : orderPaths.entrySet()) {
                 String path = entry.getKey();
@@ -435,8 +435,8 @@ final class FindEmitter {
                     body.add("            case $S -> $S + ($L.isAscending() ? $S : $S);\n",
                             path, column, "sort", " ASC", " DESC");
                 } else {
-                    String asc = QueryCompiler.aggregateSortTerm(dialect, ctx.entity(), placement, true);
-                    String desc = QueryCompiler.aggregateSortTerm(dialect, ctx.entity(), placement, false);
+                    String asc = sortSql.aggregateSortTerm(placement, true);
+                    String desc = sortSql.aggregateSortTerm(placement, false);
                     body.add("            case $S -> $L.isAscending() ? $S : $S;\n",
                             path, "sort", asc, desc);
                 }
@@ -590,35 +590,33 @@ final class FindEmitter {
             }
         }
 
-        // Build the CursorSortProjection for the hydration case (the to-many sort/projection).
-        QueryCompiler.CursorSortProjection cursorProjection = null;
-        if (hasToManySort && ecRelForHydration != null && ecRelForHydration.definition() != null) {
-            List<QueryCompiler.CursorSortProjection.SortColumn> sortColumns = new ArrayList<>();
+        // Collect the cursor sort/projection components for the hydration case (the to-many sort).
+        boolean hasCursorProjection = hasToManySort && ecRelForHydration != null
+                && ecRelForHydration.definition() != null;
+        Map<String, Boolean> cursorSortColumns = new LinkedHashMap<>();
+        if (hasCursorProjection) {
             for (SortSpec sort : sorts) {
                 String prop = sort.property();
                 if (prop.contains(".")) {
                     String firstSegment = prop.substring(0, prop.indexOf('.'));
                     if (firstSegment.equals(toManyPropForHydration)) {
                         String colPart = prop.substring(prop.indexOf('.') + 1).replace('.', '_');
-                        sortColumns.add(new QueryCompiler.CursorSortProjection.SortColumn(colPart, sort.ascending()));
+                        cursorSortColumns.put(colPart, sort.ascending());
                     }
                 }
             }
-            cursorProjection = new QueryCompiler.CursorSortProjection(
-                    ecRelForHydration.definition().tableName(),
-                    ecRelForHydration.fkColumn(),
-                    toManyPropForHydration + "_",
-                    sortColumns);
         }
 
         // Build the base SELECT SQL shell (with LEFT JOIN for TO_MANY hydration)
         SqlBuilder sqlBuilder = new SqlBuilder(ctx.entity());
         sqlBuilder.dialect(dialect);
-        QueryCompiler.RenderedCursorSortProjection rendered = null;
+        var rendered = hasCursorProjection
+                ? sqlBuilder.cursorSortProjection(ecRelForHydration.definition().tableName(),
+                        ecRelForHydration.fkColumn(), toManyPropForHydration + "_", cursorSortColumns)
+                : null;
         String baseSql;
 
-        if (cursorProjection != null) {
-            rendered = sqlBuilder.cursorSortProjection(cursorProjection);
+        if (rendered != null) {
             baseSql = rendered.shell();
         } else {
             // No TO_MANY sort — unpaged, unordered shell; seek/order spliced below

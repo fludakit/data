@@ -58,15 +58,20 @@ final class TypeDefinitionScanner {
      * Scans the given {@code @Entity}, {@code @AggregateRoot}, and {@code @ValueObject} types,
      * then resolves cross-references in a second pass.
      *
-     * <p>A failure is reported as a diagnostic and ends the scan: the types scanned before it
-     * stay in the graph, the ones after it are left unscanned.</p>
+     * <p>A failing type is reported as a diagnostic located on that type and skipped; the remaining
+     * types are still scanned and the resolution pass runs for everything that succeeded.</p>
      */
     void scanTypes(List<TypeElement> types) {
-        try {
-            for (TypeElement type : types) {
+        for (TypeElement type : types) {
+            try {
                 scanType(type);
+            } catch (RuntimeException e) {
+                String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getName();
+                diagnostics.error("fluda-data: " + msg, type);
             }
+        }
 
+        try {
             resolveAllReferences();
         } catch (RuntimeException e) {
             String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getName();
@@ -89,7 +94,14 @@ final class TypeDefinitionScanner {
         String fqn = type.getQualifiedName().toString();
         if (graph.contains(fqn)) return graph.get(fqn);
         if (!inProgress.add(fqn)) return null; // cycle
+        try {
+            return buildDefinition(type, fqn, forceEntity);
+        } finally {
+            inProgress.remove(fqn);
+        }
+    }
 
+    private TypeDefinition buildDefinition(TypeElement type, String fqn, boolean forceEntity) {
         boolean hasAggregateAnnotation = type.getAnnotation(AggregateRoot.class) != null;
         boolean hasEntityAnnotation = type.getAnnotation(Entity.class) != null;
         boolean hasVOAnnotation = type.getAnnotation(ValueObject.class) != null;
@@ -132,8 +144,6 @@ final class TypeDefinitionScanner {
                         elementCollections);
             }
         }
-
-        inProgress.remove(fqn);
 
         // Build appropriate TypeDefinition variant
         TypeDefinition definition;
@@ -183,6 +193,19 @@ final class TypeDefinitionScanner {
         String typeFqn = typeFqn(fieldType);
         String columnName = Names.toSnakeCase(fieldName);
         return new TypeDefinition.Prop.Id(fieldName, typeFqn, columnName);
+    }
+
+    /** The scanner's identifier rule: an {@code @Identity} field or a field named {@code id}. */
+    private boolean declaresIdentifier(TypeElement type) {
+        for (Element member : elements.getAllMembers(type)) {
+            if (member.getKind() != ElementKind.FIELD) continue;
+            if (member.getModifiers().contains(Modifier.STATIC)) continue;
+            if (member.getAnnotation(Identity.class) != null
+                    || member.getSimpleName().toString().equalsIgnoreCase("id")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ── Field classification — entities / aggregate roots ────────────────
@@ -303,22 +326,42 @@ final class TypeDefinitionScanner {
                         }
                         return;
                     }
-                    // For non-entity list elements in VOs, treat as ElementCollection
-                    String elementFqn = typeFqn(elementType);
-                    String ownerTable = "unknown"; // VOs don't have tables, this will be set by parent
-                    String elementTypeName = elementTE.getSimpleName().toString();
-                    String childTable = Names.childTable(elementTypeName);
-                    String parentFkCol = Names.fkColumn(fieldName);
-                    
-                    // Look up the element type's TypeDefinition from the graph
+                    // Non-entity list elements: only @ValueObject elements have a child-table shape.
+                    String elementFqn = elementTE.getQualifiedName().toString();
+                    if (elementTE.getKind() == ElementKind.ENUM
+                            || elementFqn.startsWith("java.") || elementFqn.startsWith("javax.")) {
+                        diagnostics.error("fluda-data: unsupported element-collection element type "
+                                + elementFqn + " for field '" + fieldName + "'", field);
+                        return;
+                    }
+                    if (!isVO(elementTE)) {
+                        if (elementTE.getKind() == ElementKind.RECORD) {
+                            diagnostics.error("fluda-data: record element type " + elementFqn
+                                    + " is not yet supported as an implicit value object (issue #4)", field);
+                        } else if (declaresIdentifier(elementTE)) {
+                            diagnostics.error("fluda-data: element type " + elementFqn + " of field '"
+                                    + fieldName + "' declares an identifier; annotate it with @Entity", field);
+                        } else {
+                            diagnostics.error("fluda-data: element type " + elementFqn + " of field '"
+                                    + fieldName + "' is not annotated; annotate it with @ValueObject", field);
+                        }
+                        return;
+                    }
+
+                    graph.markElementCollectionValueObject(elementFqn);
                     TypeDefinition targetType = graph.get(elementFqn);
-                    if (targetType == null && elementTE != null && !inProgress.contains(elementFqn)) {
-                        scanType(elementTE, true);
+                    if (targetType == null && !inProgress.contains(elementFqn)) {
+                        scanType(elementTE, false);
                         targetType = graph.get(elementFqn);
                     }
-                    
-                    elementCollections.add(new TypeDefinition.Prop.ElementCollection(fieldName,
-                            elementFqn, (TypeDefinition.ValueObject) targetType, childTable, parentFkCol));
+                    if (targetType instanceof TypeDefinition.ValueObject vo) {
+                        elementCollections.add(new TypeDefinition.Prop.ElementCollection(fieldName,
+                                elementFqn, vo, Names.childTable(elementTE.getSimpleName().toString()),
+                                Names.fkColumn(fieldName)));
+                    } else {
+                        diagnostics.error("fluda-data: element type " + elementFqn + " of field '"
+                                + fieldName + "' could not be resolved as a value object", field);
+                    }
                     return;
                 }
             }

@@ -354,6 +354,254 @@ class ValidationDiagnosticsTest {
     }
 
     @Test
+    void voListElementWithoutIdOrAnnotationIsRejectedWithGuidance() throws Exception {
+        // A plain unannotated class as a VO collection element used to be force-scanned as an entity
+        // and throw "declares no identifier" out of the whole type scan. The declaration must instead
+        // be rejected where it is recognised, telling the author which annotation is missing.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/vo-list-plain"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-vo-list-plain"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-vo-list-plain"));
+        writeVoListFixture(sourceDir, "volistplain", """
+                package volistplain;
+                public class Cue {
+                    String label;
+                    public String getLabel() { return label; }
+                    public void setLabel(String label) { this.label = label; }
+                }
+                """);
+
+        TaskResult result = runTask(sourceDir, classesDir, generatedDir,
+                "Track.java", "Cue.java", "Note.java", "Notes.java");
+
+        assertFalse(result.success(), "an unannotated plain-class collection element must be rejected");
+        assertTrue(result.diagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR
+                        && d.getMessage(Locale.ROOT).contains("@ValueObject")
+                        && d.getSource() != null && d.getSource().getName().endsWith("Track.java")),
+                "expected a located @ValueObject guidance diagnostic on Track:"
+                        + System.lineSeparator() + result.diagnostics());
+        assertTrue(Files.exists(generatedDir.resolve("volistplain/Notes_.java")),
+                "the other repository in the same round must still be generated");
+    }
+
+    @Test
+    void voListElementWithIdIsRejectedWithEntityGuidance() throws Exception {
+        // Same path, but the element declares an identifier: it looks like an entity, so the guidance
+        // must name @Entity. The old code produced a ClassCastException surfaced as a processor error.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/vo-list-id"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-vo-list-id"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-vo-list-id"));
+        writeVoListFixture(sourceDir, "volistid", """
+                package volistid;
+                public class Cue {
+                    Long id;
+                    String label;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getLabel() { return label; }
+                    public void setLabel(String label) { this.label = label; }
+                }
+                """);
+
+        TaskResult result = runTask(sourceDir, classesDir, generatedDir,
+                "Track.java", "Cue.java", "Note.java", "Notes.java");
+
+        assertFalse(result.success(), "an unannotated element with an identifier must be rejected");
+        assertTrue(result.diagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR
+                        && d.getMessage(Locale.ROOT).contains("@Entity")
+                        && d.getSource() != null && d.getSource().getName().endsWith("Track.java")),
+                "expected a located @Entity guidance diagnostic on Track:"
+                        + System.lineSeparator() + result.diagnostics());
+        assertTrue(Files.exists(generatedDir.resolve("volistid/Notes_.java")),
+                "the other repository in the same round must still be generated");
+    }
+
+    @Test
+    void voListOfScalarsIsRejectedAsUnsupported() throws Exception {
+        // List<String> has no child-table shape; scalar-array columns are tracked separately. Until
+        // then the field must be rejected with a located diagnostic, not crash the scan.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/vo-list-string"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-vo-list-string"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-vo-list-string"));
+        Files.writeString(sourceDir.resolve("Track.java"), """
+                package voliststring;
+                import io.github.fludakit.data.annotation.ValueObject;
+                import java.util.List;
+                @ValueObject
+                public class Track {
+                    String title;
+                    List<String> tags;
+                    public String getTitle() { return title; }
+                    public void setTitle(String title) { this.title = title; }
+                    public List<String> getTags() { return tags; }
+                    public void setTags(List<String> tags) { this.tags = tags; }
+                }
+                """);
+
+        TaskResult result = runTask(sourceDir, classesDir, generatedDir, "Track.java");
+
+        assertFalse(result.success(), "a List<String> inside a VO must be rejected");
+        assertTrue(result.diagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR
+                        && d.getMessage(Locale.ROOT).contains("unsupported")
+                        && d.getSource() != null && d.getSource().getName().endsWith("Track.java")),
+                "expected a located unsupported-element-type diagnostic:"
+                        + System.lineSeparator() + result.diagnostics());
+    }
+
+    @Test
+    void voListOfEnumsIsRejectedAsUnsupported() throws Exception {
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/vo-list-enum"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-vo-list-enum"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-vo-list-enum"));
+        Files.writeString(sourceDir.resolve("Track.java"), """
+                package volistenum;
+                import io.github.fludakit.data.annotation.ValueObject;
+                import java.util.List;
+                @ValueObject
+                public class Track {
+                    String title;
+                    List<Kind> kinds;
+                    public String getTitle() { return title; }
+                    public void setTitle(String title) { this.title = title; }
+                    public List<Kind> getKinds() { return kinds; }
+                    public void setKinds(List<Kind> kinds) { this.kinds = kinds; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Kind.java"), """
+                package volistenum;
+                public enum Kind { A, B }
+                """);
+
+        TaskResult result = runTask(sourceDir, classesDir, generatedDir, "Track.java", "Kind.java");
+
+        assertFalse(result.success(), "a List<enum> inside a VO must be rejected");
+        assertTrue(result.diagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR
+                        && d.getMessage(Locale.ROOT).contains("unsupported")
+                        && d.getSource() != null && d.getSource().getName().endsWith("Track.java")),
+                "expected a located unsupported-element-type diagnostic:"
+                        + System.lineSeparator() + result.diagnostics());
+    }
+
+    @Test
+    void voListOfUnannotatedRecordsIsRejectedUntilRecordSupportLands() throws Exception {
+        // Implicit record value objects are tracked in #4 (row mappers and write paths are still
+        // setter/getter-based). Until then an unannotated record element must be rejected with a
+        // located diagnostic naming the gap, not crash the scan with a missing-identifier throw.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/vo-list-record"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-vo-list-record"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-vo-list-record"));
+        writeVoListFixture(sourceDir, "volistrecord", """
+                package volistrecord;
+                public record Cue(String label) { }
+                """);
+
+        TaskResult result = runTask(sourceDir, classesDir, generatedDir,
+                "Track.java", "Cue.java", "Note.java", "Notes.java");
+
+        assertFalse(result.success(), "an unannotated record element must be rejected until #4 lands");
+        assertTrue(result.diagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR
+                        && d.getMessage(Locale.ROOT).contains("record")
+                        && d.getSource() != null && d.getSource().getName().endsWith("Track.java")),
+                "expected a located record-support diagnostic on Track:"
+                        + System.lineSeparator() + result.diagnostics());
+        assertTrue(Files.exists(generatedDir.resolve("volistrecord/Notes_.java")),
+                "the other repository in the same round must still be generated");
+    }
+
+    @Test
+    void scanFailureIsLocatedAndOtherTypesStillGenerate() throws Exception {
+        // The type scan used one try/catch around the whole loop: a single bad entity reported an
+        // unlocated error and cost every later type its scan, so even unrelated repositories lost
+        // their implementation. The failure must be located on the offending type and the rest of
+        // the round must survive.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/scan-continue"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-scan-continue"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-scan-continue"));
+        Files.writeString(sourceDir.resolve("Tag.java"), """
+                package scancontinue;
+                import io.github.fludakit.data.annotation.Entity;
+                @Entity
+                public class Tag {
+                    String label;
+                    public String getLabel() { return label; }
+                    public void setLabel(String label) { this.label = label; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Note.java"), """
+                package scancontinue;
+                import io.github.fludakit.data.annotation.Entity;
+                import io.github.fludakit.data.annotation.Identity;
+                @Entity
+                public class Note {
+                    @Identity Long id;
+                    String text;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getText() { return text; }
+                    public void setText(String text) { this.text = text; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Notes.java"), """
+                package scancontinue;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Notes extends CrudRepository<Note, Long> { }
+                """);
+
+        TaskResult result = runTask(sourceDir, classesDir, generatedDir,
+                "Tag.java", "Note.java", "Notes.java");
+
+        assertFalse(result.success(), "the no-identifier entity must still fail the build");
+        assertTrue(result.diagnostics().stream().anyMatch(d -> d.getKind() == Diagnostic.Kind.ERROR
+                        && d.getMessage(Locale.ROOT).contains("declares no identifier")
+                        && d.getSource() != null && d.getSource().getName().endsWith("Tag.java")),
+                "expected the missing-identity diagnostic located on Tag:"
+                        + System.lineSeparator() + result.diagnostics());
+        assertTrue(Files.exists(generatedDir.resolve("scancontinue/Notes_.java")),
+                "the valid repository must still be generated after the scan failure");
+    }
+
+    /** Track (@ValueObject, List<Cue>) + the given Cue source + an unrelated Note/Notes repository. */
+    private void writeVoListFixture(Path sourceDir, String pkg, String cueSource) throws Exception {
+        Files.writeString(sourceDir.resolve("Track.java"), """
+                package %s;
+                import io.github.fludakit.data.annotation.ValueObject;
+                import java.util.List;
+                @ValueObject
+                public class Track {
+                    String title;
+                    List<Cue> cues;
+                    public String getTitle() { return title; }
+                    public void setTitle(String title) { this.title = title; }
+                    public List<Cue> getCues() { return cues; }
+                    public void setCues(List<Cue> cues) { this.cues = cues; }
+                }
+                """.formatted(pkg));
+        Files.writeString(sourceDir.resolve("Cue.java"), cueSource);
+        Files.writeString(sourceDir.resolve("Note.java"), """
+                package %s;
+                import io.github.fludakit.data.annotation.Entity;
+                import io.github.fludakit.data.annotation.Identity;
+                @Entity
+                public class Note {
+                    @Identity Long id;
+                    String text;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getText() { return text; }
+                    public void setText(String text) { this.text = text; }
+                }
+                """.formatted(pkg));
+        Files.writeString(sourceDir.resolve("Notes.java"), """
+                package %s;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                @Repository
+                public interface Notes extends CrudRepository<Note, Long> { }
+                """.formatted(pkg));
+    }
+
+    @Test
     void rejectsGetJdbcClientDeclaredWithTheWrongReturnType() throws Exception {
         // The bounds of the escape hatch. `getJdbcClient()` is recognised on NAME, ARITY and RETURN
         // TYPE together; drop the type test and this declaration would be answered with the JdbcClient

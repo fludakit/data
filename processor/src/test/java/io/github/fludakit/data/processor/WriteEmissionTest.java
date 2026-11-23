@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 import static io.github.fludakit.data.processor.ProcessorHarness.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -967,6 +968,17 @@ class WriteEmissionTest {
                 "deleteById must remove cascaded children before the root:" + System.lineSeparator() + impl);
         assertTrue(deleteByIdCascade.contains("jdbcClient .sql(DELETE_BY_ID_SQL) .param(\"id\", id) .update()"),
                 "deleteById must then delete the root row:" + System.lineSeparator() + impl);
+        // One consolidated renderer, one sink: inside one write method every child
+        // statement is emitted exactly once — a step rendered twice would write the child row twice.
+        String saveBody = bodyOf(impl, "S save(S entity) {");
+        assertEquals(1, occurrences(saveBody, ".sql(EC_INSERT_PARTS)"),
+                "the child insert must be emitted exactly once:" + System.lineSeparator() + saveBody);
+        assertEquals(1, occurrences(saveBody, ".sql(EC_UPDATE_PARTS)"),
+                "the child update must be emitted exactly once:" + System.lineSeparator() + saveBody);
+        assertEquals(1, occurrences(saveBody, ".sql(EC_IDS_PARTS)"),
+                "the existing-id read must be emitted exactly once:" + System.lineSeparator() + saveBody);
+        assertEquals(1, occurrences(saveBody, ".sql(EC_DELETE_PARTS)"),
+                "the orphan delete must be emitted exactly once:" + System.lineSeparator() + saveBody);
     }
 
     @Test

@@ -29,18 +29,18 @@ import java.util.List;
  *   <li>{@code loadCollectionName(Entity entity)} — per-collection loader (private)</li>
  * </ul>
  */
-public final class HydrationEmitter {
+final class HydrationEmitter {
 
     private final SqlDialect dialect;
 
-    public HydrationEmitter(SqlDialect dialect) {
+    HydrationEmitter(SqlDialect dialect) {
         this.dialect = dialect;
     }
 
     /**
      * Returns whether the entity has any to-many collections or composing associations that need hydration.
      */
-    public boolean hasCollectionsToHydrate(TypeDefinition entity) {
+    boolean hasCollectionsToHydrate(TypeDefinition entity) {
         for (TypeDefinition.Prop prop : entity.properties()) {
             if (prop instanceof TypeDefinition.Prop.EntityCollection) {
                 return true;
@@ -57,7 +57,7 @@ public final class HydrationEmitter {
      * Emits the {@code hydrate(Entity entity)} umbrella method that calls all per-collection loaders.
      * Returns null if there are no to-many collections.
      */
-    public MethodSpec emitHydrate(RepositoryContext ctx) {
+    MethodSpec emitHydrate(RepositoryContext ctx) {
         TypeDefinition entity = ctx.entity();
         if (!hasCollectionsToHydrate(entity)) {
             return null;
@@ -92,7 +92,7 @@ public final class HydrationEmitter {
      * Emits the {@code hydrateList(List<Entity> entities)} method for batch hydration.
      * Returns null if there are no to-many collections.
      */
-    public MethodSpec emitHydrateList(RepositoryContext ctx) {
+    MethodSpec emitHydrateList(RepositoryContext ctx) {
         TypeDefinition entity = ctx.entity();
         if (!hasCollectionsToHydrate(entity)) {
             return null;
@@ -118,7 +118,7 @@ public final class HydrationEmitter {
      * Emits per-collection loader methods for each to-many collection.
      * Returns a list of method specs (may be empty).
      */
-    public List<MethodSpec> emitCollectionLoaders(RepositoryContext ctx) {
+    List<MethodSpec> emitCollectionLoaders(RepositoryContext ctx) {
         List<MethodSpec> methods = new ArrayList<>();
         TypeDefinition entity = ctx.entity();
 

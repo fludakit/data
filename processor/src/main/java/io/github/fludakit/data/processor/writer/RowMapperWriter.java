@@ -8,6 +8,7 @@ import com.squareup.javapoet.ParameterizedTypeName;
 import com.squareup.javapoet.TypeName;
 import com.squareup.javapoet.TypeSpec;
 import io.github.fludakit.data.metadata.TypeDefinition;
+import io.github.fludakit.data.processor.TypeGraph;
 
 import javax.annotation.processing.Filer;
 import javax.lang.model.element.ElementKind;
@@ -26,8 +27,7 @@ import java.util.Set;
  *
  * <p>Eligibility: an entity is eligible only if all its props are JDBC-safe (scalars, enums,
  * or embedded value objects). Entities with {@link TypeDefinition.Prop.EntityCollection},
- * or {@link TypeDefinition.Prop.ElementCollection} are NOT eligible and {@link #write(TypeDefinition)} returns
- * {@code null}.</p>
+ * or {@link TypeDefinition.Prop.ElementCollection} are NOT eligible and get no row mapper.</p>
  */
 public final class RowMapperWriter {
 
@@ -70,12 +70,32 @@ public final class RowMapperWriter {
     }
 
     /**
-     * Generates a row mapper for the given entity or value-object type mapping.
+     * Writes a row mapper for every managed entity or aggregate, and for every value object used
+     * as an element-collection element type.
      *
-     * @param mapping the type mapping to generate a row mapper for
-     * @return the {@link ClassName} of the generated row mapper, or {@code null} if writing failed
+     * <p>No kind test: the graph's accessors already encode it. A managed node is an entity or an
+     * aggregate by construction, and an element-collection value object is a value object by
+     * construction — {@code @ValueObject} wins over every other kind in the scanner — so testing the
+     * type here could only ever be redundant. A value object whose scan was cut short by a cycle or
+     * a failure has no node at all, and is skipped rather than dereferenced.</p>
      */
-    public ClassName write(TypeDefinition mapping) {
+    public void write(TypeGraph graph) {
+        for (String fqn : graph.managedEntities()) {
+            writeRowMapper(graph.get(fqn));
+        }
+
+        for (String fqn : graph.elementCollectionValueObjects()) {
+            TypeDefinition mapping = graph.get(fqn);
+            if (mapping != null) {
+                writeRowMapper(mapping);
+            }
+        }
+    }
+
+    /**
+     * Generates a row mapper for the given entity or value-object type mapping.
+     */
+    private void writeRowMapper(TypeDefinition mapping) {
         String typeFqn = mapping.typeName();
         String packageName = packageNameOf(typeFqn);
         String simpleName = simpleNameOf(typeFqn);
@@ -101,10 +121,8 @@ public final class RowMapperWriter {
                     .writeTo(filer);
         } catch (IOException e) {
             // Silently skip — the filer will report the error
-            return null;
+            return;
         }
-
-        return ClassName.get(packageName, mapperName);
     }
 
     // ── mapRow method construction ───────────────────────────────────────

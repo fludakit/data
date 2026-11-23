@@ -45,7 +45,7 @@ import java.util.Map;
  *   <li>{@link QueryDefinition.Native} &rarr; custom {@code @Query}</li>
  * </ul>
  */
-public final class FindEmitter {
+final class FindEmitter {
 
     private static final ClassName PAGE_REQUEST = ClassName.get("jakarta.data.page", "PageRequest");
     private static final ClassName SIMPLE_PAGE = ClassName.get("io.github.fludakit.data.page", "SimplePage");
@@ -59,7 +59,7 @@ public final class FindEmitter {
     private final DeclaredType baseRepositoryType;
     private final DeclaredType repositoryOwnType;
 
-    public FindEmitter(SqlDialect dialect, Types types, DeclaredType baseRepositoryType, DeclaredType repositoryOwnType) {
+    FindEmitter(SqlDialect dialect, Types types, DeclaredType baseRepositoryType, DeclaredType repositoryOwnType) {
         this.dialect = dialect;
         this.types = types;
         this.baseRepositoryType = baseRepositoryType;
@@ -83,7 +83,7 @@ public final class FindEmitter {
      *
      * @return the method spec, or {@code null} if the method is not handled by this emitter
      */
-    public MethodSpec emit(RepositoryContext ctx, MethodContext method) {
+    MethodSpec emit(RepositoryContext ctx, MethodContext method) {
         return switch (method.query()) {
             case QueryDefinition.Native ignored -> emitCustomQuery(ctx, method);
             case QueryDefinition.Count ignored -> emitCount(ctx, method);

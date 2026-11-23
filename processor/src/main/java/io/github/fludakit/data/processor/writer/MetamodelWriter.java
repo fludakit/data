@@ -8,6 +8,7 @@ import com.squareup.javapoet.ParameterizedTypeName;
 import com.squareup.javapoet.TypeName;
 import com.squareup.javapoet.TypeSpec;
 import io.github.fludakit.data.metadata.TypeDefinition;
+import io.github.fludakit.data.processor.TypeGraph;
 import io.github.fludakit.data.processor.support.Diagnostics;
 
 import javax.annotation.processing.Filer;
@@ -89,7 +90,22 @@ public final class MetamodelWriter {
         this.diagnostics = diagnostics;
     }
 
-    public void write(TypeDefinition entity) {
+    /**
+     * Writes a static metamodel for every registered type in the graph.
+     */
+    public void write(TypeGraph graph) {
+        for (String fqn : graph.nodes()) {
+            TypeDefinition entity = graph.get(fqn);
+            if (entity != null) {
+                writeMetamodel(entity);
+            }
+        }
+    }
+
+    /**
+     * Generates the static metamodel for one type.
+     */
+    private void writeMetamodel(TypeDefinition entity) {
         String typeFqn = entity.typeName();
         String packageName = packageNameOf(typeFqn);
         String simpleName = simpleNameOf(typeFqn);

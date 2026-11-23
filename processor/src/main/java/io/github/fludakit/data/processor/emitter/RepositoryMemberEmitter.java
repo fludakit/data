@@ -2,8 +2,10 @@ package io.github.fludakit.data.processor.emitter;
 
 import com.squareup.javapoet.MethodSpec;
 import io.github.fludakit.data.metadata.TypeDefinition;
+import io.github.fludakit.data.processor.RepositoryGraph;
 import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.RepositoryContext;
+import io.github.fludakit.data.processor.support.Diagnostics;
 import io.github.fludakit.data.sql.SqlDialect;
 
 import javax.lang.model.element.TypeElement;
@@ -13,25 +15,45 @@ import javax.lang.model.util.Types;
 import java.util.List;
 
 /**
- * Orchestrates method-body emitters for one resolved repository: finders, lifecycle, writes,
- * and hydration helpers. Appends results to {@link RepositoryContext#emission()}; does not write
- * files — {@code RepositoryWriter} owns the Filer.
+ * Orchestrates method-body emitters for every resolved repository: finders, lifecycle, writes,
+ * and hydration helpers. Appends results to each repository's {@link RepositoryContext}; does not
+ * write files — {@code RepositoryWriter} owns the Filer.
  */
 public final class RepositoryMemberEmitter {
 
-    private final TypeElement repository;
     private final Types types;
     private final Elements elements;
     private final SqlDialect dialect;
+    private final Diagnostics diagnostics;
 
-    public RepositoryMemberEmitter(TypeElement repository, Types types, Elements elements, SqlDialect dialect) {
-        this.repository = repository;
+    public RepositoryMemberEmitter(Types types, Elements elements, SqlDialect dialect, Diagnostics diagnostics) {
         this.types = types;
         this.elements = elements;
         this.dialect = dialect;
+        this.diagnostics = diagnostics;
     }
 
-    public void emit(RepositoryContext ctx) {
+    /** Emits the members of every repository in the graph that has not been emitted yet. */
+    public void emit(RepositoryGraph graph) {
+        for (String fqn : graph.repositories()) {
+            RepositoryContext ctx = graph.context(fqn);
+            if (ctx == null || ctx.status() != RepositoryContext.Status.PLANNED) continue;
+            TypeElement repository = graph.repository(fqn);
+            try {
+                emitRepository(repository, ctx);
+                ctx.markEmitted();
+            } catch (RuntimeException e) {
+                ctx.markFailed();
+                String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getName();
+                diagnostics.error(
+                    "fluda-data could not generate " + repository.getSimpleName() + "_: " + msg,
+                    repository);
+            }
+        }
+    }
+
+    /** Emits one repository's members: finders, lifecycle, writes, hydration. */
+    private void emitRepository(TypeElement repository, RepositoryContext ctx) {
         DeclaredType baseRepositoryType = ctx.baseRepositoryType();
         DeclaredType repositoryOwnType = (DeclaredType) repository.asType();
         emitFinders(ctx, baseRepositoryType, repositoryOwnType);

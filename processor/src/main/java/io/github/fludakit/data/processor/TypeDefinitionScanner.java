@@ -9,7 +9,6 @@ import io.github.fludakit.data.annotation.ValueObject;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.support.Diagnostics;
 
-import javax.annotation.processing.RoundEnvironment;
 import javax.lang.model.element.Element;
 import javax.lang.model.element.ElementKind;
 import javax.lang.model.element.Modifier;
@@ -22,15 +21,14 @@ import javax.lang.model.util.Elements;
 import javax.lang.model.util.Types;
 import java.util.ArrayList;
 import java.util.HashSet;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
 /**
- * Scans {@code @Entity}, {@code @AggregateRoot}, and {@code @ValueObject} annotated types from a
- * processing round and builds {@link TypeDefinition} instances into the {@link TypeGraph} the
- * processor owns. All building happens here, during the early scan — consumers downstream read
- * the populated graph and never trigger a build.
+ * Scans {@code @Entity}, {@code @AggregateRoot}, and {@code @ValueObject} annotated types and
+ * builds {@link TypeDefinition} instances into the {@link TypeGraph} the processor owns. All
+ * building happens here, during the early scan — consumers downstream read the populated graph
+ * and never trigger a build.
  *
  * <p>Two-pass approach: the first pass builds all definitions with {@code definition=null} for unresolved
  * cross-references; the second pass fills in targets from the cache.
@@ -57,21 +55,23 @@ final class TypeDefinitionScanner {
     // ── Public API ───────────────────────────────────────────────────────
 
     /**
-     * Scans all {@code @Entity}, {@code @AggregateRoot}, and {@code @ValueObject} types in the
-     * given round, then resolves cross-references in a second pass.
+     * Scans the given {@code @Entity}, {@code @AggregateRoot}, and {@code @ValueObject} types,
+     * then resolves cross-references in a second pass.
+     *
+     * <p>A failure is reported as a diagnostic and ends the scan: the types scanned before it
+     * stay in the graph, the ones after it are left unscanned.</p>
      */
-    void scanRound(RoundEnvironment roundEnv) {
-        List<TypeElement> allTypes = new ArrayList<>();
-        Set<String> seen = new LinkedHashSet<>();
-        collectAnnotated(roundEnv, Entity.class, allTypes, seen);
-        collectAnnotated(roundEnv, AggregateRoot.class, allTypes, seen);
-        collectAnnotated(roundEnv, ValueObject.class, allTypes, seen);
+    void scanTypes(List<TypeElement> types) {
+        try {
+            for (TypeElement type : types) {
+                scanType(type);
+            }
 
-        for (TypeElement te : allTypes) {
-            scanType(te);
+            resolveAllReferences();
+        } catch (RuntimeException e) {
+            String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getName();
+            diagnostics.error("fluda-data: " + msg, null);
         }
-
-        resolveAllReferences();
     }
 
     /**
@@ -559,21 +559,6 @@ final class TypeDefinitionScanner {
         }
 
         return ec;
-    }
-
-    // ── Annotation collection helper ─────────────────────────────────────
-
-    private void collectAnnotated(RoundEnvironment roundEnv,
-                                  Class<? extends java.lang.annotation.Annotation> annotation,
-                                  List<TypeElement> out, Set<String> seen) {
-        for (Element e : roundEnv.getElementsAnnotatedWith(annotation)) {
-            if (e.getKind() != ElementKind.CLASS) continue;
-            TypeElement te = (TypeElement) e;
-            String fqn = te.getQualifiedName().toString();
-            if (seen.add(fqn)) {
-                out.add(te);
-            }
-        }
     }
 
     // ── Type utilities ───────────────────────────────────────────────────

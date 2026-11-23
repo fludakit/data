@@ -1,8 +1,8 @@
-package io.github.fludakit.data.processor.analysis;
+package io.github.fludakit.data.processor;
 
-import io.github.fludakit.data.metadata.MutationPlan;
-import io.github.fludakit.data.metadata.MutationPlan.*;
 import io.github.fludakit.data.metadata.TypeDefinition;
+import io.github.fludakit.data.processor.context.MutationPlan;
+import io.github.fludakit.data.processor.context.MutationPlan.*;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;

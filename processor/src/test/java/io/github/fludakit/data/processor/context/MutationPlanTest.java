@@ -1,10 +1,13 @@
-package io.github.fludakit.data.metadata;
+package io.github.fludakit.data.processor.context;
 
+import io.github.fludakit.data.metadata.TypeDefinition;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
-import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MutationPlanTest {
 
@@ -13,8 +16,8 @@ class MutationPlanTest {
         var plan = new MutationPlan(
                 MutationPlan.MutationType.INSERT,
                 List.of());
-        assertThat(plan.cascadeSpecs()).isEmpty();
-        assertThat(plan.hasCascade()).isFalse();
+        assertTrue(plan.cascadeSpecs().isEmpty());
+        assertFalse(plan.hasCascade());
     }
 
     @Test
@@ -26,7 +29,7 @@ class MutationPlanTest {
         var step = new MutationPlan.CascadeSpec(
                 null, ec, MutationPlan.CascadeMode.REPLACE, List.of());
         var plan = new MutationPlan(MutationPlan.MutationType.INSERT, List.of(step));
-        assertThat(plan.hasCascade()).isTrue();
+        assertTrue(plan.hasCascade());
     }
 
     @Test
@@ -43,9 +46,9 @@ class MutationPlanTest {
                 null, outerEc, MutationPlan.CascadeMode.DIFF_SYNC, List.of(innerStep));
         var plan = new MutationPlan(MutationPlan.MutationType.INSERT, List.of(outerStep));
 
-        assertThat(plan.cascadeSpecs()).hasSize(1);
-        assertThat(plan.cascadeSpecs().getFirst().children()).hasSize(1);
-        assertThat(plan.cascadeSpecs().getFirst().children().getFirst().mode())
-                .isEqualTo(MutationPlan.CascadeMode.REPLACE);
+        assertEquals(1, plan.cascadeSpecs().size());
+        assertEquals(1, plan.cascadeSpecs().getFirst().children().size());
+        assertEquals(MutationPlan.CascadeMode.REPLACE,
+                plan.cascadeSpecs().getFirst().children().getFirst().mode());
     }
 }

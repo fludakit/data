@@ -3,13 +3,13 @@ package io.github.fludakit.data.processor.emitter;
 import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.CodeBlock;
 import com.squareup.javapoet.MethodSpec;
-import io.github.fludakit.data.metadata.MutationPlan;
-import io.github.fludakit.data.metadata.MutationPlan.CascadeMode;
-import io.github.fludakit.data.metadata.MutationPlan.CascadeSpec;
 import io.github.fludakit.data.metadata.TypeDefinition;
-import io.github.fludakit.data.processor.analysis.MutationPlanAnalyzer;
+import io.github.fludakit.data.processor.MutationPlanAnalyzer;
 import io.github.fludakit.data.processor.context.MethodContext;
 import io.github.fludakit.data.processor.context.MethodContext.Operation;
+import io.github.fludakit.data.processor.context.MutationPlan;
+import io.github.fludakit.data.processor.context.MutationPlan.CascadeMode;
+import io.github.fludakit.data.processor.context.MutationPlan.CascadeSpec;
 import io.github.fludakit.data.processor.context.RepositoryContext;
 import io.github.fludakit.data.processor.support.ExceptionTranslation;
 import io.github.fludakit.data.processor.support.MethodOverrides;
@@ -33,7 +33,7 @@ import javax.lang.model.util.Types;
  * binding helpers from {@link WriteSupport}. Insert/save branch on null id at emit time — no
  * identity-generation metadata.</p>
  */
-public final class WriteEmitter {
+final class WriteEmitter {
 
     private final SqlDialect dialect;
     private final Types types;
@@ -42,7 +42,7 @@ public final class WriteEmitter {
     private final WriteSupport support;
     private final CascadeSupport cascades;
 
-    public WriteEmitter(SqlDialect dialect, Types types, Elements elements,
+    WriteEmitter(SqlDialect dialect, Types types, Elements elements,
                         DeclaredType baseRepositoryType, DeclaredType repositoryOwnType) {
         this.dialect = dialect;
         this.types = types;
@@ -64,7 +64,7 @@ public final class WriteEmitter {
      *
      * @return the method spec, or {@code null} if the method is not handled by this emitter
      */
-    public MethodSpec emit(RepositoryContext ctx, MethodContext method) {
+    MethodSpec emit(RepositoryContext ctx, MethodContext method) {
         Operation op = method.operation();
 
         if (LifecycleEmitter.isBatchLifecycleMethod(method)) {
@@ -146,7 +146,7 @@ public final class WriteEmitter {
 
         for (CascadeSpec spec : plan.cascadeSpecs()) {
             if (spec.mode() != CascadeMode.PRE_INSERT) {
-                cascades.emitPostCascadeSpec(builder, spec, ctx, entityVar);
+                cascades.emitPostCascadeSpec(spec, ctx, entityVar, builder::addStatement);
             }
         }
 
@@ -200,7 +200,7 @@ public final class WriteEmitter {
 
         for (CascadeSpec spec : plan.cascadeSpecs()) {
             if (spec.mode() != CascadeMode.PRE_INSERT) {
-                cascades.emitPostCascadeSpec(builder, spec, ctx, entityVar);
+                cascades.emitPostCascadeSpec(spec, ctx, entityVar, builder::addStatement);
             }
         }
 
@@ -233,11 +233,10 @@ public final class WriteEmitter {
         body.add(".param($S, $L.getId()).update();\n", "id", entityVar);
 
         for (CascadeSpec spec : plan.cascadeSpecs()) {
-            CodeBlock code = cascades.buildPostCascadeCodeBlock(spec, ctx, entityVar);
-            if (!code.toString().isEmpty()) {
+            cascades.emitPostCascadeSpec(spec, ctx, entityVar, code -> {
                 body.add(code);
                 body.add("\n");
-            }
+            });
         }
 
         if (returnsEntity) body.add("return $L;", entityVar);

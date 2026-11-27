@@ -1,7 +1,7 @@
 package io.github.fludakit.data.processor.context;
 
 import io.github.fludakit.data.metadata.TypeDefinition;
-import io.github.fludakit.data.processor.context.MutationPlan.MutationType;
+import io.github.fludakit.data.processor.context.CascadePlan.WriteKind;
 import io.github.fludakit.data.query.ParamBinding;
 import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.QueryDefinition;
@@ -78,13 +78,33 @@ public final class MethodContext {
         return query instanceof QueryDefinition.Native n ? n.sql() : null;
     }
 
-    /** Maps write operations to {@link MutationType}; throws for non-write ops. */
-    public MutationType mutationType() {
+    /**
+     * Base name of the generated SQL constant for this method, before
+     * {@code RepositoryContext.registerConstant} de-duplicates it.
+     * E.g. {@code findByName} &rarr; {@code FIND_BY_NAME_SQL}.
+     */
+    public String sqlConstantBase() {
+        return toSqlConstantName(name);
+    }
+
+    /**
+     * Base name of a prefixed SQL constant for this method, e.g. {@code sqlConstantBase("COUNT_")} for
+     * {@code findByName} &rarr; {@code COUNT_FIND_BY_NAME_SQL}.
+     *
+     * <p>{@code prefix + name()} is converted as ONE string: underscores are inserted from the
+     * neighbouring characters, so this is not always {@code prefix + sqlConstantBase()}.</p>
+     */
+    public String sqlConstantBase(String prefix) {
+        return toSqlConstantName(prefix + name);
+    }
+
+    /** Maps write operations to {@link WriteKind}; throws for non-write ops. */
+    public WriteKind writeKind() {
         return switch (operation) {
-            case INSERT -> MutationType.INSERT;
-            case SAVE -> MutationType.SAVE;
-            case UPDATE -> MutationType.UPDATE;
-            case DELETE -> MutationType.DELETE;
+            case INSERT -> WriteKind.INSERT;
+            case SAVE -> WriteKind.SAVE;
+            case UPDATE -> WriteKind.UPDATE;
+            case DELETE -> WriteKind.DELETE;
             default -> throw new IllegalStateException("Not a write operation: " + operation);
         };
     }
@@ -109,5 +129,25 @@ public final class MethodContext {
             return !"deleteById".equals(name);
         }
         return type.toString().equals(entity.typeName());
+    }
+
+    /** Converts a method name to a SQL constant name base. */
+    private static String toSqlConstantName(String methodName) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < methodName.length(); i++) {
+            char c = methodName.charAt(i);
+            if (Character.isUpperCase(c) && i > 0) {
+                char prev = methodName.charAt(i - 1);
+                if (Character.isLowerCase(prev)) {
+                    sb.append('_');
+                } else if (i + 1 < methodName.length()
+                        && Character.isLowerCase(methodName.charAt(i + 1))) {
+                    sb.append('_');
+                }
+            }
+            sb.append(Character.toUpperCase(c));
+        }
+        sb.append("_SQL");
+        return sb.toString();
     }
 }

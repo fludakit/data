@@ -10,11 +10,6 @@ package io.github.fludakit.data.query;
  */
 public record ParamBinding(int argIndex, String paramName, LikePattern pattern) {
 
-    /** A binding whose value is bound as-is: every operator but the substring-matching LIKE family. */
-    public ParamBinding(int argIndex, String paramName) {
-        this(argIndex, paramName, LikePattern.NONE);
-    }
-
     public ParamBinding {
         pattern = pattern == null ? LikePattern.NONE : pattern;
     }

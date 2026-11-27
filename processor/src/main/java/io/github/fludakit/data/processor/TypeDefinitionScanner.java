@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Function;
 
 /**
  * Scans {@code @Entity}, {@code @AggregateRoot}, and {@code @ValueObject} annotated types and
@@ -45,14 +46,18 @@ final class TypeDefinitionScanner {
     /** FQNs currently being built — cycle detection. */
     private final Set<String> inProgress = new HashSet<>();
 
+    /** The second pass, which re-resolves relation targets once every type has been scanned. */
+    private final ReferenceResolver references;
+
     TypeDefinitionScanner(Types types, Elements elements, Diagnostics diagnostics, TypeGraph graph) {
         this.types = types;
         this.elements = elements;
         this.diagnostics = diagnostics;
         this.graph = graph;
+        this.references = new ReferenceResolver(graph, this::get);
     }
 
-    // ── Public API ───────────────────────────────────────────────────────
+    // ── Scanning ─────────────────────────────────────────────────────────
 
     /**
      * Scans the given {@code @Entity}, {@code @AggregateRoot}, and {@code @ValueObject} types,
@@ -64,7 +69,7 @@ final class TypeDefinitionScanner {
     void scanTypes(List<TypeElement> types) {
         for (TypeElement type : types) {
             try {
-                scanType(type);
+                scanType(type, false);
             } catch (RuntimeException e) {
                 String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getName();
                 diagnostics.error("fluda-data: " + msg, type);
@@ -72,7 +77,7 @@ final class TypeDefinitionScanner {
         }
 
         try {
-            resolveAllReferences();
+            references.resolveAllReferences();
         } catch (RuntimeException e) {
             String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getName();
             diagnostics.error("fluda-data: " + msg, null);
@@ -80,17 +85,10 @@ final class TypeDefinitionScanner {
     }
 
     /**
-     * Builds the {@link TypeDefinition} for a single type. Returns the cached definition if already
-     * scanned, or {@code null} if a cycle is detected.
-     */
-    TypeDefinition scanType(TypeElement type) {
-        return scanType(type, false);
-    }
-    
-    /**
      * Builds the {@link TypeDefinition} for a single type, optionally forcing entity treatment.
+     * Returns the cached definition if already scanned, or {@code null} if a cycle is detected.
      */
-    TypeDefinition scanType(TypeElement type, boolean forceEntity) {
+    private TypeDefinition scanType(TypeElement type, boolean forceEntity) {
         String fqn = type.getQualifiedName().toString();
         if (graph.contains(fqn)) return graph.get(fqn);
         if (!inProgress.add(fqn)) return null; // cycle
@@ -115,14 +113,9 @@ final class TypeDefinitionScanner {
         String ownerSingular = type.getSimpleName().toString();
 
         // Collect props by category
-        List<TypeDefinition.Prop.Scalar> scalars = new ArrayList<>();
-        List<TypeDefinition.Prop.Embedded> embedded = new ArrayList<>();
-        List<TypeDefinition.Prop.Association> associations = new ArrayList<>();
-        List<TypeDefinition.Prop.EntityCollection> entityCollections = new ArrayList<>();
-        List<TypeDefinition.Prop.ElementCollection> elementCollections = new ArrayList<>();
+        Props props = Props.create();
         TypeDefinition.Prop.Id idProp = null;
         String annotatedIdName = null;
-        TypeDefinition.Prop.Version versionProp = null;
 
         for (Element member : elements.getAllMembers(type)) {
             if (member.getKind() != ElementKind.FIELD) continue;
@@ -139,15 +132,13 @@ final class TypeDefinitionScanner {
                 }
                 annotatedIdName = fieldName;
                 // @Identity wins over the name fallback regardless of field order
-                idProp = buildIdProp(fieldName, fieldType, fqn);
+                idProp = buildIdProp(fieldName, fieldType);
             } else if (idProp == null && isNamedId(field)) {
-                idProp = buildIdProp(fieldName, fieldType, fqn);
+                idProp = buildIdProp(fieldName, fieldType);
             } else if (isVO) {
-                classifyVOField(field, fieldName, fieldType, scalars, embedded, associations, entityCollections, elementCollections);
+                classifyVOField(field, props);
             } else {
-                classifyEntityField(field, fieldName, fieldType, tableName, ownerSingular,
-                        isAggregate, fqn, scalars, embedded, associations, entityCollections,
-                        elementCollections);
+                classifyEntityField(field, ownerSingular, isAggregate, fqn, props);
             }
         }
 
@@ -155,22 +146,24 @@ final class TypeDefinitionScanner {
         TypeDefinition definition;
         if (isAggregate) {
             if (idProp == null) {
-                throw new IllegalArgumentException("Entity " + fqn + " declares no identifier property; annotate a field with @Identity");
+                throw new IllegalArgumentException("Entity " + fqn
+                        + " declares no identifier property; annotate a field with @Identity");
             }
             definition = new TypeDefinition.Aggregate(
-                    fqn, tableName, idProp, versionProp,
-                    scalars, embedded, associations, entityCollections,
-                    elementCollections);
+                    fqn, tableName, idProp, null,
+                    props.scalars(), props.embedded(), props.associations(), props.entityCollections(),
+                    props.elementCollections());
         } else if (isEntity) {
             if (idProp == null) {
-                throw new IllegalArgumentException("Entity " + fqn + " declares no identifier property; annotate a field with @Identity");
+                throw new IllegalArgumentException("Entity " + fqn
+                        + " declares no identifier property; annotate a field with @Identity");
             }
             definition = new TypeDefinition.Entity(
-                    fqn, tableName, idProp, versionProp,
-                    scalars, embedded, associations, entityCollections,
-                    elementCollections);
+                    fqn, tableName, idProp, null,
+                    props.scalars(), props.embedded(), props.associations(), props.entityCollections(),
+                    props.elementCollections());
         } else {
-            definition = new TypeDefinition.ValueObject(fqn, scalars, embedded, associations, entityCollections, elementCollections);
+            definition = props.toValueObject(fqn);
         }
 
         graph.put(fqn, definition);
@@ -195,7 +188,7 @@ final class TypeDefinitionScanner {
         return def;
     }
 
-    private TypeDefinition.Prop.Id buildIdProp(String fieldName, TypeMirror fieldType, String ownerFqn) {
+    private TypeDefinition.Prop.Id buildIdProp(String fieldName, TypeMirror fieldType) {
         String typeFqn = typeFqn(fieldType);
         String columnName = Names.toSnakeCase(fieldName);
         return new TypeDefinition.Prop.Id(fieldName, typeFqn, columnName);
@@ -222,17 +215,35 @@ final class TypeDefinitionScanner {
                 .anyMatch(TypeDefinitionScanner::isIdentifierField);
     }
 
+    // ── Property accumulators ────────────────────────────────────────────
+
+    /**
+     * The property lists of one type under construction. Fields are classified in declaration order
+     * and appended here, so the list order is the property order of the resulting definition.
+     */
+    private record Props(List<TypeDefinition.Prop.Scalar> scalars,
+                         List<TypeDefinition.Prop.Embedded> embedded,
+                         List<TypeDefinition.Prop.Association> associations,
+                         List<TypeDefinition.Prop.EntityCollection> entityCollections,
+                         List<TypeDefinition.Prop.ElementCollection> elementCollections) {
+
+        static Props create() {
+            return new Props(new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>(),
+                    new ArrayList<>());
+        }
+
+        TypeDefinition.ValueObject toValueObject(String fqn) {
+            return new TypeDefinition.ValueObject(fqn, scalars, embedded, associations, entityCollections,
+                    elementCollections);
+        }
+    }
+
     // ── Field classification — entities / aggregate roots ────────────────
 
-    private void classifyEntityField(VariableElement field, String fieldName,
-                                     TypeMirror fieldType, String ownerTable,
-                                     String ownerSingular, boolean isAggregate,
-                                     String ownerFqn,
-                                     List<TypeDefinition.Prop.Scalar> scalars,
-                                     List<TypeDefinition.Prop.Embedded> embedded,
-                                     List<TypeDefinition.Prop.Association> associations,
-                                     List<TypeDefinition.Prop.EntityCollection> entityCollections,
-                                     List<TypeDefinition.Prop.ElementCollection> elementCollections) {
+    private void classifyEntityField(VariableElement field, String ownerSingular, boolean isAggregate,
+                                     String ownerFqn, Props props) {
+        String fieldName = field.getSimpleName().toString();
+        TypeMirror fieldType = field.asType();
         TypeElement fieldTypeElement = asTypeElement(fieldType);
 
         // List<X> — element collection or entity collection
@@ -243,12 +254,11 @@ final class TypeDefinitionScanner {
             if (elementTE == null) return;
 
             if (isVO(elementTE)) {
-                buildElementCollection(fieldName, elementType, elementTE,
-                        ownerTable, ownerSingular, elementCollections);
+                buildElementCollection(fieldName, elementTE, ownerSingular, props.elementCollections());
                 return;
             }
             if (isEntityOrAggregate(elementTE)) {
-                buildEntityCollection(fieldName, elementTE, ownerSingular, ownerFqn, isAggregate, entityCollections);
+                buildEntityCollection(fieldName, elementTE, ownerSingular, ownerFqn, props.entityCollections());
                 return;
             }
             return;
@@ -258,20 +268,20 @@ final class TypeDefinitionScanner {
         if (fieldTypeElement != null) {
             if (isVO(fieldTypeElement)) {
                 TypeDefinition voDef = buildEmbeddedVO(fieldTypeElement);
-                embedded.add(new TypeDefinition.Prop.Embedded(fieldName,
+                props.embedded().add(new TypeDefinition.Prop.Embedded(fieldName,
                         fieldTypeElement.getQualifiedName().toString(),
                         (TypeDefinition.ValueObject) voDef, null));
                 return;
             }
             if (field.getAnnotation(Association.class) != null) {
                 String targetFqn = fieldTypeElement.getQualifiedName().toString();
-                addAssociation(associations, fieldName, targetFqn, get(targetFqn), false, false);
+                addAssociation(props.associations(), fieldName, targetFqn, get(targetFqn), false);
                 return;
             }
             if (isAggregate && isEntityOrAggregate(fieldTypeElement)) {
                 String targetFqn = fieldTypeElement.getQualifiedName().toString();
                 // Aggregate-to-aggregate/entity reference: treat as COMPOSITION by default
-                addAssociation(associations, fieldName, targetFqn, get(targetFqn), false, true);
+                addAssociation(props.associations(), fieldName, targetFqn, get(targetFqn), true);
                 return;
             }
             // Bare entity/aggregate reference on non-aggregate owner - treat as association
@@ -279,21 +289,21 @@ final class TypeDefinitionScanner {
                 String targetFqn = fieldTypeElement.getQualifiedName().toString();
                 TypeDefinition target = get(targetFqn);
                 if (target instanceof TypeDefinition.Entity entityTarget) {
-                    associations.add(new TypeDefinition.Prop.Association(fieldName,
+                    props.associations().add(new TypeDefinition.Prop.Association(fieldName,
                             targetFqn, entityTarget, Names.fkColumn(fieldName), false, false, null));
                 } else if (target instanceof TypeDefinition.Aggregate aggregateTarget) {
                     // Detect back-reference: aggregate has EntityCollection pointing to owner
                     boolean isBackRef = aggregateTarget.entityCollections().stream()
                             .anyMatch(ec -> ec.javaType().equals(ownerFqn));
-                    
+
                     // Treat aggregate target as entity for FK purposes
                     // Create a synthetic Entity view of the Aggregate for the association
                     TypeDefinition.Entity entityView = aggregateTarget.asEntity();
-                    associations.add(new TypeDefinition.Prop.Association(fieldName,
+                    props.associations().add(new TypeDefinition.Prop.Association(fieldName,
                             targetFqn, entityView, Names.fkColumn(fieldName), isBackRef, false, null));
                 } else if (target == null) {
                     // Target not available yet - add placeholder with null target for resolution pass
-                    associations.add(new TypeDefinition.Prop.Association(fieldName,
+                    props.associations().add(new TypeDefinition.Prop.Association(fieldName,
                             targetFqn, null, Names.fkColumn(fieldName), false, false, null));
                     // Track for resolution pass
                     graph.deferTarget(ownerFqn, fieldName, targetFqn);
@@ -303,22 +313,19 @@ final class TypeDefinitionScanner {
         }
 
         // Default: scalar
-        scalars.add(new TypeDefinition.Prop.Scalar(fieldName, typeFqn(fieldType),
+        props.scalars().add(new TypeDefinition.Prop.Scalar(fieldName, typeFqn(fieldType),
                 Names.toSnakeCase(fieldName), true));
     }
 
     // ── Field classification — value objects ─────────────────────────────
 
-    private void classifyVOField(VariableElement field, String fieldName, TypeMirror fieldType,
-                                 List<TypeDefinition.Prop.Scalar> scalars,
-                                 List<TypeDefinition.Prop.Embedded> embedded,
-                                 List<TypeDefinition.Prop.Association> associations,
-                                 List<TypeDefinition.Prop.EntityCollection> entityCollections,
-                                 List<TypeDefinition.Prop.ElementCollection> elementCollections) {
+    private void classifyVOField(VariableElement field, Props props) {
+        String fieldName = field.getSimpleName().toString();
+        TypeMirror fieldType = field.asType();
         TypeElement fieldTypeElement = asTypeElement(fieldType);
         if (fieldTypeElement != null && isVO(fieldTypeElement)) {
             TypeDefinition voDef = buildEmbeddedVO(fieldTypeElement);
-            embedded.add(new TypeDefinition.Prop.Embedded(fieldName,
+            props.embedded().add(new TypeDefinition.Prop.Embedded(fieldName,
                     fieldTypeElement.getQualifiedName().toString(),
                     (TypeDefinition.ValueObject) voDef, null));
             return;
@@ -335,7 +342,7 @@ final class TypeDefinitionScanner {
                         String targetFqn = elementTE.getQualifiedName().toString();
                         TypeDefinition target = get(targetFqn);
                         if (target instanceof TypeDefinition.Entity entityTarget) {
-                            entityCollections.add(new TypeDefinition.Prop.EntityCollection(fieldName,
+                            props.entityCollections().add(new TypeDefinition.Prop.EntityCollection(fieldName,
                                     targetFqn, entityTarget, Names.fkColumn(fieldName), null));
                         }
                         return;
@@ -369,7 +376,7 @@ final class TypeDefinitionScanner {
                         targetType = graph.get(elementFqn);
                     }
                     if (targetType instanceof TypeDefinition.ValueObject vo) {
-                        elementCollections.add(new TypeDefinition.Prop.ElementCollection(fieldName,
+                        props.elementCollections().add(new TypeDefinition.Prop.ElementCollection(fieldName,
                                 elementFqn, vo, Names.childTable(elementTE.getSimpleName().toString()),
                                 Names.fkColumn(fieldName)));
                     } else {
@@ -384,12 +391,12 @@ final class TypeDefinitionScanner {
         // Handle single-valued entity/aggregate references in VOs
         if (fieldTypeElement != null && isEntityOrAggregate(fieldTypeElement)) {
             String targetFqn = fieldTypeElement.getQualifiedName().toString();
-            addAssociation(associations, fieldName, targetFqn, get(targetFqn), false, false);
+            addAssociation(props.associations(), fieldName, targetFqn, get(targetFqn), false);
             return;
         }
         
         // Default: scalar
-        scalars.add(new TypeDefinition.Prop.Scalar(fieldName, typeFqn(fieldType),
+        props.scalars().add(new TypeDefinition.Prop.Scalar(fieldName, typeFqn(fieldType),
                 Names.toSnakeCase(fieldName), true));
     }
 
@@ -398,11 +405,11 @@ final class TypeDefinitionScanner {
      * flattened to its FK-only entity view). No-op when the target is unresolved.
      */
     private void addAssociation(List<TypeDefinition.Prop.Association> associations, String fieldName,
-                                String targetFqn, TypeDefinition target, boolean backReference, boolean composition) {
+                                String targetFqn, TypeDefinition target, boolean composition) {
         TypeDefinition.Entity entityTarget = target != null ? target.asEntity() : null;
         if (entityTarget != null) {
             associations.add(new TypeDefinition.Prop.Association(fieldName, targetFqn, entityTarget,
-                    Names.fkColumn(fieldName), backReference, composition, null));
+                    Names.fkColumn(fieldName), false, composition, null));
         }
     }
 
@@ -415,21 +422,15 @@ final class TypeDefinitionScanner {
             return new TypeDefinition.ValueObject(voFqn, List.of(), List.of(), List.of(), List.of(), List.of());
         }
         try {
-            List<TypeDefinition.Prop.Scalar> scalars = new ArrayList<>();
-            List<TypeDefinition.Prop.Embedded> embedded = new ArrayList<>();
-            List<TypeDefinition.Prop.Association> associations = new ArrayList<>();
-            List<TypeDefinition.Prop.EntityCollection> entityCollections = new ArrayList<>();
-            List<TypeDefinition.Prop.ElementCollection> elementCollections = new ArrayList<>();
-            scanVOProps(voType, scalars, embedded, associations, entityCollections, elementCollections);
-            return new TypeDefinition.ValueObject(voFqn, scalars, embedded, associations, entityCollections, elementCollections);
+            Props props = Props.create();
+            scanVOProps(voType, props);
+            return props.toValueObject(voFqn);
         } finally {
             inProgress.remove(voFqn);
         }
     }
 
-    private void buildElementCollection(String fieldName, TypeMirror elementType,
-                                        TypeElement elementTE, String ownerTable,
-                                        String ownerSingular,
+    private void buildElementCollection(String fieldName, TypeElement elementTE, String ownerSingular,
                                         List<TypeDefinition.Prop.ElementCollection> elementCollections) {
         String voFqn = elementTE.getQualifiedName().toString();
         String elementTypeName = elementTE.getSimpleName().toString();
@@ -453,11 +454,7 @@ final class TypeDefinitionScanner {
                 voFqn, (TypeDefinition.ValueObject) targetType, childTable, parentFkCol));
     }
 
-    private void scanVOProps(TypeElement voType, List<TypeDefinition.Prop.Scalar> scalars,
-                             List<TypeDefinition.Prop.Embedded> embedded,
-                             List<TypeDefinition.Prop.Association> associations,
-                             List<TypeDefinition.Prop.EntityCollection> entityCollections,
-                             List<TypeDefinition.Prop.ElementCollection> elementCollections) {
+    private void scanVOProps(TypeElement voType, Props props) {
         for (Element member : elements.getAllMembers(voType)) {
             if (member.getKind() != ElementKind.FIELD) continue;
             if (member.getModifiers().contains(Modifier.STATIC)) continue;
@@ -465,9 +462,7 @@ final class TypeDefinitionScanner {
             VariableElement field = (VariableElement) member;
             if (field.getAnnotation(Identity.class) != null) continue;
 
-            String fieldName = field.getSimpleName().toString();
-            TypeMirror fieldType = field.asType();
-            classifyVOField(field, fieldName, fieldType, scalars, embedded, associations, entityCollections, elementCollections);
+            classifyVOField(field, props);
         }
     }
 
@@ -475,7 +470,6 @@ final class TypeDefinitionScanner {
 
     private void buildEntityCollection(String fieldName, TypeElement elementTE,
                                        String ownerSingular, String ownerFqn,
-                                       boolean isAggregate,
                                        List<TypeDefinition.Prop.EntityCollection> entityCollections) {
         String targetFqn = elementTE.getQualifiedName().toString();
         TypeDefinition target = get(targetFqn);
@@ -495,132 +489,151 @@ final class TypeDefinitionScanner {
 
     // ── Resolution pass ──────────────────────────────────────────────────
 
-    private void resolveAllReferences() {
-        List<String> keys = new ArrayList<>(graph.nodes());
-        for (String fqn : keys) {
-            TypeDefinition definition = graph.get(fqn);
-            TypeDefinition resolved = resolveDefinition(definition, fqn);
-            if (resolved != definition) {
-                graph.put(fqn, resolved);
-            }
-        }
-    }
+    /**
+     * The second pass: rebuilds every entity and aggregate whose to-one or to-many relation targets
+     * can be resolved against the graph now that all types are scanned. Targets are looked up through
+     * the scanner's {@code get}, which can still scan a type on demand and so shares its cycle
+     * detection.
+     */
+    private static final class ReferenceResolver {
 
-    private TypeDefinition resolveDefinition(TypeDefinition definition, String ownerFqn) {
-        List<TypeDefinition.Prop.Association> associations;
-        List<TypeDefinition.Prop.EntityCollection> entityCollections;
-        if (definition instanceof TypeDefinition.Entity entity) {
-            associations = entity.associations();
-            entityCollections = entity.entityCollections();
-        } else if (definition instanceof TypeDefinition.Aggregate aggregate) {
-            associations = aggregate.associations();
-            entityCollections = aggregate.entityCollections();
-        } else {
-            return definition;
+        private final TypeGraph graph;
+        private final Function<String, TypeDefinition> lookup;
+
+        ReferenceResolver(TypeGraph graph, Function<String, TypeDefinition> lookup) {
+            this.graph = graph;
+            this.lookup = lookup;
         }
 
-        List<TypeDefinition.Prop.Association> resolvedAssociations = new ArrayList<>();
-        boolean changed = false;
-        for (TypeDefinition.Prop.Association assoc : associations) {
-            TypeDefinition.Prop.Association resolved = resolveAssociation(assoc, ownerFqn);
-            resolvedAssociations.add(resolved);
-            if (resolved != assoc) changed = true;
-        }
-
-        List<TypeDefinition.Prop.EntityCollection> resolvedEntityCollections = new ArrayList<>();
-        for (TypeDefinition.Prop.EntityCollection ec : entityCollections) {
-            TypeDefinition.Prop.EntityCollection resolved = resolveEntityCollection(ec, ownerFqn);
-            resolvedEntityCollections.add(resolved);
-            if (resolved != ec) changed = true;
-        }
-
-        if (!changed) {
-            return definition;
-        }
-
-        return definition.accept(new TypeDefinition.Visitor<>() {
-            @Override
-            public TypeDefinition visitEntity(TypeDefinition.Entity entity) {
-                return new TypeDefinition.Entity(
-                        entity.typeName(), entity.tableName(), entity.id(), entity.version(),
-                        entity.scalars(), entity.embedded(), resolvedAssociations, resolvedEntityCollections,
-                        entity.elementCollections());
-            }
-
-            @Override
-            public TypeDefinition visitAggregate(TypeDefinition.Aggregate aggregate) {
-                return new TypeDefinition.Aggregate(
-                        aggregate.typeName(), aggregate.tableName(), aggregate.id(),
-                        aggregate.version(), aggregate.scalars(), aggregate.embedded(),
-                        resolvedAssociations, resolvedEntityCollections, aggregate.elementCollections());
-            }
-
-            @Override
-            public TypeDefinition visitValueObject(TypeDefinition.ValueObject valueObject) {
-                return valueObject;
-            }
-        });
-    }
-
-    private TypeDefinition.Prop.Association resolveAssociation(TypeDefinition.Prop.Association assoc, String ownerFqn) {
-        // Get the original target type from javaType (not the synthetic Entity view)
-        TypeDefinition originalTarget = get(assoc.javaType());
-        
-        if (originalTarget == null) {
-            String targetFqn = graph.pendingTarget(ownerFqn, assoc.name());
-            if (targetFqn != null) {
-                originalTarget = get(targetFqn);
+        void resolveAllReferences() {
+            List<String> keys = new ArrayList<>(graph.nodes());
+            for (String fqn : keys) {
+                TypeDefinition definition = graph.get(fqn);
+                TypeDefinition resolved = resolveDefinition(definition, fqn);
+                if (resolved != definition) {
+                    graph.put(fqn, resolved);
+                }
             }
         }
 
-        // Detect back-reference: if original target is Aggregate with EntityCollection pointing to owner
-        boolean isBackRef = assoc.backReference();
-        if (!isBackRef && originalTarget instanceof TypeDefinition.Aggregate aggregateTarget) {
-            isBackRef = aggregateTarget.entityCollections().stream()
-                    .anyMatch(ec -> ec.javaType().equals(ownerFqn));
-        }
-
-        if (originalTarget instanceof TypeDefinition.Entity entityTarget) {
-            return new TypeDefinition.Prop.Association(assoc.name(), assoc.javaType(),
-                    entityTarget, assoc.fkColumn(), isBackRef, assoc.composition(), assoc.cascade());
-        } else if (originalTarget instanceof TypeDefinition.Aggregate aggregateTarget) {
-            // Create synthetic Entity view if needed
-            TypeDefinition.Entity entityView;
-            if (assoc.definition() != null) {
-                entityView = assoc.definition();
+        private TypeDefinition resolveDefinition(TypeDefinition definition, String ownerFqn) {
+            List<TypeDefinition.Prop.Association> associations;
+            List<TypeDefinition.Prop.EntityCollection> entityCollections;
+            if (definition instanceof TypeDefinition.Entity entity) {
+                associations = entity.associations();
+                entityCollections = entity.entityCollections();
+            } else if (definition instanceof TypeDefinition.Aggregate aggregate) {
+                associations = aggregate.associations();
+                entityCollections = aggregate.entityCollections();
             } else {
-                entityView = aggregateTarget.asEntity();
+                return definition;
             }
-            return new TypeDefinition.Prop.Association(assoc.name(), assoc.javaType(),
-                    entityView, assoc.fkColumn(), isBackRef, assoc.composition(), assoc.cascade());
-        }
 
-        return assoc;
-    }
-
-    private TypeDefinition.Prop.EntityCollection resolveEntityCollection(TypeDefinition.Prop.EntityCollection ec, String ownerFqn) {
-        if (ec.definition() != null) return ec;
-
-        // Try to get target from javaType (fully qualified class name)
-        TypeDefinition target = get(ec.javaType());
-        if (target == null) {
-            String targetFqn = graph.pendingTarget(ownerFqn, ec.name());
-            if (targetFqn != null) {
-                target = get(targetFqn);
+            List<TypeDefinition.Prop.Association> resolvedAssociations = new ArrayList<>();
+            boolean changed = false;
+            for (TypeDefinition.Prop.Association assoc : associations) {
+                TypeDefinition.Prop.Association resolved = resolveAssociation(assoc, ownerFqn);
+                resolvedAssociations.add(resolved);
+                if (resolved != assoc) changed = true;
             }
+
+            List<TypeDefinition.Prop.EntityCollection> resolvedEntityCollections = new ArrayList<>();
+            for (TypeDefinition.Prop.EntityCollection ec : entityCollections) {
+                TypeDefinition.Prop.EntityCollection resolved = resolveEntityCollection(ec, ownerFqn);
+                resolvedEntityCollections.add(resolved);
+                if (resolved != ec) changed = true;
+            }
+
+            if (!changed) {
+                return definition;
+            }
+
+            return definition.accept(new TypeDefinition.Visitor<>() {
+                @Override
+                public TypeDefinition visitEntity(TypeDefinition.Entity entity) {
+                    return new TypeDefinition.Entity(
+                            entity.typeName(), entity.tableName(), entity.id(), entity.version(),
+                            entity.scalars(), entity.embedded(), resolvedAssociations, resolvedEntityCollections,
+                            entity.elementCollections());
+                }
+
+                @Override
+                public TypeDefinition visitAggregate(TypeDefinition.Aggregate aggregate) {
+                    return new TypeDefinition.Aggregate(
+                            aggregate.typeName(), aggregate.tableName(), aggregate.id(),
+                            aggregate.version(), aggregate.scalars(), aggregate.embedded(),
+                            resolvedAssociations, resolvedEntityCollections, aggregate.elementCollections());
+                }
+
+                @Override
+                public TypeDefinition visitValueObject(TypeDefinition.ValueObject valueObject) {
+                    return valueObject;
+                }
+            });
         }
 
-        if (target instanceof TypeDefinition.Entity entityTarget) {
-            return new TypeDefinition.Prop.EntityCollection(ec.name(), ec.javaType(),
-                    entityTarget, ec.fkColumn(), ec.mappedBy());
+        private TypeDefinition.Prop.Association resolveAssociation(TypeDefinition.Prop.Association assoc,
+                                                                   String ownerFqn) {
+            // Get the original target type from javaType (not the synthetic Entity view)
+            TypeDefinition originalTarget = lookup.apply(assoc.javaType());
+
+            if (originalTarget == null) {
+                String targetFqn = graph.pendingTarget(ownerFqn, assoc.name());
+                if (targetFqn != null) {
+                    originalTarget = lookup.apply(targetFqn);
+                }
+            }
+
+            // Detect back-reference: if original target is Aggregate with EntityCollection pointing to owner
+            boolean isBackRef = assoc.backReference();
+            if (!isBackRef && originalTarget instanceof TypeDefinition.Aggregate aggregateTarget) {
+                isBackRef = aggregateTarget.entityCollections().stream()
+                        .anyMatch(ec -> ec.javaType().equals(ownerFqn));
+            }
+
+            if (originalTarget instanceof TypeDefinition.Entity entityTarget) {
+                return new TypeDefinition.Prop.Association(assoc.name(), assoc.javaType(),
+                        entityTarget, assoc.fkColumn(), isBackRef, assoc.composition(), assoc.cascade());
+            } else if (originalTarget instanceof TypeDefinition.Aggregate aggregateTarget) {
+                // Create synthetic Entity view if needed
+                TypeDefinition.Entity entityView;
+                if (assoc.definition() != null) {
+                    entityView = assoc.definition();
+                } else {
+                    entityView = aggregateTarget.asEntity();
+                }
+                return new TypeDefinition.Prop.Association(assoc.name(), assoc.javaType(),
+                        entityView, assoc.fkColumn(), isBackRef, assoc.composition(), assoc.cascade());
+            }
+
+            return assoc;
         }
 
-        return ec;
+        private TypeDefinition.Prop.EntityCollection resolveEntityCollection(TypeDefinition.Prop.EntityCollection ec,
+                                                                             String ownerFqn) {
+            if (ec.definition() != null) return ec;
+
+            // Try to get target from javaType (fully qualified class name)
+            TypeDefinition target = lookup.apply(ec.javaType());
+            if (target == null) {
+                String targetFqn = graph.pendingTarget(ownerFqn, ec.name());
+                if (targetFqn != null) {
+                    target = lookup.apply(targetFqn);
+                }
+            }
+
+            if (target instanceof TypeDefinition.Entity entityTarget) {
+                return new TypeDefinition.Prop.EntityCollection(ec.name(), ec.javaType(),
+                        entityTarget, ec.fkColumn(), ec.mappedBy());
+            }
+
+            return ec;
+        }
     }
 
     // ── Type utilities ───────────────────────────────────────────────────
 
-    private TypeElement asTypeElement(TypeMirror type) {
+    private static TypeElement asTypeElement(TypeMirror type) {
         if (type == null) return null;
         if (type.getKind() == TypeKind.NONE) return null;
         TypeMirror unwrapped = type;
@@ -630,23 +643,23 @@ final class TypeDefinitionScanner {
         return element instanceof TypeElement te ? te : null;
     }
 
-    private boolean isEntityOrAggregate(TypeElement te) {
+    private static boolean isEntityOrAggregate(TypeElement te) {
         return te.getAnnotation(Entity.class) != null
                 || te.getAnnotation(AggregateRoot.class) != null;
     }
 
-    private boolean isVO(TypeElement te) {
+    private static boolean isVO(TypeElement te) {
         return te.getAnnotation(ValueObject.class) != null;
     }
 
-    private boolean isList(TypeMirror type) {
+    private static boolean isList(TypeMirror type) {
         if (type.getKind() != TypeKind.DECLARED) return false;
         DeclaredType dt = (DeclaredType) type;
         TypeElement te = (TypeElement) dt.asElement();
         return te.getQualifiedName().contentEquals("java.util.List");
     }
 
-    private TypeMirror elementTypeOf(TypeMirror listType) {
+    private static TypeMirror elementTypeOf(TypeMirror listType) {
         DeclaredType dt = (DeclaredType) listType;
         List<? extends TypeMirror> typeArgs = dt.getTypeArguments();
         if (typeArgs.isEmpty()) return null;

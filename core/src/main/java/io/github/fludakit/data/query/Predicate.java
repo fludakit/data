@@ -19,11 +19,6 @@ public record Predicate(String property, Operator operator, String param, Connec
         return new Predicate(property, operator, param, Connector.AND, false);
     }
 
-    /** A predicate with an explicit connector; a {@code null} connector means {@code AND}. */
-    public static Predicate of(String property, Operator operator, String param, Connector connector) {
-        return new Predicate(property, operator, param, connector == null ? Connector.AND : connector, false);
-    }
-
     /** A predicate with an explicit connector and case sensitivity. */
     public static Predicate of(String property, Operator operator, String param, Connector connector,
                                boolean ignoreCase) {

@@ -12,11 +12,11 @@ public final class Diagnostics {
     }
 
     public void error(String message, Element element) {
-        messager.printMessage(Diagnostic.Kind.ERROR, message, element);
-    }
-
-    public void warn(String message, Element element) {
-        messager.printMessage(Diagnostic.Kind.WARNING, message, element);
+        if (element != null) {
+            messager.printMessage(Diagnostic.Kind.ERROR, message, element);
+        } else {
+            messager.printMessage(Diagnostic.Kind.ERROR, message);
+        }
     }
 
     public void note(String message, Element element) {

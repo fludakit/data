@@ -42,12 +42,10 @@ final class HydrationEmitter {
      */
     boolean hasCollectionsToHydrate(TypeDefinition entity) {
         for (TypeDefinition.Prop prop : entity.properties()) {
-            if (prop instanceof TypeDefinition.Prop.EntityCollection) {
+            if (prop instanceof TypeDefinition.Prop.EntityCollection || prop instanceof TypeDefinition.Prop.ElementCollection) {
                 return true;
-            } else if (prop instanceof TypeDefinition.Prop.ElementCollection) {
+            } else if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.composition()) {
                 return true;
-            } else if (prop instanceof TypeDefinition.Prop.Association assoc) {
-                if (assoc.composition()) return true;
             }
         }
         return false;
@@ -77,10 +75,8 @@ final class HydrationEmitter {
                 body.add("load$L(entity);\n", capitalize(ec.name()));
             } else if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
                 body.add("load$L(entity);\n", capitalize(ec.name()));
-            } else if (prop instanceof TypeDefinition.Prop.Association assoc) {
-                if (assoc.composition()) {
-                    body.add("load$L(entity);\n", capitalize(assoc.name()));
-                }
+            } else if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.composition()) {
+                body.add("load$L(entity);\n", capitalize(assoc.name()));
             }
         }
 
@@ -123,23 +119,16 @@ final class HydrationEmitter {
         TypeDefinition entity = ctx.entity();
 
         for (TypeDefinition.Prop prop : entity.properties()) {
+            MethodSpec loader = null;
             if (prop instanceof TypeDefinition.Prop.EntityCollection ec) {
-                MethodSpec loader = emitEntityCollectionLoader(ctx, ec);
-                if (loader != null) {
-                    methods.add(loader);
-                }
+                loader = emitEntityCollectionLoader(ctx, ec);
             } else if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
-                MethodSpec loader = emitElementCollectionLoader(ctx, ec);
-                if (loader != null) {
-                    methods.add(loader);
-                }
-            } else if (prop instanceof TypeDefinition.Prop.Association assoc) {
-                if (assoc.composition()) {
-                    MethodSpec loader = emitCompositionAssociationLoader(ctx, assoc);
-                    if (loader != null) {
-                        methods.add(loader);
-                    }
-                }
+                loader = emitElementCollectionLoader(ctx, ec);
+            } else if (prop instanceof TypeDefinition.Prop.Association assoc && assoc.composition()) {
+                loader = emitCompositionAssociationLoader(ctx, assoc);
+            }
+            if (loader != null) {
+                methods.add(loader);
             }
         }
 

@@ -1,5 +1,6 @@
 package io.github.fludakit.data.sql;
 
+import io.github.fludakit.data.metadata.TypeDefinition;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -14,12 +15,18 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class SqlBuilderSeekClauseTest {
 
+    /** The seek assembly never reads the type model; any mapped entity will do. */
+    private static final TypeDefinition WIDGET = new TypeDefinition.Entity(
+            "demo.Widget", "widget",
+            new TypeDefinition.Prop.Id("id", "Long", "id"),
+            null, List.of(), List.of(), List.of(), List.of(), List.of());
+
     private static SqlBuilder builder() {
-        return new SqlBuilder(H2Dialect.INSTANCE, SqlFormat.COMPACT);
+        return new SqlBuilder(WIDGET);
     }
 
     private static String seek(List<String> terms, List<Boolean> ascending, boolean forward) {
-        return builder().seekClause(terms, ascending, forward);
+        return SeekClause.render(terms, ascending, forward);
     }
 
     @Test

@@ -9,14 +9,15 @@ import com.squareup.javapoet.TypeName;
 import com.squareup.javapoet.TypeSpec;
 import io.github.fludakit.data.metadata.TypeDefinition;
 import io.github.fludakit.data.processor.TypeGraph;
+import io.github.fludakit.data.processor.support.Diagnostics;
 
 import javax.annotation.processing.Filer;
 import javax.lang.model.element.ElementKind;
 import javax.lang.model.element.Modifier;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.util.Elements;
-import javax.lang.model.util.Types;
 import java.io.IOException;
+import java.util.HashSet;
 import java.util.Set;
 
 /**
@@ -51,14 +52,17 @@ public final class RowMapperWriter {
             "java.lang.Number"
     );
 
-    private final Types types;
     private final Elements elements;
     private final Filer filer;
+    private final Diagnostics diagnostics;
 
-    public RowMapperWriter(Types types, Elements elements, Filer filer) {
-        this.types = types;
+    /** FQNs of mappers already written in this compilation; the TypeGraph outlives a single round. */
+    private final Set<String> written = new HashSet<>();
+
+    public RowMapperWriter(Elements elements, Filer filer, Diagnostics diagnostics) {
         this.elements = elements;
         this.filer = filer;
+        this.diagnostics = diagnostics;
     }
 
     /**
@@ -97,6 +101,9 @@ public final class RowMapperWriter {
      */
     private void writeRowMapper(TypeDefinition mapping) {
         String typeFqn = mapping.typeName();
+        if (!written.add(typeFqn)) {
+            return; // already generated in an earlier round
+        }
         String packageName = packageNameOf(typeFqn);
         String simpleName = simpleNameOf(typeFqn);
         String mapperName = simpleName + "RowMapper";
@@ -120,8 +127,8 @@ public final class RowMapperWriter {
                     .build()
                     .writeTo(filer);
         } catch (IOException e) {
-            // Silently skip — the filer will report the error
-            return;
+            diagnostics.error("fluda-data could not write " + packageName + "." + mapperName
+                    + ": " + e.getMessage(), elements.getTypeElement(typeFqn));
         }
     }
 
@@ -140,29 +147,38 @@ public final class RowMapperWriter {
                 .addParameter(int.class, "rowNum")
                 .addException(ClassName.get("java.sql", "SQLException"));
 
+        // Column labels present in this result set, used to probe optional JOIN / FK columns.
+        // Any SQLException from the driver propagates to the caller (mapRow throws SQLException).
+        if (hasAssociation(mapping)) {
+            method.addStatement("$T<$T> columnLabels = new $T<>()", Set.class, String.class, HashSet.class);
+            method.addStatement("$T metaData = rs.getMetaData()", ClassName.get("java.sql", "ResultSetMetaData"));
+            method.beginControlFlow("for (int i = 1, n = metaData.getColumnCount(); i <= n; i++)");
+            method.addStatement("columnLabels.add(metaData.getColumnLabel(i))");
+            method.endControlFlow();
+        }
+
         // Create entity instance
         method.addStatement("$T $L = new $T()", entityType, entityVar, entityType);
 
         // Read ID column first (if present)
         TypeDefinition.Prop.Id id = mapping.id();
         if (id != null) {
-            addScalarRead(method, entityVar, "id", id.columnName(), id.javaType(), "rs");
+            addScalarRead(method, entityVar, "id", id.columnName(), id.javaType());
         }
 
         // Read scalar columns
         for (TypeDefinition.Prop prop : mapping.properties()) {
             if (prop instanceof TypeDefinition.Prop.Scalar s) {
-                addScalarRead(method, entityVar, s.name(), s.columnName(), s.javaType(), "rs");
+                addScalarRead(method, entityVar, s.name(), s.columnName(), s.javaType());
             }
         }
 
         // Read relations (ASSOCIATION FK and EMBEDDED)
         for (TypeDefinition.Prop prop : mapping.properties()) {
             if (prop instanceof TypeDefinition.Prop.Association assoc) {
-                addAssociationRead(method, entityVar, assoc, "rs");
+                addAssociationRead(method, entityVar, assoc);
             } else if (prop instanceof TypeDefinition.Prop.Embedded embedded) {
-                addEmbeddedRead(method, entityVar, embedded.name(),
-                        "", embedded.definition(), "rs");
+                addEmbeddedRead(method, entityVar, embedded.name(), embedded.definition());
             }
         }
 
@@ -172,77 +188,74 @@ public final class RowMapperWriter {
         return method.build();
     }
 
-    // ── Relation reading ─────────────────────────────────────────────────
-
-    private void addRelationRead(MethodSpec.Builder method, String entityVar,
-                                  TypeDefinition.Prop rel, String columnPrefix, String rsVar) {
-        if (rel instanceof TypeDefinition.Prop.Association assoc) {
-            addAssociationRead(method, entityVar, assoc, rsVar);
-        } else if (rel instanceof TypeDefinition.Prop.Embedded embedded) {
-            addEmbeddedRead(method, entityVar, embedded.name(),
-                    columnPrefix, embedded.definition(), rsVar);
+    /** Whether the mapping (or any embedded value object, recursively) has a to-one association. */
+    private static boolean hasAssociation(TypeDefinition mapping) {
+        for (TypeDefinition.Prop prop : mapping.properties()) {
+            if (prop instanceof TypeDefinition.Prop.Association) return true;
+            if (prop instanceof TypeDefinition.Prop.Embedded e && hasAssociation(e.definition())) return true;
         }
+        return false;
     }
 
     // ── Scalar reading ───────────────────────────────────────────────────
 
     private void addScalarRead(MethodSpec.Builder method, String entityVar,
-                               String fieldName, String column, String typeFqn, String rsVar) {
-        CodeBlock readExpr = buildReadExpression(column, typeFqn, rsVar);
+                               String fieldName, String column, String typeFqn) {
+        CodeBlock readExpr = buildReadExpression(column, typeFqn);
         method.addStatement("$L.$L($L)", entityVar, setterName(fieldName), readExpr);
     }
 
     /**
      * Builds the code expression for reading a single column value from the ResultSet.
      */
-    private CodeBlock buildReadExpression(String column, String typeFqn, String rsVar) {
+    private CodeBlock buildReadExpression(String column, String typeFqn) {
         // Primitive types
         switch (typeFqn) {
             case "boolean":
-                return CodeBlock.of("$L.getBoolean($S)", rsVar, column);
+                return CodeBlock.of("rs.getBoolean($S)", column);
             case "byte":
-                return CodeBlock.of("$L.getByte($S)", rsVar, column);
+                return CodeBlock.of("rs.getByte($S)", column);
             case "short":
-                return CodeBlock.of("$L.getShort($S)", rsVar, column);
+                return CodeBlock.of("rs.getShort($S)", column);
             case "int":
-                return CodeBlock.of("$L.getInt($S)", rsVar, column);
+                return CodeBlock.of("rs.getInt($S)", column);
             case "long":
-                return CodeBlock.of("$L.getLong($S)", rsVar, column);
+                return CodeBlock.of("rs.getLong($S)", column);
             case "float":
-                return CodeBlock.of("$L.getFloat($S)", rsVar, column);
+                return CodeBlock.of("rs.getFloat($S)", column);
             case "double":
-                return CodeBlock.of("$L.getDouble($S)", rsVar, column);
+                return CodeBlock.of("rs.getDouble($S)", column);
             case "char":
                 // char is not directly supported by ResultSet; read as String and take first char
-                return CodeBlock.of("$L.getString($S).charAt(0)", rsVar, column);
+                return CodeBlock.of("rs.getString($S).charAt(0)", column);
         }
 
         // String
         if ("java.lang.String".equals(typeFqn)) {
-            return CodeBlock.of("$L.getString($S)", rsVar, column);
+            return CodeBlock.of("rs.getString($S)", column);
         }
 
         // byte[]
         if ("byte[]".equals(typeFqn)) {
-            return CodeBlock.of("$L.getBytes($S)", rsVar, column);
+            return CodeBlock.of("rs.getBytes($S)", column);
         }
 
         // Enum types — null-safe: return null when column is NULL
         if (isEnum(typeFqn)) {
             ClassName enumType = ClassName.bestGuess(typeFqn);
-            return CodeBlock.of("$L.getString($S) == null ? null : $T.valueOf($T.class, $L.getString($S))",
-                    rsVar, column, Enum.class, enumType, rsVar, column);
+            return CodeBlock.of("rs.getString($S) == null ? null : $T.valueOf($T.class, rs.getString($S))",
+                    column, Enum.class, enumType, column);
         }
 
         // Boxed types and well-known object types → getObject(column, Type.class)
         if (BOXED_TYPES.contains(typeFqn) || OBJECT_TYPES.contains(typeFqn)) {
             ClassName typeClass = ClassName.bestGuess(typeFqn);
-            return CodeBlock.of("$L.getObject($S, $T.class)", rsVar, column, typeClass);
+            return CodeBlock.of("rs.getObject($S, $T.class)", column, typeClass);
         }
 
         // Default: getObject with the type class (covers any other JDBC-compatible type)
         ClassName typeClass = ClassName.bestGuess(typeFqn);
-        return CodeBlock.of("$L.getObject($S, $T.class)", rsVar, column, typeClass);
+        return CodeBlock.of("rs.getObject($S, $T.class)", column, typeClass);
     }
 
     // ── Embedded VO reading ──────────────────────────────────────────────
@@ -254,14 +267,13 @@ public final class RowMapperWriter {
      * value is non-null (presence rule).
      */
     private void addEmbeddedRead(MethodSpec.Builder method, String entityVar,
-                                 String fieldName, String columnPrefix,
-                                 TypeDefinition.ValueObject voMapping, String rsVar) {
+                                 String fieldName, TypeDefinition.ValueObject voMapping) {
         if (voMapping == null) return;
 
         String voTypeFqn = voMapping.typeName();
         ClassName voType = ClassName.bestGuess(voTypeFqn);
         String voVar = fieldName;
-        String newPrefix = columnPrefix + io.github.fludakit.data.Names.columnBase(fieldName) + "_";
+        String newPrefix = io.github.fludakit.data.Names.columnBase(fieldName) + "_";
 
         java.util.List<String> nullCheckVars = new java.util.ArrayList<>();
         java.util.List<Runnable> setters = new java.util.ArrayList<>();
@@ -270,7 +282,7 @@ public final class RowMapperWriter {
             if (prop instanceof TypeDefinition.Prop.Scalar s) {
                 String column = newPrefix + s.columnName();
                 String tempVar = voVar + "_" + s.name();
-                addScalarReadToVar(method, tempVar, column, s.javaType(), rsVar);
+                addScalarReadToVar(method, tempVar, column, s.javaType());
                 nullCheckVars.add(tempVar);
                 setters.add(() -> method.addStatement("$L.$L($L)", voVar, setterName(s.name()), tempVar));
             }
@@ -279,7 +291,7 @@ public final class RowMapperWriter {
             if (prop instanceof TypeDefinition.Prop.Embedded embedded && embedded.definition() != null) {
                 String nestedVar = voVar + "_" + embedded.name();
                 addEmbeddedReadReturning(method, nestedVar, embedded.name(),
-                        newPrefix, embedded.definition(), rsVar);
+                        newPrefix, embedded.definition());
                 nullCheckVars.add(nestedVar);
                 setters.add(() -> method.addStatement("$L.$L($L)", voVar, setterName(embedded.name()), nestedVar));
             }
@@ -302,7 +314,7 @@ public final class RowMapperWriter {
      */
     private void addEmbeddedReadReturning(MethodSpec.Builder method, String voVar,
                                            String fieldName, String columnPrefix,
-                                           TypeDefinition.ValueObject voMapping, String rsVar) {
+                                           TypeDefinition.ValueObject voMapping) {
         if (voMapping == null) {
             method.addStatement("$T $L = null", ClassName.get(Object.class), voVar);
             return;
@@ -319,7 +331,7 @@ public final class RowMapperWriter {
             if (prop instanceof TypeDefinition.Prop.Scalar s) {
                 String column = newPrefix + s.columnName();
                 String tempVar = voVar + "_" + s.name();
-                addScalarReadToVar(method, tempVar, column, s.javaType(), rsVar);
+                addScalarReadToVar(method, tempVar, column, s.javaType());
                 nullCheckVars.add(tempVar);
                 setters.add(() -> method.addStatement("$L.$L($L)", voVar, setterName(s.name()), tempVar));
             }
@@ -328,7 +340,7 @@ public final class RowMapperWriter {
             if (prop instanceof TypeDefinition.Prop.Embedded embedded && embedded.definition() != null) {
                 String nestedVar = voVar + "_" + embedded.name();
                 addEmbeddedReadReturning(method, nestedVar, embedded.name(),
-                        newPrefix, embedded.definition(), rsVar);
+                        newPrefix, embedded.definition());
                 nullCheckVars.add(nestedVar);
                 setters.add(() -> method.addStatement("$L.$L($L)", voVar, setterName(embedded.name()), nestedVar));
             }
@@ -345,8 +357,8 @@ public final class RowMapperWriter {
         method.endControlFlow();
     }
     private void addScalarReadToVar(MethodSpec.Builder method, String varName,
-                                     String column, String typeFqn, String rsVar) {
-        CodeBlock readExpr = buildReadExpression(column, typeFqn, rsVar);
+                                     String column, String typeFqn) {
+        CodeBlock readExpr = buildReadExpression(column, typeFqn);
         TypeName javaType = boxType(typeFqn);
         method.addStatement("$T $L = $L", javaType, varName, readExpr);
     }
@@ -373,7 +385,7 @@ public final class RowMapperWriter {
      * to create a fully materialized definition. Otherwise creates an id-only partial from the FK.
      */
     private void addAssociationRead(MethodSpec.Builder method, String entityVar,
-                                  TypeDefinition.Prop.Association assoc, String rsVar) {
+                                  TypeDefinition.Prop.Association assoc) {
         if (!(assoc.definition() instanceof TypeDefinition.Entity targetEntity)) return;
 
         String targetFqn = targetEntity.typeName();
@@ -394,22 +406,11 @@ public final class RowMapperWriter {
         // Check if join-projected column exists using ResultSetMetaData
         String hasJoinVar = "hasJoinProjection_" + assoc.name();
         method.addStatement("$T $L = null", boxType(idTypeFqn), joinedIdVar);
-        method.addStatement("boolean $L = false", hasJoinVar);
-        method.beginControlFlow("try");
-        method.addStatement("$T metaData = $L.getMetaData()", ClassName.get("java.sql", "ResultSetMetaData"), rsVar);
-        method.addStatement("int colCount = metaData.getColumnCount()");
-        method.beginControlFlow("for (int i = 1; i <= colCount; i++)");
-        method.beginControlFlow("if ($S.equals(metaData.getColumnLabel(i)))", joinIdColumn);
-        method.addStatement("$L = true", hasJoinVar);
-        method.addStatement("break");
-        method.endControlFlow();
-        method.endControlFlow();
-        method.nextControlFlow("catch ($T e)", ClassName.get("java.sql", "SQLException"));
-        method.endControlFlow();
+        method.addStatement("boolean $L = columnLabels.contains($S)", hasJoinVar, joinIdColumn);
 
         // If join projection exists, read all joined columns to create full object
         method.beginControlFlow("if ($L)", hasJoinVar);
-        CodeBlock joinedIdRead = buildReadExpression(joinIdColumn, idTypeFqn, rsVar);
+        CodeBlock joinedIdRead = buildReadExpression(joinIdColumn, idTypeFqn);
         method.addStatement("$L = $L", joinedIdVar, joinedIdRead);
         method.beginControlFlow("if ($L != null)", joinedIdVar);
         method.addStatement("$T $L = new $T()", targetType, assoc.name(), targetType);
@@ -419,7 +420,7 @@ public final class RowMapperWriter {
         for (TypeDefinition.Prop prop : targetEntity.properties()) {
             if (prop instanceof TypeDefinition.Prop.Scalar s) {
                 String joinedColAlias = joinPrefix + s.columnName();
-                CodeBlock colRead = buildReadExpression(joinedColAlias, s.javaType(), rsVar);
+                CodeBlock colRead = buildReadExpression(joinedColAlias, s.javaType());
                 method.addStatement("$L.$L($L)", assoc.name(), setterName(s.name()), colRead);
             }
         }
@@ -433,22 +434,11 @@ public final class RowMapperWriter {
         // Check if FK column exists using ResultSetMetaData before reading
         String hasFkVar = "hasFkColumn_" + assoc.name();
         method.addStatement("$T $L = null", boxType(idTypeFqn), fkVar);
-        method.addStatement("boolean $L = false", hasFkVar);
-        method.beginControlFlow("try");
-        method.addStatement("$T metaData = $L.getMetaData()", ClassName.get("java.sql", "ResultSetMetaData"), rsVar);
-        method.addStatement("int colCount = metaData.getColumnCount()");
-        method.beginControlFlow("for (int i = 1; i <= colCount; i++)");
-        method.beginControlFlow("if ($S.equals(metaData.getColumnLabel(i)))", fkColumn);
-        method.addStatement("$L = true", hasFkVar);
-        method.addStatement("break");
-        method.endControlFlow();
-        method.endControlFlow();
-        method.nextControlFlow("catch ($T e)", ClassName.get("java.sql", "SQLException"));
-        method.endControlFlow();
+        method.addStatement("boolean $L = columnLabels.contains($S)", hasFkVar, fkColumn);
 
         // Only read FK if column exists
         method.beginControlFlow("if ($L)", hasFkVar);
-        CodeBlock fkRead = buildReadExpression(fkColumn, idTypeFqn, rsVar);
+        CodeBlock fkRead = buildReadExpression(fkColumn, idTypeFqn);
         method.addStatement("$L = $L", fkVar, fkRead);
         method.beginControlFlow("if ($L != null)", fkVar);
         method.addStatement("$T $L = new $T()", targetType, assoc.name(), targetType);

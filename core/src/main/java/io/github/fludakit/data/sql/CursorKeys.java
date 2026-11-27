@@ -9,7 +9,7 @@ import java.util.List;
  * Builds keyset-paging cursor keys from materialized entities.
  *
  * <p>This is the only cursor helper a generated repository needs at runtime. The seek predicate
- * itself is rendered once at compile time by {@link SqlBuilder#seekClause} and baked into a SQL
+ * itself is rendered once at compile time by {@link SeekClause#render} and baked into a SQL
  * literal, so no cursor SQL is assembled per query.
  */
 public final class CursorKeys {

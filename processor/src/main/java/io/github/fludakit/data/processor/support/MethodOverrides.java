@@ -8,7 +8,6 @@ import com.squareup.javapoet.TypeName;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.type.DeclaredType;
 import javax.lang.model.util.Types;
-import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -30,13 +29,12 @@ public final class MethodOverrides {
             ClassName entityType) {
 
         MethodSpec.Builder builder = MethodSpec.overriding(method, repositoryDeclaredType, types);
-        rebindTypeVariables(builder, method, repositoryDeclaredType, entityType);
+        rebindTypeVariables(builder, method, entityType);
         return builder;
     }
 
     private static void rebindTypeVariables(
-            MethodSpec.Builder builder, ExecutableElement method, 
-            DeclaredType repositoryDeclaredType, ClassName entityType) {
+            MethodSpec.Builder builder, ExecutableElement method, ClassName entityType) {
         if (!builder.typeVariables.isEmpty() && !method.getTypeParameters().isEmpty()) {
             builder.typeVariables.clear();
             

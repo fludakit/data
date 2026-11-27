@@ -81,15 +81,4 @@ public final class TypeGraph {
         Map<String, String> pending = pendingTargets.get(ownerFqn);
         return pending != null ? pending.get(propName) : null;
     }
-
-    /** Every value-object node in the graph. */
-    Set<String> valueObjects() {
-        Set<String> vos = new LinkedHashSet<>();
-        for (Map.Entry<String, TypeDefinition> entry : nodes.entrySet()) {
-            if (entry.getValue() instanceof TypeDefinition.ValueObject) {
-                vos.add(entry.getKey());
-            }
-        }
-        return Collections.unmodifiableSet(vos);
-    }
 }

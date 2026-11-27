@@ -252,6 +252,16 @@ class QueryByMethodNameParserTest {
         assertThat(p.sorts().get(0).ascending()).isFalse();
     }
 
+    @Test
+    void aBareFirstIsOneRowAndFirstZeroIsRejected() {
+        // Jakarta Data: First alone keeps one row. First0 parsed to limit 0, which is also the "no First"
+        // value, so the keyword vanished from the query instead of being reported.
+        assertThat(parser.parse("findFirstByName").limit()).isEqualTo(1);
+        assertThatThrownBy(() -> parser.parse("findFirst0ByName"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("First0 must limit the result to at least one row");
+    }
+
     private Operator op(String name) {
         return parser.parse(name).predicates().get(0).operator();
     }

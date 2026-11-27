@@ -4,7 +4,7 @@ import io.github.fludakit.data.query.Connector;
 import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.SortSpec;
-import io.github.fludakit.data.sql.QueryCompiler;
+import io.github.fludakit.data.sql.SqlBuilder;
 import org.antlr.v4.runtime.tree.TerminalNode;
 import java.util.ArrayList;
 import java.util.List;
@@ -33,6 +33,12 @@ public class QbnMethodNameVisitor extends QbnBaseVisitor<ParsedMethodName> {
             // FIRST token text is "First" optionally followed by the max-results digits.
             String digits = find.first().FIRST().getText().substring("First".length());
             limit = digits.isEmpty() ? 1 : Integer.parseInt(digits);
+            if (limit == 0) {
+                // 0 is also ParsedMethodName's "no First" value: accepting First0 would silently drop the
+                // keyword, which is the one thing a parsed limit must never do.
+                throw new IllegalArgumentException(
+                        "First" + digits + " must limit the result to at least one row");
+            }
         }
 
         List<Predicate> predicates = new ArrayList<>();
@@ -62,7 +68,7 @@ public class QbnMethodNameVisitor extends QbnBaseVisitor<ParsedMethodName> {
     private Predicate predicate(QbnParser.ConditionContext ctx, Connector connector) {
         String prop = propertyName(ctx.property());
         // Transform property path to SQL parameter name (e.g., "contacts.value" -> "contacts_value")
-        String paramName = QueryCompiler.paramName(prop);
+        String paramName = SqlBuilder.paramName(prop);
         return Predicate.of(prop, operator(ctx), paramName, connector, ctx.IGNORE_CASE() != null);
     }
 

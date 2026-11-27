@@ -32,7 +32,6 @@ public final class Names {
      */
     public static String columnBase(String property) { return toSnakeCase(property); }
     public static String fkColumn(String property) { return toSnakeCase(property) + "_id"; }
-    public static String tableName(Class<?> type) { return tableName(type.getSimpleName()); }
     public static String tableName(String simpleName) { return pluralize(toSnakeCase(simpleName)); }
 
     public static String pluralize(String singular) {
@@ -63,6 +62,4 @@ public final class Names {
     public static String childTable(String elementTypeName) {
         return pluralize(toSnakeCase(elementTypeName));
     }
-
-    public static String childTable(String parentTable, String field) { return parentTable + "_" + toSnakeCase(field); }
 }

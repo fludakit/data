@@ -16,8 +16,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Read-side JOIN projection of a COMPOSING to-one reference, end-to-end — see
- * {@code docs/JOIN-PROJECTION.md}.
+ * Read-side JOIN projection of a COMPOSING to-one reference, end-to-end.
  *
  * <p>{@link Book#author} is a bare entity field on an {@code @AggregateRoot} whose definition is managed
  * (it has its own {@code @Repository}), so every CRUD read JOIN-projects it: the generated constant

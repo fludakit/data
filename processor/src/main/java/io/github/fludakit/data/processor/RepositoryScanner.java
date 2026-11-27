@@ -44,7 +44,7 @@ import javax.lang.model.util.Elements;
 import javax.lang.model.util.Types;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
+import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -71,13 +71,15 @@ final class RepositoryScanner {
     // QBN module is optional — check if it's on the classpath
     private static final boolean QBN_AVAILABLE = isQbnAvailable();
 
-    /** Pattern matching named parameters in @Query SQL (e.g. {@code :name}). */
-    private static final Pattern NAMED_PARAM_PATTERN = Pattern.compile(":([a-zA-Z_]\\w*)");
     private final Types types;
     private final Elements elements;
     private final Diagnostics diagnostics;
     private final TypeGraph typeGraph;
     private final RepositoryGraph repositoryGraph;
+    private final RepositoryHierarchy hierarchy;
+    private final ParamBinder paramBinder;
+    private final QbnResolver qbn;
+    private final NativeQueryResolver nativeQueries;
 
     RepositoryScanner(Types types, Elements elements, Diagnostics diagnostics, TypeGraph typeGraph,
                       RepositoryGraph repositoryGraph) {
@@ -86,6 +88,10 @@ final class RepositoryScanner {
         this.diagnostics = diagnostics;
         this.typeGraph = typeGraph;
         this.repositoryGraph = repositoryGraph;
+        this.hierarchy = new RepositoryHierarchy(types, typeGraph, diagnostics);
+        this.paramBinder = new ParamBinder(types);
+        this.qbn = new QbnResolver(typeGraph, hierarchy);
+        this.nativeQueries = new NativeQueryResolver(paramBinder);
     }
 
     private static boolean isQbnAvailable() {
@@ -126,30 +132,13 @@ final class RepositoryScanner {
      * and method contexts for every resolvable repository method.
      */
     private RepositoryContext resolveContext(TypeElement repository) {
-        // 1. Resolve the entity type from the repository's generic superclass and interfaces
-        TypeMirror entityTypeMirror = resolveEntityType(repository);
-        if (entityTypeMirror == null) {
-            diagnostics.error("Cannot resolve entity type for repository " + repository.getQualifiedName(),
-                    repository);
-            return null;
-        }
-
-        String entityFqn = types.erasure(entityTypeMirror).toString();
-        TypeElement entityElement = asTypeElement(entityTypeMirror);
-        if (entityElement == null) {
-            diagnostics.error("Entity type is not a declared type: " + entityFqn, repository);
-            return null;
-        }
-
-        // 2. Read the entity mapping from the type graph — every repository entity type must be
-        // annotated (@Entity/@AggregateRoot/@ValueObject) so the processor's scan has already cached it;
-        // a miss is a specification violation and fails the compilation below
-        TypeDefinition entityMapping = typeGraph.get(entityFqn);
+        // 1–2. Resolve the entity type from the repository hierarchy and look it up in the type
+        // graph; any failure is already reported on the repository.
+        TypeDefinition entityMapping = hierarchy.resolveEntityMapping(repository);
         if (entityMapping == null) {
-            diagnostics.error("No @Entity/@AggregateRoot/@ValueObject mapping found for " + entityFqn,
-                    repository);
             return null;
         }
+        String entityFqn = entityMapping.typeName();
 
         // 3. Bind the conventional row-mapper type (written earlier from TypeGraph by the host)
         ClassName rowMapperType = RowMapperWriter.rowMapperClassName(entityFqn);
@@ -157,118 +146,8 @@ final class RepositoryScanner {
         // 4. Scan methods, then freeze the plan into a RepositoryContext
         MethodScan scan = scanMethods(repository, entityMapping);
         return new RepositoryContext(
-                entityMapping, rowMapperType, resolveRepositoryDeclaredType(repository),
+                entityMapping, rowMapperType, hierarchy.resolveRepositoryDeclaredType(repository),
                 scan.methods(), scan.jdbcClientAccessor());
-    }
-
-    // ── Entity type resolution ───────────────────────────────────────────
-
-    /**
-     * Resolves the entity type from the repository's generic superclass.
-     * Walks the interface hierarchy to find CrudRepository, BasicRepository, or DataRepository
-     * and extracts the first type argument.
-     */
-    private TypeMirror resolveEntityType(TypeElement repository) {
-        // Try superclass first (extends CrudRepository<E, K>)
-        TypeMirror superclass = repository.getSuperclass();
-        TypeMirror entityType = extractEntityTypeArg(superclass);
-        if (entityType != null) return entityType;
-
-        // Try interfaces
-        for (TypeMirror iface : repository.getInterfaces()) {
-            entityType = extractEntityTypeArg(iface);
-            if (entityType != null) return entityType;
-        }
-
-        // Walk transitive interfaces
-        for (TypeMirror iface : getAllInterfaces(repository)) {
-            entityType = extractEntityTypeArg(iface);
-            if (entityType != null) return entityType;
-        }
-
-        return null;
-    }
-
-    /**
-     * If the given type is a parameterized CrudRepository/BasicRepository/DataRepository,
-     * extracts the first type argument (the entity type).
-     */
-    private TypeMirror extractEntityTypeArg(TypeMirror type) {
-        if (type == null || type.getKind() != TypeKind.DECLARED) return null;
-        DeclaredType dt = (DeclaredType) type;
-        TypeElement te = (TypeElement) dt.asElement();
-        String fqn = te.getQualifiedName().toString();
-
-        if (fqn.equals(CRUD_REPOSITORY) || fqn.equals(BASIC_REPOSITORY) || fqn.equals(DATA_REPOSITORY)) {
-            List<? extends TypeMirror> typeArgs = dt.getTypeArguments();
-            if (!typeArgs.isEmpty()) {
-                return typeArgs.getFirst();
-            }
-        }
-        return null;
-    }
-
-    private List<TypeMirror> getAllInterfaces(TypeElement type) {
-        List<TypeMirror> result = new ArrayList<>();
-        for (TypeMirror iface : type.getInterfaces()) {
-            result.add(iface);
-            TypeElement ifaceElement = asTypeElement(iface);
-            if (ifaceElement != null) {
-                result.addAll(getAllInterfaces(ifaceElement));
-            }
-        }
-        TypeMirror superclass = type.getSuperclass();
-        TypeElement superElement = asTypeElement(superclass);
-        if (superElement != null && !superElement.getQualifiedName().contentEquals("java.lang.Object")) {
-            result.addAll(getAllInterfaces(superElement));
-        }
-        return result;
-    }
-
-    private TypeElement asTypeElement(TypeMirror type) {
-        if (type == null || type.getKind() != TypeKind.DECLARED) return null;
-        javax.lang.model.element.Element element = ((DeclaredType) type).asElement();
-        return element instanceof TypeElement te ? te : null;
-    }
-
-    /**
-     * Resolves the parameterized CrudRepository/BasicRepository/DataRepository type
-     * from the repository's type hierarchy. This is needed for proper type variable
-     * resolution when overriding methods like save(T entity) — we need the concrete
-     * type arguments (e.g., CrudRepository<Customer, Long>) not just the repository
-     * interface itself.
-     */
-    private DeclaredType resolveRepositoryDeclaredType(TypeElement repository) {
-        // Check superclass first (e.g. TaskRepository extends CrudRepository<Task, Long>)
-        TypeMirror superclass = repository.getSuperclass();
-        DeclaredType found = matchBaseRepositoryType(superclass);
-        if (found != null) return found;
-
-        // Check direct interfaces
-        for (TypeMirror iface : repository.getInterfaces()) {
-            found = matchBaseRepositoryType(iface);
-            if (found != null) return found;
-        }
-
-        // Walk transitive interfaces
-        for (TypeMirror iface : getAllInterfaces(repository)) {
-            found = matchBaseRepositoryType(iface);
-            if (found != null) return found;
-        }
-
-        // Fallback to the repository's own type if no base repository found
-        return (DeclaredType) repository.asType();
-    }
-
-    private DeclaredType matchBaseRepositoryType(TypeMirror type) {
-        if (type == null || type.getKind() != TypeKind.DECLARED) return null;
-        DeclaredType dt = (DeclaredType) type;
-        TypeElement te = (TypeElement) dt.asElement();
-        String fqn = te.getQualifiedName().toString();
-        if (fqn.equals(CRUD_REPOSITORY) || fqn.equals(BASIC_REPOSITORY) || fqn.equals(DATA_REPOSITORY)) {
-            return dt;
-        }
-        return null;
     }
 
     // ── Method resolution ────────────────────────────────────────────────
@@ -297,34 +176,39 @@ final class RepositoryScanner {
                 continue;
             }
 
-            // Handle @Query-annotated methods
-            if (method.getAnnotation(Query.class) != null) {
-                MethodContext queryCtx = resolveQueryMethod(method);
-                if (queryCtx != null) {
-                    methods.add(queryCtx);
+            // Fail early, per method: an unexpected resolution failure is reported on the method
+            // element and only that method is skipped (AGENTS.md "Fail early, per method").
+            MethodContext methodCtx;
+            try {
+                // Handle @Query-annotated methods
+                if (method.getAnnotation(Query.class) != null) {
+                    MethodContext queryCtx = resolveQueryMethod(method);
+                    if (queryCtx != null) {
+                        methods.add(queryCtx);
+                    }
+                    continue;
                 }
+                methodCtx = resolveMethod(repository, method, entityMapping);
+            } catch (RuntimeException e) {
+                diagnostics.error("Cannot resolve method '" + method.getSimpleName() + "': "
+                        + messageOf(e), method);
                 continue;
             }
-
-            MethodContext methodCtx = resolveMethod(repository, method, entityMapping);
+            // A null context has already been reported on the method (see resolveMethod): skip it only.
             if (methodCtx != null) {
                 methods.add(methodCtx);
-            } else if (resolveLifecycleAnnotation(method) != null) {
-                // Annotated method already emitted a located diagnostic; skip this method only.
-                continue;
-            } else {
-                String methodName = method.getSimpleName().toString();
-                diagnostics.error(
-                    "Cannot resolve method '" + methodName + "' in repository " +
-                    repository.getQualifiedName() + ". Either add a lifecycle annotation " +
-                    "(@Find, @Save, @Insert, @Update, @Delete), use a recognized CRUD method name " +
-                    "(findById, save, etc.), use Query By Name (findByXxx), or add a custom @Query annotation.",
-                    method);
             }
         }
         return new MethodScan(methods, jdbcClientAccessor);
     }
 
+    /**
+     * Resolves one abstract repository method: lifecycle annotation first, then a built-in CRUD name,
+     * then a query by method name.
+     *
+     * @return the method context, or {@code null} when the method is skipped; a located diagnostic has
+     *         then already been reported on it
+     */
     private MethodContext resolveMethod(TypeElement repository, ExecutableElement method,
                                        TypeDefinition entityMapping) {
         String methodName = method.getSimpleName().toString();
@@ -337,7 +221,7 @@ final class RepositoryScanner {
         }
 
         // Priority 2 & 3 only apply to Jakarta Data-derived repositories
-        boolean isJakartaDataRepository = extendsJakartaDataInterface(repository);
+        boolean isJakartaDataRepository = hierarchy.extendsJakartaDataInterface(repository);
 
         // Priority 2: Built-in CRUD methods from Jakarta Data standard interfaces
         // Fixed list with known semantics — skip annotation processing
@@ -348,43 +232,26 @@ final class RepositoryScanner {
 
         // Priority 3: Query By Name (QBN) parsing
         if (isJakartaDataRepository) {
-            ParsedMethodName parsed = tryParseQbn(methodName);
+            ParsedMethodName parsed = qbn.tryParseQbn(methodName);
             if (parsed != null) {
                 return resolveQbnMethod(method, methodName, parsed, entityMapping);
             }
         }
 
-        // Not a recognized method — skip
+        // Not a recognized method: report it on the method, which is then skipped
+        String qbnError = qbn.qbnParseError(repository, methodName);
+        if (qbnError != null) {
+            diagnostics.error("Cannot resolve method '" + methodName
+                    + "' as a query by method name: " + qbnError, method);
+        } else {
+            diagnostics.error(
+                "Cannot resolve method '" + methodName + "' in repository " +
+                repository.getQualifiedName() + ". Either add a lifecycle annotation " +
+                "(@Find, @Save, @Insert, @Update, @Delete), use a recognized CRUD method name " +
+                "(findById, save, etc.), use Query By Name (findByXxx), or add a custom @Query annotation.",
+                method);
+        }
         return null;
-    }
-
-    /**
-     * Checks if the repository extends a Jakarta Data interface (CrudRepository, BasicRepository, or DataRepository).
-     */
-    private boolean extendsJakartaDataInterface(TypeElement repository) {
-        // Check superclass
-        if (isJakartaDataInterface(repository.getSuperclass())) return true;
-
-        // Check direct interfaces
-        for (TypeMirror iface : repository.getInterfaces()) {
-            if (isJakartaDataInterface(iface)) return true;
-        }
-
-        // Check transitive interfaces
-        for (TypeMirror iface : getAllInterfaces(repository)) {
-            if (isJakartaDataInterface(iface)) return true;
-        }
-
-        return false;
-    }
-
-    private boolean isJakartaDataInterface(TypeMirror type) {
-        if (type == null || type.getKind() != TypeKind.DECLARED) return false;
-        TypeElement te = (TypeElement) ((DeclaredType) type).asElement();
-        String fqn = te.getQualifiedName().toString();
-        return fqn.equals(CRUD_REPOSITORY) ||
-               fqn.equals("jakarta.data.repository.BasicRepository") ||
-               fqn.equals(DATA_REPOSITORY);
     }
 
     private Operation resolveLifecycleAnnotation(ExecutableElement method) {
@@ -424,17 +291,17 @@ final class RepositoryScanner {
                 return null; // unknown attribute already diagnosed
             }
         } else {
-            predicates = resolveByAnnotations(method, entityMapping);
+            predicates = resolveByAnnotations(method);
         }
 
         // Replace Jakarta Data's "id(this)" JDQL convention with the actual ID property name
         predicates = replaceIdThis(predicates, entityMapping);
 
         List<SortSpec> sorts = resolveOrderByAnnotations(method);
-        List<ParamBinding> paramBindings = buildParamBindings(method, predicates);
+        List<ParamBinding> paramBindings = paramBinder.buildParamBindings(method, predicates);
 
         return methodContext(method, methodName, operation,
-                buildQuery(operation, resultKind, false, predicates, paramBindings, sorts, method));
+                buildQuery(operation, resultKind, false, predicates, paramBindings, sorts, 0, method));
     }
 
     /** True when the first parameter is the entity (or a collection thereof) for lifecycle writes. */
@@ -486,143 +353,47 @@ final class RepositoryScanner {
             default -> List.of();
         };
 
-        List<ParamBinding> paramBindings = buildParamBindings(method, predicates);
+        List<ParamBinding> paramBindings = paramBinder.buildParamBindings(method, predicates);
 
         return methodContext(method, methodName, operation,
-                buildQuery(operation, resultKind, false, predicates, paramBindings, List.of(), method));
+                buildQuery(operation, resultKind, false, predicates, paramBindings, List.of(), 0, method));
     }
 
     private MethodContext resolveQbnMethod(ExecutableElement method, String methodName,
                                             ParsedMethodName parsed, TypeDefinition entityMapping) {
-        Operation operation = operationFromAction(parsed.action());
+        // First<n> is a static limit: a Limit or PageRequest parameter would be a second row window,
+        // and Jakarta Data requires the combination to be rejected rather than one of them to win.
+        String pagingParameter = parsed.limit() > 0 ? pagingParameterType(method) : null;
+        if (pagingParameter != null) {
+            diagnostics.error("Method " + methodName + " combines the First keyword with a " + pagingParameter
+                    + " parameter, which Jakarta Data does not allow: First is already a static limit. Remove"
+                    + " First or the " + pagingParameter + " parameter.", method);
+            return null;
+        }
+        Operation operation = QbnResolver.operationFromAction(parsed.action());
         ResultKind resultKind = resolveResultKind(method, operation);
         boolean distinct = parsed.distinct();
 
         // Predicates from parsed method name
         List<Predicate> predicates = new ArrayList<>(parsed.predicates());
         // Resolve camelCase paths against entity structure (e.g., "workHistoryCompany" → "workHistory.company")
-        predicates = resolveCamelCasePaths(predicates, entityMapping);
+        predicates = qbn.resolveCamelCasePaths(predicates, entityMapping);
         // Add @By predicates if present (these supplement QBN predicates)
-        predicates.addAll(resolveByAnnotations(method, entityMapping));
+        predicates.addAll(resolveByAnnotations(method));
 
         // Sorts from parsed method name + @OrderBy
         List<SortSpec> sorts = new ArrayList<>(parsed.sorts());
         sorts.addAll(resolveOrderByAnnotations(method));
 
-        List<ParamBinding> paramBindings = buildParamBindings(method, predicates);
+        List<ParamBinding> paramBindings = paramBinder.buildParamBindings(method, predicates);
 
         return methodContext(method, methodName, operation,
-                buildQuery(operation, resultKind, distinct, predicates, paramBindings, sorts, method));
+                buildQuery(operation, resultKind, distinct, predicates, paramBindings, sorts, parsed.limit(),
+                        method));
     }
 
-    private static Operation operationFromAction(Action action) {
-        return switch (action) {
-            case FIND -> Operation.FIND;
-            case DELETE -> Operation.DELETE;
-            case COUNT -> Operation.COUNT;
-            case EXISTS -> Operation.EXISTS;
-        };
-    }
-
-    /**
-     * Attempts to resolve camelCase property paths by splitting them at entity property boundaries.
-     * For example, "workHistoryCompany" becomes "workHistory.company" if "workHistory" is a property.
-     */
-    private List<Predicate> resolveCamelCasePaths(List<Predicate> predicates, TypeDefinition entityMapping) {
-        List<Predicate> resolved = new ArrayList<>(predicates.size());
-        for (Predicate p : predicates) {
-            String path = p.property();
-            if (path.contains(".")) {
-                resolved.add(p);
-                continue;
-            }
-            // Try to split the camelCase path
-            String resolvedPath = trySplitCamelCasePath(path, entityMapping);
-            if (resolvedPath != null && !resolvedPath.equals(path)) {
-                // When a camelCase path is resolved to a dotted path, the param name should be the
-                // leaf property name (e.g., "orderItemsQuantity" → "orderItems.quantity" → param "quantity").
-                // This matches the Java parameter name convention.
-                String leafPropName = resolvedPath.contains(".")
-                        ? resolvedPath.substring(resolvedPath.lastIndexOf('.') + 1)
-                        : resolvedPath;
-                resolved.add(new Predicate(resolvedPath, p.operator(), leafPropName, p.connector(), p.ignoreCase()));
-            } else {
-                resolved.add(p);
-            }
-        }
-        return resolved;
-    }
-
-    /**
-     * Tries to split a camelCase path at entity property boundaries.
-     * Returns the dot-separated path if successful, or the original path if no split is found.
-     */
-    private String trySplitCamelCasePath(String path, TypeDefinition mapping) {
-        // Try splitting at each uppercase letter
-        for (int i = 1; i < path.length(); i++) {
-            if (Character.isUpperCase(path.charAt(i))) {
-                String head = path.substring(0, i);
-                String tail = Character.toLowerCase(path.charAt(i)) + path.substring(i + 1);
-                // Check if head is a known property
-                TypeDefinition.Prop prop = mapping.findProperty(head);
-                if (prop != null) {
-                    // head is a property, check if tail resolves in the definition
-                    String fullPath = head + "." + tail;
-                    
-                    // Special handling for ElementCollection - can't use resolve() directly
-                    if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
-                        TypeDefinition elementType = typeGraph.get(ec.javaType());
-                        if (elementType != null && elementType.findProperty(tail) != null) {
-                            return fullPath;
-                        }
-                        // If element type not found in cache yet, assume path is valid
-                        // and let SQL generation handle it with EXISTS subquery
-                        return fullPath;
-                    } else {
-                        try {
-                            mapping.resolve(fullPath);
-                            return fullPath;
-                        } catch (Exception e) {
-                            // tail doesn't resolve, try deeper splits
-                            TypeDefinition targetMapping = getTargetMapping(mapping, head);
-                            if (targetMapping != null) {
-                                String resolvedTail = trySplitCamelCasePath(tail, targetMapping);
-                                if (resolvedTail != null && !resolvedTail.equals(tail)) {
-                                    return head + "." + resolvedTail;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        return path;
-    }
-
-    /**
-     * Gets the definition TypeDefinition for a property name, or null if not resolvable.
-     */
-    private TypeDefinition getTargetMapping(TypeDefinition mapping, String propName) {
-        TypeDefinition.Prop prop = mapping.findProperty(propName);
-        if (prop instanceof TypeDefinition.Prop.Association assoc) return assoc.definition();
-        if (prop instanceof TypeDefinition.Prop.EntityCollection ec) return ec.definition();
-        if (prop instanceof TypeDefinition.Prop.Embedded emb) return emb.definition();
-        if (prop instanceof TypeDefinition.Prop.ElementCollection ec) {
-            // For element collections, look up the element type definition from the type graph
-            return typeGraph.get(ec.javaType());
-        }
-        return null;
-    }
-
-    private ParsedMethodName tryParseQbn(String methodName) {
-        if (!QBN_AVAILABLE) {
-            return null;
-        }
-        try {
-            return new QueryByMethodNameParser().parse(methodName);
-        } catch (IllegalArgumentException e) {
-            return null;
-        }
+    private static String messageOf(RuntimeException e) {
+        return e.getMessage() != null ? e.getMessage() : e.getClass().getName();
     }
 
     // ── ResultKind resolution ────────────────────────────────────────────
@@ -645,7 +416,7 @@ final class RepositoryScanner {
             return operation == Operation.EXISTS ? ResultKind.EXISTS : ResultKind.SINGLE;
         }
 
-        String returnFqn = erasureFqn(returnType);
+        String returnFqn = erasureFqn(types, returnType);
 
         // Optional<E>
         if ("java.util.Optional".equals(returnFqn)) return ResultKind.OPTIONAL;
@@ -686,7 +457,7 @@ final class RepositoryScanner {
                                                             TypeDefinition entityMapping) {
         List<Predicate> predicates = new ArrayList<>();
         for (VariableElement param : method.getParameters()) {
-            if (isSpecialQueryParameter(param)) {
+            if (paramBinder.isSpecialQueryParameter(param)) {
                 continue;
             }
             String paramName = param.getSimpleName().toString();
@@ -713,7 +484,7 @@ final class RepositoryScanner {
     /**
      * Resolves predicates from explicit {@code @By} annotations only (QBN / lifecycle paths).
      */
-    private List<Predicate> resolveByAnnotations(ExecutableElement method, TypeDefinition entityMapping) {
+    private List<Predicate> resolveByAnnotations(ExecutableElement method) {
         List<Predicate> predicates = new ArrayList<>();
         for (VariableElement param : method.getParameters()) {
             By byAnnotation = param.getAnnotation(By.class);
@@ -735,16 +506,6 @@ final class RepositoryScanner {
             return byAnnotation.value();
         }
         return param.getSimpleName().toString().replace('_', '.');
-    }
-
-    private boolean isSpecialQueryParameter(VariableElement param) {
-        String fqn = erasureFqn(param.asType());
-        return PAGE_REQUEST.equals(fqn)
-                || LIMIT.equals(fqn)
-                || SORT.equals(fqn)
-                || ORDER.equals(fqn)
-                || fqn.startsWith(SORT + "<")
-                || fqn.startsWith(ORDER + "<");
     }
 
     /**
@@ -786,56 +547,12 @@ final class RepositoryScanner {
         return sorts;
     }
 
-    // ── ParamBinding resolution ──────────────────────────────────────────
-
-    /**
-     * Builds param bindings by matching method parameters to predicates.
-     */
-    private List<ParamBinding> buildParamBindings(ExecutableElement method, List<Predicate> predicates) {
-        List<ParamBinding> bindings = new ArrayList<>();
-        List<? extends VariableElement> params = method.getParameters();
-
-        // Attribute / query value parameters only (skip Limit, Sort, Order, PageRequest)
-        List<Integer> nonPagingParamIndices = new ArrayList<>();
-        for (int i = 0; i < params.size(); i++) {
-            if (!isSpecialQueryParameter(params.get(i))) {
-                nonPagingParamIndices.add(i);
-            }
-        }
-
-        // Map each predicate to its binding slot(s)
-        int slotIndex = 0;
-        for (Predicate pred : predicates) {
-            Operator op = pred.operator();
-
-            if (op == Operator.BETWEEN || op == Operator.NOT_BETWEEN) {
-                // BETWEEN needs TWO consecutive parameter slots -> _from and _to
-                if (slotIndex + 1 < nonPagingParamIndices.size()) {
-                    int fromParamIdx = nonPagingParamIndices.get(slotIndex);
-                    int toParamIdx = nonPagingParamIndices.get(slotIndex + 1);
-                    bindings.add(new ParamBinding(fromParamIdx, pred.param() + "_from", LikePattern.NONE));
-                    bindings.add(new ParamBinding(toParamIdx, pred.param() + "_to", LikePattern.NONE));
-                    slotIndex += 2; // Consumed two parameter slots
-                }
-            } else {
-                // Regular operator: one parameter slot
-                if (slotIndex < nonPagingParamIndices.size()) {
-                    int paramIdx = nonPagingParamIndices.get(slotIndex);
-                    bindings.add(new ParamBinding(paramIdx, pred.param(), LikePattern.of(op)));
-                    slotIndex++;
-                }
-            }
-        }
-
-        return bindings;
-    }
-
     // ── JdbcClient accessor detection ────────────────────────────────────
 
     /** The one supported escape hatch: {@code JdbcClient getJdbcClient()} — optional, at most one. */
     private boolean isJdbcClientAccessor(ExecutableElement method) {
         return method.getSimpleName().contentEquals("getJdbcClient")
-                && JDBC_CLIENT.equals(erasureFqn(method.getReturnType()))
+                && JDBC_CLIENT.equals(erasureFqn(types, method.getReturnType()))
                 && method.getParameters().isEmpty();
     }
 
@@ -858,10 +575,10 @@ final class RepositoryScanner {
         ResultKind resultKind = resolveResultKind(method, operation);
 
         // Extract named parameters from SQL
-        List<String> namedParams = extractNamedParams(sql);
+        List<String> namedParams = nativeQueries.extractNamedParams(sql);
 
         // Build param bindings matching method parameters to named SQL parameters
-        List<ParamBinding> bindings = buildQueryBindings(method, namedParams);
+        List<ParamBinding> bindings = nativeQueries.buildQueryBindings(method, namedParams);
 
         return methodContext(method, methodName, operation, new QueryDefinition.Native(sql, resultKind, bindings));
     }
@@ -875,14 +592,17 @@ final class RepositoryScanner {
     /**
      * Builds the pure query plan. {@link Operation#SAVE} maps to {@link QueryDefinition.Upsert};
      * criteria intents carry predicates/bindings/order/window.
+     *
+     * @param firstLimit the {@code First<n>} row cap of a query by method name, {@code 0} for none. Only a
+     *        find carries one: the grammar has no {@code First} on count, exists or delete.
      */
     private QueryDefinition buildQuery(Operation operation, ResultKind resultKind, boolean distinct,
                                        List<Predicate> predicates, List<ParamBinding> bindings,
-                                       List<SortSpec> sorts, ExecutableElement method) {
+                                       List<SortSpec> sorts, int firstLimit, ExecutableElement method) {
         return switch (operation) {
             case FIND -> new QueryDefinition.Read(
                     resultKind, predicates, bindings, distinct,
-                    resolveOrder(method, sorts), resolveWindow(method, resultKind));
+                    resolveOrder(method, sorts), resolveWindow(method, resultKind, firstLimit));
             case COUNT -> new QueryDefinition.Count(predicates, bindings, distinct);
             case EXISTS -> new QueryDefinition.Exists(predicates, bindings);
             case DELETE -> predicates.isEmpty()
@@ -908,10 +628,14 @@ final class RepositoryScanner {
         return Order.Static.of(sorts);
     }
 
-    private Window resolveWindow(ExecutableElement method, ResultKind resultKind) {
+    /**
+     * The row window: a {@code PageRequest} or {@code Limit} parameter, else the static {@code firstLimit}
+     * cap ({@code 0} for none). A method combining the two is rejected before this is reached.
+     */
+    private Window resolveWindow(ExecutableElement method, ResultKind resultKind, int firstLimit) {
         List<? extends VariableElement> params = method.getParameters();
         for (int i = 0; i < params.size(); i++) {
-            String paramFqn = erasureFqn(params.get(i).asType());
+            String paramFqn = erasureFqn(types, params.get(i).asType());
             if (PAGE_REQUEST.equals(paramFqn)) {
                 return resultKind == ResultKind.CURSORED_PAGE
                         ? new Window.Cursor(i)
@@ -921,64 +645,23 @@ final class RepositoryScanner {
                 return new Window.Limit(i);
             }
         }
-        return new Window.None(LimitSpec.none());
+        return new Window.None(new LimitSpec(firstLimit, 0));
     }
 
-    /**
-     * Extracts unique named parameter names from SQL in order of first appearance.
-     * Matches patterns like {@code :name} while ignoring string literals.
-     */
-    private List<String> extractNamedParams(String sql) {
-        List<String> params = new ArrayList<>();
-        Matcher matcher = NAMED_PARAM_PATTERN.matcher(sql);
-        while (matcher.find()) {
-            String name = matcher.group(1);
-            if (!params.contains(name)) {
-                params.add(name);
+    /** {@code "PageRequest"} or {@code "Limit"} for the first such parameter of {@code method}, else {@code null}. */
+    private String pagingParameterType(ExecutableElement method) {
+        for (VariableElement param : method.getParameters()) {
+            String paramFqn = erasureFqn(types, param.asType());
+            if (PAGE_REQUEST.equals(paramFqn) || LIMIT.equals(paramFqn)) {
+                return paramFqn.substring(paramFqn.lastIndexOf('.') + 1);
             }
         }
-        return params;
-    }
-
-    /**
-     * Builds {@link ParamBinding}s for a {@code @Query} method by matching method parameters
-     * to named SQL parameters. No {@code @Param} → Java parameter name; with {@code @Param} →
-     * its required {@code value()} (no default in jakarta.data-api).
-     */
-    private List<ParamBinding> buildQueryBindings(ExecutableElement method, List<String> namedParams) {
-        List<ParamBinding> bindings = new ArrayList<>();
-        List<? extends VariableElement> params = method.getParameters();
-
-        for (int i = 0; i < params.size(); i++) {
-            VariableElement param = params.get(i);
-            // Skip Limit / Sort / Order / PageRequest
-            if (isSpecialQueryParameter(param)) continue;
-
-            String paramName = resolveQueryParamName(param);
-
-            // Only bind if this name appears in the SQL named parameters
-            if (namedParams.contains(paramName)) {
-                bindings.add(new ParamBinding(i, paramName, LikePattern.NONE));
-            }
-        }
-        return bindings;
-    }
-
-    /**
-     * Named SQL parameter: no {@code @Param} → Java parameter name; with {@code @Param} →
-     * its required {@code value()}.
-     */
-    private static String resolveQueryParamName(VariableElement param) {
-        Param paramAnnotation = param.getAnnotation(Param.class);
-        if (paramAnnotation != null) {
-            return paramAnnotation.value();
-        }
-        return param.getSimpleName().toString();
+        return null;
     }
 
     // ── Utility methods ──────────────────────────────────────────────────
 
-    private String erasureFqn(TypeMirror type) {
+    private static String erasureFqn(Types types, TypeMirror type) {
         if (type == null) return "";
         if (type.getKind().isPrimitive()) return type.toString();
         if (type.getKind() == TypeKind.ARRAY) return "array";
@@ -993,5 +676,444 @@ final class RepositoryScanner {
         if ("hashCode".equals(name) && params.isEmpty()) return true;
         if ("toString".equals(name) && params.isEmpty()) return true;
         return false;
+    }
+
+    // ── Nested helpers ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Repository interface-hierarchy walks: the superclass first, then the direct interfaces, then
+     * every transitive interface (depth-first, see {@link #getAllInterfaces}), stopping at the first
+     * type a matcher accepts, and resolves the repository's entity mapping from the {@link TypeGraph}.
+     */
+    private static final class RepositoryHierarchy {
+
+        private final Types types;
+        private final TypeGraph typeGraph;
+        private final Diagnostics diagnostics;
+
+        RepositoryHierarchy(Types types, TypeGraph typeGraph, Diagnostics diagnostics) {
+            this.types = types;
+            this.typeGraph = typeGraph;
+            this.diagnostics = diagnostics;
+        }
+
+        /**
+         * The repository's entity mapping: the entity type argument of its CrudRepository /
+         * BasicRepository / DataRepository base, looked up in the {@link TypeGraph}. Every repository
+         * entity must be annotated (@Entity/@AggregateRoot/@ValueObject) so the type scan has already
+         * registered it; if the type cannot be resolved or is missing from the graph, the error is
+         * reported on the repository and {@code null} is returned.
+         */
+        TypeDefinition resolveEntityMapping(TypeElement repository) {
+            TypeMirror entityTypeMirror = firstInHierarchy(repository, this::extractEntityTypeArg);
+            if (entityTypeMirror == null) {
+                diagnostics.error("Cannot resolve entity type for repository " + repository.getQualifiedName(),
+                        repository);
+                return null;
+            }
+
+            String entityFqn = types.erasure(entityTypeMirror).toString();
+            if (asTypeElement(entityTypeMirror) == null) {
+                diagnostics.error("Entity type is not a declared type: " + entityFqn, repository);
+                return null;
+            }
+
+            TypeDefinition entityMapping = typeGraph.get(entityFqn);
+            if (entityMapping == null) {
+                diagnostics.error("No @Entity/@AggregateRoot/@ValueObject mapping found for " + entityFqn,
+                        repository);
+                return null;
+            }
+            return entityMapping;
+        }
+
+        /**
+         * Resolves the parameterized CrudRepository/BasicRepository/DataRepository type
+         * from the repository's type hierarchy. This is needed for proper type variable
+         * resolution when overriding methods like save(T entity) — we need the concrete
+         * type arguments (e.g., CrudRepository<Customer, Long>) not just the repository
+         * interface itself.
+         */
+        DeclaredType resolveRepositoryDeclaredType(TypeElement repository) {
+            DeclaredType found = firstInHierarchy(repository, this::matchBaseRepositoryType);
+            if (found != null) return found;
+
+            // Fallback to the repository's own type if no base repository found
+            return (DeclaredType) repository.asType();
+        }
+
+        /**
+         * Checks if the repository extends a Jakarta Data interface (CrudRepository, BasicRepository, or DataRepository).
+         */
+        boolean extendsJakartaDataInterface(TypeElement repository) {
+            return firstInHierarchy(repository, type -> isJakartaDataInterface(type) ? type : null) != null;
+        }
+
+        /**
+         * The single hierarchy walk shared by {@link #resolveEntityMapping}, {@link #resolveRepositoryDeclaredType}
+         * and {@link #extendsJakartaDataInterface}: the first non-null {@code match} result, trying the
+         * superclass, then the direct interfaces, then the transitive interfaces; {@code null} if none match.
+         */
+        private <T> T firstInHierarchy(TypeElement repository, Function<TypeMirror, T> match) {
+            // Try superclass first (e.g. TaskRepository extends CrudRepository<Task, Long>)
+            T found = match.apply(repository.getSuperclass());
+            if (found != null) return found;
+
+            // Try direct interfaces
+            for (TypeMirror iface : repository.getInterfaces()) {
+                found = match.apply(iface);
+                if (found != null) return found;
+            }
+
+            // Walk transitive interfaces
+            for (TypeMirror iface : getAllInterfaces(repository)) {
+                found = match.apply(iface);
+                if (found != null) return found;
+            }
+
+            return null;
+        }
+
+        /**
+         * If the given type is a parameterized CrudRepository/BasicRepository/DataRepository,
+         * extracts the first type argument (the entity type).
+         */
+        private TypeMirror extractEntityTypeArg(TypeMirror type) {
+            if (type == null || type.getKind() != TypeKind.DECLARED) return null;
+            DeclaredType dt = (DeclaredType) type;
+            TypeElement te = (TypeElement) dt.asElement();
+            String fqn = te.getQualifiedName().toString();
+
+            if (fqn.equals(CRUD_REPOSITORY) || fqn.equals(BASIC_REPOSITORY) || fqn.equals(DATA_REPOSITORY)) {
+                List<? extends TypeMirror> typeArgs = dt.getTypeArguments();
+                if (!typeArgs.isEmpty()) {
+                    return typeArgs.getFirst();
+                }
+            }
+            return null;
+        }
+
+        private DeclaredType matchBaseRepositoryType(TypeMirror type) {
+            if (type == null || type.getKind() != TypeKind.DECLARED) return null;
+            DeclaredType dt = (DeclaredType) type;
+            TypeElement te = (TypeElement) dt.asElement();
+            String fqn = te.getQualifiedName().toString();
+            if (fqn.equals(CRUD_REPOSITORY) || fqn.equals(BASIC_REPOSITORY) || fqn.equals(DATA_REPOSITORY)) {
+                return dt;
+            }
+            return null;
+        }
+
+        private boolean isJakartaDataInterface(TypeMirror type) {
+            if (type == null || type.getKind() != TypeKind.DECLARED) return false;
+            TypeElement te = (TypeElement) ((DeclaredType) type).asElement();
+            String fqn = te.getQualifiedName().toString();
+            return fqn.equals(CRUD_REPOSITORY) ||
+                   fqn.equals("jakarta.data.repository.BasicRepository") ||
+                   fqn.equals(DATA_REPOSITORY);
+        }
+
+        private List<TypeMirror> getAllInterfaces(TypeElement type) {
+            List<TypeMirror> result = new ArrayList<>();
+            for (TypeMirror iface : type.getInterfaces()) {
+                result.add(iface);
+                TypeElement ifaceElement = asTypeElement(iface);
+                if (ifaceElement != null) {
+                    result.addAll(getAllInterfaces(ifaceElement));
+                }
+            }
+            TypeMirror superclass = type.getSuperclass();
+            TypeElement superElement = asTypeElement(superclass);
+            if (superElement != null && !superElement.getQualifiedName().contentEquals("java.lang.Object")) {
+                result.addAll(getAllInterfaces(superElement));
+            }
+            return result;
+        }
+
+        TypeElement asTypeElement(TypeMirror type) {
+            if (type == null || type.getKind() != TypeKind.DECLARED) return null;
+            javax.lang.model.element.Element element = ((DeclaredType) type).asElement();
+            return element instanceof TypeElement te ? te : null;
+        }
+    }
+
+    /**
+     * Query-by-method-name support: parsing (when the optional QBN module is on the classpath) and
+     * resolution of camelCase property paths against the entity structure.
+     */
+    private static final class QbnResolver {
+
+        private final TypeGraph typeGraph;
+        private final RepositoryHierarchy hierarchy;
+
+        QbnResolver(TypeGraph typeGraph, RepositoryHierarchy hierarchy) {
+            this.typeGraph = typeGraph;
+            this.hierarchy = hierarchy;
+        }
+
+        ParsedMethodName tryParseQbn(String methodName) {
+            if (!QBN_AVAILABLE) {
+                return null;
+            }
+            try {
+                return new QueryByMethodNameParser().parse(methodName);
+            } catch (IllegalArgumentException e) {
+                return null;
+            }
+        }
+
+        /**
+         * When {@code methodName} looks like a query by method name (findBy..., countBy..., ...) on a
+         * Jakarta Data repository but does not parse, the parser's reason; otherwise {@code null}.
+         */
+        String qbnParseError(TypeElement repository, String methodName) {
+            if (!QBN_AVAILABLE || !hierarchy.extendsJakartaDataInterface(repository)
+                    || !methodName.matches("(find|count|exists|delete)\\w*By[A-Z]\\w*")) {
+                return null;
+            }
+            try {
+                new QueryByMethodNameParser().parse(methodName);
+                return null;
+            } catch (RuntimeException e) {
+                return messageOf(e);
+            }
+        }
+
+        static Operation operationFromAction(Action action) {
+            return switch (action) {
+                case FIND -> Operation.FIND;
+                case DELETE -> Operation.DELETE;
+                case COUNT -> Operation.COUNT;
+                case EXISTS -> Operation.EXISTS;
+            };
+        }
+
+        /**
+         * Attempts to resolve camelCase property paths by splitting them at entity property boundaries.
+         * For example, "workHistoryCompany" becomes "workHistory.company" if "workHistory" is a property.
+         */
+        List<Predicate> resolveCamelCasePaths(List<Predicate> predicates, TypeDefinition entityMapping) {
+            List<Predicate> resolved = new ArrayList<>(predicates.size());
+            for (Predicate p : predicates) {
+                String path = p.property();
+                if (path.contains(".")) {
+                    resolved.add(p);
+                    continue;
+                }
+                // Try to split the camelCase path
+                String resolvedPath = trySplitCamelCasePath(path, entityMapping);
+                if (resolvedPath != null && !resolvedPath.equals(path)) {
+                    // When a camelCase path is resolved to a dotted path, the param name should be the
+                    // leaf property name (e.g., "orderItemsQuantity" → "orderItems.quantity" → param "quantity").
+                    // This matches the Java parameter name convention.
+                    String leafPropName = resolvedPath.contains(".")
+                            ? resolvedPath.substring(resolvedPath.lastIndexOf('.') + 1)
+                            : resolvedPath;
+                    resolved.add(new Predicate(resolvedPath, p.operator(), leafPropName, p.connector(), p.ignoreCase()));
+                } else {
+                    resolved.add(p);
+                }
+            }
+            return resolved;
+        }
+
+        /**
+         * Tries to split a camelCase path at entity property boundaries.
+         * Returns the dot-separated path if successful, or the original path if no split is found.
+         */
+        private String trySplitCamelCasePath(String path, TypeDefinition mapping) {
+            // Try splitting at each uppercase letter
+            for (int i = 1; i < path.length(); i++) {
+                if (Character.isUpperCase(path.charAt(i))) {
+                    String head = path.substring(0, i);
+                    String tail = Character.toLowerCase(path.charAt(i)) + path.substring(i + 1);
+                    // Check if head is a known property
+                    TypeDefinition.Prop prop = mapping.findProperty(head);
+                    if (prop != null) {
+                        // head is a property, check if tail resolves in the definition
+                        String fullPath = head + "." + tail;
+                    
+                        // Special handling for ElementCollection - can't use resolve() directly: assume the
+                        // path is valid and let SQL generation handle it with EXISTS subquery
+                        if (prop instanceof TypeDefinition.Prop.ElementCollection) {
+                            return fullPath;
+                        } else {
+                            try {
+                                mapping.resolve(fullPath);
+                                return fullPath;
+                            } catch (Exception e) {
+                                // tail doesn't resolve, try deeper splits
+                                TypeDefinition targetMapping = getTargetMapping(mapping, head);
+                                if (targetMapping != null) {
+                                    String resolvedTail = trySplitCamelCasePath(tail, targetMapping);
+                                    if (resolvedTail != null && !resolvedTail.equals(tail)) {
+                                        return head + "." + resolvedTail;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return path;
+        }
+
+        /**
+         * Gets the definition TypeDefinition for a property name, or null if not resolvable.
+         */
+        private TypeDefinition getTargetMapping(TypeDefinition mapping, String propName) {
+            TypeDefinition.Prop prop = mapping.findProperty(propName);
+            return switch (prop) {
+                case null -> null;
+                case TypeDefinition.Prop.Association assoc -> assoc.definition();
+                case TypeDefinition.Prop.EntityCollection ec -> ec.definition();
+                case TypeDefinition.Prop.Embedded emb -> emb.definition();
+                // For element collections, look up the element type definition from the type graph
+                case TypeDefinition.Prop.ElementCollection ec -> typeGraph.get(ec.javaType());
+                case TypeDefinition.Prop.Scalar ignored -> null;
+                case TypeDefinition.Prop.Id ignored -> null;
+                case TypeDefinition.Prop.Version ignored -> null;
+            };
+        }
+    }
+
+    /**
+     * {@code @Query} support: named-parameter extraction from the raw SQL and binding of method
+     * parameters to those names.
+     */
+    private static final class NativeQueryResolver {
+
+        /** Pattern matching named parameters in @Query SQL (e.g. {@code :name}). */
+        private static final Pattern NAMED_PARAM_PATTERN = Pattern.compile(":([a-zA-Z_]\\w*)");
+
+        private final ParamBinder paramBinder;
+
+        NativeQueryResolver(ParamBinder paramBinder) {
+            this.paramBinder = paramBinder;
+        }
+
+        /**
+         * Extracts unique named parameter names from SQL in order of first appearance.
+         * Matches patterns like {@code :name} while ignoring string literals.
+         */
+        List<String> extractNamedParams(String sql) {
+            List<String> params = new ArrayList<>();
+            Matcher matcher = NAMED_PARAM_PATTERN.matcher(sql);
+            while (matcher.find()) {
+                String name = matcher.group(1);
+                if (!params.contains(name)) {
+                    params.add(name);
+                }
+            }
+            return params;
+        }
+
+        /**
+         * Builds {@link ParamBinding}s for a {@code @Query} method by matching method parameters
+         * to named SQL parameters. No {@code @Param} → Java parameter name; with {@code @Param} →
+         * its required {@code value()} (no default in jakarta.data-api).
+         */
+        List<ParamBinding> buildQueryBindings(ExecutableElement method, List<String> namedParams) {
+            List<ParamBinding> bindings = new ArrayList<>();
+            List<? extends VariableElement> params = method.getParameters();
+
+            for (int i = 0; i < params.size(); i++) {
+                VariableElement param = params.get(i);
+                // Skip Limit / Sort / Order / PageRequest
+                if (paramBinder.isSpecialQueryParameter(param)) continue;
+
+                String paramName = resolveQueryParamName(param);
+
+                // Only bind if this name appears in the SQL named parameters
+                if (namedParams.contains(paramName)) {
+                    bindings.add(new ParamBinding(i, paramName, LikePattern.NONE));
+                }
+            }
+            return bindings;
+        }
+
+        /**
+         * Named SQL parameter: no {@code @Param} → Java parameter name; with {@code @Param} →
+         * its required {@code value()}.
+         */
+        private static String resolveQueryParamName(VariableElement param) {
+            Param paramAnnotation = param.getAnnotation(Param.class);
+            if (paramAnnotation != null) {
+                return paramAnnotation.value();
+            }
+            return param.getSimpleName().toString();
+        }
+    }
+
+    /**
+     * Binds method parameters to predicate slots, skipping the special query parameters
+     * (PageRequest, Limit, Sort, Order).
+     */
+    private static final class ParamBinder {
+
+        private final Types types;
+
+        ParamBinder(Types types) {
+            this.types = types;
+        }
+
+        /**
+         * Builds param bindings by matching method parameters to predicates.
+         */
+        List<ParamBinding> buildParamBindings(ExecutableElement method, List<Predicate> predicates) {
+            List<ParamBinding> bindings = new ArrayList<>();
+            List<? extends VariableElement> params = method.getParameters();
+
+            // Attribute / query value parameters only (skip Limit, Sort, Order, PageRequest)
+            List<Integer> nonPagingParamIndices = new ArrayList<>();
+            for (int i = 0; i < params.size(); i++) {
+                if (!isSpecialQueryParameter(params.get(i))) {
+                    nonPagingParamIndices.add(i);
+                }
+            }
+
+            // Every predicate must be fully bindable; a half-bound plan compiles but fails at runtime.
+            // Operator owns the bind-arity table (nullary operators bind no value).
+            int requiredSlots = 0;
+            for (Predicate pred : predicates) {
+                requiredSlots += pred.operator().parameterCount();
+            }
+            if (requiredSlots > nonPagingParamIndices.size()) {
+                throw new IllegalArgumentException("method '" + method.getSimpleName() + "' requires "
+                        + requiredSlots + " query parameter(s) but declares " + nonPagingParamIndices.size());
+            }
+
+            // Map each predicate to its binding slot(s)
+            int slotIndex = 0;
+            for (Predicate pred : predicates) {
+                int slots = pred.operator().parameterCount();
+                if (slots == 0) {
+                    continue;
+                }
+                if (slots == 2) {
+                    // BETWEEN needs TWO consecutive parameter slots -> _from and _to
+                    int fromParamIdx = nonPagingParamIndices.get(slotIndex);
+                    int toParamIdx = nonPagingParamIndices.get(slotIndex + 1);
+                    bindings.add(new ParamBinding(fromParamIdx, pred.param() + "_from", LikePattern.NONE));
+                    bindings.add(new ParamBinding(toParamIdx, pred.param() + "_to", LikePattern.NONE));
+                } else {
+                    int paramIdx = nonPagingParamIndices.get(slotIndex);
+                    bindings.add(new ParamBinding(paramIdx, pred.param(), LikePattern.of(pred.operator())));
+                }
+                slotIndex += slots;
+            }
+
+            return bindings;
+        }
+
+        boolean isSpecialQueryParameter(VariableElement param) {
+            String fqn = erasureFqn(types, param.asType());
+            return PAGE_REQUEST.equals(fqn)
+                    || LIMIT.equals(fqn)
+                    || SORT.equals(fqn)
+                    || ORDER.equals(fqn)
+                    || fqn.startsWith(SORT + "<")
+                    || fqn.startsWith(ORDER + "<");
+        }
     }
 }

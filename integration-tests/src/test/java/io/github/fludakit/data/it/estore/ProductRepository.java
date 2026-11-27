@@ -21,4 +21,10 @@ public interface ProductRepository extends CrudRepository<Product, Long> {
 
     // A range binds TWO values: BETWEEN renders :low_from and :low_to, fed by the two arguments.
     List<Product> findByPriceBetween(BigDecimal low, BigDecimal high);
+
+    // First<n> is a static limit applied after the sort: at most n rows, in OrderBy order.
+    List<Product> findFirst2ByPriceGreaterThanOrderByPriceDesc(BigDecimal price);
+
+    // A bare First keeps one row, so a single-entity return is well defined while several rows match.
+    Product findFirstByNameContainsOrderByPriceAsc(String text);
 }

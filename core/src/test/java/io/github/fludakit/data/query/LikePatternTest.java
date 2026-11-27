@@ -14,11 +14,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class LikePatternTest {
 
+    /** The bound value as the generated {@code .param(...)} call builds it from the pattern. */
+    private static String decorate(LikePattern pattern, String value) {
+        return pattern.prefix() + value + pattern.suffix();
+    }
+
     @Test
     void theSubstringOperatorsDecorateTheBoundValue() {
-        assertEquals("%dd%", LikePattern.of(Operator.CONTAINS).decorate("dd"));
-        assertEquals("dd%", LikePattern.of(Operator.STARTS_WITH).decorate("dd"));
-        assertEquals("%dd", LikePattern.of(Operator.ENDS_WITH).decorate("dd"));
+        assertEquals("%dd%", decorate(LikePattern.of(Operator.CONTAINS), "dd"));
+        assertEquals("dd%", decorate(LikePattern.of(Operator.STARTS_WITH), "dd"));
+        assertEquals("%dd", decorate(LikePattern.of(Operator.ENDS_WITH), "dd"));
     }
 
     @Test
@@ -36,7 +41,7 @@ class LikePatternTest {
         // make an anchored or single-character pattern impossible to express.
         assertEquals(LikePattern.NONE, LikePattern.of(Operator.LIKE));
         assertEquals(LikePattern.NONE, LikePattern.of(Operator.NOT_LIKE));
-        assertEquals("%DD%", LikePattern.of(Operator.LIKE).decorate("%DD%"));
+        assertEquals("%DD%", decorate(LikePattern.of(Operator.LIKE), "%DD%"));
     }
 
     @Test
@@ -66,8 +71,8 @@ class LikePatternTest {
 
     @Test
     void aBindingWithoutAPatternBindsAsIs() {
-        assertEquals(LikePattern.NONE, new ParamBinding(0, "text").pattern());
+        assertEquals(LikePattern.NONE, new ParamBinding(0, "text", null).pattern());
         assertEquals(LikePattern.BOTH, new ParamBinding(0, "text", LikePattern.BOTH).pattern());
-        assertEquals("%dd%", new ParamBinding(0, "text", LikePattern.BOTH).pattern().decorate("dd"));
+        assertEquals("%dd%", decorate(new ParamBinding(0, "text", LikePattern.BOTH).pattern(), "dd"));
     }
 }

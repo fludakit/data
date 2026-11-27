@@ -3,26 +3,22 @@ package io.github.fludakit.data.sql;
 import io.github.fludakit.data.metadata.ColumnPlacement;
 import io.github.fludakit.data.metadata.ColumnRef;
 import io.github.fludakit.data.metadata.JoinEdge;
-import io.github.fludakit.data.metadata.NonLocalAttributePathException;
 import io.github.fludakit.data.metadata.TypeDefinition;
-import io.github.fludakit.data.query.Operator;
-import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
-import io.github.fludakit.data.query.SortSpec;
 
-import java.util.Collection;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
-import java.util.stream.Collectors;
 
 /**
  * Turns an {@link SqlFragment} into a SQL literal. Compilation belongs to {@link QueryCompiler};
- * this class only renders, optionally formats, and splices call-time clauses (seek, order, limit).
+ * this class only renders, optionally formats, and splices call-time clauses (seek, order).
  *
  * <pre>
  * new SqlBuilder(typeModel).dialect(dialect).sql(definition);
- * new SqlBuilder(dialect, SqlFormat.PRETTY).sql(fragment);
+ * new SqlBuilder(typeModel).format(SqlFormat.PRETTY).sql(fragment);
  * </pre>
  */
 public final class SqlBuilder {
@@ -31,20 +27,11 @@ public final class SqlBuilder {
     private SqlDialect dialect;
     private SqlFormat format;
 
-    /** Dialect + format only — for rendering fragments and runtime splices. */
-    public SqlBuilder(SqlDialect dialect, SqlFormat format) {
-        this(null, dialect, format);
-    }
-
     /** Type model as both physical table shape and attribute-path model. */
     public SqlBuilder(TypeDefinition typeModel) {
-        this(typeModel, H2Dialect.INSTANCE, SqlFormat.COMPACT);
-    }
-
-    private SqlBuilder(TypeDefinition typeModel, SqlDialect dialect, SqlFormat format) {
         this.typeModel = typeModel;
-        this.dialect = Objects.requireNonNull(dialect, "dialect");
-        this.format = Objects.requireNonNull(format, "format");
+        this.dialect = H2Dialect.INSTANCE;
+        this.format = SqlFormat.COMPACT;
     }
 
     public SqlBuilder dialect(SqlDialect dialect) {
@@ -76,76 +63,11 @@ public final class SqlBuilder {
         return sql(QueryCompiler.compile(definition, requireTypeModel(), dialect, extraEdges, extraProjection));
     }
 
-    /**
-     * @deprecated prefer {@link #sql(QueryDefinition)}
-     */
-    @Deprecated
-    public String render(QueryDefinition definition) {
-        return sql(definition);
-    }
-
-    /**
-     * @deprecated prefer {@link #sql(QueryDefinition, List, String)}
-     */
-    @Deprecated
-    public String render(QueryDefinition definition, String extraProjection) {
-        return sql(definition, List.of(), extraProjection);
-    }
-
-    /**
-     * @deprecated prefer {@link #sql(QueryDefinition, List, String)}
-     */
-    @Deprecated
-    public String render(QueryDefinition definition, List<JoinEdge> extraEdges, String extraProjection) {
-        return sql(definition, extraEdges, extraProjection);
-    }
-
     // --------------------------------------------------------------- runtime splices
-
-    /**
-     * Keyset seek predicate over pre-rendered sort terms.
-     *
-     * @see SeekClause#render(List, List, boolean)
-     */
-    public String withSeek(List<String> terms, List<Boolean> ascending, boolean forward) {
-        return SeekClause.render(terms, ascending, forward);
-    }
 
     /**
      * Assembles a cursor-paged seek statement: shell + null-guarded seek + ORDER BY. No LIMIT —
      * the caller splices that at runtime.
-     */
-    public String withSeek(String shell, boolean shellHasWhere, List<String> terms,
-                           List<Boolean> ascending, boolean forward, List<String> orderByTerms,
-                           List<String> aggregateExpressions, String rootTable) {
-        return pagedSeekStatement(shell, shellHasWhere, terms, ascending, forward, orderByTerms,
-                aggregateExpressions, rootTable);
-    }
-
-    /** Appends {@code ORDER BY} from pre-rendered terms. */
-    public String withOrder(String shell, List<String> terms, List<Boolean> ascending) {
-        return shell + renderOrderBy(terms, ascending);
-    }
-
-    /** Appends the dialect's limit/offset clause. */
-    public String withLimit(String sql, String limitExpression, String offsetExpression) {
-        if (offsetExpression != null && !offsetExpression.isBlank()) {
-            return sql + dialect.limitOffsetClause(limitExpression, offsetExpression);
-        }
-        return sql + dialect.limitClause(limitExpression);
-    }
-
-    /**
-     * @deprecated prefer {@link #withSeek(List, List, boolean)}
-     */
-    @Deprecated
-    public String seekClause(List<String> terms, List<Boolean> ascending, boolean forward) {
-        return withSeek(terms, ascending, forward);
-    }
-
-    /**
-     * Full keyset-seek statement. Prefer
-     * {@link #withSeek(String, boolean, List, List, boolean, List, List, String)}.
      */
     public String pagedSeekStatement(String shell, boolean shellHasWhere, List<String> terms,
                                      List<Boolean> ascending, boolean forward, List<String> orderByTerms,
@@ -200,10 +122,6 @@ public final class SqlBuilder {
 
     // --------------------------------------------------------------- convenience (type-model-backed)
 
-    public String insert() {
-        return insert(true);
-    }
-
     public String insert(boolean includeId) {
         return insert(includeId, ResultKind.VOID);
     }
@@ -256,9 +174,56 @@ public final class SqlBuilder {
         return sql(QueryCompiler.insertColumns(dialect, table, columns, paramNames));
     }
 
-    public QueryCompiler.RenderedCursorSortProjection cursorSortProjection(
-            QueryCompiler.CursorSortProjection projection) {
-        return QueryCompiler.renderCursorSortProjection(dialect, requireTypeModel(), projection);
+    /**
+     * The rendered shape of a cursor-paged to-many sort/projection: the base SELECT shell
+     * ({@code LEFT JOIN} child + {@code GROUP BY} root columns + {@code MIN}/{@code MAX} aggregates),
+     * the {@code ORDER BY} aliases, and the keyset seek terms (full aggregate expressions).
+     */
+    public record CursorProjection(String shell, List<String> orderByTerms, List<String> seekTerms) {
+        public CursorProjection {
+            Objects.requireNonNull(shell, "shell");
+            orderByTerms = List.copyOf(orderByTerms);
+            seekTerms = List.copyOf(seekTerms);
+        }
+    }
+
+    /**
+     * Renders a cursor-paged to-many sort/projection. {@code sortColumns} maps child column suffix
+     * to sort direction in iteration order; each becomes {@code MIN(alias.col)} (ascending) or
+     * {@code MAX(alias.col)} (descending) aliased {@code agg_N}.
+     */
+    public CursorProjection cursorSortProjection(
+            String childTable, String fkColumn, String joinAlias, Map<String, Boolean> sortColumns) {
+        TypeDefinition typeModel = requireTypeModel();
+        String rootTable = dialect.quoteIdentifier(typeModel.tableName());
+        String quotedAlias = dialect.quoteIdentifier(joinAlias);
+
+        SqlFragment.Query.Builder shell = SqlFragment.Query.builder().table(typeModel.tableName());
+        List<String> selectColumns = new ArrayList<>();
+        for (ColumnRef col : typeModel.columns()) {
+            String qualified = rootTable + "." + dialect.quoteIdentifier(col.column());
+            selectColumns.add(qualified);
+            shell.groupBy(qualified);
+        }
+
+        List<String> orderByTerms = new ArrayList<>();
+        List<String> seekTerms = new ArrayList<>();
+        int aggIndex = 0;
+        for (Map.Entry<String, Boolean> sort : sortColumns.entrySet()) {
+            String aggFunc = sort.getValue() ? "MIN" : "MAX";
+            String expr = aggFunc + "(" + quotedAlias + "." + dialect.quoteIdentifier(sort.getKey()) + ")";
+            String alias = dialect.quoteIdentifier("agg_" + aggIndex);
+            selectColumns.add(expr + " AS " + alias);
+            orderByTerms.add(alias);
+            seekTerms.add(expr);
+            aggIndex++;
+        }
+
+        JoinEdge edge = new JoinEdge.ToMany(
+                new ColumnRef.Simple(typeModel.idColumn(), typeModel.tableName()),
+                new ColumnRef.ForeignKey(fkColumn, childTable));
+        shell.projection(String.join(", ", selectColumns)).join(edge, joinAlias);
+        return new CursorProjection(shell.build().render(dialect), orderByTerms, seekTerms);
     }
 
     public String correlatedSort(String childTable, String leafColumn, String fkColumn,
@@ -275,89 +240,14 @@ public final class SqlBuilder {
         return QueryCompiler.rowMapperProjection(dialect, type, associationAliasIsName);
     }
 
-    public String selectBy(List<Predicate> predicates, List<SortSpec> sorts, int limit, String cursorClause) {
-        return QueryCompiler.selectBy(dialect, requireTypeModel(), predicates, sorts, limit, cursorClause);
-    }
-
-    public String selectBy(List<Predicate> predicates, List<SortSpec> sorts, int limit, String cursorClause,
-                           boolean distinct) {
-        return QueryCompiler.selectBy(dialect, requireTypeModel(), predicates, sorts, limit, cursorClause, distinct);
-    }
-
-    public String countBy(List<Predicate> predicates) {
-        return QueryCompiler.countBy(dialect, requireTypeModel(), predicates, false);
-    }
-
-    public String deleteBy(List<Predicate> predicates) {
-        return QueryCompiler.deleteBy(dialect, requireTypeModel(), predicates);
-    }
-
     // --------------------------------------------------------------- splice primitives
-
-    public String qualify(ColumnRef columnRef) {
-        return qualify(columnRef, requireTypeModel().tableName());
-    }
-
-    public String qualify(ColumnRef columnRef, String rootTable) {
-        return QueryCompiler.qualify(dialect, columnRef, rootTable);
-    }
-
-    public String joinClause(List<JoinEdge> edges) {
-        return QueryCompiler.joinClause(dialect, edges);
-    }
-
-    public String joinClause(List<JoinEdge> edges, Collection<String> alreadyJoined) {
-        return QueryCompiler.joinClause(dialect, edges, alreadyJoined);
-    }
-
-    public String resolveColumn(String path) {
-        ColumnPlacement placement = requireTypeModel().resolve(path);
-        if (!placement.local()) {
-            throw new NonLocalAttributePathException(path, placement);
-        }
-        return placement.leaf().column();
-    }
-
-    public boolean isToManyPath(String path) {
-        return requireTypeModel().isToManyPath(path);
-    }
 
     public String aggregateSortTerm(ColumnPlacement placement, boolean ascending) {
         return QueryCompiler.aggregateSortTerm(dialect, requireTypeModel(), placement, ascending);
     }
 
-    public String existsConjunct(Predicate predicate, ColumnPlacement placement) {
-        return QueryCompiler.existsConjunct(dialect, predicate, placement);
-    }
-
-    public String renderPredicate(Predicate predicate, ColumnPlacement placement) {
-        return QueryCompiler.renderPredicate(dialect, predicate, placement);
-    }
-
-    public String qualifiedRootSelect(List<JoinEdge> traversedToOne, boolean qualified, String extraProjection) {
-        return QueryCompiler.qualifiedRootSelect(dialect, requireTypeModel(), traversedToOne, qualified, extraProjection);
-    }
-
-    public String orderBy(List<SortSpec> sorts) {
-        if (sorts.isEmpty()) {
-            return "";
-        }
-        return " ORDER BY " + sorts.stream()
-                .map(s -> dialect.quoteIdentifier(resolveColumn(s.property()))
-                        + (s.ascending() ? " ASC" : " DESC"))
-                .collect(Collectors.joining(", "));
-    }
-
     public static String paramName(String path) {
         return QueryCompiler.paramName(path);
-    }
-
-    public static int parameterCount(Operator operator) {
-        return QueryCompiler.parameterCount(operator);
-    }
-
-    public static List<String> paramNames(Operator operator, String param) {
-        return QueryCompiler.paramNames(operator, param);
     }
 
     private TypeDefinition requireTypeModel() {

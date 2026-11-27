@@ -222,16 +222,13 @@ class TypeDefinitionTest {
     }
 
     @Test
-    void identityAndLifecycleHelpers() {
+    void identityHelpers() {
         assertInstanceOf(TypeDefinition.Aggregate.class, BOOK);
-        assertTrue(BOOK.ownsAggregateLifecycle());
         assertEquals("id", BOOK.idColumn());
 
         assertInstanceOf(TypeDefinition.Entity.class, AUTHOR);
-        assertFalse(AUTHOR.ownsAggregateLifecycle());
 
         assertInstanceOf(TypeDefinition.ValueObject.class, ADDRESS);
-        assertFalse(ADDRESS.ownsAggregateLifecycle());
         assertNull(ADDRESS.idColumn());
     }
 

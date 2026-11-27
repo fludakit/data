@@ -217,6 +217,51 @@ class QueryByMethodNameEmissionTest {
     }
 
     @Test
+    void nullaryOperatorConsumesNoParameterSlot() throws Exception {
+        // A nullary operator binds no value, so it must not consume a binding slot: in a mixed
+        // finder the positional binder used to hand the tag parameter to the IS NULL condition
+        // (.param("text", tag)) and leave :tag itself unbound — compilable, wrong at runtime.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/nullary-mix"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-nullary-mix"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-nullary-mix"));
+        Files.writeString(sourceDir.resolve("Memo.java"), """
+                package nullarymix;
+                @io.github.fludakit.data.annotation.Entity
+                public class Memo {
+                    public Long id;
+                    public String text;
+                    public String tag;
+                    public Long getId() { return id; }
+                    public void setId(Long id) { this.id = id; }
+                    public String getText() { return text; }
+                    public void setText(String text) { this.text = text; }
+                    public String getTag() { return tag; }
+                    public void setTag(String tag) { this.tag = tag; }
+                }
+                """);
+        Files.writeString(sourceDir.resolve("Memos.java"), """
+                package nullarymix;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.List;
+                @Repository
+                public interface Memos extends CrudRepository<Memo, Long> {
+                    List<Memo> findByTextNullOrTag(String tag);
+                }
+                """);
+
+        compile(sourceDir, classesDir, generatedDir, "Memo.java", "Memos.java");
+
+        String impl = sqlFlat(generatedDir.resolve("nullarymix/Memos_.java"));
+        assertTrue(impl.contains("\"text\" IS NULL OR \"tag\" = :tag"),
+                "the mixed finder must render both conditions:" + System.lineSeparator() + impl);
+        assertTrue(impl.contains("param(\"tag\", tag)"),
+                "the tag parameter must bind to :tag:" + System.lineSeparator() + impl);
+        assertFalse(impl.contains("param(\"text\", tag)"),
+                "the tag parameter must not be bound to the nullary condition:" + System.lineSeparator() + impl);
+    }
+
+    @Test
     void distinctSubjectKeywordRendersSelectDistinct() throws Exception {
         // Distinct is a deliberate superset of the Jakarta Data BNF, so it is a KEYWORD here, not
         // ignored text: the name states the de-duplication and the statement must honour it.
@@ -256,6 +301,65 @@ class QueryByMethodNameEmissionTest {
         assertTrue(impl.contains("SELECT COUNT(DISTINCT \"id\") FROM \"memos\" WHERE \"text\" = :text"),
                 "a Distinct count must count distinct ids:" + System.lineSeparator() + impl);
 
+    }
+
+    @Test
+    void firstKeywordRendersAStaticLimitAfterTheOrderBy() throws Exception {
+        // First<n> is a static limit applied after sorting; a bare First is First1. The parser always read
+        // it into ParsedMethodName.limit(), but nothing carried it into the query, so findFirstByName
+        // selected every matching row (and .single() failed on the second one) and findFirst3By...OrderBy
+        // returned the whole ordered match. Both shipped dialects spell it LIMIT n, and a method without
+        // First keeps exactly the statement it had.
+        for (String dialect : List.of("h2", "postgresql")) {
+            Path sourceDir = Files.createDirectories(workspace.resolve("src/first-" + dialect));
+            Path classesDir = Files.createDirectories(workspace.resolve("classes-first-" + dialect));
+            Path generatedDir = Files.createDirectories(workspace.resolve("generated-first-" + dialect));
+
+            Files.writeString(sourceDir.resolve("Memo.java"), """
+                    package firstq;
+                    @io.github.fludakit.data.annotation.Entity
+                    public class Memo {
+                        public Long id;
+                        public String name;
+                        public int age;
+                        public Long getId() { return id; }
+                        public void setId(Long id) { this.id = id; }
+                        public String getName() { return name; }
+                        public void setName(String name) { this.name = name; }
+                        public int getAge() { return age; }
+                        public void setAge(int age) { this.age = age; }
+                    }
+                    """);
+            Files.writeString(sourceDir.resolve("Memos.java"), """
+                    package firstq;
+                    import jakarta.data.repository.CrudRepository;
+                    import jakarta.data.repository.Repository;
+                    import java.util.List;
+                    @Repository
+                    public interface Memos extends CrudRepository<Memo, Long> {
+                        Memo findFirstByName(String name);
+                        List<Memo> findFirst3ByNameOrderByAgeAsc(String name);
+                        List<Memo> findByNameOrderByAgeAsc(String name);
+                    }
+                    """);
+
+            compileWithDialect(sourceDir, classesDir, generatedDir, dialect, "Memo.java", "Memos.java");
+
+            String impl = sqlFlat(generatedDir.resolve("firstq/Memos_.java"));
+            String select = "SELECT \"id\", \"name\", \"age\" FROM \"memos\" WHERE \"name\" = :name";
+            assertOperatorConstant(impl, "FIND_FIRST_BY_NAME_SQL",
+                    select + " LIMIT 1\"", "param(\"name\", name)");
+            assertOperatorConstant(impl, "FIND_FIRST3_BY_NAME_ORDER_BY_AGE_ASC_SQL",
+                    select + " ORDER BY \"age\" ASC LIMIT 3\"", "param(\"name\", name)");
+            assertOperatorConstant(impl, "FIND_BY_NAME_ORDER_BY_AGE_ASC_SQL",
+                    select + " ORDER BY \"age\" ASC\"", "param(\"name\", name)");
+            // The cap leaves the declared result shape alone: an entity stays single(), a List stays list().
+            assertTrue(bodyOf(impl, "public Memo findFirstByName(String name)").contains(".single()"),
+                    dialect + ": findFirstByName must read one row:" + System.lineSeparator() + impl);
+            assertTrue(bodyOf(impl, "public List<Memo> findFirst3ByNameOrderByAgeAsc(String name)")
+                            .contains(".list()"),
+                    dialect + ": findFirst3ByNameOrderByAgeAsc must read a list:" + System.lineSeparator() + impl);
+        }
     }
 
     @Test

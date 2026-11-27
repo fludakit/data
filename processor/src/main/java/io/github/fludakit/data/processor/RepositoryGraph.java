@@ -44,9 +44,4 @@ public final class RepositoryGraph {
     public RepositoryContext context(String fqn) {
         return contexts.get(fqn);
     }
-
-    /** Whether the graph holds no repository. */
-    public boolean isEmpty() {
-        return contexts.isEmpty();
-    }
 }

@@ -86,7 +86,6 @@ class UpsertTest {
     void anUpsertReportsWhatTheMethodDeclares() {
         QueryDefinition.Upsert upsert = new QueryDefinition.Upsert(ResultKind.AFFECTED);
         assertEquals(ResultKind.AFFECTED, upsert.resultKind());
-        assertEquals(ResultKind.VOID, new QueryDefinition.Upsert().resultKind());
         assertEquals(ResultKind.VOID, new QueryDefinition.Upsert(null).resultKind());
     }
 

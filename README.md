@@ -39,7 +39,6 @@ Enable the compiler `-parameters` flag (`maven-compiler-plugin` `<parameters>tru
 
 ## Documentation
 
-- [Product specification](docs/PRODUCT-SPEC.md) — the v1 Jakarta Data scope and DDD entity model.
-- [Technical specification](docs/TECH-SPEC.md) — processor architecture and refactoring roadmap.
-- [Reference documentation](https://fludakit.github.io/documentation/data/getting-started/) — getting started, repository patterns, query-by-method-name, and full API reference.
+- [AGENTS.md](AGENTS.md) — architecture, the v1 Jakarta Data scope, the DDD entity model and contribution rules.
+- [Reference documentation](https://fludakit.github.io/data/getting-started/) — getting started, repository patterns, query-by-method-name, and full API reference.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — how to build the project and submit changes.

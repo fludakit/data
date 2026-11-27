@@ -3,8 +3,8 @@ package io.github.fludakit.data.processor.emitter;
 import com.squareup.javapoet.ClassName;
 import com.squareup.javapoet.CodeBlock;
 import io.github.fludakit.data.metadata.TypeDefinition;
-import io.github.fludakit.data.processor.context.MutationPlan.CascadeMode;
-import io.github.fludakit.data.processor.context.MutationPlan.CascadeSpec;
+import io.github.fludakit.data.processor.context.CascadePlan.CascadeMode;
+import io.github.fludakit.data.processor.context.CascadePlan.CascadeStep;
 import io.github.fludakit.data.processor.context.RepositoryContext;
 import io.github.fludakit.data.sql.H2Dialect;
 import org.junit.jupiter.api.Test;
@@ -19,19 +19,22 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Pins the consolidated post-cascade emission: one renderer, one sink, and a step that
  * contributes no code never reaches the sink.
  */
-class CascadeSupportTest {
+class WriteEmitterCascadeTest {
 
-    /** The paths under test never resolve a type, so they need no {@code Elements}. */
-    private static final WriteSupport SUPPORT = new WriteSupport(null);
+    /** The paths under test never resolve a type or a repository method, so they need no
+     *  {@code Types}, {@code Elements} or repository types. */
+    private static WriteEmitter emitter() {
+        return new WriteEmitter(H2Dialect.INSTANCE, null, null, null, null);
+    }
 
     @Test
     void stepWithoutCodeNeverReachesTheSink() {
-        CascadeSupport cascades = new CascadeSupport(H2Dialect.INSTANCE, SUPPORT);
+        WriteEmitter cascades = emitter();
 
         List<CodeBlock> emitted = new ArrayList<>();
         // PRE_INSERT is rendered by the pre-insert path; the post-cascade renderer has no code for it.
-        cascades.emitPostCascadeSpec(
-                new CascadeSpec(null, new TypeDefinition.Prop.Scalar("name", "java.lang.String", "name", true),
+        cascades.emitPostCascadeStep(
+                new CascadeStep(null, new TypeDefinition.Prop.Scalar("name", "java.lang.String", "name", true),
                         CascadeMode.PRE_INSERT, List.of()),
                 null, "entity", emitted::add);
 
@@ -40,7 +43,7 @@ class CascadeSupportTest {
 
     @Test
     void stepWithCodeReachesTheSinkExactlyOnce() {
-        CascadeSupport cascades = new CascadeSupport(H2Dialect.INSTANCE, SUPPORT);
+        WriteEmitter cascades = emitter();
 
         TypeDefinition.Entity child = new TypeDefinition.Entity(
                 "casc.Child", "child",
@@ -52,8 +55,8 @@ class CascadeSupportTest {
                 child, ClassName.get("casc", "ChildRowMapper"), null, List.of(), null);
 
         List<CodeBlock> emitted = new ArrayList<>();
-        cascades.emitPostCascadeSpec(
-                new CascadeSpec(child, collection, CascadeMode.CASCADE_DELETE, List.of()),
+        cascades.emitPostCascadeStep(
+                new CascadeStep(child, collection, CascadeMode.CASCADE_DELETE, List.of()),
                 ctx, "entity", emitted::add);
 
         assertEquals(1, emitted.size(), "the step must reach the sink exactly once");

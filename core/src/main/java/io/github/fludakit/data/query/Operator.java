@@ -21,8 +21,7 @@ public enum Operator {
     IN, NOT_IN,
     IS_NULL, IS_NOT_NULL, TRUE, FALSE,
     CONTAINS, STARTS_WITH, ENDS_WITH,
-    NOT_CONTAINS, NOT_STARTS_WITH, NOT_ENDS_WITH,
-    IGNORE_CASE_EQ;
+    NOT_CONTAINS, NOT_STARTS_WITH, NOT_ENDS_WITH;
 
     /** How many method parameters one predicate with this operator binds. */
     public int parameterCount() {

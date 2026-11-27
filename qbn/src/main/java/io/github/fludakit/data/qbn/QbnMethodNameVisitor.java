@@ -33,6 +33,12 @@ public class QbnMethodNameVisitor extends QbnBaseVisitor<ParsedMethodName> {
             // FIRST token text is "First" optionally followed by the max-results digits.
             String digits = find.first().FIRST().getText().substring("First".length());
             limit = digits.isEmpty() ? 1 : Integer.parseInt(digits);
+            if (limit == 0) {
+                // 0 is also ParsedMethodName's "no First" value: accepting First0 would silently drop the
+                // keyword, which is the one thing a parsed limit must never do.
+                throw new IllegalArgumentException(
+                        "First" + digits + " must limit the result to at least one row");
+            }
         }
 
         List<Predicate> predicates = new ArrayList<>();

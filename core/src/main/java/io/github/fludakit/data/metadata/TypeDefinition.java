@@ -55,11 +55,6 @@ public sealed interface TypeDefinition
      */
     String idColumn();
 
-    /**
-     * Returns whether this type owns aggregate lifecycle.
-     */
-    boolean ownsAggregateLifecycle();
-
     // ── Physical table shape ─────────────────────────────────────────────
 
     /**
@@ -475,11 +470,6 @@ public sealed interface TypeDefinition
         }
 
         @Override
-        public boolean ownsAggregateLifecycle() {
-            return false;
-        }
-
-        @Override
         public <R> R accept(Visitor<R> visitor) {
             return visitor.visitEntity(this);
         }
@@ -523,11 +513,6 @@ public sealed interface TypeDefinition
         @Override
         public String idColumn() {
             return id != null ? id.columnName() : null;
-        }
-
-        @Override
-        public boolean ownsAggregateLifecycle() {
-            return true;
         }
 
         @Override
@@ -583,11 +568,6 @@ public sealed interface TypeDefinition
         @Override
         public String idColumn() {
             return null;
-        }
-
-        @Override
-        public boolean ownsAggregateLifecycle() {
-            return false;
         }
 
         @Override
@@ -690,7 +670,7 @@ public sealed interface TypeDefinition
             }
 
             public enum Cascade {
-                ALL, PERSIST, MERGE, REMOVE
+                ALL
             }
         }
 

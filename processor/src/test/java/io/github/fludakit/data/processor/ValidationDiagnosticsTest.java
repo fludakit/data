@@ -761,6 +761,65 @@ class ValidationDiagnosticsTest {
                         + System.lineSeparator() + result.diagnostics());
     }
 
+    @Test
+    void rejectsFirstCombinedWithALimitOrPageRequestParameter() throws Exception {
+        // First is a static limit, so a Limit or PageRequest parameter would be a second, competing row
+        // window, and Jakarta Data requires the combination to be rejected. It used to compile with the
+        // First silently dropped. The error must sit on the offending method; a Limit without First is legal.
+        Path sourceDir = Files.createDirectories(workspace.resolve("src/first-paging"));
+        Path classesDir = Files.createDirectories(workspace.resolve("classes-first-paging"));
+        Path generatedDir = Files.createDirectories(workspace.resolve("generated-first-paging"));
+        String notesSource = """
+                package firstpaging;
+                import jakarta.data.Limit;
+                import jakarta.data.page.Page;
+                import jakarta.data.page.PageRequest;
+                import jakarta.data.repository.CrudRepository;
+                import jakarta.data.repository.Repository;
+                import java.util.List;
+                @Repository
+                public interface Notes extends CrudRepository<Note, Long> {
+                    List<Note> findFirst3ByTitle(String title, Limit limit);
+                    Page<Note> findFirstByText(String text, PageRequest pageRequest);
+                    List<Note> findByTitleOrderByAgeAsc(String title, Limit limit);
+                }
+                """;
+        writeNoteFixture(sourceDir, "firstpaging", notesSource);
+
+        TaskResult result = runTask(sourceDir, classesDir, generatedDir, "Note.java", "Notes.java");
+
+        assertFalse(result.success(), "First combined with a Limit or PageRequest parameter must be rejected");
+        assertFirstWithPagingRejected(result, notesSource, "findFirst3ByTitle", "Limit");
+        assertFirstWithPagingRejected(result, notesSource, "findFirstByText", "PageRequest");
+        assertTrue(result.diagnostics().stream().noneMatch(d -> d.getKind() == Diagnostic.Kind.ERROR
+                        && d.getMessage(Locale.ROOT).contains("findByTitleOrderByAgeAsc")),
+                "a Limit parameter without First must not be reported:"
+                        + System.lineSeparator() + result.diagnostics());
+    }
+
+    /** Exactly one error names {@code method} in Notes.java, on the line that declares it, and says why. */
+    private static void assertFirstWithPagingRejected(TaskResult result, String notesSource, String method,
+                                                      String parameterType) {
+        List<String> lines = notesSource.lines().toList();
+        int declarationLine = 0;
+        for (int i = 0; i < lines.size() && declarationLine == 0; i++) {
+            if (lines.get(i).contains(" " + method + "(")) {
+                declarationLine = i + 1;
+            }
+        }
+        List<Diagnostic<? extends JavaFileObject>> errors = result.diagnostics().stream()
+                .filter(d -> d.getKind() == Diagnostic.Kind.ERROR
+                        && d.getSource() != null && d.getSource().getName().endsWith("Notes.java")
+                        && d.getMessage(Locale.ROOT).contains(method))
+                .toList();
+        assertTrue(errors.size() == 1
+                        && errors.getFirst().getLineNumber() == declarationLine
+                        && errors.getFirst().getMessage(Locale.ROOT).contains("First keyword with a "
+                                + parameterType + " parameter"),
+                "expected one First/" + parameterType + " error on " + method + " at Notes.java:"
+                        + declarationLine + ":" + System.lineSeparator() + result.diagnostics());
+    }
+
     /** Note (@Entity: id, title, text, age) + the given Notes repository source. */
     private void writeNoteFixture(Path sourceDir, String pkg, String notesSource) throws Exception {
         Files.writeString(sourceDir.resolve("Note.java"), """

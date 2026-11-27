@@ -14,6 +14,7 @@ import io.github.fludakit.data.processor.support.Diagnostics;
 import javax.annotation.processing.Filer;
 import javax.lang.model.element.Modifier;
 import java.io.IOException;
+import java.util.HashSet;
 import java.util.Set;
 
 /**
@@ -85,6 +86,9 @@ public final class MetamodelWriter {
     private final Filer filer;
     private final Diagnostics diagnostics;
 
+    /** FQNs of metamodels already written in this compilation; the TypeGraph outlives a single round. */
+    private final Set<String> written = new HashSet<>();
+
     public MetamodelWriter(Filer filer, Diagnostics diagnostics) {
         this.filer = filer;
         this.diagnostics = diagnostics;
@@ -107,6 +111,9 @@ public final class MetamodelWriter {
      */
     private void writeMetamodel(TypeDefinition entity) {
         String typeFqn = entity.typeName();
+        if (!written.add(typeFqn)) {
+            return; // already generated in an earlier round
+        }
         String packageName = packageNameOf(typeFqn);
         String simpleName = simpleNameOf(typeFqn);
         String metamodelName = "_" + simpleName;
@@ -136,16 +143,19 @@ public final class MetamodelWriter {
         }
 
         for (TypeDefinition.Prop prop : entity.properties()) {
-            if (prop instanceof TypeDefinition.Prop.Scalar s) {
-                addScalarToInterface(interfaceBuilder, s, entityType);
-            } else if (prop instanceof TypeDefinition.Prop.Embedded embedded) {
-                addEmbeddedToInterface(interfaceBuilder, embedded, entityType);
-            } else if (prop instanceof TypeDefinition.Prop.Association assoc) {
-                addAssociationToInterface(interfaceBuilder, assoc, entityType);
-            } else if (prop instanceof TypeDefinition.Prop.EntityCollection ec) {
-                addEntityCollectionToInterface(interfaceBuilder, ec, entityType);
-            } else if (prop instanceof TypeDefinition.Prop.ElementCollection elemCol) {
-                addElementCollectionToInterface(interfaceBuilder, elemCol, entityType);
+            switch (prop) {
+                case null -> { }
+                case TypeDefinition.Prop.Scalar s -> addScalarToInterface(interfaceBuilder, s, entityType);
+                case TypeDefinition.Prop.Embedded embedded ->
+                        addEmbeddedToInterface(interfaceBuilder, embedded, entityType);
+                case TypeDefinition.Prop.Association assoc ->
+                        addAssociationToInterface(interfaceBuilder, assoc, entityType);
+                case TypeDefinition.Prop.EntityCollection ec ->
+                        addEntityCollectionToInterface(interfaceBuilder, ec, entityType);
+                case TypeDefinition.Prop.ElementCollection elemCol ->
+                        addElementCollectionToInterface(interfaceBuilder, elemCol, entityType);
+                case TypeDefinition.Prop.Id ignored -> { }
+                case TypeDefinition.Prop.Version ignored -> { }
             }
         }
 
@@ -263,7 +273,7 @@ public final class MetamodelWriter {
                     .build()
                     .writeTo(filer);
         } catch (IOException e) {
-            // Filer will report the error; silently skip
+            diagnostics.error("fluda-data could not write " + expectedName + ": " + e.getMessage(), null);
         }
     }
 

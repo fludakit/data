@@ -99,10 +99,6 @@ public sealed interface QueryDefinition {
     record DeleteWhere(List<Predicate> predicates, List<ParamBinding> paramBindings, ResultKind resultKind)
             implements Criteria {
 
-        public DeleteWhere(List<Predicate> predicates, List<ParamBinding> paramBindings) {
-            this(predicates, paramBindings, ResultKind.VOID);
-        }
-
         public DeleteWhere {
             predicates = List.copyOf(predicates);
             paramBindings = List.copyOf(paramBindings);
@@ -119,14 +115,6 @@ public sealed interface QueryDefinition {
      */
     record Insert(ResultKind resultKind, boolean includeId) implements QueryDefinition {
 
-        public Insert() {
-            this(ResultKind.VOID, true);
-        }
-
-        public Insert(boolean includeId) {
-            this(ResultKind.VOID, includeId);
-        }
-
         public Insert {
             resultKind = resultKind == null ? ResultKind.VOID : resultKind;
         }
@@ -138,10 +126,6 @@ public sealed interface QueryDefinition {
      */
     record Upsert(ResultKind resultKind) implements QueryDefinition {
 
-        public Upsert() {
-            this(ResultKind.VOID);
-        }
-
         public Upsert {
             resultKind = resultKind == null ? ResultKind.VOID : resultKind;
         }
@@ -150,10 +134,6 @@ public sealed interface QueryDefinition {
     /** An {@code UPDATE} of every non-identifier column, matched by identifier. */
     record Update(ResultKind resultKind) implements QueryDefinition {
 
-        public Update() {
-            this(ResultKind.VOID);
-        }
-
         public Update {
             resultKind = resultKind == null ? ResultKind.VOID : resultKind;
         }
@@ -161,10 +141,6 @@ public sealed interface QueryDefinition {
 
     /** A {@code DELETE} matched by identifier. */
     record DeleteById(ResultKind resultKind) implements QueryDefinition {
-
-        public DeleteById() {
-            this(ResultKind.VOID);
-        }
 
         public DeleteById {
             resultKind = resultKind == null ? ResultKind.VOID : resultKind;
@@ -179,10 +155,6 @@ public sealed interface QueryDefinition {
      */
     record Native(String sql, ResultKind resultKind, List<ParamBinding> paramBindings)
             implements QueryDefinition {
-
-        public Native(String sql, ResultKind resultKind) {
-            this(sql, resultKind, List.of());
-        }
 
         public Native {
             paramBindings = List.copyOf(paramBindings);

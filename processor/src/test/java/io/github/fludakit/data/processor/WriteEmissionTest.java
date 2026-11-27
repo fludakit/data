@@ -1071,7 +1071,7 @@ class WriteEmissionTest {
     @Test
     void entityCollectionsWithGeneratedAndAppAssignedIdsBothHydrateAndCascade() throws Exception {
         // Both the generated-key (Long id) and app-assigned (String id) entity collections are fully
-        // managed by the MutationPlan architecture: each gets its hydration loader AND
+        // managed by the CascadePlan architecture: each gets its hydration loader AND
         // its diff-sync write cascade. The id type only changes the sync shape — a Number key inserts
         // children with a GeneratedKeyHolder and backfills ids, an app-assigned key always updates by
         // the child's existing id — while the children-first delete cascade and per-entity loaders are

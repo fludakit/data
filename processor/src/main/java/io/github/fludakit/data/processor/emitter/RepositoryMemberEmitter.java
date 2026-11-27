@@ -13,6 +13,7 @@ import javax.lang.model.type.DeclaredType;
 import javax.lang.model.util.Elements;
 import javax.lang.model.util.Types;
 import java.util.List;
+import java.util.function.Supplier;
 
 /**
  * Orchestrates method-body emitters for every resolved repository: finders, lifecycle, writes,
@@ -65,10 +66,7 @@ public final class RepositoryMemberEmitter {
     private void emitFinders(RepositoryContext ctx, DeclaredType baseRepositoryType, DeclaredType repositoryOwnType) {
         FindEmitter findEmitter = new FindEmitter(dialect, types, baseRepositoryType, repositoryOwnType);
         for (MethodContext mc : ctx.methods()) {
-            MethodSpec emitted = findEmitter.emit(ctx, mc);
-            if (emitted != null) {
-                ctx.auxMethods().add(emitted);
-            }
+            emitGuarded(ctx, mc, () -> findEmitter.emit(ctx, mc));
         }
     }
 
@@ -76,10 +74,7 @@ public final class RepositoryMemberEmitter {
                                       DeclaredType repositoryOwnType) {
         LifecycleEmitter lifecycleEmitter = new LifecycleEmitter(types, baseRepositoryType, repositoryOwnType);
         for (MethodContext mc : ctx.methods()) {
-            MethodSpec emitted = lifecycleEmitter.emit(ctx, mc);
-            if (emitted != null) {
-                ctx.auxMethods().add(emitted);
-            }
+            emitGuarded(ctx, mc, () -> lifecycleEmitter.emit(ctx, mc));
         }
     }
 
@@ -87,10 +82,25 @@ public final class RepositoryMemberEmitter {
                                   DeclaredType repositoryOwnType) {
         WriteEmitter writeEmitter = new WriteEmitter(dialect, types, elements, baseRepositoryType, repositoryOwnType);
         for (MethodContext mc : ctx.methods()) {
-            MethodSpec emitted = writeEmitter.emit(ctx, mc);
+            emitGuarded(ctx, mc, () -> writeEmitter.emit(ctx, mc));
+        }
+    }
+
+    /**
+     * Runs one method's emitter. A failure is reported on that method's element and only that
+     * method is skipped (AGENTS.md "Fail early, per method"); the rest of the
+     * repository is still generated.
+     */
+    private void emitGuarded(RepositoryContext ctx, MethodContext mc, Supplier<MethodSpec> emitter) {
+        try {
+            MethodSpec emitted = emitter.get();
             if (emitted != null) {
                 ctx.auxMethods().add(emitted);
             }
+        } catch (RuntimeException e) {
+            String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getName();
+            diagnostics.error("fluda-data could not generate method '" + mc.name() + "': " + msg,
+                    mc.method());
         }
     }
 

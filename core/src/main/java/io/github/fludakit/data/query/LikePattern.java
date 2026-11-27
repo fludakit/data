@@ -51,11 +51,6 @@ public enum LikePattern {
         return this != NONE;
     }
 
-    /** The value as the comparison must see it: {@code prefix + value + suffix}. */
-    public String decorate(String value) {
-        return prefix + value + suffix;
-    }
-
     /**
      * The pattern {@code operator} imposes on the value it binds. This switch is the ONE place the
      * rule is written; a negated operator carries the same decoration as its positive counterpart,

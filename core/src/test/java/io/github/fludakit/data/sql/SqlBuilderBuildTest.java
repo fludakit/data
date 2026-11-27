@@ -5,7 +5,6 @@ import io.github.fludakit.data.query.Connector;
 import io.github.fludakit.data.query.LimitSpec;
 import io.github.fludakit.data.query.Operator;
 import io.github.fludakit.data.query.Order;
-import io.github.fludakit.data.query.PagingMode;
 import io.github.fludakit.data.query.Predicate;
 import io.github.fludakit.data.query.QueryDefinition;
 import io.github.fludakit.data.query.ResultKind;
@@ -58,32 +57,26 @@ class SqlBuilderBuildTest {
                     "tags", "java.util.List", TAG, "order_tags", "order_id")));
 
     private static QueryDefinition model(Kind operation, List<Predicate> predicates,
-                                         List<SortSpec> sorts, PagingMode paging, int limit) {
-        return model(operation, predicates, sorts, paging, limit, false);
+                                         List<SortSpec> sorts, Window window) {
+        return model(operation, predicates, sorts, window, false);
     }
 
     private static QueryDefinition model(Kind operation, List<Predicate> predicates,
-                                         List<SortSpec> sorts, PagingMode paging, int limit,
-                                         boolean distinct) {
+                                         List<SortSpec> sorts, Window window, boolean distinct) {
         return switch (operation) {
             case COUNT -> new QueryDefinition.Count(predicates, List.of(), distinct);
             case EXISTS -> new QueryDefinition.Exists(predicates, List.of());
-            case DELETE -> new QueryDefinition.DeleteWhere(predicates, List.of());
+            case DELETE -> new QueryDefinition.DeleteWhere(predicates, List.of(), ResultKind.VOID);
             default -> {
                 Order order = sorts == null || sorts.isEmpty() ? Order.None.INSTANCE : Order.Static.of(sorts);
-                Window window = switch (paging == null ? PagingMode.NONE : paging) {
-                    case NONE -> new Window.None(new LimitSpec(limit, 0));
-                    case OFFSET -> new Window.Offset(0);
-                    case CURSOR -> new Window.Cursor(0);
-                };
                 yield new QueryDefinition.Read(ResultKind.LIST, predicates, List.of(), distinct, order, window);
             }
         };
     }
 
     private static String build(Kind operation, List<Predicate> predicates,
-                                List<SortSpec> sorts, PagingMode paging, int limit) {
-        return new SqlBuilder(ATTRIBUTES).sql(model(operation, predicates, sorts, paging, limit));
+                                List<SortSpec> sorts, Window window) {
+        return new SqlBuilder(ATTRIBUTES).sql(model(operation, predicates, sorts, window));
     }
 
     private static Predicate pred(Predicate predicate) {
@@ -94,7 +87,7 @@ class SqlBuilderBuildTest {
     void distinctFindSelectsDistinctRows() {
         String sql = new SqlBuilder(ATTRIBUTES).sql(model(Kind.FIND,
                 List.of(pred(Predicate.of("status", Operator.EQ, "status"))),
-                List.of(), PagingMode.NONE, 0, true));
+                List.of(), Window.None.unpaged(), true));
         assertEquals("SELECT DISTINCT \"id\", \"status\", \"customer_id\" FROM \"order_table\""
                 + " WHERE \"status\" = :status", sql);
     }
@@ -103,7 +96,7 @@ class SqlBuilderBuildTest {
     void distinctCountCountsDistinctIdentifiers() {
         String sql = new SqlBuilder(ATTRIBUTES).sql(model(Kind.COUNT,
                 List.of(pred(Predicate.of("status", Operator.EQ, "status"))),
-                List.of(), PagingMode.NONE, 0, true));
+                List.of(), Window.None.unpaged(), true));
         assertEquals("SELECT COUNT(DISTINCT \"id\") FROM \"order_table\" WHERE \"status\" = :status", sql);
     }
 
@@ -111,14 +104,14 @@ class SqlBuilderBuildTest {
     void lifecycleStatementsRenderStraightFromTheTableShape() {
         assertEquals("INSERT INTO \"order_table\" (\"id\", \"status\", \"customer_id\")"
                         + " VALUES (:id, :status, :customer)",
-                new SqlBuilder(ATTRIBUTES).sql(new QueryDefinition.Insert()));
+                new SqlBuilder(ATTRIBUTES).sql(new QueryDefinition.Insert(ResultKind.VOID, true)));
         assertEquals("INSERT INTO \"order_table\" (\"status\", \"customer_id\") VALUES (:status, :customer)",
-                new SqlBuilder(ATTRIBUTES).sql(new QueryDefinition.Insert(false)));
+                new SqlBuilder(ATTRIBUTES).sql(new QueryDefinition.Insert(ResultKind.VOID, false)));
         assertEquals("UPDATE \"order_table\" SET \"status\" = :status, \"customer_id\" = :customer"
                         + " WHERE \"id\" = :id",
-                new SqlBuilder(ATTRIBUTES).sql(new QueryDefinition.Update()));
+                new SqlBuilder(ATTRIBUTES).sql(new QueryDefinition.Update(ResultKind.VOID)));
         assertEquals("DELETE FROM \"order_table\" WHERE \"id\" = :id",
-                new SqlBuilder(ATTRIBUTES).sql(new QueryDefinition.DeleteById()));
+                new SqlBuilder(ATTRIBUTES).sql(new QueryDefinition.DeleteById(ResultKind.VOID)));
     }
 
     @Test
@@ -127,22 +120,11 @@ class SqlBuilderBuildTest {
                         + " WHERE \"status\" = :status",
                 build(Kind.FIND,
                         List.of(pred(Predicate.of("status", Operator.EQ, "status"))),
-                        List.of(), PagingMode.NONE, 0));
+                        List.of(), Window.None.unpaged()));
         assertEquals("SELECT COUNT(*) FROM \"order_table\" WHERE \"status\" = :status",
                 build(Kind.COUNT,
                         List.of(pred(Predicate.of("status", Operator.EQ, "status"))),
-                        List.of(), PagingMode.NONE, 0));
-    }
-
-    @Test
-    void theClassicHelpersTakeDistinctAsAnExplicitFlagToo() {
-        List<Predicate> where = List.of(Predicate.of("status", Operator.EQ, "status"));
-        SqlBuilder builder = new SqlBuilder(ATTRIBUTES).dialect(H2Dialect.INSTANCE);
-        assertEquals("SELECT DISTINCT \"order_table_0\".\"id\", \"order_table_0\".\"status\", \"order_table_0\".\"customer_id\" FROM \"order_table\""
-                        + " AS \"order_table_0\" WHERE \"status\" = :status",
-                builder.selectBy(where, List.of(), 0, null, true));
-        assertEquals("SELECT COUNT(DISTINCT \"id\") FROM \"order_table\" WHERE \"status\" = :status",
-                builder.countBy(where, true));
+                        List.of(), Window.None.unpaged()));
     }
 
     @Test
@@ -151,8 +133,8 @@ class SqlBuilderBuildTest {
                         + " WHERE \"status\" = :status OR \"customer_id\" = :customer_id",
                 build(Kind.FIND,
                         List.of(pred(Predicate.of("status", Operator.EQ, "status")),
-                                pred(Predicate.of("customer_id", Operator.EQ, "customer_id", Connector.OR))),
-                        List.of(), PagingMode.NONE, 0));
+                                pred(Predicate.of("customer_id", Operator.EQ, "customer_id", Connector.OR, false))),
+                        List.of(), Window.None.unpaged()));
     }
 
     @Test
@@ -162,16 +144,16 @@ class SqlBuilderBuildTest {
                 build(Kind.FIND,
                         List.of(pred(Predicate.of("status", Operator.EQ, "a")),
                                 pred(Predicate.of("customer_id", Operator.EQ, "b")),
-                                pred(Predicate.of("status", Operator.EQ, "c", Connector.OR))),
-                        List.of(), PagingMode.NONE, 0));
+                                pred(Predicate.of("status", Operator.EQ, "c", Connector.OR, false))),
+                        List.of(), Window.None.unpaged()));
     }
 
     @Test
     void orWithAnExistentialPredicateKeepsTheExistentialInPlace() {
         String sql = build(Kind.FIND,
-                List.of(pred(Predicate.of("tags.label", Operator.EQ, "label", Connector.OR)),
+                List.of(pred(Predicate.of("tags.label", Operator.EQ, "label", Connector.OR, false)),
                         pred(Predicate.of("status", Operator.EQ, "status"))),
-                List.of(), PagingMode.NONE, 0);
+                List.of(), Window.None.unpaged());
         assertEquals("SELECT \"id\", \"status\", \"customer_id\" FROM \"order_table\""
                 + " WHERE EXISTS (SELECT 1 FROM \"order_tags\" \"order_tags\""
                 + " WHERE \"order_tags\".\"order_id\" = \"order_table\".\"id\" AND \"order_tags\".\"label\" = :label)"
@@ -198,7 +180,7 @@ class SqlBuilderBuildTest {
         };
         String sql = new SqlBuilder(ATTRIBUTES).dialect(testDialect).sql(model(Kind.FIND,
                 List.of(pred(Predicate.of("customer.name", Operator.EQ, "customer_name"))),
-                List.of(), PagingMode.NONE, 0));
+                List.of(), Window.None.unpaged()));
         assertEquals("SELECT `order_table`.`id`, `order_table`.`status`, `order_table`.`customer_id`"
                         + " FROM `order_table` LEFT JOIN `customer` AS `customer`"
                         + " ON `order_table`.`customer_id` = `customer`.`id`"
@@ -212,18 +194,18 @@ class SqlBuilderBuildTest {
                         + " WHERE \"status\" = :status",
                 build(Kind.FIND,
                         List.of(pred(Predicate.of("status", Operator.EQ, "status"))),
-                        List.of(), PagingMode.NONE, 0));
+                        List.of(), Window.None.unpaged()));
     }
 
     @Test
     void legacyCountAndDeleteDelegate() {
         List<Predicate> preds = List.of(pred(Predicate.of("status", Operator.EQ, "status")));
         assertEquals("SELECT COUNT(*) FROM \"order_table\" WHERE \"status\" = :status",
-                build(Kind.COUNT, preds, List.of(), PagingMode.NONE, 0));
+                build(Kind.COUNT, preds, List.of(), Window.None.unpaged()));
         assertEquals("SELECT COUNT(*) FROM \"order_table\" WHERE \"status\" = :status",
-                build(Kind.EXISTS, preds, List.of(), PagingMode.NONE, 0));
+                build(Kind.EXISTS, preds, List.of(), Window.None.unpaged()));
         assertEquals("DELETE FROM \"order_table\" WHERE \"status\" = :status",
-                build(Kind.DELETE, preds, List.of(), PagingMode.NONE, 0));
+                build(Kind.DELETE, preds, List.of(), Window.None.unpaged()));
     }
 
     @Test
@@ -233,7 +215,7 @@ class SqlBuilderBuildTest {
                 build(Kind.FIND,
                         List.of(pred(Predicate.of("status", Operator.EQ, "status"))),
                         List.of(new SortSpec("status", false, false)),
-                        PagingMode.NONE, 5));
+                        new Window.None(new LimitSpec(5, 0))));
     }
 
     @Test
@@ -246,7 +228,7 @@ class SqlBuilderBuildTest {
                         + " WHERE \"customer\".\"name\" = :customer_name",
                 build(Kind.FIND,
                         List.of(pred(Predicate.of("customer.name", Operator.EQ, "customer_name"))),
-                        List.of(), PagingMode.NONE, 0));
+                        List.of(), Window.None.unpaged()));
     }
 
     @Test
@@ -257,7 +239,7 @@ class SqlBuilderBuildTest {
                         + " AND \"order_tags\".\"label\" = :label)",
                 build(Kind.FIND,
                         List.of(pred(Predicate.of("tags.label", Operator.EQ, "label"))),
-                        List.of(), PagingMode.NONE, 0));
+                        List.of(), Window.None.unpaged()));
     }
 
     @Test
@@ -269,7 +251,7 @@ class SqlBuilderBuildTest {
                 build(Kind.FIND,
                         List.of(pred(Predicate.of("status", Operator.EQ, "status"))),
                         List.of(new SortSpec("lines.product", true, false)),
-                        PagingMode.NONE, 0));
+                        Window.None.unpaged()));
     }
 
     @Test
@@ -279,7 +261,7 @@ class SqlBuilderBuildTest {
                         + " AND \"customer\".\"name\" = :customer_name)",
                 build(Kind.DELETE,
                         List.of(pred(Predicate.of("customer.name", Operator.EQ, "customer_name"))),
-                        List.of(), PagingMode.NONE, 0));
+                        List.of(), Window.None.unpaged()));
     }
 
     @Test
@@ -287,7 +269,7 @@ class SqlBuilderBuildTest {
         List<Predicate> preds = List.of(pred(Predicate.of("customer.name", Operator.EQ, "customer_name")));
         List<SortSpec> sorts = List.of(new SortSpec("customer.name", false, false));
         String base = new SqlBuilder(ATTRIBUTES).sql(model(Kind.FIND, preds, sorts,
-                PagingMode.OFFSET, 10));
+                new Window.Offset(0)));
         assertEquals("SELECT \"order_table\".\"id\", \"order_table\".\"status\","
                         + " \"order_table\".\"customer_id\""
                         + " FROM \"order_table\""
@@ -301,7 +283,7 @@ class SqlBuilderBuildTest {
         String sql = new SqlBuilder(ATTRIBUTES).sql(
                 model(Kind.FIND,
                         List.of(pred(Predicate.of("customer.name", Operator.EQ, "customer_name"))),
-                        List.of(), PagingMode.NONE, 0),
+                        List.of(), Window.None.unpaged()),
                 List.of(),
                 "\"customer\".\"id\" AS \"customer_join_id\"");
         assertEquals("SELECT \"order_table\".\"id\", \"order_table\".\"status\","
@@ -316,7 +298,8 @@ class SqlBuilderBuildTest {
     @Test
     void bareProjectionCannotCarryExtraColumns() {
         IllegalStateException failure = assertThrows(IllegalStateException.class,
-                () -> new SqlBuilder(ATTRIBUTES).qualifiedRootSelect(List.of(), false, "\"customer\".\"id\""));
+                () -> new SqlBuilder(ATTRIBUTES).sql(model(Kind.FIND, List.of(), List.of(), Window.None.unpaged()),
+                        List.of(), "\"customer\".\"id\""));
         assertEquals("bare projection cannot carry extraProjection", failure.getMessage());
     }
 
@@ -324,7 +307,7 @@ class SqlBuilderBuildTest {
     void prettyFormatRunsSqlFormatter() {
         String sql = new SqlBuilder(ATTRIBUTES).format(SqlFormat.PRETTY).sql(model(Kind.FIND,
                 List.of(pred(Predicate.of("status", Operator.EQ, "status"))),
-                List.of(), PagingMode.NONE, 0));
+                List.of(), Window.None.unpaged()));
         assertEquals(SqlFormatter.format(
                 "SELECT \"id\", \"status\", \"customer_id\" FROM \"order_table\" WHERE \"status\" = :status"), sql);
     }

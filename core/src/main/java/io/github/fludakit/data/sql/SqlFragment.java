@@ -8,7 +8,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 
 /**
  * Immutable SQL-shaped parts produced by {@link QueryCompiler}. {@link #render(SqlDialect)} is the
@@ -36,22 +35,18 @@ public sealed interface SqlFragment permits SqlFragment.Query, SqlFragment.Opaqu
 
     /**
      * A structured {@code SELECT} or {@code DELETE}: projection, joins, where, order, and optional
-     * limit/offset. Cursor seek keys travel with the fragment when the compiler derived them; they
-     * are not rendered into the base statement.
+     * limit.
      */
     record Query(
             String keyword,
             boolean distinct,
             String projection,
             String table,
-            String tableAlias,
             List<Joined> joins,
             List<Conjunct> where,
             List<String> groupBy,
             List<String> orderBy,
-            Integer limit,
-            Integer offset,
-            List<String> seekKeys
+            Integer limit
     ) implements SqlFragment {
 
         public Query {
@@ -62,12 +57,6 @@ public sealed interface SqlFragment permits SqlFragment.Query, SqlFragment.Opaqu
             where = List.copyOf(where);
             groupBy = List.copyOf(groupBy);
             orderBy = List.copyOf(orderBy);
-            seekKeys = List.copyOf(seekKeys);
-        }
-
-        /** The join edges in insertion order. */
-        public List<JoinEdge> joinEdges() {
-            return joins.stream().map(Joined::edge).toList();
         }
 
         /** Starts a mutable builder for compiler assembly. */
@@ -90,33 +79,12 @@ public sealed interface SqlFragment permits SqlFragment.Query, SqlFragment.Opaqu
             appendWhere(sb, where);
             appendGroupBy(sb);
             appendOrderBy(sb, orderBy);
-            appendPagination(sb, dialect, limit, offset);
-            return sb.toString();
-        }
-
-        /**
-         * Keyword, projection, {@code FROM}, and joins only — for callers that append seek, order,
-         * or limit themselves.
-         */
-        public String renderWithoutTail(SqlDialect dialect) {
-            Objects.requireNonNull(dialect, "dialect");
-            StringBuilder sb = new StringBuilder(keyword);
-            if (distinct && !projection.isEmpty()) {
-                sb.append(" DISTINCT");
-            }
-            if (!projection.isEmpty()) {
-                sb.append(' ').append(projection);
-            }
-            appendFrom(sb, dialect);
-            appendJoins(sb, dialect, joins);
+            appendPagination(sb, dialect, limit);
             return sb.toString();
         }
 
         private void appendFrom(StringBuilder sql, SqlDialect dialect) {
             sql.append(" FROM ").append(dialect.quoteIdentifier(table));
-            if (tableAlias != null) {
-                sql.append(" AS ").append(dialect.quoteIdentifier(tableAlias));
-            }
         }
 
         private void appendGroupBy(StringBuilder sql) {
@@ -132,14 +100,11 @@ public sealed interface SqlFragment permits SqlFragment.Query, SqlFragment.Opaqu
             private boolean distinct;
             private String projection = "";
             private String table;
-            private String tableAlias;
             private final Map<String, JoinEdge> joins = new LinkedHashMap<>();
             private final List<Conjunct> where = new ArrayList<>();
             private final List<String> groupBy = new ArrayList<>();
             private final List<String> orderBy = new ArrayList<>();
             private Integer limit;
-            private Integer offset;
-            private final List<String> seekKeys = new ArrayList<>();
 
             public Builder keyword(String keyword) {
                 this.keyword = Objects.requireNonNull(keyword, "keyword");
@@ -158,12 +123,6 @@ public sealed interface SqlFragment permits SqlFragment.Query, SqlFragment.Opaqu
 
             public Builder table(String table) {
                 this.table = Objects.requireNonNull(table, "table");
-                return this;
-            }
-
-            public Builder table(String table, String alias) {
-                this.table = Objects.requireNonNull(table, "table");
-                this.tableAlias = Objects.requireNonNull(alias, "alias");
                 return this;
             }
 
@@ -188,15 +147,6 @@ public sealed interface SqlFragment permits SqlFragment.Query, SqlFragment.Opaqu
                 return this;
             }
 
-            public Builder where(String sql) {
-                return where(sql, false);
-            }
-
-            public Builder where(String sql, boolean orJoined) {
-                where.add(new Conjunct(sql, orJoined));
-                return this;
-            }
-
             public Builder where(Conjunct conjunct) {
                 where.add(Objects.requireNonNull(conjunct, "conjunct"));
                 return this;
@@ -217,16 +167,6 @@ public sealed interface SqlFragment permits SqlFragment.Query, SqlFragment.Opaqu
                 return this;
             }
 
-            public Builder offset(Integer offset) {
-                this.offset = offset;
-                return this;
-            }
-
-            public Builder seekKey(String key) {
-                seekKeys.add(Objects.requireNonNull(key, "key"));
-                return this;
-            }
-
             public Query build() {
                 if (table == null) {
                     throw new IllegalStateException("SqlFragment has no root table — call table(..) before build()");
@@ -234,9 +174,9 @@ public sealed interface SqlFragment permits SqlFragment.Query, SqlFragment.Opaqu
                 List<Joined> joined = joins.entrySet().stream()
                         .map(e -> new Joined(e.getKey(), e.getValue()))
                         .toList();
-                return new Query(keyword, distinct, projection, table, tableAlias,
+                return new Query(keyword, distinct, projection, table,
                         joined, List.copyOf(where), List.copyOf(groupBy),
-                        List.copyOf(orderBy), limit, offset, List.copyOf(seekKeys));
+                        List.copyOf(orderBy), limit);
             }
         }
     }
@@ -262,21 +202,11 @@ public sealed interface SqlFragment permits SqlFragment.Query, SqlFragment.Opaqu
 
     /** Deduplicated {@code LEFT JOIN} chain for {@code edges}. */
     static String joins(SqlDialect dialect, Collection<JoinEdge> edges) {
-        return joins(dialect, edges, Set.of());
-    }
-
-    /**
-     * Join chain for {@code edges}, dropping every edge onto a table already named in
-     * {@code alreadyJoined}.
-     */
-    static String joins(SqlDialect dialect, Collection<JoinEdge> edges,
-                        Collection<String> alreadyJoined) {
         Objects.requireNonNull(dialect, "dialect");
         Objects.requireNonNull(edges, "edges");
-        Objects.requireNonNull(alreadyJoined, "alreadyJoined");
         Query.Builder builder = Query.builder().table("_");
         for (JoinEdge edge : edges) {
-            if (edge == null || alreadyJoined.contains(edge.childTable())) {
+            if (edge == null) {
                 continue;
             }
             builder.join(edge);
@@ -321,16 +251,9 @@ public sealed interface SqlFragment permits SqlFragment.Query, SqlFragment.Opaqu
         sql.append(" ORDER BY ").append(String.join(", ", orderBy));
     }
 
-    private static void appendPagination(StringBuilder sql, SqlDialect dialect,
-                                         Integer limit, Integer offset) {
-        boolean hasLimit = limit != null && limit > 0;
-        boolean hasOffset = offset != null && offset >= 0;
-        if (hasLimit && hasOffset) {
-            sql.append(dialect.limitOffsetClause(Integer.toString(limit), Integer.toString(offset)));
-        } else if (hasLimit) {
+    private static void appendPagination(StringBuilder sql, SqlDialect dialect, Integer limit) {
+        if (limit != null && limit > 0) {
             sql.append(dialect.limitClause(Integer.toString(limit)));
-        } else if (hasOffset) {
-            sql.append(dialect.offsetClause(Integer.toString(offset)));
         }
     }
 }

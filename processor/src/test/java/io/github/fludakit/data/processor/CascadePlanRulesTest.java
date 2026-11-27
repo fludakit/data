@@ -1,15 +1,15 @@
 package io.github.fludakit.data.processor;
 
 import io.github.fludakit.data.metadata.TypeDefinition;
-import io.github.fludakit.data.processor.context.MutationPlan;
-import io.github.fludakit.data.processor.context.MutationPlan.*;
+import io.github.fludakit.data.processor.context.CascadePlan;
+import io.github.fludakit.data.processor.context.CascadePlan.*;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-class MutationPlanAnalyzerTest {
+class CascadePlanRulesTest {
 
     @Test
     void aggregateInsertHasPreInsertCompositionAndPostInsertCollections() {
@@ -19,14 +19,11 @@ class MutationPlanAnalyzerTest {
         // - one ElementCollection
         TypeDefinition.Aggregate aggregate = buildTestAggregate();
 
-        MutationPlan plan = MutationPlanAnalyzer.analyze(aggregate, MutationType.INSERT);
-
-        assertEquals(MutationType.INSERT, plan.mutationType());
-        assertTrue(plan.hasCascade());
+        CascadePlan plan = CascadePlan.of(aggregate, WriteKind.INSERT);
 
         // Pre-root: composition to-one (PRE_INSERT)
         // Post-root: entity collection (DIFF_SYNC), element collection (REPLACE)
-        var specs = plan.cascadeSpecs();
+        var specs = plan.steps();
         assertTrue(specs.stream().anyMatch(s -> s.prop() instanceof TypeDefinition.Prop.Association
                 && s.mode() == CascadeMode.PRE_INSERT),
                 "Should have a composition association with PRE_INSERT");
@@ -42,10 +39,9 @@ class MutationPlanAnalyzerTest {
     void entityInsertOnlyHasElementCollections() {
         TypeDefinition.Entity entity = buildTestEntity();
 
-        MutationPlan plan = MutationPlanAnalyzer.analyze(entity, MutationType.INSERT);
+        CascadePlan plan = CascadePlan.of(entity, WriteKind.INSERT);
 
-        assertEquals(MutationType.INSERT, plan.mutationType());
-        var specs = plan.cascadeSpecs();
+        var specs = plan.steps();
         assertTrue(specs.stream().noneMatch(s -> s.prop() instanceof TypeDefinition.Prop.Association),
                 "Entity plan should have no associations");
         assertTrue(specs.stream().noneMatch(s -> s.prop() instanceof TypeDefinition.Prop.EntityCollection),
@@ -59,10 +55,9 @@ class MutationPlanAnalyzerTest {
     void aggregateDeleteCascadesCompositionsAndCollectionsBeforeRoot() {
         TypeDefinition.Aggregate aggregate = buildTestAggregate();
 
-        MutationPlan plan = MutationPlanAnalyzer.analyze(aggregate, MutationType.DELETE);
+        CascadePlan plan = CascadePlan.of(aggregate, WriteKind.DELETE);
 
-        assertEquals(MutationType.DELETE, plan.mutationType());
-        var specs = plan.cascadeSpecs();
+        var specs = plan.steps();
         // All delete specs should be CASCADE_DELETE
         assertTrue(specs.stream().allMatch(s -> s.mode() == CascadeMode.CASCADE_DELETE),
                 "All delete specs should be CASCADE_DELETE");
@@ -79,10 +74,10 @@ class MutationPlanAnalyzerTest {
         // Build aggregate with entity collection whose target is an Aggregate
         TypeDefinition.Aggregate aggregate = buildAggregateWithAggregateTarget();
 
-        MutationPlan plan = MutationPlanAnalyzer.analyze(aggregate, MutationType.INSERT);
+        CascadePlan plan = CascadePlan.of(aggregate, WriteKind.INSERT);
 
         // The entity collection targeting an aggregate should NOT appear in the plan
-        assertTrue(plan.cascadeSpecs().stream()
+        assertTrue(plan.steps().stream()
                 .noneMatch(s -> s.prop() instanceof TypeDefinition.Prop.EntityCollection
                         && s.target() instanceof TypeDefinition.Aggregate),
                 "Entity collection targeting an Aggregate should be skipped (Rule 4)");
@@ -92,11 +87,9 @@ class MutationPlanAnalyzerTest {
     void aggregateUpdateHasPostUpdateCompositionAndCollections() {
         TypeDefinition.Aggregate aggregate = buildTestAggregate();
 
-        MutationPlan plan = MutationPlanAnalyzer.analyze(aggregate, MutationType.UPDATE);
+        CascadePlan plan = CascadePlan.of(aggregate, WriteKind.UPDATE);
 
-        assertEquals(MutationType.UPDATE, plan.mutationType());
-        assertTrue(plan.hasCascade());
-        var specs = plan.cascadeSpecs();
+        var specs = plan.steps();
         assertTrue(specs.stream().anyMatch(s -> s.prop() instanceof TypeDefinition.Prop.Association
                 && s.mode() == CascadeMode.UPDATE),
                 "Should have a composition association with UPDATE");
@@ -112,10 +105,9 @@ class MutationPlanAnalyzerTest {
     void entityDeleteOnlyHasElementCollectionCascadeDelete() {
         TypeDefinition.Entity entity = buildTestEntity();
 
-        MutationPlan plan = MutationPlanAnalyzer.analyze(entity, MutationType.DELETE);
+        CascadePlan plan = CascadePlan.of(entity, WriteKind.DELETE);
 
-        assertEquals(MutationType.DELETE, plan.mutationType());
-        var specs = plan.cascadeSpecs();
+        var specs = plan.steps();
         assertTrue(specs.stream().allMatch(s -> s.mode() == CascadeMode.CASCADE_DELETE),
                 "All entity delete specs should be CASCADE_DELETE");
         assertTrue(specs.stream().anyMatch(s -> s.prop() instanceof TypeDefinition.Prop.ElementCollection),
@@ -130,10 +122,9 @@ class MutationPlanAnalyzerTest {
     void saveMutationBehavesLikeInsert() {
         TypeDefinition.Aggregate aggregate = buildTestAggregate();
 
-        MutationPlan plan = MutationPlanAnalyzer.analyze(aggregate, MutationType.SAVE);
+        CascadePlan plan = CascadePlan.of(aggregate, WriteKind.SAVE);
 
-        assertEquals(MutationType.SAVE, plan.mutationType());
-        var specs = plan.cascadeSpecs();
+        var specs = plan.steps();
         assertTrue(specs.stream().anyMatch(s -> s.prop() instanceof TypeDefinition.Prop.Association
                 && s.mode() == CascadeMode.PRE_INSERT),
                 "SAVE should have PRE_INSERT for compositions (like INSERT)");
@@ -163,11 +154,11 @@ class MutationPlanAnalyzerTest {
                 "Root", "root", rootId, null,
                 List.of(), List.of(), List.of(composition), List.of(), List.of());
 
-        MutationPlan plan = MutationPlanAnalyzer.analyze(root, MutationType.INSERT);
+        CascadePlan plan = CascadePlan.of(root, WriteKind.INSERT);
 
-        var specs = plan.cascadeSpecs();
+        var specs = plan.steps();
         assertEquals(1, specs.size());
-        CascadeSpec compositionSpec = specs.get(0);
+        CascadeStep compositionSpec = specs.get(0);
         assertEquals(CascadeMode.PRE_INSERT, compositionSpec.mode());
         // The composition's children should include the nested element collection
         assertFalse(compositionSpec.children().isEmpty(), "Composition should have nested cascade children");

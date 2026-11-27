@@ -52,24 +52,17 @@ class QueryDefinitionTest {
 
     @Test
     void aWriteWithNoDeclaredShapeReportsNothing() {
-        assertEquals(ResultKind.VOID, new QueryDefinition.Insert(false).resultKind());
-        assertEquals(ResultKind.VOID, new QueryDefinition.Update().resultKind());
-        assertEquals(ResultKind.VOID, new QueryDefinition.DeleteById().resultKind());
-        assertEquals(ResultKind.VOID, new QueryDefinition.DeleteWhere(List.of(), List.of()).resultKind());
+        assertEquals(ResultKind.VOID, new QueryDefinition.Insert(null, false).resultKind());
+        assertEquals(ResultKind.VOID, new QueryDefinition.Update(null).resultKind());
+        assertEquals(ResultKind.VOID, new QueryDefinition.DeleteById(null).resultKind());
+        assertEquals(ResultKind.VOID, new QueryDefinition.DeleteWhere(List.of(), List.of(), null).resultKind());
         assertEquals(ResultKind.VOID, new QueryDefinition.Insert(null, true).resultKind());
-    }
-
-    @Test
-    void anInsertDefaultsToIncludingTheIdentifier() {
-        assertTrue(new QueryDefinition.Insert().includeId());
-        assertFalse(new QueryDefinition.Insert(false).includeId());
-        assertFalse(new QueryDefinition.Insert(ResultKind.SINGLE, false).includeId());
     }
 
     @Test
     void nativeQueryCarriesSqlBindingsAndResultKind() {
         QueryDefinition.Native nativeQuery = new QueryDefinition.Native(
-                "SELECT 1", ResultKind.SINGLE, List.of(new ParamBinding(0, "id")));
+                "SELECT 1", ResultKind.SINGLE, List.of(new ParamBinding(0, "id", LikePattern.NONE)));
         assertEquals("SELECT 1", nativeQuery.sql());
         assertEquals(ResultKind.SINGLE, nativeQuery.resultKind());
         assertEquals(1, nativeQuery.paramBindings().size());

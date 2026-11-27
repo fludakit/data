@@ -44,6 +44,16 @@ public class RepositoryProcessor extends AbstractProcessor {
     private Filer filer;
     private SqlDialect dialect;
 
+    // Pipeline stages: created once in init() and reused for every round. They hold only
+    // compiler utilities, the dialect, Diagnostics and the two compilation-wide graphs, plus
+    // per-compilation "already written" bookkeeping in the writers.
+    private TypeDefinitionScanner typeScanner;
+    private RowMapperWriter rowMapperWriter;
+    private MetamodelWriter metamodelWriter;
+    private RepositoryScanner repositoryScanner;
+    private RepositoryMemberEmitter memberEmitter;
+    private RepositoryWriter repositoryWriter;
+
     /** The type cache for the whole compilation: populated by the early scan, read by everything else. */
     private final TypeGraph typeGraph = new TypeGraph();
 
@@ -63,6 +73,12 @@ public class RepositoryProcessor extends AbstractProcessor {
         this.elements = processingEnv.getElementUtils();
         this.filer = processingEnv.getFiler();
         this.dialect = resolveDialect(processingEnv.getOptions().get("fluda.dialect"));
+        this.typeScanner = new TypeDefinitionScanner(types, elements, diagnostics, typeGraph);
+        this.rowMapperWriter = new RowMapperWriter(elements, filer, diagnostics);
+        this.metamodelWriter = new MetamodelWriter(filer, diagnostics);
+        this.repositoryScanner = new RepositoryScanner(types, elements, diagnostics, typeGraph, repositoryGraph);
+        this.memberEmitter = new RepositoryMemberEmitter(types, elements, dialect, diagnostics);
+        this.repositoryWriter = new RepositoryWriter(filer, diagnostics);
     }
 
     @Override
@@ -76,17 +92,16 @@ public class RepositoryProcessor extends AbstractProcessor {
                 jakarta.data.repository.Repository.class);
 
         // Phase 1: Scan annotated types into the shared TypeGraph
-        new TypeDefinitionScanner(types, elements, diagnostics, typeGraph).scanTypes(mappedTypes);
+        typeScanner.scanTypes(mappedTypes);
 
         // Phase 2: Write graph-owned artifacts once from TypeGraph (before any repository work)
-        new RowMapperWriter(types, elements, filer).write(typeGraph);
-        new MetamodelWriter(filer, diagnostics).write(typeGraph);
+        rowMapperWriter.write(typeGraph);
+        metamodelWriter.write(typeGraph);
 
         // Phase 3: Resolve every repository into the shared RepositoryGraph, then emit and write from it
-        new RepositoryScanner(types, elements, diagnostics, typeGraph, repositoryGraph)
-                .scanRepositories(repositories);
-        new RepositoryMemberEmitter(types, elements, dialect, diagnostics).emit(repositoryGraph);
-        new RepositoryWriter(filer, diagnostics).write(repositoryGraph);
+        repositoryScanner.scanRepositories(repositories);
+        memberEmitter.emit(repositoryGraph);
+        repositoryWriter.write(repositoryGraph);
 
         return false;
     }

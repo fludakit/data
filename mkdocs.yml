@@ -72,5 +72,4 @@ nav:
   - Applying DDD: ddd.md
   - Optimistic Locking: version.md
   - Domain Events: domain-events.md
-  - Product Specification (design): PRODUCT-SPEC.md
   - FluDa Toolkit: https://fludakit.github.io/

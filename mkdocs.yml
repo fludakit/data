@@ -1,0 +1,76 @@
+site_name: "FluDa Data"
+site_description: "Jakarta Data repositories generated at compile time and executed through JdbcClient."
+site_url: https://fludakit.github.io/data/
+repo_url: https://github.com/fludakit/data
+repo_name: fludakit/data
+
+theme:
+  name: material
+  logo: https://fludakit.github.io/assets/fluda-badge-light.svg
+  favicon: https://fludakit.github.io/assets/favicon.ico
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - content.code.copy
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.indexes
+    - navigation.footer
+    - search.suggest
+  icon:
+    repo: fontawesome/brands/git-alt
+
+extra_css:
+  - stylesheets/extra.css
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/fludakit
+
+markdown_extensions:
+  - meta
+  - attr_list
+  - md_in_html
+  - admonition
+  - toc:
+      permalink: true
+      toc_depth: 3
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+plugins:
+  - search
+  - git-revision-date-localized:
+      enable_creation_date: true
+      enable_git_follow: false
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Applying DDD: ddd.md
+  - Optimistic Locking: version.md
+  - Domain Events: domain-events.md
+  - Product Specification (design): PRODUCT-SPEC.md
+  - FluDa Toolkit: https://fludakit.github.io/

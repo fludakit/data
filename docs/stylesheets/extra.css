@@ -1,0 +1,37 @@
+/* FluDa brand tokens — shared with the FluDa documentation hub
+   (https://fludakit.github.io/). Keep the palette in sync with
+   fludakit.github.io/overrides/stylesheets/extra.css. */
+:root {
+  --md-primary-fg-color: #202794;
+  --md-primary-fg-color--light: #3f47b8;
+  --md-primary-fg-color--dark: #0a1258;
+  --md-primary-bg-color: #ffffff;
+  --md-accent-fg-color: #f0b92d;
+  --md-accent-fg-color--transparent: rgba(240, 185, 45, 0.1);
+  --md-accent-bg-color: #ffffff;
+}
+
+/* Brand accent for primary buttons */
+.md-button--primary {
+  background-color: var(--md-primary-fg-color);
+  color: var(--md-primary-bg-color);
+  border-color: var(--md-primary-fg-color);
+}
+
+.md-button--primary:hover {
+  background-color: var(--md-accent-fg-color);
+  color: var(--md-accent-bg-color);
+  border-color: var(--md-accent-fg-color);
+}
+
+/* Table styling */
+.md-typeset table:not([class]) {
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+}
+
+/* Code block styling */
+.md-typeset pre > code {
+  border-radius: 8px;
+}

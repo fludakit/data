@@ -129,6 +129,6 @@ When changing FluDa Data:
 
 ## Related docs
 
-- [Constitution](../.specify/memory/constitution.md) — engineering principles (compile-time generation, TDD, single SQL source).
-- [README](../README.md) — usage entry point.
+- [Constitution](https://github.com/fludakit/data/blob/main/.specify/memory/constitution.md) — engineering principles (compile-time generation, TDD, single SQL source).
+- [README](https://github.com/fludakit/data/blob/main/README.md) — usage entry point.
 - Issues [#29](https://github.com/fludakit/data/issues/29), [#30](https://github.com/fludakit/data/issues/30).

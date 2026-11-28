@@ -27,3 +27,8 @@ The project is organized into three published modules:
 
 - Start with [getting started](getting-started.md) to add the processor, map an entity, declare a repository and use the lifecycle annotations, built-in methods and query-by-method-name.
 - Explore [Applying DDD](ddd.md) for aggregate roots and value objects, [Optimistic Locking](version.md) for the versioning roadmap, and [Domain Events](domain-events.md).
+
+
+---
+
+[FluDa Toolkit — browse all modules](https://fludakit.github.io/){ .md-button .md-button--primary }

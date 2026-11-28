@@ -11,15 +11,15 @@ theme:
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
-      primary: custom
-      accent: amber
+      primary: green
+      accent: deep orange
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
-      primary: custom
-      accent: amber
+      primary: green
+      accent: deep orange
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
@@ -72,4 +72,3 @@ nav:
   - Applying DDD: ddd.md
   - Optimistic Locking: version.md
   - Domain Events: domain-events.md
-  - FluDa Toolkit: https://fludakit.github.io/

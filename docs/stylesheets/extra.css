@@ -1,15 +1,5 @@
-/* FluDa brand tokens — shared with the FluDa documentation hub
-   (https://fludakit.github.io/). Keep the palette in sync with
-   fludakit.github.io/overrides/stylesheets/extra.css. */
-:root {
-  --md-primary-fg-color: #202794;
-  --md-primary-fg-color--light: #3f47b8;
-  --md-primary-fg-color--dark: #0a1258;
-  --md-primary-bg-color: #ffffff;
-  --md-accent-fg-color: #f0b92d;
-  --md-accent-fg-color--transparent: rgba(240, 185, 45, 0.1);
-  --md-accent-bg-color: #ffffff;
-}
+/* Per-module palette: primary and accent colors come from the Material
+   palette in mkdocs.yml — each FluDa module uses its own color scheme. */
 
 /* Brand accent for primary buttons */
 .md-button--primary {
